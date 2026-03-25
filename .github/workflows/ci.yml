@@ -26,6 +26,13 @@ jobs:
       - name: Validate default policy
         run: go run ./cmd/agentguard validate --policy configs/default.yaml
 
+      - name: Validate example policies
+        run: |
+          for f in configs/examples/*.yaml; do
+            echo "Validating $f..."
+            go run ./cmd/agentguard validate --policy "$f"
+          done
+
   lint:
     runs-on: ubuntu-latest
     steps:

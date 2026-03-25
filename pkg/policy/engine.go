@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -45,6 +46,7 @@ type RuleSet struct {
 	Deny            []Rule        `yaml:"deny,omitempty"`
 	RequireApproval []Rule        `yaml:"require_approval,omitempty"`
 	RateLimit       *RateLimitCfg `yaml:"rate_limit,omitempty"`
+	Limits          *CostLimits   `yaml:"limits,omitempty"`
 }
 
 // Rule is an individual policy rule.
@@ -69,6 +71,13 @@ type RateLimitCfg struct {
 	Window      string `yaml:"window"`
 }
 
+// CostLimits defines cost guardrails for a scope.
+type CostLimits struct {
+	MaxPerAction    string `yaml:"max_per_action,omitempty"`
+	MaxPerSession   string `yaml:"max_per_session,omitempty"`
+	AlertThreshold  string `yaml:"alert_threshold,omitempty"`
+}
+
 // AgentCfg defines per-agent policy overrides.
 type AgentCfg struct {
 	Extends  string    `yaml:"extends"`
@@ -83,7 +92,7 @@ type NotificationCfg struct {
 
 // NotifyTarget is a notification destination.
 type NotifyTarget struct {
-	Type  string `yaml:"type"`  // "webhook", "console", "log"
+	Type  string `yaml:"type"`  // "webhook", "slack", "console", "log"
 	URL   string `yaml:"url,omitempty"`
 	Level string `yaml:"level,omitempty"`
 }
@@ -146,27 +155,44 @@ func (e *Engine) UpdatePolicy(pol *Policy) {
 	e.policy = pol
 }
 
+// Policy returns the currently active policy (thread-safe).
+func (e *Engine) Policy() *Policy {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.policy
+}
+
 // ActionRequest represents an agent's intended action.
 type ActionRequest struct {
-	Scope   string            `json:"scope"`
-	Action  string            `json:"action,omitempty"`
-	Command string            `json:"command,omitempty"`
-	Path    string            `json:"path,omitempty"`
-	Domain  string            `json:"domain,omitempty"`
-	URL     string            `json:"url,omitempty"`
-	AgentID string            `json:"agent_id,omitempty"`
-	Meta    map[string]string `json:"meta,omitempty"`
+	Scope     string            `json:"scope"`
+	Action    string            `json:"action,omitempty"`
+	Command   string            `json:"command,omitempty"`
+	Path      string            `json:"path,omitempty"`
+	Domain    string            `json:"domain,omitempty"`
+	URL       string            `json:"url,omitempty"`
+	AgentID   string            `json:"agent_id,omitempty"`
+	SessionID string            `json:"session_id,omitempty"`
+	EstCost   float64           `json:"est_cost,omitempty"`
+	Meta      map[string]string `json:"meta,omitempty"`
 }
 
 // Check evaluates an action request against the active policy.
-// Order: deny rules → require_approval rules → allow rules → default deny.
+// Order: deny rules -> require_approval rules -> allow rules -> default deny.
+// Per-agent overrides are applied when AgentID matches a key in policy.Agents.
 func (e *Engine) Check(req ActionRequest) CheckResult {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	for _, rs := range e.policy.Rules {
+	rules := e.resolveRules(req.AgentID)
+
+	for _, rs := range rules {
 		if rs.Scope != req.Scope {
 			continue
+		}
+
+		// Cost scope: evaluate limits instead of pattern rules
+		if rs.Scope == "cost" && rs.Limits != nil {
+			return e.checkCost(rs, req)
 		}
 
 		// 1. Check deny rules first
@@ -212,6 +238,107 @@ func (e *Engine) Check(req ActionRequest) CheckResult {
 		Decision: Deny,
 		Reason:   "No matching allow rule (default deny)",
 	}
+}
+
+// RateLimitConfig returns the rate limit config for a given scope, considering
+// per-agent overrides. Returns nil if no rate limit is configured.
+func (e *Engine) RateLimitConfig(scope, agentID string) *RateLimitCfg {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	rules := e.resolveRules(agentID)
+	for _, rs := range rules {
+		if rs.Scope == scope && rs.RateLimit != nil {
+			return rs.RateLimit
+		}
+	}
+	return nil
+}
+
+// resolveRules returns the effective rule list for a given agent.
+// If the agent has overrides in the policy, scope-level overrides replace
+// the base rules for those scopes; non-overridden scopes use the base rules.
+func (e *Engine) resolveRules(agentID string) []RuleSet {
+	if agentID == "" || e.policy.Agents == nil {
+		return e.policy.Rules
+	}
+
+	agentCfg, ok := e.policy.Agents[agentID]
+	if !ok {
+		return e.policy.Rules
+	}
+
+	// Build a map of overridden scopes
+	overridden := make(map[string]RuleSet, len(agentCfg.Override))
+	for _, rs := range agentCfg.Override {
+		overridden[rs.Scope] = rs
+	}
+
+	// Merge: use override for scopes that have one, base for the rest
+	var merged []RuleSet
+	seen := make(map[string]bool)
+
+	for _, rs := range e.policy.Rules {
+		if override, ok := overridden[rs.Scope]; ok {
+			merged = append(merged, override)
+			seen[rs.Scope] = true
+		} else {
+			merged = append(merged, rs)
+			seen[rs.Scope] = true
+		}
+	}
+
+	// Add any override scopes not in the base (agent adds a new scope)
+	for scope, rs := range overridden {
+		if !seen[scope] {
+			merged = append(merged, rs)
+		}
+	}
+
+	return merged
+}
+
+// checkCost evaluates cost limits for a request.
+func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
+	if rs.Limits == nil {
+		return CheckResult{Decision: Allow, Reason: "No cost limits configured"}
+	}
+
+	maxPerAction := parseDollar(rs.Limits.MaxPerAction)
+
+	if req.EstCost > 0 && maxPerAction > 0 && req.EstCost > maxPerAction {
+		return CheckResult{
+			Decision: Deny,
+			Reason:   fmt.Sprintf("Estimated cost $%.2f exceeds per-action limit of %s", req.EstCost, rs.Limits.MaxPerAction),
+			Rule:     "deny:cost:max_per_action",
+		}
+	}
+
+	alertThreshold := parseDollar(rs.Limits.AlertThreshold)
+	if req.EstCost > 0 && alertThreshold > 0 && req.EstCost > alertThreshold {
+		return CheckResult{
+			Decision: RequireApproval,
+			Reason:   fmt.Sprintf("Estimated cost $%.2f exceeds alert threshold of %s", req.EstCost, rs.Limits.AlertThreshold),
+			Rule:     "require_approval:cost:alert_threshold",
+		}
+	}
+
+	return CheckResult{
+		Decision: Allow,
+		Reason:   "Cost within limits",
+		Rule:     "allow:cost:within_limits",
+	}
+}
+
+// parseDollar extracts a float from a string like "$0.50".
+func parseDollar(s string) float64 {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "$")
+	if s == "" {
+		return 0
+	}
+	v, _ := strconv.ParseFloat(s, 64)
+	return v
 }
 
 // matchRule checks if an action request matches a specific rule.

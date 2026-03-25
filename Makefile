@@ -1,8 +1,8 @@
-.PHONY: build test lint run clean docker validate
+.PHONY: build test lint run clean docker validate help
 
 # Binary name
 BINARY=agentguard
-VERSION=0.1.0
+VERSION=0.2.0
 COMMIT=$(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)"
 
@@ -45,7 +45,11 @@ clean:
 
 ## install-python-sdk: Install the Python SDK in development mode
 install-python-sdk:
-	cd plugins/python && pip install -e ".[langchain]"
+	cd plugins/python && pip install -e ".[all]"
+
+## install-ts-sdk: Build the TypeScript SDK
+install-ts-sdk:
+	cd plugins/typescript && npm install && npm run build
 
 ## help: Show this help
 help:

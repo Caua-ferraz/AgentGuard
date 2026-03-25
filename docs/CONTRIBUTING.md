@@ -8,15 +8,33 @@ Thanks for your interest in making AI agents safer. Here's how to get involved.
 git clone https://github.com/Caua-ferraz/agentguard.git
 cd agentguard
 go build ./...
-go test ./...
+go test -race ./...
+```
+
+For the full local setup guide, see [SETUP.md](SETUP.md).
+
+## Project Structure
+
+```
+cmd/agentguard/     CLI entry point
+pkg/policy/         Policy engine (YAML parsing, rule evaluation, per-agent overrides)
+pkg/proxy/          HTTP proxy server + embedded dashboard
+pkg/audit/          Audit logging (JSON lines)
+pkg/notify/         Webhook/Slack/console notifications
+pkg/ratelimit/      Token-bucket rate limiter
+plugins/python/     Python SDK + framework adapters (LangChain, CrewAI, browser-use, MCP)
+plugins/typescript/ TypeScript SDK
+configs/            Policy files and examples
+docs/               Documentation
 ```
 
 ## Priority Areas
 
 1. **Adapters** — Adding support for more agent frameworks (AutoGPT, OpenAI Agents SDK, etc.)
 2. **Policy rules** — New scope types, matching strategies, and contextual conditions
-3. **Dashboard** — Improved UI, better session replay, richer analytics
-4. **Documentation** — Tutorials, integration guides, example policies
+3. **Dashboard** — Session replay, policy editor, richer analytics
+4. **Audit backends** — SQLite/PostgreSQL storage for audit logs
+5. **Documentation** — Tutorials, integration guides, example policies
 
 ## Pull Request Process
 
@@ -35,7 +53,7 @@ go test ./...
 
 ## Policy Contributions
 
-We welcome community-contributed policy templates in `configs/community/`. Include a clear description of the use case and what the policy protects against.
+We welcome community-contributed policy templates in `configs/examples/`. Include a clear description of the use case and what the policy protects against.
 
 ## Reporting Security Issues
 
