@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go build:*)",
+      "Bash(where go:*)",
+      "Read(//usr/local/go/bin/**)",
+      "Read(//c/Users/topfe/Downloads/agentguard/$GOROOT/bin/**)"
+    ]
+  }
+}

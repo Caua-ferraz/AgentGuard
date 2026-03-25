@@ -1,0 +1,85 @@
+# AgentGuard Policy: Research Agent
+# Permissive read access, strict write controls.
+
+version: "1"
+name: "research-agent-policy"
+description: "Policy for AI research agents — broad read access to the web, restricted writes and API usage"
+
+rules:
+  # --- Network: Broad read access, restricted APIs ---
+  - scope: network
+    allow:
+      - domain: "*.wikipedia.org"
+      - domain: "*.arxiv.org"
+      - domain: "scholar.google.com"
+      - domain: "*.semanticscholar.org"
+      - domain: "*.github.com"
+      - domain: "*.stackoverflow.com"
+      - domain: "api.openai.com"
+      - domain: "api.anthropic.com"
+    deny:
+      - domain: "*.social-media.com"
+        message: "Social media access blocked for research agents"
+    rate_limit:
+      max_requests: 120
+      window: "1m"
+
+  # --- Browser: Open browsing with guardrails ---
+  - scope: browser
+    deny:
+      - domain: "*.bank.*"
+        message: "Financial sites are off-limits"
+      - domain: "mail.*"
+        message: "Email access blocked"
+      - domain: "*.admin.*"
+        message: "Admin panels blocked"
+    allow:
+      - domain: "*"
+
+  # --- Shell: Data processing only ---
+  - scope: shell
+    allow:
+      - pattern: "python *"
+      - pattern: "node *"
+      - pattern: "grep *"
+      - pattern: "wc *"
+      - pattern: "head *"
+      - pattern: "tail *"
+      - pattern: "sort *"
+      - pattern: "jq *"
+    require_approval:
+      - pattern: "pip install *"
+      - pattern: "npm install *"
+    deny:
+      - pattern: "sudo *"
+      - pattern: "rm *"
+      - pattern: "curl * | *"
+        message: "Piped curl commands blocked — use Python requests instead"
+
+  # --- Filesystem ---
+  - scope: filesystem
+    allow:
+      - action: read
+        paths: ["**"]
+      - action: write
+        paths: ["./research/**", "./output/**", "/tmp/**"]
+    deny:
+      - action: write
+        paths: ["/etc/**", "~/**"]
+      - action: delete
+        paths: ["**"]
+        message: "Research agents cannot delete files"
+
+  # --- Cost ---
+  - scope: cost
+    limits:
+      max_per_action: "$0.25"
+      max_per_session: "$15.00"
+      alert_threshold: "$10.00"
+
+notifications:
+  approval_required:
+    - type: console
+  on_deny:
+    - type: log
+      level: info

@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 200">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0a0a0a"/>
+      <stop offset="100%" style="stop-color:#111111"/>
+    </linearGradient>
+    <linearGradient id="shield" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4ade80"/>
+      <stop offset="100%" style="stop-color:#22c55e"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#4ade80;stop-opacity:0"/>
+      <stop offset="50%" style="stop-color:#4ade80;stop-opacity:0.15"/>
+      <stop offset="100%" style="stop-color:#4ade80;stop-opacity:0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="720" height="200" rx="12" fill="url(#bg)"/>
+
+  <!-- Subtle grid -->
+  <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+    <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1a1a1a" stroke-width="0.5"/>
+  </pattern>
+  <rect width="720" height="200" rx="12" fill="url(#grid)" opacity="0.5"/>
+
+  <!-- Glow line -->
+  <rect x="0" y="96" width="720" height="2" fill="url(#glow)" opacity="0.6"/>
+
+  <!-- Shield icon -->
+  <g transform="translate(220, 55)">
+    <path d="M30 8 L30 8 C30 8 50 16 50 16 L50 42 C50 58 30 70 30 70 C30 70 10 58 10 42 L10 16 Z"
+          fill="none" stroke="url(#shield)" stroke-width="2.5" stroke-linejoin="round"/>
+    <polyline points="22,38 28,44 40,32" fill="none" stroke="#4ade80" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <!-- Text -->
+  <text x="280" y="90" font-family="'SF Mono', 'Fira Code', 'Cascadia Code', monospace" font-size="38" font-weight="700" fill="#ffffff" letter-spacing="-1">
+    AgentGuard
+  </text>
+
+  <!-- Subtitle -->
+  <text x="280" y="118" font-family="'SF Mono', 'Fira Code', 'Cascadia Code', monospace" font-size="13" fill="#4ade80" letter-spacing="3" opacity="0.9">
+    THE FIREWALL FOR AI AGENTS
+  </text>
+
+  <!-- Version badge -->
+  <rect x="280" y="132" width="48" height="20" rx="10" fill="#1a2e1a" opacity="0.8"/>
+  <text x="304" y="146" font-family="'SF Mono', monospace" font-size="10" fill="#4ade80" text-anchor="middle">v0.1</text>
+
+  <!-- Border -->
+  <rect width="720" height="200" rx="12" fill="none" stroke="#222" stroke-width="1"/>
+</svg>

@@ -1,0 +1,20 @@
+{
+  "name": "@agentguard/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for AgentGuard — the firewall for AI agents",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourname/agentguard"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "@types/node": "^20.0.0"
+  }
+}

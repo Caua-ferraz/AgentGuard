@@ -1,0 +1,43 @@
+# Binaries
+agentguard
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test
+*.test
+coverage.out
+
+# Build
+/dist/
+/bin/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Audit logs (don't commit real logs)
+*.jsonl
+*.db
+
+# Docker
+docker-compose.override.yml
+
+# Python SDK
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# Node SDK
+node_modules/
+package-lock.json

@@ -1,0 +1,81 @@
+# AgentGuard Default Policy
+# Safe defaults for development and testing.
+
+version: "1"
+name: "default-sandbox"
+description: "Restrictive defaults suitable for development agents"
+
+rules:
+  # --- File System ---
+  - scope: filesystem
+    allow:
+      - action: read
+        paths: ["./workspace/**", "/tmp/**"]
+      - action: write
+        paths: ["./workspace/**", "/tmp/**"]
+    deny:
+      - action: delete
+        paths: ["**"]
+        message: "File deletion is not permitted by default policy"
+      - action: write
+        paths: ["/etc/**", "/usr/**", "/var/**", "~/.ssh/**", "~/.aws/**"]
+        message: "Writing to system/credential directories is blocked"
+
+  # --- Shell Commands ---
+  - scope: shell
+    require_approval:
+      - pattern: "sudo *"
+      - pattern: "rm -rf *"
+      - pattern: "curl * | bash"
+      - pattern: "wget * | sh"
+      - pattern: "chmod 777 *"
+    deny:
+      - pattern: ":(){ :|:& };:"
+        message: "Fork bomb detected"
+      - pattern: "dd if=/dev/*"
+        message: "Raw disk operations are blocked"
+      - pattern: "> /dev/sda"
+        message: "Raw disk write blocked"
+    allow:
+      - pattern: "ls *"
+      - pattern: "cat *"
+      - pattern: "grep *"
+      - pattern: "find *"
+      - pattern: "echo *"
+      - pattern: "python *"
+      - pattern: "node *"
+      - pattern: "go *"
+      - pattern: "git *"
+
+  # --- Network / API Calls ---
+  - scope: network
+    allow:
+      - domain: "api.openai.com"
+      - domain: "api.anthropic.com"
+      - domain: "api.github.com"
+      - domain: "*.googleapis.com"
+    deny:
+      - domain: "*.production.internal"
+        message: "Production access requires an elevated policy"
+    rate_limit:
+      max_requests: 60
+      window: "1m"
+
+  # --- Browser Automation ---
+  - scope: browser
+    deny:
+      - domain: "*.bank.*"
+        message: "Banking sites are blocked"
+      - domain: "mail.google.com"
+        message: "Email access is blocked by default"
+    allow:
+      - domain: "*.wikipedia.org"
+      - domain: "*.stackoverflow.com"
+      - domain: "*.github.com"
+
+notifications:
+  approval_required:
+    - type: console
+  on_deny:
+    - type: log
+      level: warn

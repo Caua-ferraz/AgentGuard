@@ -1,0 +1,67 @@
+# AgentGuard Policy: Trading Bot
+# Strict guardrails for AI agents interacting with financial APIs.
+
+version: "1"
+name: "trading-bot-policy"
+description: "Policy for AI trading agents — restricts order sizes, blocks withdrawals, requires approval for large trades"
+
+rules:
+  # --- Network: Only allow known financial APIs ---
+  - scope: network
+    allow:
+      - domain: "api.alpaca.markets"
+      - domain: "*.polygon.io"
+      - domain: "api.binance.com"
+      - domain: "api.coingecko.com"
+    deny:
+      - domain: "*"
+        message: "Trading bots may only access whitelisted financial APIs"
+    rate_limit:
+      max_requests: 30
+      window: "1m"
+
+  # --- Shell: Read-only market data scripts ---
+  - scope: shell
+    allow:
+      - pattern: "python scripts/fetch_*.py"
+      - pattern: "python scripts/analyze_*.py"
+    require_approval:
+      - pattern: "python scripts/execute_trade.py *"
+    deny:
+      - pattern: "curl *"
+        message: "Use sanctioned scripts, not raw HTTP calls"
+      - pattern: "pip install *"
+        message: "No package installation during trading sessions"
+
+  # --- Cost: Hard limits on trade sizes ---
+  - scope: cost
+    limits:
+      max_per_action: "$500"
+      max_per_session: "$5000"
+      alert_threshold: "$2000"
+
+  # --- Filesystem: Log access only ---
+  - scope: filesystem
+    allow:
+      - action: read
+        paths: ["./data/**", "./config/**"]
+      - action: write
+        paths: ["./logs/**", "./output/**"]
+    deny:
+      - action: write
+        paths: ["./config/**"]
+        message: "Bots cannot modify their own configuration"
+      - action: delete
+        paths: ["**"]
+        message: "No file deletion permitted"
+
+notifications:
+  approval_required:
+    - type: webhook
+      url: "https://hooks.slack.com/services/YOUR/TRADING/WEBHOOK"
+    - type: console
+  on_deny:
+    - type: webhook
+      url: "https://hooks.slack.com/services/YOUR/ALERTS/WEBHOOK"
+    - type: log
+      level: error
