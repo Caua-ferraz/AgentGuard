@@ -1,6 +1,6 @@
 # AgentGuard Python SDK
 
-Lightweight Python client for [AgentGuard](https://github.com/Caua-ferraz/agentguard) — the firewall for AI agents.
+Lightweight Python client for [AgentGuard](https://github.com/Caua-ferraz/AgentGuard) — the firewall for AI agents.
 
 ## Install
 

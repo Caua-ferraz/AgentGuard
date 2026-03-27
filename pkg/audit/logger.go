@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Caua-ferraz/agentguard/pkg/policy"
+	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
 // Entry represents a single audit log record.

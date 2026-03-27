@@ -307,4 +307,4 @@ watcher goroutine (every 2s):
 - Approval queue is in-memory only — lost on restart; needs persistence
 - No audit log rotation or retention policy
 - Unused Go dependencies (`gorilla/mux`, `gorilla/websocket`, `go-sqlite3`) should be removed or used
-- Module path is `github.com/yourname/agentguard` — placeholder not updated for real publish
+- Module path is `github.com/Caua-ferraz/AgentGuard`

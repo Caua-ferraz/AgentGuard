@@ -54,12 +54,12 @@ Right now, most teams deploying AI agents are just... hoping they behave.
 
 ```bash
 # From source
-git clone https://github.com/Caua-ferraz/agentguard.git
-cd agentguard
+git clone https://github.com/Caua-ferraz/AgentGuard.git
+cd AgentGuard
 go build -o agentguard ./cmd/agentguard
 
 # Or via Go install
-go install github.com/Caua-ferraz/agentguard/cmd/agentguard@latest
+go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@latest
 
 # Or Docker
 docker run -d -p 8080:8080 -v ./configs:/etc/agentguard agentguard:latest
@@ -67,7 +67,7 @@ docker run -d -p 8080:8080 -v ./configs:/etc/agentguard agentguard:latest
 
 ### Define a Policy
 
-Create `policies/default.yaml`:
+Create `configs/default.yaml` (a ready-to-use default is included in the repo):
 
 ```yaml
 # AgentGuard Policy File
@@ -385,22 +385,31 @@ agentguard version    # Print version
 
 ## Roadmap
 
-- [x] Core policy engine with YAML rules
+### Implemented
+- [x] Core policy engine with YAML rules (deny -> require_approval -> allow -> default deny)
 - [x] Audit logging (JSON lines)
 - [x] Shell, filesystem, network, browser, cost scopes
-- [x] Approval queue with webhook/Slack notifications
-- [x] Web dashboard (live feed + interactive approval)
-- [x] Rate limiting enforcement
-- [x] Per-agent policy overrides
-- [x] Cost guardrails with threshold alerts
-- [x] LangChain, CrewAI, browser-use, MCP adapters
-- [x] Full CLI (approve, deny, status, audit)
+- [x] Approval queue with Slack/webhook/console notifications
+- [x] Web dashboard (live SSE feed, stats, interactive approve/deny)
+- [x] Token-bucket rate limiting per scope per agent
+- [x] Per-agent policy overrides via `agents:` config
+- [x] Cost guardrails with per-action limits and alert thresholds
+- [x] Python SDK + adapters: LangChain, CrewAI, browser-use, MCP
+- [x] TypeScript/Node.js SDK
+- [x] Full CLI: serve, validate, approve, deny, status, audit, version
+- [x] Docker support with multi-stage build
+- [x] Policy hot-reload via `--watch`
+
+### Planned
 - [ ] SQLite/PostgreSQL audit backend
 - [ ] Data exfiltration detection (PII scanning)
 - [ ] Policy-as-code (test policies in CI/CD)
 - [ ] Multi-agent session correlation
 - [ ] Session replay in dashboard
 - [ ] Policy editor in dashboard
+- [ ] Conditional rules (`require_prior`, `time_window`)
+- [ ] AutoGPT adapter
+- [ ] OpenAI Agents SDK adapter
 - [ ] SOC 2 / compliance report generation
 - [ ] VS Code extension for policy authoring
 

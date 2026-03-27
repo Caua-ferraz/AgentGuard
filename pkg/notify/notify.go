@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Caua-ferraz/agentguard/pkg/policy"
+	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
 // Event describes something that happened in the system.

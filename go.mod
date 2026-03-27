@@ -1,4 +1,4 @@
-module github.com/Caua-ferraz/agentguard
+module github.com/Caua-ferraz/AgentGuard
 
 go 1.22.0
 

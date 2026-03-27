@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Caua-ferraz/agentguard/pkg/audit"
-	"github.com/Caua-ferraz/agentguard/pkg/notify"
-	"github.com/Caua-ferraz/agentguard/pkg/policy"
-	"github.com/Caua-ferraz/agentguard/pkg/ratelimit"
+	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
+	"github.com/Caua-ferraz/AgentGuard/pkg/notify"
+	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
+	"github.com/Caua-ferraz/AgentGuard/pkg/ratelimit"
 )
 
 // Config holds the server configuration.

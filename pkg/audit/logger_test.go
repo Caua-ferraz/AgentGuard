@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Caua-ferraz/agentguard/pkg/policy"
+	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
 func TestFileLogger_LogAndQuery(t *testing.T) {

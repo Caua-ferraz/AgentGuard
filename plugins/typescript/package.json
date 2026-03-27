@@ -1,17 +1,37 @@
 {
   "name": "@agentguard/sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "TypeScript SDK for AgentGuard — the firewall for AI agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
-    "test": "jest"
+    "test": "jest",
+    "prepublishOnly": "npm run build"
   },
+  "keywords": [
+    "ai",
+    "agents",
+    "firewall",
+    "policy",
+    "guardrails",
+    "safety",
+    "agentguard"
+  ],
+  "author": "AgentGuard Contributors",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Caua-ferraz/agentguard"
+    "url": "https://github.com/Caua-ferraz/AgentGuard.git",
+    "directory": "plugins/typescript"
+  },
+  "homepage": "https://github.com/Caua-ferraz/AgentGuard",
+  "bugs": {
+    "url": "https://github.com/Caua-ferraz/AgentGuard/issues"
   },
   "devDependencies": {
     "typescript": "^5.3.0",

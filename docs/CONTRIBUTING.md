@@ -5,8 +5,8 @@ Thanks for your interest in making AI agents safer. Here's how to get involved.
 ## Development Setup
 
 ```bash
-git clone https://github.com/Caua-ferraz/agentguard.git
-cd agentguard
+git clone https://github.com/Caua-ferraz/AgentGuard.git
+cd AgentGuard
 go build ./...
 go test -race ./...
 ```

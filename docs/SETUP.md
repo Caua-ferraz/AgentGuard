@@ -17,8 +17,8 @@ Get AgentGuard running on your machine in under 5 minutes.
 ### 1. Clone and Build
 
 ```bash
-git clone https://github.com/Caua-ferraz/agentguard.git
-cd agentguard
+git clone https://github.com/Caua-ferraz/AgentGuard.git
+cd AgentGuard
 go build -o agentguard ./cmd/agentguard
 ```
 
