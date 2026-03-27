@@ -120,7 +120,9 @@ func (s *Server) Start() error {
 func (s *Server) Shutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	s.http.Shutdown(ctx)
+	if err := s.http.Shutdown(ctx); err != nil {
+		log.Printf("Shutdown error: %v", err)
+	}
 }
 
 // handleCheck is the main policy enforcement endpoint.
@@ -212,7 +214,9 @@ func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, 
 	})
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		log.Printf("Response encode error: %v", err)
+	}
 }
 
 // handleApprove approves a pending action.
@@ -229,7 +233,7 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "approved", "id": id})
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "approved", "id": id})
 }
 
 // handleDeny denies a pending action.
@@ -246,7 +250,7 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "denied", "id": id})
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "denied", "id": id})
 }
 
 // handleAuditQuery returns filtered audit log entries.
@@ -266,13 +270,13 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(entries)
+	_ = json.NewEncoder(w).Encode(entries)
 }
 
 // handleHealth returns server health status.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "version": "0.2.0"})
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "version": "0.2.0"})
 }
 
 // handleStats returns aggregate statistics for the dashboard.
@@ -299,7 +303,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]int{
+	_ = json.NewEncoder(w).Encode(map[string]int{
 		"total":     total,
 		"allowed":   allowed,
 		"denied":    denied,
@@ -316,7 +320,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 // handlePendingList returns pending approval actions.
 func (s *Server) handlePendingList(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(s.approval.List())
+	_ = json.NewEncoder(w).Encode(s.approval.List())
 }
 
 // handleEventStream is a Server-Sent Events endpoint for live updates.
@@ -365,13 +369,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if pa.Resolved {
-		json.NewEncoder(w).Encode(map[string]string{
+		_ = json.NewEncoder(w).Encode(map[string]string{
 			"id":       id,
 			"decision": pa.Decision,
 			"status":   "resolved",
 		})
 	} else {
-		json.NewEncoder(w).Encode(map[string]string{
+		_ = json.NewEncoder(w).Encode(map[string]string{
 			"id":     id,
 			"status": "pending",
 		})

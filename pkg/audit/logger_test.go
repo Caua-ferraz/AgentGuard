@@ -133,23 +133,33 @@ func TestFileLogger_Persistence(t *testing.T) {
 	path := filepath.Join(dir, "persist_audit.jsonl")
 
 	// Write with first logger
-	logger1, _ := NewFileLogger(path)
-	logger1.Log(Entry{
+	logger1, err := NewFileLogger(path)
+	if err != nil {
+		t.Fatalf("NewFileLogger: %v", err)
+	}
+	if err := logger1.Log(Entry{
 		Timestamp: time.Now().UTC(),
 		AgentID:   "bot-1",
 		Request:   policy.ActionRequest{Scope: "shell", Command: "echo hello"},
 		Result:    policy.CheckResult{Decision: policy.Allow, Reason: "ok"},
-	})
+	}); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
 	logger1.Close()
 
 	// Read with second logger (append mode)
-	logger2, _ := NewFileLogger(path)
-	logger2.Log(Entry{
+	logger2, err := NewFileLogger(path)
+	if err != nil {
+		t.Fatalf("NewFileLogger: %v", err)
+	}
+	if err := logger2.Log(Entry{
 		Timestamp: time.Now().UTC(),
 		AgentID:   "bot-2",
 		Request:   policy.ActionRequest{Scope: "shell", Command: "echo world"},
 		Result:    policy.CheckResult{Decision: policy.Allow, Reason: "ok"},
-	})
+	}); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
 
 	results, err := logger2.Query(QueryFilter{})
 	if err != nil {
@@ -165,17 +175,25 @@ func TestFileLogger_AutoTimestamp(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ts_audit.jsonl")
 
-	logger, _ := NewFileLogger(path)
+	logger, err := NewFileLogger(path)
+	if err != nil {
+		t.Fatalf("NewFileLogger: %v", err)
+	}
 	defer logger.Close()
 
 	// Log with zero timestamp — should be auto-filled
-	logger.Log(Entry{
+	if err := logger.Log(Entry{
 		AgentID: "bot",
 		Request: policy.ActionRequest{Scope: "shell", Command: "ls"},
 		Result:  policy.CheckResult{Decision: policy.Allow, Reason: "ok"},
-	})
+	}); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
 
-	results, _ := logger.Query(QueryFilter{})
+	results, err := logger.Query(QueryFilter{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
 	if len(results) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(results))
 	}
@@ -245,12 +263,17 @@ func TestFileLogger_FileContent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "content_audit.jsonl")
 
-	logger, _ := NewFileLogger(path)
-	logger.Log(Entry{
+	logger, err := NewFileLogger(path)
+	if err != nil {
+		t.Fatalf("NewFileLogger: %v", err)
+	}
+	if err := logger.Log(Entry{
 		AgentID: "bot",
 		Request: policy.ActionRequest{Scope: "shell", Command: "echo test"},
 		Result:  policy.CheckResult{Decision: policy.Allow, Reason: "ok"},
-	})
+	}); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
 	logger.Close()
 
 	data, err := os.ReadFile(path)

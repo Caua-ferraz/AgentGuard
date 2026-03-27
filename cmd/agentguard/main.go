@@ -59,15 +59,15 @@ func main() {
 
 	switch os.Args[1] {
 	case "serve":
-		serveCmd.Parse(os.Args[2:])
+		_ = serveCmd.Parse(os.Args[2:]) // flag.ExitOnError handles errors
 		runServe(*policyFile, *port, *dashboard, *watch, *auditPath, *apiKey)
 
 	case "validate":
-		validateCmd.Parse(os.Args[2:])
+		_ = validateCmd.Parse(os.Args[2:])
 		runValidate(*validateFile)
 
 	case "approve":
-		approveCmd.Parse(os.Args[2:])
+		_ = approveCmd.Parse(os.Args[2:])
 		args := approveCmd.Args()
 		if len(args) == 0 {
 			fmt.Fprintln(os.Stderr, "Usage: agentguard approve [flags] <approval-id>")
@@ -76,7 +76,7 @@ func main() {
 		runResolve(*approveURL, args[0], "approve")
 
 	case "deny":
-		denyCmd.Parse(os.Args[2:])
+		_ = denyCmd.Parse(os.Args[2:])
 		args := denyCmd.Args()
 		if len(args) == 0 {
 			fmt.Fprintln(os.Stderr, "Usage: agentguard deny [flags] <approval-id>")
@@ -85,11 +85,11 @@ func main() {
 		runResolve(*denyURL, args[0], "deny")
 
 	case "status":
-		statusCmd.Parse(os.Args[2:])
+		_ = statusCmd.Parse(os.Args[2:])
 		runStatus(*statusURL)
 
 	case "audit":
-		auditCmd.Parse(os.Args[2:])
+		_ = auditCmd.Parse(os.Args[2:])
 		runAuditQuery(*auditQueryURL, *auditAgent, *auditDecision, *auditScope, *auditLimit)
 
 	case "version":
@@ -209,7 +209,10 @@ func runResolve(baseURL, approvalID, action string) {
 	defer resp.Body.Close()
 
 	var body map[string]string
-	json.NewDecoder(resp.Body).Decode(&body)
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
+		os.Exit(1)
+	}
 
 	if resp.StatusCode == http.StatusOK {
 		fmt.Printf("Action %s: %s\n", action, body["status"])
@@ -240,7 +243,10 @@ func runStatus(baseURL string) {
 	defer resp.Body.Close()
 
 	var pending []map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&pending)
+	if err := json.NewDecoder(resp.Body).Decode(&pending); err != nil {
+		fmt.Fprintf(os.Stderr, "Error decoding pending list: %v\n", err)
+		return
+	}
 
 	if len(pending) == 0 {
 		fmt.Println("Pending approvals: none")
@@ -283,7 +289,10 @@ func runAuditQuery(baseURL, agent, decision, scope string, limit int) {
 	defer resp.Body.Close()
 
 	var entries []map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&entries)
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		fmt.Fprintf(os.Stderr, "Error decoding audit entries: %v\n", err)
+		return
+	}
 
 	if len(entries) == 0 {
 		fmt.Println("No audit entries found.")
