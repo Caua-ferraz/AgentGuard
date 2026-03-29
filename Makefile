@@ -2,7 +2,7 @@
 
 # Binary name
 BINARY=agentguard
-VERSION=0.2.2
+VERSION=0.2.3
 COMMIT=$(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)"
 

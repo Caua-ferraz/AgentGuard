@@ -39,7 +39,7 @@ from agentguard import Guard, CheckResult, DEFAULT_BASE_URL
 
 # MCP protocol constants
 MCP_PROTOCOL_VERSION = "2024-11-05"
-SDK_VERSION = "0.2.2"
+SDK_VERSION = "0.2.3"
 
 
 class ToolDefinition:

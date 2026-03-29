@@ -51,7 +51,7 @@ go build -o agentguard.exe ./cmd/agentguard
 
 ```bash
 curl http://localhost:8080/health
-# {"status":"ok","version":"0.2.2"}
+# {"status":"ok","version":"0.2.3"}
 ```
 
 Open `http://localhost:8080/dashboard` in your browser to see the live dashboard.
