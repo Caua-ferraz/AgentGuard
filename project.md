@@ -96,12 +96,20 @@ agentguard/
 │   ├── policy/
 │   │   ├── engine.go            # Core policy evaluation logic
 │   │   ├── engine_test.go       # Table-driven tests for all decision paths
-│   │   └── watcher.go          # Hot-reload: polls policy file every 2s
+│   │   ├── engine_agent_test.go # Per-agent override tests
+│   │   └── watcher.go           # Hot-reload: polls policy file every 2s
 │   ├── audit/
 │   │   ├── logger.go            # JSON Lines file logger + query interface
 │   │   └── logger_test.go       # Tests for log/query/persistence
-│   └── proxy/
-│       └── server.go            # HTTP server, approval queue, SSE, dashboard HTML
+│   ├── metrics/
+│   │   └── metrics.go           # Prometheus-compatible counters + histograms
+│   ├── notify/
+│   │   └── notify.go            # Webhook/Slack/console/log notification dispatcher
+│   ├── proxy/
+│   │   └── server.go            # HTTP server, approval queue, SSE, dashboard HTML
+│   └── ratelimit/
+│       ├── ratelimit.go         # Token-bucket rate limiter
+│       └── ratelimit_test.go    # Rate limiter tests
 │
 ├── configs/
 │   ├── default.yaml             # Restrictive defaults (dev/sandbox)
@@ -111,11 +119,14 @@ agentguard/
 │
 ├── plugins/
 │   ├── python/
-│   │   ├── setup.py             # Package metadata (v0.1.0, Python 3.8+)
+│   │   ├── pyproject.toml       # Package metadata (v0.2.3, Python 3.8+)
 │   │   └── agentguard/
 │   │       ├── __init__.py      # Guard class, CheckResult, @guarded decorator
 │   │       └── adapters/
-│   │           └── langchain.py # GuardedTool / GuardedToolkit for LangChain
+│   │           ├── langchain.py # GuardedTool / GuardedToolkit for LangChain
+│   │           ├── crewai.py    # GuardedCrewTool / guard_crew_tools for CrewAI
+│   │           ├── browseruse.py# GuardedBrowser / GuardedPage for browser-use
+│   │           └── mcp.py       # GuardedMCPServer for Anthropic MCP
 │   └── typescript/
 │       ├── package.json         # @agentguard/sdk package
 │       └── src/
@@ -227,15 +238,16 @@ Agent code
   → Guard.check("shell", command="sudo apt install ...")
   → POST /v1/check
   → Engine.Check → REQUIRE_APPROVAL
-  → ApprovalQueue.Add() → PendingAction{id: "ap_<nanoseconds>"}
+  → ApprovalQueue.Add() → PendingAction{id: "ap_<crypto_rand_hex>"}
   → SSE broadcast to all /api/stream subscribers
   → HTTP 200 {decision: "REQUIRE_APPROVAL", approval_id: "ap_...", approval_url: "..."}
   → Agent calls Guard.wait_for_approval("ap_...")
-    → Polls GET /v1/check/ap_... every 2s (NOTE: endpoint does not exist — bug)
+    → Polls GET /v1/status/ap_... every 2s
   → Human opens Dashboard → sees pending action
   → Human POSTs /v1/approve/ap_...
   → ApprovalQueue.Resolve("ap_...", ALLOW)
-  → Agent eventually times out and gets DENY (due to polling bug)
+  → Next poll returns {status: "resolved", decision: "ALLOW"}
+  → Agent proceeds
 ```
 
 ### Policy hot-reload
@@ -254,9 +266,6 @@ watcher goroutine (every 2s):
 | Dependency | Version | Purpose |
 |---|---|---|
 | `gopkg.in/yaml.v3` | v3.0.1 | YAML policy parsing |
-| `github.com/gorilla/mux` | v1.8.1 | **Declared but unused** |
-| `github.com/gorilla/websocket` | v1.5.1 | **Declared but unused** |
-| `github.com/mattn/go-sqlite3` | v1.14.22 | **Declared but unused** (planned for audit DB) |
 | Python stdlib (`urllib`, `json`) | Built-in | Python SDK HTTP calls |
 | Browser `fetch` API | Web standard | TypeScript SDK HTTP calls |
 
@@ -282,29 +291,22 @@ watcher goroutine (every 2s):
 ## Known Limitations and TODOs
 
 ### Bugs
-- **`wait_for_approval` polls a non-existent endpoint:** Both Python (`__init__.py:153`) and TypeScript (`index.ts:200`) poll `GET /v1/check/{id}`, but no such endpoint exists on the server. Approval waiting is silently broken — agents always time out and receive DENY. The server needs a `GET /v1/status/{id}` endpoint, or the SDKs should use `GET /api/pending` to check resolution status.
-- **`~/.ssh/**` deny rule never matches:** `filepath.Match` does not expand `~`. The shell home-directory deny rules in `configs/default.yaml:21` are ineffective on all platforms.
-- **Broad allow patterns can be bypassed:** `python *` in shell scope allows arbitrary Python one-liners (e.g., `python -c "import os; os.system('rm -rf /')`).
+- **`globMatch` only supports one `**` per pattern:** Patterns like `**/sensitive/**` silently return false. Multi-segment `**` matching needs implementation or a load-time validation error.
 
 ### Security TODOs
-- No authentication on `/v1/approve` and `/v1/deny` endpoints (anyone on the network can approve)
-- CORS is `Access-Control-Allow-Origin: *` — any browser script can call the API
-- Approval IDs use nanosecond timestamps (guessable); should use `crypto/rand` UUIDs
-- No request body size limit (DoS vector via oversized payloads)
-- XSS in dashboard: `data.request.scope/command/path` inserted via `innerHTML` without sanitization
+- Approve/deny endpoints bind to localhost when no `--api-key` is set, but network deployments still need a key for proper auth
+- `conditions` in rules (`require_prior`, `time_window`) are parsed but never enforced — could give false sense of security
 
 ### Features Parsed but Not Enforced
-- `rate_limit` in RuleSet — parsed from YAML, never evaluated in `Engine.Check()`
 - `conditions` in Rule (`require_prior`, `time_window`) — parsed, never enforced
-- `cost` scope — policy structure exists, no evaluation logic
-- `notifications` targets (`webhook` type) — parsed, never dispatched
+- `max_per_session` in CostLimits — parsed, but no session-level cost accumulator exists
 
 ### Performance TODOs
-- Audit `Query()` does a full file scan on every call — replace with SQLite (dependency already declared in `go.mod`)
-- Policy watcher re-parses YAML on every 2-second tick even when file hasn't changed — should check mtime before parsing
+- Audit `Query()` does a full file scan on every call — replace with a database-backed implementation (SQLite or PostgreSQL)
+- Rate limiter bucket map grows unbounded — needs TTL-based eviction for long-running servers
+- Startup counter seeding scans the full audit log — should persist counters separately
 
 ### Operational TODOs
 - Approval queue is in-memory only — lost on restart; needs persistence
 - No audit log rotation or retention policy
-- Unused Go dependencies (`gorilla/mux`, `gorilla/websocket`, `go-sqlite3`) should be removed or used
 - Module path is `github.com/Caua-ferraz/AgentGuard`

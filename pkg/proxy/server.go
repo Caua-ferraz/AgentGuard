@@ -29,6 +29,8 @@ const (
 	ApprovalIDPrefix = "ap_"
 	// ShutdownTimeout is the graceful shutdown deadline.
 	ShutdownTimeout = 10 * time.Second
+	// MaxRequestBodySize is the maximum allowed size of incoming request bodies (1 MB).
+	MaxRequestBodySize = 1 << 20
 )
 
 // Config holds the server configuration.
@@ -74,7 +76,6 @@ type PendingAction struct {
 	CreatedAt time.Time            `json:"created_at"`
 	Resolved  bool                 `json:"resolved"`
 	Decision  string               `json:"decision,omitempty"`
-	response  chan policy.Decision
 }
 
 // AuditEvent is sent over SSE to dashboard clients for any check result.
@@ -129,8 +130,16 @@ func NewServer(cfg Config) *Server {
 		mux.HandleFunc("/api/stats", s.handleStats)
 	}
 
+	addr := fmt.Sprintf(":%d", cfg.Port)
+	if cfg.APIKey == "" {
+		// Without an API key, bind to localhost only to prevent network-adjacent
+		// attackers from approving/denying actions.
+		addr = fmt.Sprintf("127.0.0.1:%d", cfg.Port)
+		log.Printf("INFO: binding to %s (localhost only) — set --api-key to listen on all interfaces", addr)
+	}
+
 	s.http = &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Port),
+		Addr:    addr,
 		Handler: withCORS(cfg.AllowedOrigin)(withLogging(mux)),
 	}
 
@@ -158,6 +167,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodySize)
 	var req policy.ActionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
@@ -422,8 +432,7 @@ func (q *ApprovalQueue) Add(req policy.ActionRequest, result policy.CheckResult)
 
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		log.Printf("crypto/rand failed, falling back: %v", err)
-		b[0] = byte(time.Now().UnixNano())
+		log.Fatalf("crypto/rand failed — cannot generate secure approval IDs: %v", err)
 	}
 	id := ApprovalIDPrefix + hex.EncodeToString(b[:])
 	pa := &PendingAction{
@@ -431,7 +440,6 @@ func (q *ApprovalQueue) Add(req policy.ActionRequest, result policy.CheckResult)
 		Request:   req,
 		Result:    result,
 		CreatedAt: time.Now().UTC(),
-		response:  make(chan policy.Decision, 1),
 	}
 	q.pending[id] = pa
 
@@ -449,7 +457,6 @@ func (q *ApprovalQueue) Resolve(id string, decision policy.Decision) error {
 
 	pa.Resolved = true
 	pa.Decision = string(decision)
-	pa.response <- decision
 
 	// Broadcast resolution to SSE clients
 	q.broadcast(AuditEvent{
@@ -641,6 +648,13 @@ var dashboardHTML = `<!DOCTYPE html>
     const pendingEl = document.getElementById('pending');
     const MAX_FEED_ENTRIES = 200;
 
+    // Escape HTML to prevent XSS when inserting user-controlled data.
+    function esc(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
     // Shared entry renderer used by both history load and live SSE.
     // entry shape: { request, result, timestamp } — works for both audit entries and SSE events.
     function renderEntry(entry) {
@@ -649,13 +663,25 @@ var dashboardHTML = `<!DOCTYPE html>
       const req = entry.request || {};
       const action = req.command || req.path || req.domain || 'unknown';
       const el = document.createElement('div');
-      el.className = 'entry ' + decision;
-      el.innerHTML =
-        '<div class="decision ' + decision + '">' + decision + '</div>' +
-        '<div class="action">' + (req.scope || '') + ': ' + action + '</div>' +
-        '<div class="meta">Agent: ' + (req.agent_id || 'unknown') +
-        ' &bull; ' + new Date(entry.timestamp).toLocaleTimeString() +
-        (result.reason ? ' &bull; ' + result.reason : '') + '</div>';
+      el.className = 'entry ' + esc(decision);
+
+      const decDiv = document.createElement('div');
+      decDiv.className = 'decision ' + esc(decision);
+      decDiv.textContent = decision;
+      el.appendChild(decDiv);
+
+      const actDiv = document.createElement('div');
+      actDiv.className = 'action';
+      actDiv.textContent = (req.scope || '') + ': ' + action;
+      el.appendChild(actDiv);
+
+      const metaDiv = document.createElement('div');
+      metaDiv.className = 'meta';
+      metaDiv.textContent = 'Agent: ' + (req.agent_id || 'unknown') +
+        ' \u2022 ' + new Date(entry.timestamp).toLocaleTimeString() +
+        (result.reason ? ' \u2022 ' + result.reason : '');
+      el.appendChild(metaDiv);
+
       return el;
     }
 
@@ -683,14 +709,36 @@ var dashboardHTML = `<!DOCTYPE html>
           const action = item.request.command || item.request.path || item.request.domain || 'unknown';
           const div = document.createElement('div');
           div.className = 'pending-item';
-          div.innerHTML =
-            '<div class="info"><span class="scope-badge">' + item.request.scope + '</span> ' + action + '</div>' +
-            '<div style="font-size:11px;color:#888">Agent: ' + (item.request.agent_id || 'unknown') +
-            ' &bull; ' + new Date(item.created_at).toLocaleTimeString() + '</div>' +
-            '<div class="actions">' +
-            '<button class="btn btn-approve" onclick="resolve(\'' + item.id + '\', \'approve\')">Approve</button>' +
-            '<button class="btn btn-deny" onclick="resolve(\'' + item.id + '\', \'deny\')">Deny</button>' +
-            '</div>';
+
+          const info = document.createElement('div');
+          info.className = 'info';
+          const badge = document.createElement('span');
+          badge.className = 'scope-badge';
+          badge.textContent = item.request.scope;
+          info.appendChild(badge);
+          info.appendChild(document.createTextNode(' ' + action));
+          div.appendChild(info);
+
+          const meta = document.createElement('div');
+          meta.style.cssText = 'font-size:11px;color:#888';
+          meta.textContent = 'Agent: ' + (item.request.agent_id || 'unknown') +
+            ' \u2022 ' + new Date(item.created_at).toLocaleTimeString();
+          div.appendChild(meta);
+
+          const actions = document.createElement('div');
+          actions.className = 'actions';
+          const btnApprove = document.createElement('button');
+          btnApprove.className = 'btn btn-approve';
+          btnApprove.textContent = 'Approve';
+          btnApprove.addEventListener('click', function() { resolve(item.id, 'approve'); });
+          actions.appendChild(btnApprove);
+          const btnDeny = document.createElement('button');
+          btnDeny.className = 'btn btn-deny';
+          btnDeny.textContent = 'Deny';
+          btnDeny.addEventListener('click', function() { resolve(item.id, 'deny'); });
+          actions.appendChild(btnDeny);
+          div.appendChild(actions);
+
           pendingEl.appendChild(div);
         });
       }).catch(() => {});

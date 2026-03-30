@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -38,7 +39,8 @@ type QueryFilter struct {
 }
 
 // DefaultFilePermissions is the Unix file mode for newly created audit log files.
-const DefaultFilePermissions = 0644
+// Restricted to owner-only since audit logs may contain sensitive operational data.
+const DefaultFilePermissions = 0600
 
 // FileLogger writes audit entries as JSON lines to a file.
 type FileLogger struct {
@@ -88,12 +90,16 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 	defer readFile.Close()
 
 	var results []Entry
-	dec := json.NewDecoder(readFile)
-
-	for dec.More() {
-		var entry Entry
-		if err := dec.Decode(&entry); err != nil {
+	scanner := bufio.NewScanner(readFile)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
 			continue
+		}
+
+		var entry Entry
+		if err := json.Unmarshal(line, &entry); err != nil {
+			continue // skip corrupt lines
 		}
 
 		if matchesFilter(entry, filter) {

@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -19,7 +21,7 @@ import (
 )
 
 var (
-	version = "0.2.3"
+	version = "0.3.0"
 	commit  = "dev"
 )
 
@@ -179,7 +181,7 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 			log.Printf("Dashboard: http://localhost:%d/dashboard", port)
 		}
 		log.Printf("Health:    http://localhost:%d/health", port)
-		if err := srv.Start(); err != nil && err.Error() != "http: Server closed" {
+		if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("Server error: %v", err)
 		}
 	}()
@@ -259,11 +261,15 @@ func runStatus(baseURL string) {
 	} else {
 		fmt.Printf("Pending approvals: %d\n", len(pending))
 		for _, p := range pending {
-			req, _ := p["request"].(map[string]interface{})
+			id, _ := p["id"].(string)
+			req, ok := p["request"].(map[string]interface{})
+			if !ok {
+				fmt.Printf("  [%s] (unable to parse request)\n", id)
+				continue
+			}
 			scope, _ := req["scope"].(string)
 			cmd, _ := req["command"].(string)
 			agent, _ := req["agent_id"].(string)
-			id, _ := p["id"].(string)
 			if cmd == "" {
 				cmd, _ = req["domain"].(string)
 			}
@@ -276,18 +282,20 @@ func runStatus(baseURL string) {
 }
 
 func runAuditQuery(baseURL, agent, decision, scope string, limit int) {
-	url := fmt.Sprintf("%s/v1/audit?limit=%d", strings.TrimRight(baseURL, "/"), limit)
+	params := url.Values{}
+	params.Set("limit", fmt.Sprintf("%d", limit))
 	if agent != "" {
-		url += "&agent_id=" + agent
+		params.Set("agent_id", agent)
 	}
 	if decision != "" {
-		url += "&decision=" + decision
+		params.Set("decision", decision)
 	}
 	if scope != "" {
-		url += "&scope=" + scope
+		params.Set("scope", scope)
 	}
+	queryURL := fmt.Sprintf("%s/v1/audit?%s", strings.TrimRight(baseURL, "/"), params.Encode())
 
-	resp, err := http.Get(url)
+	resp, err := http.Get(queryURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

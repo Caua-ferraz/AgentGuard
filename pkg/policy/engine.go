@@ -303,7 +303,14 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 		return CheckResult{Decision: Allow, Reason: "No cost limits configured"}
 	}
 
-	maxPerAction := parseDollar(rs.Limits.MaxPerAction)
+	maxPerAction, err := parseDollar(rs.Limits.MaxPerAction)
+	if err != nil {
+		return CheckResult{
+			Decision: Deny,
+			Reason:   fmt.Sprintf("Invalid max_per_action in policy: %v", err),
+			Rule:     "deny:cost:invalid_config",
+		}
+	}
 
 	if req.EstCost > 0 && maxPerAction > 0 && req.EstCost > maxPerAction {
 		return CheckResult{
@@ -313,7 +320,14 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 		}
 	}
 
-	alertThreshold := parseDollar(rs.Limits.AlertThreshold)
+	alertThreshold, err := parseDollar(rs.Limits.AlertThreshold)
+	if err != nil {
+		return CheckResult{
+			Decision: Deny,
+			Reason:   fmt.Sprintf("Invalid alert_threshold in policy: %v", err),
+			Rule:     "deny:cost:invalid_config",
+		}
+	}
 	if req.EstCost > 0 && alertThreshold > 0 && req.EstCost > alertThreshold {
 		return CheckResult{
 			Decision: RequireApproval,
@@ -330,14 +344,18 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 }
 
 // parseDollar extracts a float from a string like "$0.50".
-func parseDollar(s string) float64 {
+// Returns an error if the string is non-empty but not a valid number.
+func parseDollar(s string) (float64, error) {
 	s = strings.TrimSpace(s)
 	s = strings.TrimPrefix(s, "$")
 	if s == "" {
-		return 0
+		return 0, nil
 	}
-	v, _ := strconv.ParseFloat(s, 64)
-	return v
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid cost value %q: %w", s, err)
+	}
+	return v, nil
 }
 
 // matchRule checks if an action request matches a specific rule.
@@ -375,19 +393,48 @@ func matchRule(rule Rule, req ActionRequest) bool {
 // Unlike filepath.Match, the single * wildcard matches any character including
 // path separators, which is required for shell command patterns like "rm -rf *"
 // matching "rm -rf /tmp/data".
+// Supports multiple ** segments (e.g., "**/sensitive/**").
 func globMatch(pattern, value string) bool {
 	// Handle ** (match any number of path segments)
 	if strings.Contains(pattern, "**") {
 		parts := strings.Split(pattern, "**")
-		if len(parts) == 2 {
-			prefix := strings.TrimSuffix(parts[0], "/")
-			suffix := strings.TrimPrefix(parts[1], "/")
-
-			hasPrefix := prefix == "" || strings.HasPrefix(value, prefix)
-			hasSuffix := suffix == "" || strings.HasSuffix(value, suffix)
-			return hasPrefix && hasSuffix
+		// Clean up separators around ** segments
+		for i := range parts {
+			if i > 0 {
+				parts[i] = strings.TrimPrefix(parts[i], "/")
+			}
+			if i < len(parts)-1 {
+				parts[i] = strings.TrimSuffix(parts[i], "/")
+			}
 		}
-		return false
+
+		// Match each segment sequentially against the value
+		remaining := value
+		for i, part := range parts {
+			if part == "" {
+				continue
+			}
+			if i == 0 {
+				// First segment must match the prefix
+				if !strings.HasPrefix(remaining, part) {
+					return false
+				}
+				remaining = remaining[len(part):]
+			} else if i == len(parts)-1 {
+				// Last segment must match the suffix
+				if !strings.HasSuffix(remaining, part) {
+					return false
+				}
+			} else {
+				// Middle segments: find the segment anywhere in the remaining string
+				idx := strings.Index(remaining, part)
+				if idx < 0 {
+					return false
+				}
+				remaining = remaining[idx+len(part):]
+			}
+		}
+		return true
 	}
 
 	// Simple wildcard match: * matches zero or more of any character (including /)
