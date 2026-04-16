@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -156,15 +157,59 @@ func (p *Policy) ScopeCount() int {
 	return len(seen)
 }
 
+// HistoryEntry is a minimal record of a past action, used for conditional rule evaluation.
+type HistoryEntry struct {
+	Action   string
+	Command  string
+	Decision Decision
+	EstCost  float64
+}
+
+// HistoryQuerier provides access to recent action history for conditional rules.
+// Implemented by the audit logger (via an adapter to avoid circular imports).
+type HistoryQuerier interface {
+	RecentActions(agentID string, scope string, since time.Time) ([]HistoryEntry, error)
+}
+
 // Engine evaluates actions against a policy.
 type Engine struct {
-	mu     sync.RWMutex
-	policy *Policy
+	mu           sync.RWMutex
+	policy       *Policy
+	history      HistoryQuerier
+	sessionCosts map[string]float64 // session_id -> cumulative cost
 }
 
 // NewEngine creates a policy engine with the given policy.
 func NewEngine(pol *Policy) *Engine {
-	return &Engine{policy: pol}
+	return &Engine{
+		policy:       pol,
+		sessionCosts: make(map[string]float64),
+	}
+}
+
+// SetHistoryQuerier sets the history querier for conditional rule evaluation.
+func (e *Engine) SetHistoryQuerier(h HistoryQuerier) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.history = h
+}
+
+// RecordCost adds the cost of a completed action to the session accumulator.
+// Called by the proxy after a check returns ALLOW for a cost-scoped request.
+func (e *Engine) RecordCost(sessionID string, cost float64) {
+	if sessionID == "" || cost <= 0 {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.sessionCosts[sessionID] += cost
+}
+
+// SessionCost returns the accumulated cost for a session (for testing).
+func (e *Engine) SessionCost(sessionID string) float64 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.sessionCosts[sessionID]
 }
 
 // UpdatePolicy hot-swaps the active policy.
@@ -231,7 +276,7 @@ func (e *Engine) Check(req ActionRequest) CheckResult {
 
 		// 1. Check deny rules first
 		for _, rule := range rs.Deny {
-			if matchRule(rule, req) {
+			if matchRule(rule, req) && e.matchConditions(rule, req) {
 				msg := rule.Message
 				if msg == "" {
 					msg = fmt.Sprintf("Action denied by %s deny rule", rs.Scope)
@@ -246,7 +291,7 @@ func (e *Engine) Check(req ActionRequest) CheckResult {
 
 		// 2. Check require_approval rules
 		for _, rule := range rs.RequireApproval {
-			if matchRule(rule, req) {
+			if matchRule(rule, req) && e.matchConditions(rule, req) {
 				return CheckResult{
 					Decision: RequireApproval,
 					Reason:   fmt.Sprintf("Matches approval rule in %s scope", rs.Scope),
@@ -257,7 +302,7 @@ func (e *Engine) Check(req ActionRequest) CheckResult {
 
 		// 3. Check allow rules
 		for _, rule := range rs.Allow {
-			if matchRule(rule, req) {
+			if matchRule(rule, req) && e.matchConditions(rule, req) {
 				return CheckResult{
 					Decision: Allow,
 					Reason:   fmt.Sprintf("Allowed by %s rule", rs.Scope),
@@ -361,6 +406,26 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 			Decision: Deny,
 			Reason:   fmt.Sprintf("Estimated cost $%.2f exceeds per-action limit of %s", req.EstCost, rs.Limits.MaxPerAction),
 			Rule:     "deny:cost:max_per_action",
+		}
+	}
+
+	// Session-level cost enforcement
+	maxPerSession, err := parseDollar(rs.Limits.MaxPerSession)
+	if err != nil {
+		return CheckResult{
+			Decision: Deny,
+			Reason:   fmt.Sprintf("Invalid max_per_session in policy: %v", err),
+			Rule:     "deny:cost:invalid_config",
+		}
+	}
+	if req.SessionID != "" && maxPerSession > 0 && req.EstCost > 0 {
+		cumulative := e.sessionCosts[req.SessionID]
+		if cumulative+req.EstCost > maxPerSession {
+			return CheckResult{
+				Decision: Deny,
+				Reason:   fmt.Sprintf("Session cost $%.2f + $%.2f would exceed limit of %s", cumulative, req.EstCost, rs.Limits.MaxPerSession),
+				Rule:     "deny:cost:max_per_session",
+			}
 		}
 	}
 
@@ -522,6 +587,55 @@ func wildcardMatch(pattern, value string) bool {
 	}
 
 	return px == len(pattern)
+}
+
+// matchConditions evaluates the conditions attached to a rule.
+// Returns true if all conditions are satisfied (or if there are no conditions).
+// Must be called with e.mu held (at least RLock).
+func (e *Engine) matchConditions(rule Rule, req ActionRequest) bool {
+	if len(rule.Conditions) == 0 {
+		return true
+	}
+
+	for _, cond := range rule.Conditions {
+		if cond.RequirePrior != "" {
+			if !e.checkRequirePrior(cond, req) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// checkRequirePrior verifies that a prior action matching the condition was
+// recently allowed. Uses the history querier if available; returns false
+// (condition not met) if no querier is configured.
+func (e *Engine) checkRequirePrior(cond Condition, req ActionRequest) bool {
+	if e.history == nil {
+		return false
+	}
+
+	window := 1 * time.Hour // default lookback
+	if cond.TimeWindow != "" {
+		if d, err := time.ParseDuration(cond.TimeWindow); err == nil {
+			window = d
+		}
+	}
+
+	since := time.Now().Add(-window)
+	entries, err := e.history.RecentActions(req.AgentID, req.Scope, since)
+	if err != nil {
+		return false
+	}
+
+	for _, entry := range entries {
+		prior := cond.RequirePrior
+		if entry.Decision == Allow && (entry.Action == prior || entry.Command == prior ||
+			globMatch(prior, entry.Action) || globMatch(prior, entry.Command)) {
+			return true
+		}
+	}
+	return false
 }
 
 func formatRule(decision, scope string, rule Rule) string {
