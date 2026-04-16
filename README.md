@@ -213,7 +213,7 @@ const result = await guard.check('network', {
 
 ### Core Components
 
-**Policy Engine** — Evaluates every agent action against your YAML policy rules. Supports glob patterns, regex matching, per-agent overrides, and cost evaluation. Rule precedence: deny → require_approval → allow → default deny.
+**Policy Engine** — Evaluates every agent action against your YAML policy rules. Supports glob patterns (`*`, `**`, `?`), per-agent overrides, and cost evaluation. Rule precedence: deny → require_approval → allow → default deny.
 
 **Rate Limiter** — Token-bucket rate limiting per scope, per agent. Prevents runaway agents from burning through API quotas.
 
@@ -240,7 +240,6 @@ For each action → check deny rules → check require_approval → check allow 
 | `network` | HTTP/API calls | Whitelist specific domains |
 | `browser` | Web automation | Block navigation to banking sites |
 | `cost` | Spend limits | Cap per-action API costs |
-| `data` | Data exfiltration | Block sending PII to external APIs |
 
 ### Per-Agent Overrides
 
@@ -388,17 +387,35 @@ agentguard audit      # Query the audit log
 agentguard version    # Print version
 ```
 
+## Limitations & Threat Model
+
+AgentGuard is a policy enforcement layer, not a sandbox. Understanding what it does and does not protect against is important for safe deployment.
+
+**Shell scope uses string-glob matching, not semantic analysis.** A deny rule for `rm -rf *` matches literal strings. An agent can trivially bypass it with equivalent commands (`find / -delete`, `perl -e 'unlink...'`, base64-encoded payloads, etc.). Shell rules reduce accidental damage from well-behaved agents; they do not stop a determined or adversarial agent. For strong shell isolation, combine AgentGuard with OS-level sandboxing (containers, seccomp, AppArmor).
+
+**AgentGuard is opt-in, not a transparent proxy.** The agent (or its framework) must call `/v1/check` before acting. If the agent bypasses the SDK and acts directly, AgentGuard has no way to intercept it. It is an advisory gate, not an enforcement boundary.
+
+**Conditional rules are not yet evaluated.** The policy schema accepts `require_prior` and `time_window` conditions, but the engine does not evaluate them. They are parsed and silently ignored.
+
+**Session-level cost tracking is not enforced.** `max_per_session` is accepted in policy YAML but not evaluated — there is no server-side session cost accumulator. Only `max_per_action` and `alert_threshold` are enforced.
+
+**Audit log is append-only JSON lines.** There is no built-in log rotation, retention policy, or tamper detection. For production use, ship the log to an external system.
+
+**Approval queue is in-memory.** Pending approvals are lost on server restart. There is no persistence layer for the approval queue.
+
+**Rate limiter state is in-memory.** Rate limit buckets reset on restart and are not shared across instances.
+
 ## Roadmap
 
 ### Implemented
 - [x] Core policy engine with YAML rules (deny -> require_approval -> allow -> default deny)
 - [x] Audit logging (JSON lines)
-- [x] Shell, filesystem, network, browser, cost scopes
-- [x] Approval queue with Slack/webhook/console notifications
+- [x] Shell, filesystem, network, browser, cost scopes (string-glob matching — see [Limitations](#limitations--threat-model))
+- [x] Approval queue with Slack/webhook/console notifications (in-memory, not persisted)
 - [x] Web dashboard (live SSE feed, stats, interactive approve/deny)
-- [x] Token-bucket rate limiting per scope per agent
+- [x] Token-bucket rate limiting per scope per agent (in-memory)
 - [x] Per-agent policy overrides via `agents:` config
-- [x] Cost guardrails with per-action limits and alert thresholds
+- [x] Cost guardrails — per-action limits and alert thresholds (session-level tracking not yet implemented)
 - [x] Python SDK + adapters: LangChain, CrewAI, browser-use, MCP
 - [x] TypeScript/Node.js SDK
 - [x] Full CLI: serve, validate, approve, deny, status, audit, version
@@ -406,13 +423,15 @@ agentguard version    # Print version
 - [x] Policy hot-reload via `--watch`
 
 ### Planned
+- [ ] Conditional rules (`require_prior`, `time_window`) — schema accepted, evaluation not yet implemented
+- [ ] Session-level cost tracking (`max_per_session`)
+- [ ] Data exfiltration detection / `data` scope (PII scanning)
 - [ ] SQLite/PostgreSQL audit backend
-- [ ] Data exfiltration detection (PII scanning)
+- [ ] Persistent approval queue
 - [ ] Policy-as-code (test policies in CI/CD)
 - [ ] Multi-agent session correlation
 - [ ] Session replay in dashboard
 - [ ] Policy editor in dashboard
-- [ ] Conditional rules (`require_prior`, `time_window`)
 - [ ] AutoGPT adapter
 - [ ] OpenAI Agents SDK adapter
 - [ ] SOC 2 / compliance report generation
