@@ -3,6 +3,7 @@ package policy
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -115,6 +116,25 @@ func LoadFromFile(path string) (*Policy, error) {
 		return nil, fmt.Errorf("policy missing required 'name' field")
 	}
 
+	// Reject filesystem rule patterns containing ".." after normalization.
+	// This prevents policy authors from accidentally writing traversal-prone
+	// patterns like "./workspace/../../etc/**".
+	for _, rs := range pol.Rules {
+		if rs.Scope != "filesystem" {
+			continue
+		}
+		for _, rules := range [][]Rule{rs.Allow, rs.Deny, rs.RequireApproval} {
+			for _, rule := range rules {
+				for _, p := range rule.Paths {
+					cleaned := filepath.ToSlash(filepath.Clean(p))
+					if containsDotDot(cleaned) {
+						return nil, fmt.Errorf("filesystem rule pattern %q contains '..' after normalization — this is a path traversal risk", p)
+					}
+				}
+			}
+		}
+	}
+
 	return &pol, nil
 }
 
@@ -192,6 +212,21 @@ func (e *Engine) Check(req ActionRequest) CheckResult {
 		// Cost scope: evaluate limits instead of pattern rules
 		if rs.Scope == "cost" && rs.Limits != nil {
 			return e.checkCost(rs, req)
+		}
+
+		// Filesystem scope: reject paths that still contain ".." after
+		// filepath.Clean. This catches traversal attempts that Clean
+		// cannot resolve (e.g. the path is already absolute-looking but
+		// crafted to escape an allowed directory).
+		if rs.Scope == "filesystem" && req.Path != "" {
+			cleaned := filepath.ToSlash(filepath.Clean(req.Path))
+			if containsDotDot(cleaned) {
+				return CheckResult{
+					Decision: Deny,
+					Reason:   fmt.Sprintf("path traversal detected: %s", req.Path),
+					Rule:     "deny:filesystem:path_traversal",
+				}
+			}
 		}
 
 		// 1. Check deny rules first
@@ -367,13 +402,23 @@ func matchRule(rule Rule, req ActionRequest) bool {
 		}
 	}
 
-	// Match by action + paths
+	// Match by action + paths.
+	// For path-based rules the request path is normalized with filepath.Clean
+	// and converted to forward slashes before matching. This ensures that
+	// traversal sequences like "../" are resolved so deny rules on target
+	// directories (e.g. /etc/**) fire even when the raw path started inside
+	// an allowed prefix (e.g. ./workspace/../etc/passwd).
 	if rule.Action != "" && rule.Action == req.Action {
 		if len(rule.Paths) == 0 {
 			return true
 		}
+		// Normalize both pattern and value so that "./workspace/ok.txt" and
+		// "workspace/ok.txt" are treated identically. filepath.Clean collapses
+		// "." and ".." segments; ToSlash ensures forward slashes on Windows.
+		cleanedPath := filepath.ToSlash(filepath.Clean(req.Path))
 		for _, p := range rule.Paths {
-			if globMatch(p, req.Path) {
+			cleanedPattern := filepath.ToSlash(filepath.Clean(p))
+			if globMatch(cleanedPattern, cleanedPath) {
 				return true
 			}
 		}
@@ -479,4 +524,16 @@ func formatRule(decision, scope string, rule Rule) string {
 		identifier = rule.Domain
 	}
 	return fmt.Sprintf("%s:%s:%s", decision, scope, identifier)
+}
+
+// containsDotDot reports whether the slash-separated path contains a ".."
+// segment. It checks for standalone ".." as a path component, not as a
+// substring of a longer name (e.g. "my..file" is fine).
+func containsDotDot(path string) bool {
+	for _, seg := range strings.Split(path, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
 }
