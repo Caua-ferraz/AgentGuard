@@ -15,6 +15,16 @@ import (
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
+// mustAdd is a test helper that calls ApprovalQueue.Add and fails on error.
+func mustAdd(t *testing.T, q *ApprovalQueue, req policy.ActionRequest, result policy.CheckResult) *PendingAction {
+	t.Helper()
+	pa, err := q.Add(req, result)
+	if err != nil {
+		t.Fatalf("ApprovalQueue.Add: %v", err)
+	}
+	return pa
+}
+
 // newTestServer builds a Server using httptest (never calls ListenAndServe).
 func newTestServer(t *testing.T, opts ...func(*Config)) *Server {
 	t.Helper()
@@ -228,7 +238,7 @@ func TestHandleApprove(t *testing.T) {
 	srv := newTestServer(t)
 
 	// Create a pending action first
-	pending := srv.approval.Add(
+	pending := mustAdd(t, srv.approval,
 		policy.ActionRequest{Scope: "shell", Command: "sudo reboot"},
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)
@@ -264,7 +274,7 @@ func TestHandleApprove(t *testing.T) {
 func TestHandleDeny(t *testing.T) {
 	srv := newTestServer(t)
 
-	pending := srv.approval.Add(
+	pending := mustAdd(t, srv.approval,
 		policy.ActionRequest{Scope: "shell", Command: "sudo rm -rf /"},
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)
@@ -335,7 +345,7 @@ func TestHandleApprove_MethodNotAllowed(t *testing.T) {
 func TestHandleStatus_Pending(t *testing.T) {
 	srv := newTestServer(t)
 
-	pending := srv.approval.Add(
+	pending := mustAdd(t, srv.approval,
 		policy.ActionRequest{Scope: "shell", Command: "sudo test"},
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)
@@ -358,7 +368,7 @@ func TestHandleStatus_Pending(t *testing.T) {
 func TestHandleStatus_Resolved(t *testing.T) {
 	srv := newTestServer(t)
 
-	pending := srv.approval.Add(
+	pending := mustAdd(t, srv.approval,
 		policy.ActionRequest{Scope: "shell", Command: "sudo test"},
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)
@@ -542,7 +552,7 @@ func TestHandleDashboard_NoMetaTagWithoutAPIKey(t *testing.T) {
 func TestHandleApprove_NoAuthHeader(t *testing.T) {
 	srv := newTestServer(t) // has APIKey: "test-secret"
 
-	pending := srv.approval.Add(
+	pending := mustAdd(t, srv.approval,
 		policy.ActionRequest{Scope: "shell", Command: "sudo reboot"},
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)
@@ -563,7 +573,7 @@ func TestHandleApprove_NoAuthHeader(t *testing.T) {
 func TestHandleDeny_NoAuthHeader(t *testing.T) {
 	srv := newTestServer(t)
 
-	pending := srv.approval.Add(
+	pending := mustAdd(t, srv.approval,
 		policy.ActionRequest{Scope: "shell", Command: "sudo halt"},
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)
@@ -596,11 +606,11 @@ func TestHandlePendingList(t *testing.T) {
 	}
 
 	// Add pending actions
-	srv.approval.Add(
+	mustAdd(t, srv.approval,
 		policy.ActionRequest{Scope: "shell", Command: "sudo reboot"},
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)
-	srv.approval.Add(
+	mustAdd(t, srv.approval,
 		policy.ActionRequest{Scope: "shell", Command: "sudo halt"},
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)
@@ -799,11 +809,11 @@ func TestCORS_Preflight(t *testing.T) {
 func TestApprovalQueue_AddAndList(t *testing.T) {
 	q := &ApprovalQueue{pending: make(map[string]*PendingAction)}
 
-	pa1 := q.Add(
+	pa1 := mustAdd(t, q,
 		policy.ActionRequest{Scope: "shell", Command: "sudo test1"},
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)
-	pa2 := q.Add(
+	pa2 := mustAdd(t, q,
 		policy.ActionRequest{Scope: "shell", Command: "sudo test2"},
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)
@@ -824,7 +834,7 @@ func TestApprovalQueue_AddAndList(t *testing.T) {
 func TestApprovalQueue_ResolveRemovesFromList(t *testing.T) {
 	q := &ApprovalQueue{pending: make(map[string]*PendingAction)}
 
-	pa := q.Add(
+	pa := mustAdd(t, q,
 		policy.ActionRequest{Scope: "shell", Command: "sudo test"},
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)
@@ -845,7 +855,7 @@ func TestApprovalQueue_EvictsResolved(t *testing.T) {
 
 	// Add and resolve entries to fill the map
 	for i := 0; i < MaxPendingApprovals; i++ {
-		pa := q.Add(
+		pa := mustAdd(t, q,
 			policy.ActionRequest{Scope: "shell", Command: "sudo test"},
 			policy.CheckResult{Decision: policy.RequireApproval},
 		)
@@ -861,7 +871,7 @@ func TestApprovalQueue_EvictsResolved(t *testing.T) {
 	}
 
 	// Adding one more should trigger eviction of resolved entries
-	q.Add(
+	mustAdd(t, q,
 		policy.ActionRequest{Scope: "shell", Command: "sudo new"},
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)
@@ -892,7 +902,7 @@ func TestApprovalQueue_SSEBroadcast(t *testing.T) {
 	defer q.Unsubscribe(ch)
 
 	// Add should trigger a broadcast via Resolve
-	pa := q.Add(
+	pa := mustAdd(t, q,
 		policy.ActionRequest{Scope: "shell", Command: "sudo test"},
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)

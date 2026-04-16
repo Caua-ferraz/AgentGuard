@@ -239,7 +239,12 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 
 	// If approval required, queue it
 	if result.Decision == policy.RequireApproval {
-		pending := s.approval.Add(req, result)
+		pending, err := s.approval.Add(req, result)
+		if err != nil {
+			log.Printf("approval queue error: %v", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
 		result.ApprovalID = pending.ID
 		result.ApprovalURL = fmt.Sprintf("%s/v1/approve/%s", s.cfg.BaseURL, pending.ID)
 
@@ -481,7 +486,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 // ApprovalQueue methods
 
-func (q *ApprovalQueue) Add(req policy.ActionRequest, result policy.CheckResult) *PendingAction {
+func (q *ApprovalQueue) Add(req policy.ActionRequest, result policy.CheckResult) (*PendingAction, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -492,7 +497,7 @@ func (q *ApprovalQueue) Add(req policy.ActionRequest, result policy.CheckResult)
 
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		log.Fatalf("crypto/rand failed — cannot generate secure approval IDs: %v", err)
+		return nil, fmt.Errorf("crypto/rand failed — cannot generate secure approval IDs: %w", err)
 	}
 	id := ApprovalIDPrefix + hex.EncodeToString(b[:])
 	pa := &PendingAction{
@@ -503,7 +508,7 @@ func (q *ApprovalQueue) Add(req policy.ActionRequest, result policy.CheckResult)
 	}
 	q.pending[id] = pa
 
-	return pa
+	return pa, nil
 }
 
 // evictResolvedLocked removes all resolved entries from the queue.

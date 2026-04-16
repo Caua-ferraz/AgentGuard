@@ -419,10 +419,6 @@ AgentGuard is a policy enforcement layer, not a sandbox. Understanding what it d
 
 **AgentGuard is opt-in, not a transparent proxy.** The agent (or its framework) must call `/v1/check` before acting. If the agent bypasses the SDK and acts directly, AgentGuard has no way to intercept it. It is an advisory gate, not an enforcement boundary.
 
-**Conditional rules are not yet evaluated.** The policy schema accepts `require_prior` and `time_window` conditions, but the engine does not evaluate them. They are parsed and silently ignored.
-
-**Session-level cost tracking is not enforced.** `max_per_session` is accepted in policy YAML but not evaluated — there is no server-side session cost accumulator. Only `max_per_action` and `alert_threshold` are enforced.
-
 **Audit log is append-only JSON lines.** There is no built-in log rotation, retention policy, or tamper detection. For production use, ship the log to an external system.
 
 **Approval queue is in-memory.** Pending approvals are lost on server restart. There is no persistence layer for the approval queue.
@@ -439,7 +435,8 @@ AgentGuard is a policy enforcement layer, not a sandbox. Understanding what it d
 - [x] Web dashboard (live SSE feed, stats, interactive approve/deny)
 - [x] Token-bucket rate limiting per scope per agent (in-memory)
 - [x] Per-agent policy overrides via `agents:` config
-- [x] Cost guardrails — per-action limits and alert thresholds (session-level tracking not yet implemented)
+- [x] Cost guardrails — per-action limits, alert thresholds, and session-level cost tracking
+- [x] Conditional rules — `require_prior` and `time_window` conditions evaluated at check time
 - [x] Python SDK + adapters: LangChain, CrewAI, browser-use, MCP
 - [x] TypeScript/Node.js SDK
 - [x] Full CLI: serve, validate, approve, deny, status, audit, version
@@ -447,8 +444,6 @@ AgentGuard is a policy enforcement layer, not a sandbox. Understanding what it d
 - [x] Policy hot-reload via `--watch`
 
 ### Planned
-- [ ] Conditional rules (`require_prior`, `time_window`) — schema accepted, evaluation not yet implemented
-- [ ] Session-level cost tracking (`max_per_session`)
 - [ ] Data exfiltration detection / `data` scope (PII scanning)
 - [ ] SQLite/PostgreSQL audit backend
 - [ ] Persistent approval queue
