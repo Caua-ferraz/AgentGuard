@@ -131,6 +131,39 @@ func TestEngineCheck_CostInvalidAlertThreshold(t *testing.T) {
 	}
 }
 
+func TestEngineCheck_CostNegativeValue(t *testing.T) {
+	pol := &Policy{
+		Version: "1",
+		Name:    "test-negative-cost",
+		Rules: []RuleSet{
+			{
+				Scope: "cost",
+				Limits: &CostLimits{
+					MaxPerAction:   "$1.00",
+					AlertThreshold: "$0.50",
+				},
+			},
+		},
+	}
+
+	engine := NewEngine(pol)
+
+	// Negative cost should be denied
+	result := engine.Check(ActionRequest{Scope: "cost", EstCost: -5.00})
+	if result.Decision != Deny {
+		t.Errorf("expected DENY for negative cost, got %s: %s", result.Decision, result.Reason)
+	}
+	if result.Rule != "deny:cost:negative_value" {
+		t.Errorf("expected rule deny:cost:negative_value, got %s", result.Rule)
+	}
+
+	// Zero cost should be allowed (no bypass)
+	result = engine.Check(ActionRequest{Scope: "cost", EstCost: 0})
+	if result.Decision != Allow {
+		t.Errorf("expected ALLOW for zero cost, got %s: %s", result.Decision, result.Reason)
+	}
+}
+
 // Test the default policy loads and key rules work as expected after fixes.
 func TestDefaultPolicy_LoadAndBasicRules(t *testing.T) {
 	pol, err := LoadFromFile("../../configs/default.yaml")

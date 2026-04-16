@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -60,6 +61,31 @@ func TestLimiter_WindowRefill(t *testing.T) {
 	// Should be allowed again
 	if err := l.Allow("test", 1, window); err != nil {
 		t.Errorf("request after window should be allowed: %v", err)
+	}
+}
+
+func TestLimiter_EvictsStale(t *testing.T) {
+	l := New()
+	window := 50 * time.Millisecond
+
+	// Fill up to MaxBuckets
+	for i := 0; i < MaxBuckets; i++ {
+		_ = l.Allow(fmt.Sprintf("key-%d", i), 1, window)
+	}
+
+	if l.BucketCount() != MaxBuckets {
+		t.Fatalf("expected %d buckets, got %d", MaxBuckets, l.BucketCount())
+	}
+
+	// Wait for all buckets to become stale
+	time.Sleep(60 * time.Millisecond)
+
+	// Next Allow hits the capacity check and triggers eviction
+	_ = l.Allow("trigger", 1, window)
+
+	// All stale buckets evicted, only "trigger" remains
+	if got := l.BucketCount(); got != 1 {
+		t.Errorf("expected 1 bucket after eviction, got %d", got)
 	}
 }
 

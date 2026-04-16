@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -31,6 +32,9 @@ const (
 	ShutdownTimeout = 10 * time.Second
 	// MaxRequestBodySize is the maximum allowed size of incoming request bodies (1 MB).
 	MaxRequestBodySize = 1 << 20
+	// MaxPendingApprovals is the maximum number of entries (pending + resolved) kept
+	// in the approval queue. When exceeded, the oldest resolved entries are evicted.
+	MaxPendingApprovals = 10000
 )
 
 // Config holds the server configuration.
@@ -139,8 +143,12 @@ func NewServer(cfg Config) *Server {
 	}
 
 	s.http = &http.Server{
-		Addr:    addr,
-		Handler: withCORS(cfg.AllowedOrigin)(withLogging(mux)),
+		Addr:              addr,
+		Handler:           withCORS(cfg.AllowedOrigin)(withLogging(mux)),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	return s
@@ -442,6 +450,11 @@ func (q *ApprovalQueue) Add(req policy.ActionRequest, result policy.CheckResult)
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	// Evict oldest resolved entries if at capacity
+	if len(q.pending) >= MaxPendingApprovals {
+		q.evictResolvedLocked()
+	}
+
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		log.Fatalf("crypto/rand failed — cannot generate secure approval IDs: %v", err)
@@ -456,6 +469,16 @@ func (q *ApprovalQueue) Add(req policy.ActionRequest, result policy.CheckResult)
 	q.pending[id] = pa
 
 	return pa
+}
+
+// evictResolvedLocked removes all resolved entries from the queue.
+// Must be called with q.mu held.
+func (q *ApprovalQueue) evictResolvedLocked() {
+	for id, pa := range q.pending {
+		if pa.Resolved {
+			delete(q.pending, id)
+		}
+	}
 }
 
 func (q *ApprovalQueue) Resolve(id string, decision policy.Decision) error {
@@ -545,7 +568,8 @@ func requireAuth(apiKey string, next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		auth := r.Header.Get("Authorization")
-		if auth != "Bearer "+apiKey {
+		provided := strings.TrimPrefix(auth, "Bearer ")
+		if len(provided) == len(auth) || subtle.ConstantTimeCompare([]byte(provided), []byte(apiKey)) != 1 {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}

@@ -338,6 +338,15 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 		return CheckResult{Decision: Allow, Reason: "No cost limits configured"}
 	}
 
+	// Reject negative cost values — they could bypass limits
+	if req.EstCost < 0 {
+		return CheckResult{
+			Decision: Deny,
+			Reason:   fmt.Sprintf("Negative cost value not allowed: $%.2f", req.EstCost),
+			Rule:     "deny:cost:negative_value",
+		}
+	}
+
 	maxPerAction, err := parseDollar(rs.Limits.MaxPerAction)
 	if err != nil {
 		return CheckResult{
