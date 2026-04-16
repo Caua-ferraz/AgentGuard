@@ -68,10 +68,11 @@ class CheckResult:
 class Guard:
     """Client for the AgentGuard proxy."""
 
-    def __init__(self, base_url: str = "", agent_id: str = "", timeout: int = DEFAULT_TIMEOUT):
+    def __init__(self, base_url: str = "", agent_id: str = "", timeout: int = DEFAULT_TIMEOUT, api_key: str = ""):
         self.base_url = (base_url or os.environ.get("AGENTGUARD_URL", DEFAULT_BASE_URL)).rstrip("/")
         self.agent_id = agent_id
         self.timeout = timeout
+        self.api_key = api_key or os.environ.get("AGENTGUARD_API_KEY", "")
 
     def check(
         self,
@@ -140,10 +141,17 @@ class Guard:
                 reason=f"AgentGuard unreachable: {e}",
             )
 
+    def _auth_headers(self) -> dict:
+        """Return Authorization header if api_key is set."""
+        if self.api_key:
+            return {"Authorization": f"Bearer {self.api_key}"}
+        return {}
+
     def approve(self, approval_id: str) -> bool:
         """Approve a pending action."""
         req = request.Request(
             f"{self.base_url}{ENDPOINT_APPROVE}{approval_id}",
+            headers=self._auth_headers(),
             method="POST",
         )
         try:
@@ -156,6 +164,7 @@ class Guard:
         """Deny a pending action."""
         req = request.Request(
             f"{self.base_url}{ENDPOINT_DENY}{approval_id}",
+            headers=self._auth_headers(),
             method="POST",
         )
         try:

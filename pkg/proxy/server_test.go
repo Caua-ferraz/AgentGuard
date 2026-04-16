@@ -513,6 +513,72 @@ func TestHandleDashboard(t *testing.T) {
 	}
 }
 
+func TestHandleDashboard_APIKeyMetaTag(t *testing.T) {
+	srv := newTestServer(t) // has APIKey: "test-secret"
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	w := httptest.NewRecorder()
+	srv.handleDashboard(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, `<meta name="agentguard-api-key" content="test-secret">`) {
+		t.Error("dashboard should contain API key meta tag when APIKey is set")
+	}
+}
+
+func TestHandleDashboard_NoMetaTagWithoutAPIKey(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) { c.APIKey = "" })
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	w := httptest.NewRecorder()
+	srv.handleDashboard(w, req)
+
+	body := w.Body.String()
+	if strings.Contains(body, `<meta name="agentguard-api-key"`) {
+		t.Error("dashboard should NOT contain API key meta tag when APIKey is empty")
+	}
+}
+
+func TestHandleApprove_NoAuthHeader(t *testing.T) {
+	srv := newTestServer(t) // has APIKey: "test-secret"
+
+	pending := srv.approval.Add(
+		policy.ActionRequest{Scope: "shell", Command: "sudo reboot"},
+		policy.CheckResult{Decision: policy.RequireApproval},
+	)
+
+	// No Authorization header
+	req := httptest.NewRequest(http.MethodPost, "/v1/approve/"+pending.ID, nil)
+	w := httptest.NewRecorder()
+
+	// Must go through requireAuth middleware
+	handler := requireAuth(srv.cfg.APIKey, srv.handleApprove)
+	handler(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without auth header, got %d", w.Code)
+	}
+}
+
+func TestHandleDeny_NoAuthHeader(t *testing.T) {
+	srv := newTestServer(t)
+
+	pending := srv.approval.Add(
+		policy.ActionRequest{Scope: "shell", Command: "sudo halt"},
+		policy.CheckResult{Decision: policy.RequireApproval},
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/deny/"+pending.ID, nil)
+	w := httptest.NewRecorder()
+
+	handler := requireAuth(srv.cfg.APIKey, srv.handleDeny)
+	handler(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without auth header, got %d", w.Code)
+	}
+}
+
 // --- /api/pending ---
 
 func TestHandlePendingList(t *testing.T) {

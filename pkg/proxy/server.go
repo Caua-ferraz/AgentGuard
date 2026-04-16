@@ -353,10 +353,22 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDashboard serves the web dashboard.
+// When --api-key is set, a <meta> tag is injected so the dashboard JS can
+// include the Authorization header on approve/deny requests. This is
+// acceptable for same-origin dashboard access; dashboard XSS is a separate
+// concern (the API key is already visible to anyone who can open the page).
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 	w.Header().Set("Cache-Control", "no-store")
-	fmt.Fprint(w, dashboardHTML)
+	html := dashboardHTML
+	if s.cfg.APIKey != "" {
+		// Inject meta tag after <meta charset> so JS can read it.
+		html = strings.Replace(html,
+			`<meta charset="utf-8">`,
+			`<meta charset="utf-8">`+"\n"+`  <meta name="agentguard-api-key" content="`+s.cfg.APIKey+`">`,
+			1)
+	}
+	fmt.Fprint(w, html)
 }
 
 // handlePendingList returns pending approval actions.
@@ -647,6 +659,8 @@ var dashboardHTML = `<!DOCTYPE html>
     const feed = document.getElementById('feed');
     const pendingEl = document.getElementById('pending');
     const MAX_FEED_ENTRIES = 200;
+    const _akMeta = document.querySelector('meta[name="agentguard-api-key"]');
+    const _apiKey = _akMeta ? _akMeta.getAttribute('content') : '';
 
     // Escape HTML to prevent XSS when inserting user-controlled data.
     function esc(s) {
@@ -747,9 +761,17 @@ var dashboardHTML = `<!DOCTYPE html>
 
     // Approve / Deny from dashboard
     function resolve(id, action) {
-      fetch('/v1/' + action + '/' + id, { method: 'POST' })
-        .then(() => { refreshPending(); refreshStats(); })
-        .catch(e => console.error(e));
+      const opts = { method: 'POST' };
+      if (_apiKey) opts.headers = { 'Authorization': 'Bearer ' + _apiKey };
+      fetch('/v1/' + action + '/' + id, opts)
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); refreshPending(); refreshStats(); })
+        .catch(e => {
+          const errDiv = document.createElement('div');
+          errDiv.style.cssText = 'background:#3a1a1a;color:#f87171;padding:8px 12px;border-radius:6px;margin:8px 0;font-size:13px';
+          errDiv.textContent = action + ' failed: ' + e.message;
+          pendingEl.prepend(errDiv);
+          setTimeout(() => errDiv.remove(), 5000);
+        });
     }
 
     // Load historical entries on page open so the feed isn't blank.
