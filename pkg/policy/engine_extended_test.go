@@ -2,6 +2,7 @@ package policy
 
 import (
 	"testing"
+	"time"
 )
 
 // Tests for multi-** glob pattern matching (audit fix #10).
@@ -287,5 +288,239 @@ func TestEngineCheck_ConcurrentSafety(t *testing.T) {
 
 	for i := 0; i < 100; i++ {
 		<-done
+	}
+}
+
+// --- Conditional rules (require_prior + time_window) ---
+
+// mockHistory implements HistoryQuerier for testing.
+type mockHistory struct {
+	entries []HistoryEntry
+}
+
+func (m *mockHistory) RecentActions(agentID string, scope string, since time.Time) ([]HistoryEntry, error) {
+	return m.entries, nil
+}
+
+func TestConditionalRule_RequirePrior_Met(t *testing.T) {
+	pol := &Policy{
+		Version: "1",
+		Name:    "cond-test",
+		Rules: []RuleSet{
+			{
+				Scope: "shell",
+				Allow: []Rule{
+					{
+						Pattern: "deploy *",
+						Conditions: []Condition{
+							{RequirePrior: "test *", TimeWindow: "1h"},
+						},
+					},
+					{Pattern: "test *"},
+				},
+			},
+		},
+	}
+
+	engine := NewEngine(pol)
+	engine.SetHistoryQuerier(&mockHistory{
+		entries: []HistoryEntry{
+			{Command: "test all", Decision: Allow},
+		},
+	})
+
+	// Deploy should be allowed because "test *" was recently allowed
+	result := engine.Check(ActionRequest{Scope: "shell", Command: "deploy prod", AgentID: "bot"})
+	if result.Decision != Allow {
+		t.Errorf("expected ALLOW (prior condition met), got %s: %s", result.Decision, result.Reason)
+	}
+}
+
+func TestConditionalRule_RequirePrior_NotMet(t *testing.T) {
+	pol := &Policy{
+		Version: "1",
+		Name:    "cond-test",
+		Rules: []RuleSet{
+			{
+				Scope: "shell",
+				Allow: []Rule{
+					{
+						Pattern: "deploy *",
+						Conditions: []Condition{
+							{RequirePrior: "test *", TimeWindow: "1h"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	engine := NewEngine(pol)
+	engine.SetHistoryQuerier(&mockHistory{entries: nil}) // no prior actions
+
+	// Deploy should be denied because no prior "test *" action
+	result := engine.Check(ActionRequest{Scope: "shell", Command: "deploy prod", AgentID: "bot"})
+	if result.Decision != Deny {
+		t.Errorf("expected DENY (prior condition not met), got %s: %s", result.Decision, result.Reason)
+	}
+}
+
+func TestConditionalRule_RequirePrior_DeniedPriorDoesNotCount(t *testing.T) {
+	pol := &Policy{
+		Version: "1",
+		Name:    "cond-test",
+		Rules: []RuleSet{
+			{
+				Scope: "shell",
+				Allow: []Rule{
+					{
+						Pattern: "deploy *",
+						Conditions: []Condition{
+							{RequirePrior: "test *", TimeWindow: "1h"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	engine := NewEngine(pol)
+	engine.SetHistoryQuerier(&mockHistory{
+		entries: []HistoryEntry{
+			{Command: "test all", Decision: Deny}, // was denied, doesn't count
+		},
+	})
+
+	result := engine.Check(ActionRequest{Scope: "shell", Command: "deploy prod", AgentID: "bot"})
+	if result.Decision != Deny {
+		t.Errorf("expected DENY (denied prior doesn't satisfy condition), got %s: %s", result.Decision, result.Reason)
+	}
+}
+
+func TestConditionalRule_NoHistoryQuerier(t *testing.T) {
+	pol := &Policy{
+		Version: "1",
+		Name:    "cond-test",
+		Rules: []RuleSet{
+			{
+				Scope: "shell",
+				Allow: []Rule{
+					{
+						Pattern: "deploy *",
+						Conditions: []Condition{
+							{RequirePrior: "test *"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	engine := NewEngine(pol) // no history querier set
+
+	// Without a querier, conditions can't be verified → rule doesn't match → default deny
+	result := engine.Check(ActionRequest{Scope: "shell", Command: "deploy prod"})
+	if result.Decision != Deny {
+		t.Errorf("expected DENY when no history querier, got %s", result.Decision)
+	}
+}
+
+// --- Session-level cost tracking (max_per_session) ---
+
+func TestSessionCost_EnforcesLimit(t *testing.T) {
+	pol := &Policy{
+		Version: "1",
+		Name:    "session-cost-test",
+		Rules: []RuleSet{
+			{
+				Scope: "cost",
+				Limits: &CostLimits{
+					MaxPerAction:  "$5.00",
+					MaxPerSession: "$10.00",
+				},
+			},
+		},
+	}
+
+	engine := NewEngine(pol)
+
+	// First action: $4.00 — allowed
+	r1 := engine.Check(ActionRequest{Scope: "cost", EstCost: 4.00, SessionID: "sess-1"})
+	if r1.Decision != Allow {
+		t.Fatalf("expected ALLOW for $4, got %s: %s", r1.Decision, r1.Reason)
+	}
+	engine.RecordCost("sess-1", 4.00)
+
+	// Second action: $4.00 — allowed (cumulative $8)
+	r2 := engine.Check(ActionRequest{Scope: "cost", EstCost: 4.00, SessionID: "sess-1"})
+	if r2.Decision != Allow {
+		t.Fatalf("expected ALLOW for $4 (cumulative $8), got %s: %s", r2.Decision, r2.Reason)
+	}
+	engine.RecordCost("sess-1", 4.00)
+
+	// Third action: $3.00 — denied (cumulative $8 + $3 = $11 > $10)
+	r3 := engine.Check(ActionRequest{Scope: "cost", EstCost: 3.00, SessionID: "sess-1"})
+	if r3.Decision != Deny {
+		t.Fatalf("expected DENY for $3 (would exceed $10 session limit), got %s: %s", r3.Decision, r3.Reason)
+	}
+	if r3.Rule != "deny:cost:max_per_session" {
+		t.Errorf("expected rule deny:cost:max_per_session, got %s", r3.Rule)
+	}
+}
+
+func TestSessionCost_IndependentSessions(t *testing.T) {
+	pol := &Policy{
+		Version: "1",
+		Name:    "session-cost-test",
+		Rules: []RuleSet{
+			{
+				Scope: "cost",
+				Limits: &CostLimits{
+					MaxPerAction:  "$5.00",
+					MaxPerSession: "$10.00",
+				},
+			},
+		},
+	}
+
+	engine := NewEngine(pol)
+
+	// Session A: spend $9
+	engine.RecordCost("sess-a", 9.00)
+
+	// Session B: $4 should be allowed (independent)
+	r := engine.Check(ActionRequest{Scope: "cost", EstCost: 4.00, SessionID: "sess-b"})
+	if r.Decision != Allow {
+		t.Errorf("expected ALLOW for separate session, got %s: %s", r.Decision, r.Reason)
+	}
+
+	// Session A: $2 should be denied
+	r = engine.Check(ActionRequest{Scope: "cost", EstCost: 2.00, SessionID: "sess-a"})
+	if r.Decision != Deny {
+		t.Errorf("expected DENY for session A ($9 + $2 > $10), got %s: %s", r.Decision, r.Reason)
+	}
+}
+
+func TestSessionCost_NoSessionID(t *testing.T) {
+	pol := &Policy{
+		Version: "1",
+		Name:    "session-cost-test",
+		Rules: []RuleSet{
+			{
+				Scope: "cost",
+				Limits: &CostLimits{
+					MaxPerAction:  "$5.00",
+					MaxPerSession: "$10.00",
+				},
+			},
+		},
+	}
+
+	engine := NewEngine(pol)
+
+	// No session ID → session limit not enforced
+	r := engine.Check(ActionRequest{Scope: "cost", EstCost: 4.00})
+	if r.Decision != Allow {
+		t.Errorf("expected ALLOW without session ID, got %s: %s", r.Decision, r.Reason)
 	}
 }

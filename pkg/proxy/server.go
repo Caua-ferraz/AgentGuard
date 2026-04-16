@@ -90,6 +90,33 @@ type AuditEvent struct {
 	Result    policy.CheckResult   `json:"result"`
 }
 
+// auditHistoryAdapter bridges audit.Logger to policy.HistoryQuerier,
+// avoiding a circular import between the audit and policy packages.
+type auditHistoryAdapter struct {
+	logger audit.Logger
+}
+
+func (a *auditHistoryAdapter) RecentActions(agentID string, scope string, since time.Time) ([]policy.HistoryEntry, error) {
+	entries, err := a.logger.Query(audit.QueryFilter{
+		AgentID: agentID,
+		Scope:   scope,
+		Since:   &since,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result []policy.HistoryEntry
+	for _, e := range entries {
+		result = append(result, policy.HistoryEntry{
+			Action:   e.Request.Action,
+			Command:  e.Request.Command,
+			Decision: policy.Decision(e.Result.Decision),
+			EstCost:  e.Request.EstCost,
+		})
+	}
+	return result, nil
+}
+
 // NewServer creates a new proxy server.
 func NewServer(cfg Config) *Server {
 	if cfg.APIKey == "" {
@@ -103,6 +130,9 @@ func NewServer(cfg Config) *Server {
 		},
 		limiter: ratelimit.New(),
 	}
+
+	// Wire up history querier for conditional rule evaluation
+	cfg.Engine.SetHistoryQuerier(&auditHistoryAdapter{logger: cfg.Logger})
 
 	// Seed in-memory counters from existing audit log so stats survive restarts.
 	if existing, err := cfg.Logger.Query(audit.QueryFilter{}); err == nil {
@@ -223,6 +253,11 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 				ApprovalURL: result.ApprovalURL,
 			})
 		}
+	}
+
+	// Record cost for session tracking
+	if result.Decision == policy.Allow && req.Scope == "cost" && req.EstCost > 0 {
+		s.cfg.Engine.RecordCost(req.SessionID, req.EstCost)
 	}
 
 	// Notify on deny
