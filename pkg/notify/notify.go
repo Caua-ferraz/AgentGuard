@@ -63,16 +63,18 @@ func targetToNotifier(t policy.NotifyTarget, eventFilter string) Notifier {
 	}
 }
 
-// Send dispatches an event to all matching notifiers. Errors are logged but
-// do not stop delivery to other notifiers.
+// Send dispatches an event to all matching notifiers asynchronously.
+// Errors are logged but do not block the caller or stop delivery to other notifiers.
 func (d *Dispatcher) Send(event Event) {
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
 	for _, n := range d.notifiers {
-		if err := n.Notify(event); err != nil {
-			log.Printf("notify error (%T): %v", n, err)
-		}
+		go func(n Notifier) {
+			if err := n.Notify(event); err != nil {
+				log.Printf("notify error (%T): %v", n, err)
+			}
+		}(n)
 	}
 }
 

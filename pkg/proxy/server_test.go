@@ -633,6 +633,39 @@ func TestRequireAuth_NoKey(t *testing.T) {
 	}
 }
 
+func TestRequireAuth_MalformedHeader(t *testing.T) {
+	handler := requireAuth("secret", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should NOT be called with malformed header")
+	})
+
+	// No "Bearer " prefix
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	req.Header.Set("Authorization", "secret")
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestNewServer_HasHTTPTimeouts(t *testing.T) {
+	srv := newTestServer(t)
+
+	if srv.http.ReadHeaderTimeout == 0 {
+		t.Error("ReadHeaderTimeout should be set (Slowloris protection)")
+	}
+	if srv.http.ReadTimeout == 0 {
+		t.Error("ReadTimeout should be set")
+	}
+	if srv.http.WriteTimeout == 0 {
+		t.Error("WriteTimeout should be set")
+	}
+	if srv.http.IdleTimeout == 0 {
+		t.Error("IdleTimeout should be set")
+	}
+}
+
 // --- CORS middleware ---
 
 func TestCORS_LocalhostAllowed(t *testing.T) {
@@ -738,6 +771,42 @@ func TestApprovalQueue_ResolveRemovesFromList(t *testing.T) {
 	list := q.List()
 	if len(list) != 0 {
 		t.Errorf("expected 0 pending after resolve, got %d", len(list))
+	}
+}
+
+func TestApprovalQueue_EvictsResolved(t *testing.T) {
+	q := &ApprovalQueue{pending: make(map[string]*PendingAction)}
+
+	// Add and resolve entries to fill the map
+	for i := 0; i < MaxPendingApprovals; i++ {
+		pa := q.Add(
+			policy.ActionRequest{Scope: "shell", Command: "sudo test"},
+			policy.CheckResult{Decision: policy.RequireApproval},
+		)
+		_ = q.Resolve(pa.ID, policy.Allow)
+	}
+
+	// Map should be at capacity (resolved entries are still in the map)
+	q.mu.RLock()
+	sizeBefore := len(q.pending)
+	q.mu.RUnlock()
+	if sizeBefore != MaxPendingApprovals {
+		t.Fatalf("expected %d entries before eviction, got %d", MaxPendingApprovals, sizeBefore)
+	}
+
+	// Adding one more should trigger eviction of resolved entries
+	q.Add(
+		policy.ActionRequest{Scope: "shell", Command: "sudo new"},
+		policy.CheckResult{Decision: policy.RequireApproval},
+	)
+
+	q.mu.RLock()
+	sizeAfter := len(q.pending)
+	q.mu.RUnlock()
+
+	// All resolved entries evicted, only the new one remains
+	if sizeAfter != 1 {
+		t.Errorf("expected 1 entry after eviction, got %d", sizeAfter)
 	}
 }
 
