@@ -169,3 +169,39 @@ class TestGuardActions:
     def test_deny_unreachable(self):
         g = Guard("http://127.0.0.1:1", timeout=1)
         assert g.deny("ap_123") is False
+
+
+# ---------------------------------------------------------------------------
+# Auth header tests (H9)
+# ---------------------------------------------------------------------------
+
+class TestGuardAuth:
+    def test_approve_sends_auth_header(self, mock_server):
+        g = Guard(mock_server, api_key="my-secret")
+        g.approve("ap_123")
+        assert MockAgentGuardHandler.last_request_headers is not None
+        assert MockAgentGuardHandler.last_request_headers.get("Authorization") == "Bearer my-secret"
+
+    def test_deny_sends_auth_header(self, mock_server):
+        g = Guard(mock_server, api_key="my-secret")
+        g.deny("ap_123")
+        assert MockAgentGuardHandler.last_request_headers is not None
+        assert MockAgentGuardHandler.last_request_headers.get("Authorization") == "Bearer my-secret"
+
+    def test_approve_no_auth_header_without_key(self, mock_server):
+        g = Guard(mock_server)
+        g.approve("ap_123")
+        assert MockAgentGuardHandler.last_request_headers is not None
+        assert MockAgentGuardHandler.last_request_headers.get("Authorization") is None
+
+    def test_api_key_from_env(self, mock_server, monkeypatch):
+        monkeypatch.setenv("AGENTGUARD_API_KEY", "env-secret")
+        g = Guard(mock_server)
+        g.approve("ap_123")
+        assert MockAgentGuardHandler.last_request_headers.get("Authorization") == "Bearer env-secret"
+
+    def test_explicit_key_overrides_env(self, mock_server, monkeypatch):
+        monkeypatch.setenv("AGENTGUARD_API_KEY", "env-secret")
+        g = Guard(mock_server, api_key="explicit-secret")
+        g.approve("ap_123")
+        assert MockAgentGuardHandler.last_request_headers.get("Authorization") == "Bearer explicit-secret"

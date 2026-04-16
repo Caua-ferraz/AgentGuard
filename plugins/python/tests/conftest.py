@@ -23,13 +23,15 @@ class MockAgentGuardHandler(BaseHTTPRequestHandler):
     }
     status_response = {"id": "ap_123", "status": "pending"}
 
-    # Capture the last request body for assertions
+    # Capture the last request body and headers for assertions
     last_request_body = None
+    last_request_headers = None
 
     def do_POST(self):
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length) if content_length else b""
         MockAgentGuardHandler.last_request_body = body
+        MockAgentGuardHandler.last_request_headers = dict(self.headers)
 
         if self.path == "/v1/check":
             self._json_response(200, self.check_response)
@@ -82,3 +84,4 @@ def mock_server():
     }
     MockAgentGuardHandler.status_response = {"id": "ap_123", "status": "pending"}
     MockAgentGuardHandler.last_request_body = None
+    MockAgentGuardHandler.last_request_headers = None

@@ -49,6 +49,8 @@ export interface AgentGuardOptions {
   baseUrl?: string;
   /** Agent identifier sent with every check */
   agentId?: string;
+  /** API key for authenticated endpoints (approve/deny) */
+  apiKey?: string;
   /** Request timeout in milliseconds (default: 5000) */
   timeout?: number;
   /** Behavior when AgentGuard is unreachable: 'deny' (default) or 'allow' */
@@ -84,6 +86,7 @@ class CheckResultImpl implements CheckResult {
 export class AgentGuard {
   private baseUrl: string;
   private agentId: string;
+  private apiKey: string;
   private timeout: number;
   private failMode: "deny" | "allow";
 
@@ -91,6 +94,7 @@ export class AgentGuard {
     if (typeof baseUrlOrOptions === "string") {
       this.baseUrl = baseUrlOrOptions.replace(/\/$/, "");
       this.agentId = "";
+      this.apiKey = "";
       this.timeout = 5000;
       this.failMode = "deny";
     } else {
@@ -100,9 +104,17 @@ export class AgentGuard {
         ""
       );
       this.agentId = opts.agentId ?? "";
+      this.apiKey = opts.apiKey ?? "";
       this.timeout = opts.timeout ?? 5000;
       this.failMode = opts.failMode ?? "deny";
     }
+  }
+
+  private authHeaders(): Record<string, string> {
+    if (this.apiKey) {
+      return { Authorization: `Bearer ${this.apiKey}` };
+    }
+    return {};
   }
 
   /**
@@ -163,6 +175,7 @@ export class AgentGuard {
     try {
       const res = await fetch(`${this.baseUrl}/v1/approve/${approvalId}`, {
         method: "POST",
+        headers: this.authHeaders(),
       });
       return res.ok;
     } catch {
@@ -177,6 +190,7 @@ export class AgentGuard {
     try {
       const res = await fetch(`${this.baseUrl}/v1/deny/${approvalId}`, {
         method: "POST",
+        headers: this.authHeaders(),
       });
       return res.ok;
     } catch {

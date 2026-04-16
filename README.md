@@ -153,6 +153,30 @@ agentguard serve --policy configs/default.yaml --port 8080 --dashboard
 agentguard serve --policy configs/default.yaml --watch --dashboard
 ```
 
+### Authentication
+
+When deploying AgentGuard beyond localhost, set an API key to protect the approve/deny endpoints:
+
+```bash
+agentguard serve --policy configs/default.yaml --api-key YOUR_SECRET --dashboard
+```
+
+Without `--api-key`, the server binds to `127.0.0.1` only. With an API key set, it binds to all interfaces (`0.0.0.0`).
+
+The dashboard automatically picks up the API key — approve/deny buttons work without extra config. SDKs pass the key on approve/deny calls:
+
+```python
+# Python
+guard = Guard("http://your-server:8080", api_key="YOUR_SECRET")
+```
+
+```typescript
+// TypeScript
+const guard = new AgentGuard({ baseUrl: 'http://your-server:8080', apiKey: 'YOUR_SECRET' });
+```
+
+The API key can also be set via the `AGENTGUARD_API_KEY` environment variable (Python SDK).
+
 ### Connect Your Agent
 
 ```bash
