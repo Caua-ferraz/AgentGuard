@@ -82,11 +82,11 @@ class StatusCapturingHandler(MockAgentGuardHandler):
 def mock_status_server():
     """Dedicated server that captures Authorization on /v1/status."""
     import threading
-    from http.server import HTTPServer
+    from http.server import ThreadingHTTPServer
 
     StatusCapturingHandler.status_auth_headers = []
 
-    server = HTTPServer(("127.0.0.1", 0), StatusCapturingHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), StatusCapturingHandler)
     port = server.server_address[1]
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()

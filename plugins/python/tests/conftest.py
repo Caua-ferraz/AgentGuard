@@ -2,7 +2,7 @@
 
 import json
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 import pytest
 
@@ -67,7 +67,10 @@ def mock_server():
     Yields the base URL (e.g. ``http://127.0.0.1:54321``).
     Resets class-level response overrides after each test.
     """
-    server = HTTPServer(("127.0.0.1", 0), MockAgentGuardHandler)
+    # ThreadingHTTPServer handles each connection on its own thread. The
+    # single-threaded HTTPServer used to drop concurrent requests with
+    # ConnectionResetError under load (reproduced flakily in CI).
+    server = ThreadingHTTPServer(("127.0.0.1", 0), MockAgentGuardHandler)
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
