@@ -62,6 +62,11 @@ class GuardedTool:
                     params["action"] = "write"
                 elif "delete" in name_lower or "remove" in name_lower:
                     params["action"] = "delete"
+            # Forward session/cost hints so cost-scope guardrails work.
+            if "session_id" in tool_input:
+                params["session_id"] = tool_input["session_id"]
+            if "est_cost" in tool_input:
+                params["est_cost"] = tool_input["est_cost"]
 
         return params
 

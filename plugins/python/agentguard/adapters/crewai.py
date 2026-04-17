@@ -76,6 +76,11 @@ class GuardedCrewTool:
                     pass
             if "path" in tool_input or "file_path" in tool_input:
                 params["path"] = tool_input.get("path", tool_input.get("file_path", ""))
+            # Forward session/cost hints for cost-scope guardrails.
+            if "session_id" in tool_input:
+                params["session_id"] = tool_input["session_id"]
+            if "est_cost" in tool_input:
+                params["est_cost"] = tool_input["est_cost"]
         return params
 
     def run(self, tool_input: Any = "", **kwargs) -> Any:

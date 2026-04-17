@@ -132,6 +132,12 @@ class GuardedMCPServer:
         if "domain" in arguments:
             params["domain"] = arguments["domain"]
 
+        # Forward session/cost hints so cost-scope guardrails work via MCP.
+        if "session_id" in arguments:
+            params["session_id"] = arguments["session_id"]
+        if "est_cost" in arguments:
+            params["est_cost"] = arguments["est_cost"]
+
         return params
 
     def _handle_request(self, request: dict) -> dict:

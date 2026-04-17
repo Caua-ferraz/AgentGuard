@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -136,7 +137,47 @@ func LoadFromFile(path string) (*Policy, error) {
 		}
 	}
 
+	// Warn (but don't fail) on conditions with time_window and no require_prior.
+	// These are effectively no-ops at runtime — TimeWindow has nothing to
+	// time-bound. We keep v0.4.0 pass-through behavior here for backward
+	// compat and let the operator know about the mistake.
+	warnTimeWindowOnlyConditions(&pol)
+
 	return &pol, nil
+}
+
+// warnTimeWindowOnlyConditions scans every rule for conditions that set
+// TimeWindow but not RequirePrior and emits a single log line naming the
+// scope and rule identifier. It does NOT fail the load.
+func warnTimeWindowOnlyConditions(pol *Policy) {
+	check := func(scope, kind string, rules []Rule) {
+		for _, r := range rules {
+			for _, c := range r.Conditions {
+				if c.RequirePrior == "" && c.TimeWindow != "" {
+					id := r.Pattern
+					if id == "" {
+						id = r.Action
+					}
+					if id == "" {
+						id = r.Domain
+					}
+					log.Printf("WARNING: policy condition with time_window=%q but no require_prior in %s:%s rule %q — condition will be ignored at runtime", c.TimeWindow, scope, kind, id)
+				}
+			}
+		}
+	}
+	for _, rs := range pol.Rules {
+		check(rs.Scope, "allow", rs.Allow)
+		check(rs.Scope, "deny", rs.Deny)
+		check(rs.Scope, "require_approval", rs.RequireApproval)
+	}
+	for agentID, cfg := range pol.Agents {
+		for _, rs := range cfg.Override {
+			check("agents."+agentID+"/"+rs.Scope, "allow", rs.Allow)
+			check("agents."+agentID+"/"+rs.Scope, "deny", rs.Deny)
+			check("agents."+agentID+"/"+rs.Scope, "require_approval", rs.RequireApproval)
+		}
+	}
 }
 
 // RuleCount returns the total number of individual rules.
@@ -196,6 +237,10 @@ func (e *Engine) SetHistoryQuerier(h HistoryQuerier) {
 
 // RecordCost adds the cost of a completed action to the session accumulator.
 // Called by the proxy after a check returns ALLOW for a cost-scoped request.
+//
+// Note: callers should prefer CheckAndReserve in Check() when possible, which
+// updates the accumulator atomically with the Allow decision. RecordCost is
+// retained for backfill or out-of-band accounting.
 func (e *Engine) RecordCost(sessionID string, cost float64) {
 	if sessionID == "" || cost <= 0 {
 		return
@@ -203,6 +248,20 @@ func (e *Engine) RecordCost(sessionID string, cost float64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.sessionCosts[sessionID] += cost
+}
+
+// RefundCost subtracts from the session accumulator. Used if a reserved cost
+// is rolled back (e.g. a downstream action failed after the policy allowed it).
+func (e *Engine) RefundCost(sessionID string, cost float64) {
+	if sessionID == "" || cost <= 0 {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.sessionCosts[sessionID] -= cost
+	if e.sessionCosts[sessionID] < 0 {
+		e.sessionCosts[sessionID] = 0
+	}
 }
 
 // SessionCost returns the accumulated cost for a session (for testing).
@@ -243,9 +302,27 @@ type ActionRequest struct {
 // Check evaluates an action request against the active policy.
 // Order: deny rules -> require_approval rules -> allow rules -> default deny.
 // Per-agent overrides are applied when AgentID matches a key in policy.Agents.
+//
+// For cost-scoped requests that are ALLOWed, the session accumulator is
+// incremented atomically under the same write lock as the decision, so
+// concurrent checks on the same session_id cannot collectively exceed the
+// configured max_per_session limit (TOCTOU fix).
 func (e *Engine) Check(req ActionRequest) CheckResult {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+	// Normalize request inputs (Unicode, URL-encoding, null bytes) before
+	// matching. Callers should ideally do this at the proxy boundary, but we
+	// do it here as a belt-and-suspenders defense.
+	req = normalizeRequest(req)
+
+	// Cost-scoped requests that may write to sessionCosts need the write lock
+	// to make check-and-reserve atomic. For all other scopes a read lock
+	// suffices.
+	if req.Scope == "cost" {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+	} else {
+		e.mu.RLock()
+		defer e.mu.RUnlock()
+	}
 
 	rules := e.resolveRules(req.AgentID)
 
@@ -377,7 +454,9 @@ func (e *Engine) resolveRules(agentID string) []RuleSet {
 	return merged
 }
 
-// checkCost evaluates cost limits for a request.
+// checkCost evaluates cost limits for a request. MUST be called with e.mu
+// held for write, because an Allow decision reserves the cost atomically
+// against the session accumulator.
 func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 	if rs.Limits == nil {
 		return CheckResult{Decision: Allow, Reason: "No cost limits configured"}
@@ -438,6 +517,8 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 		}
 	}
 	if req.EstCost > 0 && alertThreshold > 0 && req.EstCost > alertThreshold {
+		// Approval requests do NOT reserve cost — the reservation happens
+		// when the approver releases the action (by re-submitting the check).
 		return CheckResult{
 			Decision: RequireApproval,
 			Reason:   fmt.Sprintf("Estimated cost $%.2f exceeds alert threshold of %s", req.EstCost, rs.Limits.AlertThreshold),
@@ -445,11 +526,129 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 		}
 	}
 
+	// Allow — reserve the cost against the session accumulator atomically.
+	if req.SessionID != "" && req.EstCost > 0 {
+		e.sessionCosts[req.SessionID] += req.EstCost
+	}
+
 	return CheckResult{
 		Decision: Allow,
 		Reason:   "Cost within limits",
 		Rule:     "allow:cost:within_limits",
 	}
+}
+
+// normalizeRequest canonicalizes the user-supplied fields that participate in
+// policy matching. Goals:
+//   - Strip NUL and C0 control bytes that would cause downstream truncation
+//     (null-byte injection) or obscure traversal sequences.
+//   - URL-decode path/url once so "%2E%2E" traversal attempts are visible to
+//     filepath.Clean and the ".." guard.
+//   - Leave glob metacharacters intact (no decoding of `*`/`?`).
+func normalizeRequest(req ActionRequest) ActionRequest {
+	req.Command = stripControl(req.Command)
+	req.Action = stripControl(req.Action)
+	req.Domain = stripControl(req.Domain)
+	req.URL = stripControl(req.URL)
+	req.Path = normalizePath(req.Path)
+	return req
+}
+
+// stripControl removes NUL and other C0 control characters (0x00-0x1F and 0x7F)
+// except tab (0x09), which is legitimately used in shell command strings.
+//
+// Fast-path: well-formed strings contain no control bytes, so we scan once
+// and return the input unchanged (no allocation). Only when a control byte
+// is found do we allocate a sanitized copy.
+func stripControl(s string) string {
+	if s == "" {
+		return s
+	}
+	// Fast scan — bytewise is fine here because C0/DEL are single-byte code
+	// points; multi-byte UTF-8 sequences never contain bytes ≤ 0x7F in
+	// continuation positions.
+	clean := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == 0x09 {
+			continue
+		}
+		if c < 0x20 || c == 0x7F {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return s
+	}
+	// Slow path: rebuild without the offending bytes.
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == 0x09 || (r >= 0x20 && r != 0x7F) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// normalizePath URL-decodes a single layer of percent-encoding (common bypass),
+// strips control characters, and returns the canonical form. filepath.Clean is
+// applied by the path-matching code in matchRule/Check; we do not clean here
+// to preserve the original structure for clear error messages.
+func normalizePath(p string) string {
+	if p == "" {
+		return p
+	}
+	p = stripControl(p)
+	// Single-pass URL decode. Double-encoded escapes are intentionally not
+	// decoded recursively — a single decode is enough to expose common
+	// traversal tricks while not masking pathological policy input.
+	if decoded, err := urlUnescape(p); err == nil {
+		p = decoded
+	}
+	return p
+}
+
+// urlUnescape is a minimal decoder for %HH sequences. We avoid net/url here
+// because PathUnescape has opinions about `+` that don't apply to filesystem
+// paths.
+func urlUnescape(s string) (string, error) {
+	if !strings.Contains(s, "%") {
+		return s, nil
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '%' {
+			if i+2 >= len(s) {
+				return s, fmt.Errorf("truncated percent escape")
+			}
+			hi, ok1 := hexDigit(s[i+1])
+			lo, ok2 := hexDigit(s[i+2])
+			if !ok1 || !ok2 {
+				return s, fmt.Errorf("invalid percent escape")
+			}
+			b.WriteByte(hi<<4 | lo)
+			i += 2
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return b.String(), nil
+}
+
+func hexDigit(b byte) (byte, bool) {
+	switch {
+	case b >= '0' && b <= '9':
+		return b - '0', true
+	case b >= 'a' && b <= 'f':
+		return b - 'a' + 10, true
+	case b >= 'A' && b <= 'F':
+		return b - 'A' + 10, true
+	}
+	return 0, false
 }
 
 // parseDollar extracts a float from a string like "$0.50".
@@ -508,56 +707,83 @@ func matchRule(rule Rule, req ActionRequest) bool {
 	return false
 }
 
-// globMatch performs simple glob pattern matching supporting * and **.
-// Unlike filepath.Match, the single * wildcard matches any character including
-// path separators, which is required for shell command patterns like "rm -rf *"
-// matching "rm -rf /tmp/data".
-// Supports multiple ** segments (e.g., "**/sensitive/**").
+// globMatch performs glob pattern matching supporting * and **.
+//
+// Semantics:
+//   - A literal segment (between `/` separators) is matched with wildcardMatch,
+//     so `*` matches any character including `/` within a shell-command pattern
+//     like "rm -rf *".
+//   - `**` matches zero or more whole path segments.
+//
+// For non-path patterns that have no `/` separators (e.g., shell command
+// patterns, domain globs), globMatch falls through to wildcardMatch so `*`
+// still matches any run of characters including spaces or dots.
+//
+// The important security property: when `**` appears in a pattern, it only
+// matches at path-component boundaries — "**/secret/**" does NOT match
+// "/notsecret/x". The old implementation substring-matched and over-reported.
 func globMatch(pattern, value string) bool {
-	// Handle ** (match any number of path segments)
-	if strings.Contains(pattern, "**") {
-		parts := strings.Split(pattern, "**")
-		// Clean up separators around ** segments
-		for i := range parts {
-			if i > 0 {
-				parts[i] = strings.TrimPrefix(parts[i], "/")
-			}
-			if i < len(parts)-1 {
-				parts[i] = strings.TrimSuffix(parts[i], "/")
-			}
-		}
-
-		// Match each segment sequentially against the value
-		remaining := value
-		for i, part := range parts {
-			if part == "" {
-				continue
-			}
-			if i == 0 {
-				// First segment must match the prefix
-				if !strings.HasPrefix(remaining, part) {
-					return false
-				}
-				remaining = remaining[len(part):]
-			} else if i == len(parts)-1 {
-				// Last segment must match the suffix
-				if !strings.HasSuffix(remaining, part) {
-					return false
-				}
-			} else {
-				// Middle segments: find the segment anywhere in the remaining string
-				idx := strings.Index(remaining, part)
-				if idx < 0 {
-					return false
-				}
-				remaining = remaining[idx+len(part):]
-			}
-		}
-		return true
+	// Patterns without ** use simple wildcard matching (anchored both ends).
+	if !strings.Contains(pattern, "**") {
+		return wildcardMatch(pattern, value)
 	}
 
-	// Simple wildcard match: * matches zero or more of any character (including /)
-	return wildcardMatch(pattern, value)
+	// Patterns with ** are matched as path-component globs.
+	return doubleStarMatch(pattern, value)
+}
+
+// doubleStarMatch matches patterns containing `**` against `value` by walking
+// path components (split on `/`). Each non-`**` component is matched with
+// wildcardMatch; `**` matches zero or more whole components.
+func doubleStarMatch(pattern, value string) bool {
+	patSegs := splitSegments(pattern)
+	valSegs := splitSegments(value)
+	return matchSegments(patSegs, valSegs)
+}
+
+// splitSegments splits s on `/` but preserves a leading empty segment so that
+// "/etc/passwd" → ["", "etc", "passwd"] and "etc/passwd" → ["etc", "passwd"].
+// This keeps absolute-vs-relative distinction meaningful in matching.
+func splitSegments(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, "/")
+}
+
+// matchSegments does the recursive/iterative matching between pattern and
+// value segment lists. `**` can match zero or more consecutive segments.
+func matchSegments(pat, val []string) bool {
+	pi, vi := 0, 0
+	starPi, starVi := -1, -1
+
+	for vi < len(val) {
+		if pi < len(pat) && pat[pi] == "**" {
+			starPi = pi
+			starVi = vi
+			pi++
+			continue
+		}
+		if pi < len(pat) && wildcardMatch(pat[pi], val[vi]) {
+			pi++
+			vi++
+			continue
+		}
+		if starPi >= 0 {
+			// Backtrack: let ** consume one more value segment.
+			starVi++
+			vi = starVi
+			pi = starPi + 1
+			continue
+		}
+		return false
+	}
+
+	// Consume any trailing `**` segments in the pattern.
+	for pi < len(pat) && pat[pi] == "**" {
+		pi++
+	}
+	return pi == len(pat)
 }
 
 // wildcardMatch matches a pattern with * (any chars) and ? (single char) wildcards.
@@ -592,16 +818,26 @@ func wildcardMatch(pattern, value string) bool {
 // matchConditions evaluates the conditions attached to a rule.
 // Returns true if all conditions are satisfied (or if there are no conditions).
 // Must be called with e.mu held (at least RLock).
+//
+// Backward-compat note (v0.4.1): a condition with a TimeWindow but no
+// RequirePrior is effectively a no-op — there's nothing to time-bound. The
+// v0.4.0 engine treated such conditions as "always satisfied"; we retain
+// that behavior here so policies written against v0.4.0 don't suddenly
+// fail-closed. `LoadFromFile` logs a warning when it sees such a rule so
+// authors learn about the mistake without production breakage.
 func (e *Engine) matchConditions(rule Rule, req ActionRequest) bool {
 	if len(rule.Conditions) == 0 {
 		return true
 	}
 
 	for _, cond := range rule.Conditions {
-		if cond.RequirePrior != "" {
-			if !e.checkRequirePrior(cond, req) {
-				return false
-			}
+		if cond.RequirePrior == "" {
+			// TimeWindow-only (or empty Condition): nothing to verify.
+			// Pass through — matches v0.4.0 behavior.
+			continue
+		}
+		if !e.checkRequirePrior(cond, req) {
+			return false
 		}
 	}
 	return true

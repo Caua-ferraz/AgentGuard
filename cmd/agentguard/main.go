@@ -35,18 +35,22 @@ func main() {
 	auditPath := serveCmd.String("audit-log", "audit.jsonl", "Path to audit log file")
 	apiKey := serveCmd.String("api-key", "", "Bearer token for approve/deny endpoints")
 	baseURL := serveCmd.String("base-url", "", "External base URL for approval links (default: http://localhost:<port>)")
+	allowedOrigin := serveCmd.String("allowed-origin", "", "Exact CORS origin to accept (e.g. https://app.example). Empty means permissive-localhost (any http://localhost:* or http://127.0.0.1:*) for backward compat.")
 
 	validateCmd := flag.NewFlagSet("validate", flag.ExitOnError)
 	validateFile := validateCmd.String("policy", "configs/default.yaml", "Policy file to validate")
 
 	approveCmd := flag.NewFlagSet("approve", flag.ExitOnError)
 	approveURL := approveCmd.String("url", "http://localhost:8080", "AgentGuard server URL")
+	approveKey := approveCmd.String("api-key", "", "Bearer token (overrides AGENTGUARD_API_KEY)")
 
 	denyCmd := flag.NewFlagSet("deny", flag.ExitOnError)
 	denyURL := denyCmd.String("url", "http://localhost:8080", "AgentGuard server URL")
+	denyKey := denyCmd.String("api-key", "", "Bearer token (overrides AGENTGUARD_API_KEY)")
 
 	statusCmd := flag.NewFlagSet("status", flag.ExitOnError)
 	statusURL := statusCmd.String("url", "http://localhost:8080", "AgentGuard server URL")
+	statusKey := statusCmd.String("api-key", "", "Bearer token (overrides AGENTGUARD_API_KEY)")
 
 	auditCmd := flag.NewFlagSet("audit", flag.ExitOnError)
 	auditQueryURL := auditCmd.String("url", "http://localhost:8080", "AgentGuard server URL")
@@ -54,6 +58,7 @@ func main() {
 	auditDecision := auditCmd.String("decision", "", "Filter by decision (ALLOW, DENY, REQUIRE_APPROVAL)")
 	auditScope := auditCmd.String("scope", "", "Filter by scope")
 	auditLimit := auditCmd.Int("limit", 50, "Max entries to return")
+	auditKey := auditCmd.String("api-key", "", "Bearer token (overrides AGENTGUARD_API_KEY)")
 
 	if len(os.Args) < 2 {
 		printUsage()
@@ -63,7 +68,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		_ = serveCmd.Parse(os.Args[2:]) // flag.ExitOnError handles errors
-		runServe(*policyFile, *port, *dashboard, *watch, *auditPath, *apiKey, *baseURL)
+		// Fall back to AGENTGUARD_API_KEY env if --api-key not supplied.
+		runServe(*policyFile, *port, *dashboard, *watch, *auditPath, resolveAPIKey(*apiKey), *baseURL, *allowedOrigin)
 
 	case "validate":
 		_ = validateCmd.Parse(os.Args[2:])
@@ -76,7 +82,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: agentguard approve [flags] <approval-id>")
 			os.Exit(1)
 		}
-		runResolve(*approveURL, args[0], "approve")
+		runResolve(*approveURL, args[0], "approve", resolveAPIKey(*approveKey))
 
 	case "deny":
 		_ = denyCmd.Parse(os.Args[2:])
@@ -85,15 +91,15 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: agentguard deny [flags] <approval-id>")
 			os.Exit(1)
 		}
-		runResolve(*denyURL, args[0], "deny")
+		runResolve(*denyURL, args[0], "deny", resolveAPIKey(*denyKey))
 
 	case "status":
 		_ = statusCmd.Parse(os.Args[2:])
-		runStatus(*statusURL)
+		runStatus(*statusURL, resolveAPIKey(*statusKey))
 
 	case "audit":
 		_ = auditCmd.Parse(os.Args[2:])
-		runAuditQuery(*auditQueryURL, *auditAgent, *auditDecision, *auditScope, *auditLimit)
+		runAuditQuery(*auditQueryURL, *auditAgent, *auditDecision, *auditScope, *auditLimit, resolveAPIKey(*auditKey))
 
 	case "version":
 		fmt.Printf("agentguard %s (%s)\n", version, commit)
@@ -123,7 +129,7 @@ Run 'agentguard <command> -h' for details on each command.
 `)
 }
 
-func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string) {
+func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string) {
 	if baseURL == "" {
 		baseURL = fmt.Sprintf("http://localhost:%d", port)
 	}
@@ -144,8 +150,10 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 	// Initialize policy engine
 	engine := policy.NewEngine(pol)
 
-	// Initialize notifier from policy config
+	// Initialize notifier from policy config. The dispatcher owns background
+	// worker goroutines and MUST be Close()'d on shutdown to stop them.
 	notifier := notify.NewDispatcher(pol.Notifications)
+	defer notifier.Close()
 
 	// Enable file watching for hot reload
 	if watch {
@@ -168,6 +176,7 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		Notifier:         notifier,
 		APIKey:           apiKey,
 		BaseURL:          baseURL,
+		AllowedOrigin:    allowedOrigin,
 		Version:          version,
 	})
 
@@ -200,13 +209,29 @@ func runValidate(policyFile string) {
 	fmt.Printf("VALID: %s — %d rules across %d scopes\n", pol.Name, pol.RuleCount(), pol.ScopeCount())
 }
 
-func runResolve(baseURL, approvalID, action string) {
+// resolveAPIKey returns the first non-empty of: explicit flag, env var.
+func resolveAPIKey(flagVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	return os.Getenv("AGENTGUARD_API_KEY")
+}
+
+// attachAuth adds a Bearer header when the key is non-empty.
+func attachAuth(req *http.Request, key string) {
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+}
+
+func runResolve(baseURL, approvalID, action, apiKey string) {
 	url := fmt.Sprintf("%s/v1/%s/%s", strings.TrimRight(baseURL, "/"), action, approvalID)
 	req, err := http.NewRequest(http.MethodPost, url, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	attachAuth(req, apiKey)
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -230,10 +255,10 @@ func runResolve(baseURL, approvalID, action string) {
 	}
 }
 
-func runStatus(baseURL string) {
+func runStatus(baseURL, apiKey string) {
 	url := strings.TrimRight(baseURL, "/")
 
-	// Health check
+	// Health check (unauthenticated)
 	resp, err := http.Get(url + "/health")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Cannot connect to AgentGuard at %s: %v\n", baseURL, err)
@@ -242,13 +267,24 @@ func runStatus(baseURL string) {
 	resp.Body.Close()
 	fmt.Printf("AgentGuard server: OK (%s)\n", baseURL)
 
-	// Pending approvals
-	resp, err = http.Get(url + "/api/pending")
+	// Pending approvals (requires auth when server has --api-key)
+	pendingReq, err := http.NewRequest(http.MethodGet, url+"/api/pending", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return
+	}
+	attachAuth(pendingReq, apiKey)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err = client.Do(pendingReq)
 	if err != nil {
 		fmt.Println("Pending approvals: unavailable (dashboard not enabled?)")
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		fmt.Println("Pending approvals: unauthorized (set --api-key or AGENTGUARD_API_KEY)")
+		return
+	}
 
 	var pending []map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&pending); err != nil {
@@ -281,7 +317,7 @@ func runStatus(baseURL string) {
 	}
 }
 
-func runAuditQuery(baseURL, agent, decision, scope string, limit int) {
+func runAuditQuery(baseURL, agent, decision, scope string, limit int, apiKey string) {
 	params := url.Values{}
 	params.Set("limit", fmt.Sprintf("%d", limit))
 	if agent != "" {
@@ -295,12 +331,23 @@ func runAuditQuery(baseURL, agent, decision, scope string, limit int) {
 	}
 	queryURL := fmt.Sprintf("%s/v1/audit?%s", strings.TrimRight(baseURL, "/"), params.Encode())
 
-	resp, err := http.Get(queryURL)
+	req, err := http.NewRequest(http.MethodGet, queryURL, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	attachAuth(req, apiKey)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		fmt.Fprintln(os.Stderr, "audit: unauthorized (set --api-key or AGENTGUARD_API_KEY)")
+		os.Exit(1)
+	}
 
 	var entries []map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {

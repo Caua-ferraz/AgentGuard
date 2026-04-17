@@ -179,8 +179,11 @@ func (l *SQLiteLogger) Query(filter QueryFilter) ([]Entry, error) {
 	}
 	query += " ORDER BY id ASC"
 
+	// LIMIT is parameterized to avoid SQL injection even though the caller is
+	// currently trusted. Treat unbounded (Limit <= 0) as "no limit".
 	if filter.Limit > 0 {
-		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
+		query += " LIMIT ?"
+		args = append(args, filter.Limit)
 	}
 
 	rows, err := l.db.Query(query, args...)

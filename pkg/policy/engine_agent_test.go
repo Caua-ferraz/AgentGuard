@@ -131,21 +131,19 @@ func TestEngineCheck_CostScope(t *testing.T) {
 		},
 	}
 
+	// No session_id → reservations are no-ops, so each check is independent.
 	engine := NewEngine(pol)
 
-	// Within limits
 	result := engine.Check(ActionRequest{Scope: "cost", EstCost: 0.10})
 	if result.Decision != Allow {
 		t.Errorf("expected ALLOW for $0.10, got %s: %s", result.Decision, result.Reason)
 	}
 
-	// Exceeds alert threshold -> require approval
 	result = engine.Check(ActionRequest{Scope: "cost", EstCost: 0.30})
 	if result.Decision != RequireApproval {
 		t.Errorf("expected REQUIRE_APPROVAL for $0.30, got %s: %s", result.Decision, result.Reason)
 	}
 
-	// Exceeds max per action -> deny
 	result = engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00})
 	if result.Decision != Deny {
 		t.Errorf("expected DENY for $1.00, got %s: %s", result.Decision, result.Reason)

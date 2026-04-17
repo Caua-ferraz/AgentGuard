@@ -26,6 +26,10 @@ export interface CheckOptions {
   path?: string;
   domain?: string;
   url?: string;
+  /** Session identifier for session-level cost tracking. */
+  sessionId?: string;
+  /** Estimated cost of this action in USD (for cost scope). */
+  estCost?: number;
   meta?: Record<string, string>;
 }
 
@@ -42,6 +46,26 @@ export interface CheckResult {
   readonly denied: boolean;
   /** Convenience: true if decision is REQUIRE_APPROVAL */
   readonly needsApproval: boolean;
+}
+
+/**
+ * Wire-format of the /v1/check response as emitted by the Go server. Kept
+ * internal: callers see the normalized `CheckResult` shape above.
+ */
+interface CheckResponseJSON {
+  decision: "ALLOW" | "DENY" | "REQUIRE_APPROVAL";
+  reason: string;
+  matched_rule?: string;
+  approval_id?: string;
+  approval_url?: string;
+}
+
+/** Wire-format of the /v1/status/{id} response. */
+interface StatusResponseJSON {
+  id: string;
+  status: "pending" | "resolved";
+  decision?: "ALLOW" | "DENY";
+  reason?: string;
 }
 
 export interface AgentGuardOptions {
@@ -131,6 +155,8 @@ export class AgentGuard {
     if (options.path) payload.path = options.path;
     if (options.domain) payload.domain = options.domain;
     if (options.url) payload.url = options.url;
+    if (options.sessionId) payload.session_id = options.sessionId;
+    if (options.estCost !== undefined && options.estCost !== 0) payload.est_cost = options.estCost;
     if (options.meta) payload.meta = options.meta;
 
     try {
@@ -150,7 +176,7 @@ export class AgentGuard {
         throw new Error(`AgentGuard returned ${response.status}`);
       }
 
-      const data = await response.json();
+      const data = (await response.json()) as CheckResponseJSON;
       return new CheckResultImpl({
         decision: data.decision,
         reason: data.reason,
@@ -200,6 +226,9 @@ export class AgentGuard {
 
   /**
    * Wait for a pending action to be resolved (blocks).
+   *
+   * Sends the API key on every poll since /v1/status is auth-gated on
+   * servers configured with --api-key.
    */
   async waitForApproval(
     approvalId: string,
@@ -211,10 +240,11 @@ export class AgentGuard {
     while (Date.now() < deadline) {
       try {
         const res = await fetch(
-          `${this.baseUrl}/v1/status/${approvalId}`
+          `${this.baseUrl}/v1/status/${approvalId}`,
+          { headers: this.authHeaders() }
         );
         if (res.ok) {
-          const data = await res.json();
+          const data = (await res.json()) as StatusResponseJSON;
           if (data.status === "resolved" && (data.decision === "ALLOW" || data.decision === "DENY")) {
             return new CheckResultImpl({
               decision: data.decision,
