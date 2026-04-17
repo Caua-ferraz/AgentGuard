@@ -1,10 +1,14 @@
 name: CI
 
+# Triggers:
+#   - push to any branch (so feature-branch commits get CI feedback).
+#   - pull_request targeting any branch (catches forks + branch-to-branch PRs).
+# Explicit "**" branch glob keeps any future branch-protection rules working.
 on:
   push:
-    branches: [master, main]
+    branches: ['**']
   pull_request:
-    branches: [master, main]
+    branches: ['**']
 
 jobs:
   test:
@@ -22,6 +26,13 @@ jobs:
 
       - name: Test
         run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-coverage
+          path: coverage.out
+          if-no-files-found: warn
 
       - name: Validate default policy
         run: go run ./cmd/agentguard validate --policy configs/default.yaml
@@ -53,19 +64,100 @@ jobs:
     strategy:
       matrix:
         python-version: ['3.9', '3.12']
-    defaults:
-      run:
-        working-directory: plugins/python
     steps:
       - uses: actions/checkout@v4
+
+      # Go is needed so we can build the agentguard binary. The Python E2E
+      # tests (tests/test_end_to_end_real_server.py) spawn the real binary
+      # and drive it through the Python SDK; without Go, those tests SKIP
+      # silently and pretend to be green.
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build agentguard binary for E2E tests
+        run: go build -o agentguard ./cmd/agentguard
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install dependencies
+      - name: Install Python dependencies
+        working-directory: plugins/python
         run: pip install -e ".[dev]"
 
-      - name: Run tests
-        run: pytest -v --tb=short --cov=agentguard --cov-report=term-missing
+      - name: Run Python tests
+        working-directory: plugins/python
+        # The E2E suite (test_end_to_end_real_server.py) MUST execute — if
+        # the binary isn't discoverable it silently skips, which masks real
+        # regressions. We run those tests with --runxfail and a non-skipped
+        # assertion below.
+        run: |
+          pytest -v --tb=short --cov=agentguard --cov-report=term-missing -p no:cacheprovider
+
+      - name: Assert E2E tests actually ran (no silent skip)
+        working-directory: plugins/python
+        run: |
+          # Re-run only the E2E file with -ra; count "PASSED" lines, which
+          # must be > 0. If the binary path breaks, every test will be
+          # "SKIPPED" and the count will be 0, failing the job.
+          passed=$(pytest tests/test_end_to_end_real_server.py -v --no-header 2>&1 | grep -c "PASSED" || true)
+          echo "E2E passed count: $passed"
+          if [ "$passed" -lt 10 ]; then
+            echo "ERROR: E2E tests skipped silently; expected >=10 passes, got $passed"
+            exit 1
+          fi
+
+  typescript-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install TS SDK deps
+        working-directory: plugins/typescript
+        run: npm install
+
+      - name: Typecheck + build
+        working-directory: plugins/typescript
+        run: npm run build
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t agentguard:ci .
+
+      - name: Smoke test the container
+        run: |
+          # Start the image with --api-key so it binds to 0.0.0.0 (reachable
+          # from the host via port publish). Then poll /health until it
+          # responds, and tear down.
+          docker run -d --name agentguard-ci -p 18080:8080 agentguard:ci \
+            serve \
+              --policy /etc/agentguard/default.yaml \
+              --port 8080 \
+              --api-key ci-smoke-key \
+              --audit-log /var/lib/agentguard/audit.jsonl \
+              --dashboard
+          for i in {1..20}; do
+            if curl -sf http://127.0.0.1:18080/health >/dev/null; then
+              echo "health ok"
+              break
+            fi
+            sleep 1
+            if [ "$i" = "20" ]; then
+              echo "server failed to start; logs:"
+              docker logs agentguard-ci
+              exit 1
+            fi
+          done
+          docker rm -f agentguard-ci

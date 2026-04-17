@@ -83,6 +83,8 @@ class Guard:
         path: str = "",
         domain: str = "",
         url: str = "",
+        session_id: str = "",
+        est_cost: float = 0.0,
         meta: Optional[dict] = None,
     ) -> CheckResult:
         """Check an action against the policy.
@@ -94,6 +96,8 @@ class Guard:
             path: File path — used with filesystem scope
             domain: Target domain — used with network/browser scope
             url: Full URL — used with network scope
+            session_id: Session identifier for session-level cost tracking
+            est_cost: Estimated cost of this action in USD (for cost scope)
             meta: Additional metadata
 
         Returns:
@@ -113,6 +117,10 @@ class Guard:
             payload["domain"] = domain
         if url:
             payload["url"] = url
+        if session_id:
+            payload["session_id"] = session_id
+        if est_cost:
+            payload["est_cost"] = est_cost
         if meta:
             payload["meta"] = meta
 
@@ -179,12 +187,17 @@ class Guard:
         timeout: int = DEFAULT_APPROVAL_TIMEOUT,
         poll_interval: int = DEFAULT_POLL_INTERVAL,
     ) -> CheckResult:
-        """Block until a pending action is approved or denied (or timeout)."""
+        """Block until a pending action is approved or denied (or timeout).
+
+        Sends the API key on every poll because /v1/status is now auth-gated
+        on servers configured with --api-key.
+        """
         deadline = time.time() + timeout
         while time.time() < deadline:
             # Poll the status endpoint for resolution
             req = request.Request(
                 f"{self.base_url}{ENDPOINT_STATUS}{approval_id}",
+                headers=self._auth_headers(),
                 method="GET",
             )
             try:

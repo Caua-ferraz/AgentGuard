@@ -155,18 +155,32 @@ agentguard serve --policy configs/default.yaml --watch --dashboard
 
 ### Authentication
 
-When deploying AgentGuard beyond localhost, set an API key to protect the approve/deny endpoints:
+When deploying AgentGuard beyond localhost, set an API key to protect the privileged endpoints. You can pass it as a flag or via the `AGENTGUARD_API_KEY` environment variable (server and CLI both read it):
 
 ```bash
 agentguard serve --policy configs/default.yaml --api-key YOUR_SECRET --dashboard
+# or
+AGENTGUARD_API_KEY=YOUR_SECRET agentguard serve --policy configs/default.yaml --dashboard
 ```
 
-Without `--api-key`, the server binds to `127.0.0.1` only. With an API key set, it binds to all interfaces (`0.0.0.0`).
+Without `--api-key`, the server binds to `127.0.0.1` only. With an API key set, it binds to all interfaces (`0.0.0.0`) and gates the privileged surface.
 
-The dashboard automatically picks up the API key — approve/deny buttons work without extra config. SDKs pass the key on approve/deny calls:
+**What's gated when an API key is set:**
+
+| Endpoint | Access |
+|---|---|
+| `POST /v1/check` | Open (the policy answer itself is not sensitive) |
+| `POST /v1/approve/{id}`, `POST /v1/deny/{id}` | Bearer token **or** session cookie + `X-CSRF-Token` header |
+| `GET /v1/status/{id}`, `GET /v1/audit` | Bearer token **or** session cookie |
+| `GET /dashboard`, `GET /api/*` | Session cookie (served a login page otherwise) |
+| `GET /health`, `GET /metrics` | Open |
+
+**Dashboard login flow.** Opening `/dashboard` without a session serves a login form. POST your API key to `/auth/login` — the server sets an HTTP-only `ag_session` cookie and a JS-readable `ag_csrf` cookie (same token, double-submit pattern). The dashboard JS attaches `X-CSRF-Token` on approve/deny. The API key is **never** embedded in the HTML. `POST /auth/logout` destroys the session.
+
+**SDKs.** The Python and TypeScript SDKs attach the Bearer token automatically on approve/deny/status/audit when configured:
 
 ```python
-# Python
+# Python — explicit or AGENTGUARD_API_KEY env var
 guard = Guard("http://your-server:8080", api_key="YOUR_SECRET")
 ```
 
@@ -175,7 +189,9 @@ guard = Guard("http://your-server:8080", api_key="YOUR_SECRET")
 const guard = new AgentGuard({ baseUrl: 'http://your-server:8080', apiKey: 'YOUR_SECRET' });
 ```
 
-The API key can also be set via the `AGENTGUARD_API_KEY` environment variable (Python SDK).
+**CLI subcommands** (`approve`, `deny`, `status`, `audit`) accept `--api-key` or read `AGENTGUARD_API_KEY` from the environment.
+
+**CORS.** When you want a browser-based app on a different origin to call AgentGuard, set `--allowed-origin https://your-app.example` (exact match only — no localhost-wildcard default).
 
 ### Connect Your Agent
 
@@ -188,30 +204,45 @@ pip install agentguardproxy
 # Python — wrap any agent framework
 from agentguard import Guard
 
-guard = Guard("http://localhost:8080")
+guard = Guard("http://localhost:8080", agent_id="my-bot")
 
 # Before executing any action, check it
 result = guard.check("shell", command="rm -rf ./old_data")
 # result.decision = "REQUIRE_APPROVAL"
 # result.reason = "Matches pattern: rm -rf *"
-# result.approval_url = "http://localhost:8080/approve/abc123"
+# result.approval_url = "http://localhost:8080/v1/approve/ap_..."
 
 if result.allowed:
     execute(command)
+
+# Cost-scope guardrails: attach session_id + est_cost so the engine can
+# enforce max_per_session. Each ALLOWed call atomically reserves the cost.
+r = guard.check(
+    "cost",
+    command="llm-call",
+    session_id="user-123",
+    est_cost=0.42,
+)
 ```
 
 ```typescript
 // TypeScript / Node.js
 import { AgentGuard } from '@agentguard/sdk';
 
-const guard = new AgentGuard('http://localhost:8080');
+const guard = new AgentGuard({ baseUrl: 'http://localhost:8080', agentId: 'my-bot' });
 
 const result = await guard.check('network', {
-  method: 'POST',
   url: 'https://api.production.internal/deploy',
 });
-// result.decision = "DENIED"
+// result.decision = "DENY"
 // result.reason = "Production access requires elevated policy"
+
+// Cost-scope guardrails:
+await guard.check('cost', {
+  command: 'llm-call',
+  sessionId: 'user-123',
+  estCost: 0.42,
+});
 ```
 
 ## Architecture

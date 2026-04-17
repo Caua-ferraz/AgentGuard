@@ -3,7 +3,6 @@ package proxy
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -63,6 +62,7 @@ type Server struct {
 	http     *http.Server
 	approval *ApprovalQueue
 	limiter  *ratelimit.Limiter
+	sessions *SessionStore
 }
 
 // ApprovalQueue manages pending approval requests.
@@ -128,7 +128,8 @@ func NewServer(cfg Config) *Server {
 		approval: &ApprovalQueue{
 			pending: make(map[string]*PendingAction),
 		},
-		limiter: ratelimit.New(),
+		limiter:  ratelimit.New(),
+		sessions: NewSessionStore(),
 	}
 
 	// Wire up history querier for conditional rule evaluation
@@ -144,24 +145,34 @@ func NewServer(cfg Config) *Server {
 	mux := http.NewServeMux()
 
 	// Core API
+	// /v1/check is intentionally open: it is the policy query endpoint called
+	// by many agents, and the answer is not sensitive by itself. If you need
+	// to gate it, run with --api-key and put /v1/check behind a reverse proxy.
 	mux.HandleFunc("/v1/check", s.handleCheck)
-	mux.HandleFunc("/v1/approve/", requireAuth(cfg.APIKey, s.handleApprove))
-	mux.HandleFunc("/v1/deny/", requireAuth(cfg.APIKey, s.handleDeny))
-	mux.HandleFunc("/v1/status/", s.handleStatus)
 
-	// Audit API
-	mux.HandleFunc("/v1/audit", s.handleAuditQuery)
+	// State-changing endpoints: Bearer OR (session + CSRF).
+	mux.HandleFunc("/v1/approve/", requireAuthOrSession(cfg.APIKey, s.sessions, true, s.handleApprove))
+	mux.HandleFunc("/v1/deny/", requireAuthOrSession(cfg.APIKey, s.sessions, true, s.handleDeny))
 
-	// Health + Metrics
+	// Read endpoints that expose audit/status data: Bearer OR session (no CSRF needed for GET).
+	mux.HandleFunc("/v1/status/", requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleStatus))
+	mux.HandleFunc("/v1/audit", requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleAuditQuery))
+
+	// Auth endpoints for dashboard login/logout.
+	mux.HandleFunc("/auth/login", s.handleLogin)
+	mux.HandleFunc("/auth/logout", s.handleLogout)
+
+	// Health + Metrics (unauthenticated — commonly scraped by monitoring).
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/metrics", s.handleMetrics)
 
-	// Dashboard
+	// Dashboard — /dashboard itself returns login page when unauthenticated;
+	// API subpaths are gated.
 	if cfg.DashboardEnabled {
 		mux.HandleFunc("/dashboard", s.handleDashboard)
-		mux.HandleFunc("/api/pending", s.handlePendingList)
-		mux.HandleFunc("/api/stream", s.handleEventStream)
-		mux.HandleFunc("/api/stats", s.handleStats)
+		mux.HandleFunc("/api/pending", requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handlePendingList))
+		mux.HandleFunc("/api/stream", requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleEventStream))
+		mux.HandleFunc("/api/stats", requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleStats))
 	}
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
@@ -260,10 +271,8 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Record cost for session tracking
-	if result.Decision == policy.Allow && req.Scope == "cost" && req.EstCost > 0 {
-		s.cfg.Engine.RecordCost(req.SessionID, req.EstCost)
-	}
+	// Cost reservation is atomic inside Engine.Check for cost-scoped allows,
+	// so no post-hoc RecordCost call is needed (that would double-count).
 
 	// Notify on deny
 	if result.Decision == policy.Deny && s.cfg.Notifier != nil {
@@ -382,7 +391,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // handleMetrics serves Prometheus-compatible metrics in text format.
 // Scrape with: curl http://localhost:8080/metrics
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	metrics.SetPendingApprovals(len(s.approval.List()))
+	// PendingCount counts under RLock without allocating a slice — matters
+	// because this endpoint is scraped on a schedule.
+	metrics.SetPendingApprovals(s.approval.PendingCount())
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	metrics.WritePrometheus(w)
 }
@@ -401,22 +412,27 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDashboard serves the web dashboard.
-// When --api-key is set, a <meta> tag is injected so the dashboard JS can
-// include the Authorization header on approve/deny requests. This is
-// acceptable for same-origin dashboard access; dashboard XSS is a separate
-// concern (the API key is already visible to anyone who can open the page).
+//
+// Authentication model:
+//   - When --api-key is empty, the dashboard is freely accessible (historical
+//     localhost-only mode).
+//   - When --api-key is set, the user must first POST their key to /auth/login
+//     which issues an HTTP-only session cookie. Without a valid session, we
+//     serve a login form; never the actual dashboard.
+//
+// The API key is NEVER embedded in the HTML response.
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 	w.Header().Set("Cache-Control", "no-store")
-	html := dashboardHTML
-	if s.cfg.APIKey != "" {
-		// Inject meta tag after <meta charset> so JS can read it.
-		html = strings.Replace(html,
-			`<meta charset="utf-8">`,
-			`<meta charset="utf-8">`+"\n"+`  <meta name="agentguard-api-key" content="`+s.cfg.APIKey+`">`,
-			1)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+
+	if s.cfg.APIKey != "" && !s.sessions.Validate(sessionToken(r)) {
+		fmt.Fprint(w, loginHTML)
+		return
 	}
-	fmt.Fprint(w, html)
+	fmt.Fprint(w, dashboardHTML)
 }
 
 // handlePendingList returns pending approval actions.
@@ -436,6 +452,15 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // disable nginx proxy buffering
+
+	// Flush headers immediately so clients (browser EventSource, test code,
+	// reverse proxies) see 200 OK and the content-type before any event
+	// arrives. Without this, a slow-traffic channel leaves the client
+	// blocked on the response-headers read until the first event, which
+	// also means EventSource.onopen never fires until activity starts.
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
 
 	ch := s.approval.Subscribe()
 	defer s.approval.Unsubscribe(ch)
@@ -557,6 +582,20 @@ func (q *ApprovalQueue) List() []*PendingAction {
 	return list
 }
 
+// PendingCount returns the number of unresolved pending actions without
+// allocating. Intended for metrics/health endpoints that just need the count.
+func (q *ApprovalQueue) PendingCount() int {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	n := 0
+	for _, pa := range q.pending {
+		if !pa.Resolved {
+			n++
+		}
+	}
+	return n
+}
+
 func (q *ApprovalQueue) Subscribe() chan AuditEvent {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -601,42 +640,54 @@ func (q *ApprovalQueue) broadcastLocked(event AuditEvent) {
 
 // Middleware
 
-func requireAuth(apiKey string, next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if apiKey == "" {
-			next(w, r)
-			return
-		}
-		auth := r.Header.Get("Authorization")
-		provided := strings.TrimPrefix(auth, "Bearer ")
-		if len(provided) == len(auth) || subtle.ConstantTimeCompare([]byte(provided), []byte(apiKey)) != 1 {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next(w, r)
-	}
-}
-
+// withCORS handles Origin reflection with two modes:
+//
+//  1. Strict (allowedOrigin != ""): reflect an Origin header ONLY when it
+//     EXACTLY matches the configured AllowedOrigin. Use this in production
+//     deployments where a specific frontend needs to talk to AgentGuard.
+//
+//  2. Permissive-localhost (allowedOrigin == ""): accept any
+//     http://localhost:* or http://127.0.0.1:* origin. This is the historical
+//     default and is retained for backward compatibility with local dev
+//     frontends that predate --allowed-origin. It is safe because:
+//     - the API key is NEVER embedded in the dashboard HTML;
+//     - session cookies are SameSite=Strict (cross-origin requests don't
+//       carry them);
+//     - state-changing endpoints require a CSRF token that attackers on
+//       other origins cannot read (double-submit cookie pattern).
+//
+// `Vary: Origin` is always set to prevent cached responses from leaking
+// cross-origin.
 func withCORS(allowedOrigin string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
+			w.Header().Add("Vary", "Origin")
+
+			allow := false
 			if origin != "" {
-				allow := false
 				if allowedOrigin != "" {
+					// Strict mode: exact match only.
 					allow = origin == allowedOrigin
 				} else {
+					// Permissive-localhost: match http://localhost:<port> or
+					// http://127.0.0.1:<port>. We require the `:` so origins
+					// like "http://localhost.evil.com" cannot slip through.
 					allow = strings.HasPrefix(origin, "http://localhost:") ||
-						strings.HasPrefix(origin, "http://127.0.0.1:")
-				}
-				if allow {
-					w.Header().Set("Access-Control-Allow-Origin", origin)
+						strings.HasPrefix(origin, "http://127.0.0.1:") ||
+						origin == "http://localhost" ||
+						origin == "http://127.0.0.1"
 				}
 			}
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-			if r.Method == "OPTIONS" {
-				w.WriteHeader(http.StatusOK)
+
+			if allow {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, "+CSRFHeaderName)
+			}
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -723,8 +774,11 @@ var dashboardHTML = `<!DOCTYPE html>
     const feed = document.getElementById('feed');
     const pendingEl = document.getElementById('pending');
     const MAX_FEED_ENTRIES = 200;
-    const _akMeta = document.querySelector('meta[name="agentguard-api-key"]');
-    const _apiKey = _akMeta ? _akMeta.getAttribute('content') : '';
+    // CSRF token is sourced from a server-rendered cookie named ag_csrf on page
+    // load. We no longer embed the API key in HTML.
+    function getCsrf() {
+      return (document.cookie.split('; ').find(c => c.startsWith('ag_csrf=')) || '').split('=')[1] || '';
+    }
 
     // Escape HTML to prevent XSS when inserting user-controlled data.
     function esc(s) {
@@ -763,9 +817,25 @@ var dashboardHTML = `<!DOCTYPE html>
       return el;
     }
 
+    // Wrapper that adds credentials + redirects to login on 401/403.
+    // 401: no/invalid session. 403: session ok but CSRF header mismatch —
+    // usually means the session expired between reads and a state-changing
+    // request; force the user through the login flow again.
+    function agFetch(path, opts) {
+      opts = opts || {};
+      opts.credentials = 'same-origin';
+      return fetch(path, opts).then(r => {
+        if (r.status === 401 || r.status === 403) {
+          location.href = '/dashboard';
+          throw new Error('reauth');
+        }
+        return r;
+      });
+    }
+
     // Load stats
     function refreshStats() {
-      fetch('/api/stats').then(r => r.json()).then(s => {
+      agFetch('/api/stats').then(r => r.json()).then(s => {
         document.getElementById('stat-total').textContent = s.total;
         document.getElementById('stat-allowed').textContent = s.allowed;
         document.getElementById('stat-denied').textContent = s.denied;
@@ -777,7 +847,7 @@ var dashboardHTML = `<!DOCTYPE html>
 
     // Load pending
     function refreshPending() {
-      fetch('/api/pending').then(r => r.json()).then(items => {
+      agFetch('/api/pending').then(r => r.json()).then(items => {
         if (!items || items.length === 0) {
           pendingEl.innerHTML = '<div class="empty">None</div>';
           return;
@@ -823,11 +893,12 @@ var dashboardHTML = `<!DOCTYPE html>
     }
     refreshPending();
 
-    // Approve / Deny from dashboard
+    // Approve / Deny from dashboard — sends session cookie + CSRF header.
     function resolve(id, action) {
-      const opts = { method: 'POST' };
-      if (_apiKey) opts.headers = { 'Authorization': 'Bearer ' + _apiKey };
-      fetch('/v1/' + action + '/' + id, opts)
+      const csrf = getCsrf();
+      const opts = { method: 'POST', headers: {} };
+      if (csrf) opts.headers['X-CSRF-Token'] = csrf;
+      agFetch('/v1/' + action + '/' + id, opts)
         .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); refreshPending(); refreshStats(); })
         .catch(e => {
           const errDiv = document.createElement('div');
@@ -841,7 +912,7 @@ var dashboardHTML = `<!DOCTYPE html>
     // Load historical entries on page open so the feed isn't blank.
     // Fetches the last MAX_FEED_ENTRIES audit entries (newest-first after reversing).
     function loadHistory() {
-      fetch('/v1/audit?limit=' + MAX_FEED_ENTRIES)
+      agFetch('/v1/audit?limit=' + MAX_FEED_ENTRIES)
         .then(r => r.json())
         .then(entries => {
           if (!entries || entries.length === 0) return;
@@ -887,6 +958,63 @@ var dashboardHTML = `<!DOCTYPE html>
         badge.style.background = '#1a1500';
       }
     };
+  </script>
+</body>
+</html>`
+
+// loginHTML is served from /dashboard when no valid session cookie exists
+// (and APIKey is configured). It collects the API key via a POST to
+// /auth/login; on success the server sets an HTTP-only session cookie and
+// a JS-readable CSRF cookie, and the page redirects back to /dashboard.
+var loginHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AgentGuard — Sign in</title>
+  <style>
+    body { font-family: -apple-system, 'SF Mono', 'Fira Code', monospace; background: #0a0a0a; color: #e0e0e0; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+    .box { background: #111; border: 1px solid #222; border-radius: 10px; padding: 28px 32px; width: 360px; }
+    h1 { font-size: 18px; margin: 0 0 4px; color: #fff; }
+    p { font-size: 12px; color: #888; margin: 0 0 18px; }
+    label { display: block; font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+    input[type=password] { width: 100%; padding: 10px 12px; background: #000; border: 1px solid #333; border-radius: 6px; color: #fff; font-family: inherit; font-size: 14px; box-sizing: border-box; }
+    button { margin-top: 14px; width: 100%; padding: 10px; border: none; border-radius: 6px; background: #166534; color: #4ade80; font-weight: 600; cursor: pointer; }
+    button:hover { background: #15803d; }
+    .err { color: #f87171; font-size: 12px; margin-top: 10px; min-height: 14px; }
+  </style>
+</head>
+<body>
+  <form class="box" id="f" autocomplete="off">
+    <h1>AgentGuard</h1>
+    <p>Sign in with the server API key.</p>
+    <label for="k">API key</label>
+    <input id="k" type="password" autocomplete="off" required>
+    <button type="submit">Sign in</button>
+    <div class="err" id="e"></div>
+  </form>
+  <script>
+    const f = document.getElementById('f');
+    const e = document.getElementById('e');
+    f.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      e.textContent = '';
+      const key = document.getElementById('k').value;
+      try {
+        const r = await fetch('/auth/login', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ api_key: key }),
+        });
+        if (!r.ok) {
+          e.textContent = r.status === 401 ? 'Invalid API key' : ('Error: HTTP ' + r.status);
+          return;
+        }
+        location.href = '/dashboard';
+      } catch (err) {
+        e.textContent = 'Network error: ' + err.message;
+      }
+    });
   </script>
 </body>
 </html>`

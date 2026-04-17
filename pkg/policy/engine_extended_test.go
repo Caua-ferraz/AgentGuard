@@ -444,19 +444,17 @@ func TestSessionCost_EnforcesLimit(t *testing.T) {
 
 	engine := NewEngine(pol)
 
-	// First action: $4.00 — allowed
+	// Check now atomically reserves the cost on Allow — no manual RecordCost
+	// follow-up is needed (that would double-count).
 	r1 := engine.Check(ActionRequest{Scope: "cost", EstCost: 4.00, SessionID: "sess-1"})
 	if r1.Decision != Allow {
 		t.Fatalf("expected ALLOW for $4, got %s: %s", r1.Decision, r1.Reason)
 	}
-	engine.RecordCost("sess-1", 4.00)
 
-	// Second action: $4.00 — allowed (cumulative $8)
 	r2 := engine.Check(ActionRequest{Scope: "cost", EstCost: 4.00, SessionID: "sess-1"})
 	if r2.Decision != Allow {
 		t.Fatalf("expected ALLOW for $4 (cumulative $8), got %s: %s", r2.Decision, r2.Reason)
 	}
-	engine.RecordCost("sess-1", 4.00)
 
 	// Third action: $3.00 — denied (cumulative $8 + $3 = $11 > $10)
 	r3 := engine.Check(ActionRequest{Scope: "cost", EstCost: 3.00, SessionID: "sess-1"})
@@ -465,6 +463,10 @@ func TestSessionCost_EnforcesLimit(t *testing.T) {
 	}
 	if r3.Rule != "deny:cost:max_per_session" {
 		t.Errorf("expected rule deny:cost:max_per_session, got %s", r3.Rule)
+	}
+
+	if got := engine.SessionCost("sess-1"); got != 8.00 {
+		t.Errorf("expected sessionCosts[sess-1] = 8.00 (reserved twice), got %.2f", got)
 	}
 }
 
@@ -485,16 +487,16 @@ func TestSessionCost_IndependentSessions(t *testing.T) {
 
 	engine := NewEngine(pol)
 
-	// Session A: spend $9
+	// Session A: reserve $9 up front (e.g. from prior session state restore).
 	engine.RecordCost("sess-a", 9.00)
 
-	// Session B: $4 should be allowed (independent)
+	// Session B: $4 should be allowed (independent).
 	r := engine.Check(ActionRequest{Scope: "cost", EstCost: 4.00, SessionID: "sess-b"})
 	if r.Decision != Allow {
 		t.Errorf("expected ALLOW for separate session, got %s: %s", r.Decision, r.Reason)
 	}
 
-	// Session A: $2 should be denied
+	// Session A: $2 should be denied ($9 + $2 > $10).
 	r = engine.Check(ActionRequest{Scope: "cost", EstCost: 2.00, SessionID: "sess-a"})
 	if r.Decision != Deny {
 		t.Errorf("expected DENY for session A ($9 + $2 > $10), got %s: %s", r.Decision, r.Reason)

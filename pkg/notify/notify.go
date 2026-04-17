@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
+	"sync/atomic"
 	"time"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
@@ -13,6 +15,18 @@ import (
 
 // DefaultHTTPTimeout is the timeout for webhook and Slack HTTP requests.
 const DefaultHTTPTimeout = 10 * time.Second
+
+// DefaultQueueSize is the buffered channel size for the dispatch worker pool.
+// If notifications arrive faster than workers can send, excess events are
+// dropped and DroppedEvents is incremented.
+const DefaultQueueSize = 256
+
+// DefaultWorkers is the number of concurrent dispatch goroutines.
+const DefaultWorkers = 8
+
+// DroppedEvents counts events discarded because the dispatch queue was full.
+// Exposed as a package-level atomic so callers/metrics can observe it.
+var DroppedEvents uint64
 
 // Event describes something that happened in the system.
 type Event struct {
@@ -29,14 +43,35 @@ type Notifier interface {
 	Notify(event Event) error
 }
 
-// Dispatcher fans out events to multiple notifiers.
+// Dispatcher fans out events to multiple notifiers using a bounded worker pool.
 type Dispatcher struct {
 	notifiers []Notifier
+	queue     chan dispatchJob
+	done      chan struct{}
+	redactor  *Redactor
+}
+
+type dispatchJob struct {
+	notifier Notifier
+	event    Event
 }
 
 // NewDispatcher builds a dispatcher from the policy notification config.
+// The dispatcher starts DefaultWorkers goroutines that pull from a bounded
+// queue. Send() never blocks the caller; overflowing events are dropped and
+// counted in DroppedEvents.
 func NewDispatcher(cfg policy.NotificationCfg) *Dispatcher {
-	d := &Dispatcher{}
+	return NewDispatcherWithOpts(cfg, DefaultWorkers, DefaultQueueSize)
+}
+
+// NewDispatcherWithOpts allows tuning the worker count and queue size. Used
+// primarily by tests.
+func NewDispatcherWithOpts(cfg policy.NotificationCfg, workers, queueSize int) *Dispatcher {
+	d := &Dispatcher{
+		queue:    make(chan dispatchJob, queueSize),
+		done:     make(chan struct{}),
+		redactor: DefaultRedactor(),
+	}
 
 	for _, t := range cfg.ApprovalRequired {
 		d.notifiers = append(d.notifiers, targetToNotifier(t, "approval_required"))
@@ -45,7 +80,36 @@ func NewDispatcher(cfg policy.NotificationCfg) *Dispatcher {
 		d.notifiers = append(d.notifiers, targetToNotifier(t, "denied"))
 	}
 
+	if workers < 1 {
+		workers = 1
+	}
+	for i := 0; i < workers; i++ {
+		go d.worker()
+	}
+
 	return d
+}
+
+func (d *Dispatcher) worker() {
+	for {
+		select {
+		case <-d.done:
+			return
+		case job, ok := <-d.queue:
+			if !ok {
+				return
+			}
+			if err := job.notifier.Notify(job.event); err != nil {
+				log.Printf("notify error (%T): %v", job.notifier, err)
+			}
+		}
+	}
+}
+
+// Close stops worker goroutines. Safe to call multiple times is NOT
+// guaranteed; callers should call once at shutdown.
+func (d *Dispatcher) Close() {
+	close(d.done)
 }
 
 func targetToNotifier(t policy.NotifyTarget, eventFilter string) Notifier {
@@ -63,18 +127,25 @@ func targetToNotifier(t policy.NotifyTarget, eventFilter string) Notifier {
 	}
 }
 
-// Send dispatches an event to all matching notifiers asynchronously.
-// Errors are logged but do not block the caller or stop delivery to other notifiers.
+// Send queues an event for asynchronous dispatch to all matching notifiers.
+// Non-blocking: if the queue is full, events are dropped and counted.
 func (d *Dispatcher) Send(event Event) {
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
+
+	// Redact sensitive patterns before dispatching. Webhooks and Slack channels
+	// are external systems; agent-supplied commands can contain secrets.
+	if d.redactor != nil {
+		event = d.redactor.Redact(event)
+	}
+
 	for _, n := range d.notifiers {
-		go func(n Notifier) {
-			if err := n.Notify(event); err != nil {
-				log.Printf("notify error (%T): %v", n, err)
-			}
-		}(n)
+		select {
+		case d.queue <- dispatchJob{notifier: n, event: event}:
+		default:
+			atomic.AddUint64(&DroppedEvents, 1)
+		}
 	}
 }
 
@@ -235,4 +306,54 @@ func (l *LogNotifier) Notify(event Event) error {
 		l.Level, event.Result.Decision, event.Request.Scope,
 		action, event.Request.AgentID, event.Result.Reason)
 	return nil
+}
+
+// --- Redaction ---
+
+// Redactor scrubs obvious secret patterns from event payloads before they
+// leave the process. This is a best-effort defense; the authoritative fix is
+// for agents not to pass secrets through as command arguments.
+type Redactor struct {
+	patterns []*regexp.Regexp
+}
+
+// DefaultRedactor returns a Redactor pre-loaded with common secret patterns:
+// bearer tokens, AWS-style access keys, GitHub/Slack tokens, and generic
+// KEY=value pairs where the key name contains "secret"/"token"/"password".
+func DefaultRedactor() *Redactor {
+	return &Redactor{
+		patterns: []*regexp.Regexp{
+			regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9_\-\.]+`),
+			regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
+			regexp.MustCompile(`ghp_[A-Za-z0-9]{36,}`),
+			regexp.MustCompile(`xox[baprs]-[A-Za-z0-9\-]+`),
+			regexp.MustCompile(`(?i)(secret|token|password|api[_\-]?key)\s*=\s*\S+`),
+		},
+	}
+}
+
+// Redact returns a copy of the event with sensitive substrings replaced by
+// "[REDACTED]" in the command, URL, and reason fields.
+func (r *Redactor) Redact(e Event) Event {
+	e.Request.Command = r.redactString(e.Request.Command)
+	e.Request.URL = r.redactString(e.Request.URL)
+	e.Result.Reason = r.redactString(e.Result.Reason)
+	if e.Request.Meta != nil {
+		meta := make(map[string]string, len(e.Request.Meta))
+		for k, v := range e.Request.Meta {
+			meta[k] = r.redactString(v)
+		}
+		e.Request.Meta = meta
+	}
+	return e
+}
+
+func (r *Redactor) redactString(s string) string {
+	if s == "" {
+		return s
+	}
+	for _, p := range r.patterns {
+		s = p.ReplaceAllString(s, "[REDACTED]")
+	}
+	return s
 }

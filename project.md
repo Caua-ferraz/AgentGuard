@@ -162,9 +162,9 @@ The heart of AgentGuard. Implements `Engine.Check(ActionRequest) CheckResult`.
 4. Default DENY — no matching rule → denied
 
 **Pattern matching (`globMatch`):**
-- Standard glob via `filepath.Match` (e.g., `rm -rf *`, `*.txt`)
-- Double-star `**` for recursive path matching (e.g., `/etc/**`)
-- Domain matching supports wildcards (e.g., `*.googleapis.com`)
+- Wildcard match for non-path patterns (shell commands, domains). `*` matches any run of characters including spaces/dots; anchored to both ends.
+- Segment-based matching for patterns containing `**` — splits on `/` and matches path components. `**` consumes zero or more whole segments. Example: `**/secret/**` matches `/home/user/secret/data` but **not** `/notsecret/x` (substring bypass fixed).
+- Domain globs use the same wildcard semantics (e.g., `*.googleapis.com`).
 
 **Thread safety:** `sync.RWMutex` — multiple concurrent checks are safe; policy hot-swap uses an exclusive write lock.
 
@@ -178,16 +178,23 @@ The heart of AgentGuard. Implements `Engine.Check(ActionRequest) CheckResult`.
 Exposes the REST API agents call. Also manages the approval queue and dashboard.
 
 **Endpoints:**
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/v1/check` | Main policy enforcement |
-| POST | `/v1/approve/{id}` | Approve a pending action |
-| POST | `/v1/deny/{id}` | Deny a pending action |
-| GET | `/v1/audit` | Query audit log (filtered) |
-| GET | `/health` | Health check |
-| GET | `/dashboard` | Web dashboard UI |
-| GET | `/api/pending` | List pending approvals |
-| GET | `/api/stream` | SSE stream of new pending actions |
+| Method | Path | Purpose | Auth when `--api-key` set |
+|---|---|---|---|
+| POST | `/v1/check` | Main policy enforcement | open |
+| POST | `/v1/approve/{id}` | Approve a pending action | Bearer OR session+CSRF |
+| POST | `/v1/deny/{id}` | Deny a pending action | Bearer OR session+CSRF |
+| GET | `/v1/status/{id}` | Poll approval status | Bearer OR session |
+| GET | `/v1/audit` | Query audit log (filtered) | Bearer OR session |
+| POST | `/auth/login` | Exchange API key for session cookie | open |
+| POST | `/auth/logout` | Destroy the current session | open |
+| GET | `/health` | Health check | open |
+| GET | `/metrics` | Prometheus metrics | open |
+| GET | `/dashboard` | Web dashboard UI (or login page) | session |
+| GET | `/api/pending` | List pending approvals | Bearer OR session |
+| GET | `/api/stream` | SSE stream of new pending actions | Bearer OR session |
+| GET | `/api/stats` | Aggregate counter snapshot | Bearer OR session |
+
+Session auth uses a **double-submit cookie**: `/auth/login` sets a HttpOnly `ag_session` cookie plus a JS-readable `ag_csrf` cookie (same token). State-changing requests must echo the CSRF token in the `X-CSRF-Token` header. The API key is never embedded in the dashboard HTML.
 
 **ApprovalQueue:** In-memory `map[string]*PendingAction`. Each pending action has a `response chan policy.Decision` that blocks `Resolve()` callers. SSE watchers are notified on `Add()`.
 
@@ -278,7 +285,8 @@ watcher goroutine (every 2s):
 | Add a new policy scope (e.g., `database`) | `pkg/policy/engine.go` — add case in `matchRule()` |
 | Change how rules are evaluated | `pkg/policy/engine.go:163-215` — `Engine.Check()` |
 | Add a new API endpoint | `pkg/proxy/server.go` — add handler + register in `NewServer()` |
-| Add authentication | `pkg/proxy/server.go` — add auth middleware, wire in `NewServer():80` |
+| Tweak auth / sessions | `pkg/proxy/auth.go` (`requireAuthOrSession`, `SessionStore`, login/logout handlers) |
+| Tighten CORS | `pkg/proxy/server.go` — `withCORS` middleware (exact-origin match) |
 | Swap audit backend (file → DB) | `pkg/audit/logger.go` — implement `Logger` interface |
 | Add rate limiting enforcement | `pkg/policy/engine.go` — consume `RuleSet.RateLimit` in `Check()` |
 | Add a new framework adapter (Python) | `plugins/python/agentguard/adapters/` — new file, implement wrapping |
@@ -290,23 +298,49 @@ watcher goroutine (every 2s):
 
 ## Known Limitations and TODOs
 
-### Bugs
-- **`globMatch` only supports one `**` per pattern:** Patterns like `**/sensitive/**` silently return false. Multi-segment `**` matching needs implementation or a load-time validation error.
-
-### Security TODOs
-- Approve/deny endpoints bind to localhost when no `--api-key` is set, but network deployments still need a key for proper auth
-- `conditions` in rules (`require_prior`, `time_window`) are parsed but never enforced — could give false sense of security
-
-### Features Parsed but Not Enforced
-- `conditions` in Rule (`require_prior`, `time_window`) — parsed, never enforced
-- `max_per_session` in CostLimits — parsed, but no session-level cost accumulator exists
-
 ### Performance TODOs
-- Audit `Query()` does a full file scan on every call — replace with a database-backed implementation (SQLite or PostgreSQL)
-- Rate limiter bucket map grows unbounded — needs TTL-based eviction for long-running servers
-- Startup counter seeding scans the full audit log — should persist counters separately
+- Audit `Query()` does a full file scan on every call — replace with a database-backed implementation. A SQLite logger (`pkg/audit/sqlite_logger.go`) exists and is SQL-injection-safe but is not wired in by default.
+- Startup counter seeding scans the full audit log — should persist counters separately for servers with very large existing logs.
 
 ### Operational TODOs
-- Approval queue is in-memory only — lost on restart; needs persistence
-- No audit log rotation or retention policy
-- Module path is `github.com/Caua-ferraz/AgentGuard`
+- Approval queue is in-memory only — lost on restart; needs persistence.
+- No audit log rotation or retention policy — ship the log to an external system in production.
+- Module path is `github.com/Caua-ferraz/AgentGuard`.
+
+### Resolved (v0.4.0 / v0.4.1)
+- ✔ `globMatch` now supports multi-`**` patterns with segment-based matching (no more substring bypass).
+- ✔ `conditions.require_prior` + `time_window` are enforced at check time. For v0.4.1, rules with only `time_window` (no `require_prior`) log a load-time warning but pass (restored backward-compat; the engine cannot satisfy a `time_window` without something to time-bound).
+- ✔ `max_per_session` is enforced with atomic check-and-reserve inside `Engine.Check` — concurrent requests on the same session cannot collectively exceed the budget (TOCTOU fix). `Engine.RefundCost` is available to roll back a reservation.
+- ✔ Rate limiter has TTL-based eviction of stale buckets when at capacity.
+- ✔ Dashboard no longer embeds the API key in HTML. Login flow issues an HTTP-only session cookie; double-submit CSRF token on writes.
+- ✔ Notifier dispatcher uses a bounded worker pool with an event queue; excess events are dropped with a counter (`notify.DroppedEvents`).
+- ✔ Input normalization (strip NUL/C0 controls, single-pass URL-decode for paths) runs before policy matching.
+- ✔ CLI subcommands (`approve`, `deny`, `status`, `audit`) accept `--api-key` or read `AGENTGUARD_API_KEY`.
+- ✔ `--allowed-origin` CLI flag on `serve`. CORS default with no `--allowed-origin` remains permissive-localhost for backward compat (safe now: session cookies are SameSite=Strict, CSRF double-submit is required for state-changing requests, API key is never in HTML).
+
+---
+
+## v0.5.0 — Planned Fixes
+
+These items are deliberately deferred. They are performance or defense-in-depth improvements that do not block v0.4.1; the current behavior is safe and correct.
+
+### Security hardening
+- **Rate limit `/auth/login`**: brute-force a short API key is trivial. Either add a per-IP rate limiter on the login endpoint or document a minimum key length (≥32 random chars) in the deployment guide.
+- **CSP header on `/dashboard` and `/auth/login`**: add `Content-Security-Policy: default-src 'self'; script-src 'self'; frame-ancestors 'none'`. `ag_csrf` is JS-readable by design (double-submit pattern) — CSP hardens the dashboard against XSS concentrations of risk.
+- **Trust-proxy / `X-Forwarded-Proto` handling**: when AgentGuard sits behind a TLS-terminating reverse proxy, `r.TLS` is nil, so `Secure` is not set on cookies. Functionally safe (proxy enforces HTTPS) but wrong on the wire. Consume `X-Forwarded-Proto` under an opt-in `--trust-proxy` flag.
+
+### Configurability
+- **`SessionTTL` as a Config field** (currently hardcoded 1 hour in `pkg/proxy/auth.go`). Expose via `--session-ttl` on `serve`.
+- **`MaxSessions` as a Config field** (currently 1024). Expose similarly.
+
+### Performance
+- **`resolveRules` allocation caching**: per-call `[]RuleSet` allocation for agents with overrides. Cache on `(policy-version-counter, agent_id)`; invalidate on `UpdatePolicy`.
+- **`FileLogger.Log` batching / SQLite wire-up**: single mutex per write serializes audit writes. Either batch and flush periodically or wire `sqlite_logger.go` behind an `--audit-backend=sqlite` flag.
+- **Histogram `Observe` lock-free**: `sync.Mutex` in `pkg/metrics/metrics.go:82-93` is fine at hundreds of RPS, a bottleneck higher. Convert bucket counts to `[]uint64` with `atomic.AddUint64`.
+- **Notifier `Redactor` regex cost**: 5 regexes × 3 fields per event. Negligible today; precompile once (done) and consider a single combined pattern under heavy notification load.
+- **Startup audit replay full-file scan**: servers restarting against a multi-GB audit log stall on boot. Persist counter state separately (sidecar file or SQLite table) and seed from it.
+
+### Observability & docs
+- **Verify line-number references in `project.md` "Common Edit Points"**: file lengths changed since the last sweep; the `dashboardHTML` pointer in particular is stale.
+- **Metric for `notify.DroppedEvents`**: currently a package-level `uint64`, not wired into the Prometheus exporter.
+- **Per-rule deny-rate + approval-latency metrics**.

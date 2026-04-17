@@ -75,15 +75,28 @@ func (l *FileLogger) Log(entry Entry) error {
 }
 
 // Query reads the log file and filters entries.
+//
+// Lock scope: we hold l.mu only long enough to capture the current file path
+// (effectively immutable, but we still snapshot it under the lock for safety)
+// and open a read handle. The actual scan runs WITHOUT the lock so concurrent
+// Log() writes are not blocked by long queries.
+//
+// This is safe because:
+//   - FileLogger.file is opened in O_APPEND mode, so writes go to EOF
+//     atomically (on POSIX, append writes of ≤PIPE_BUF are atomic).
+//   - Our read handle captures a consistent size at open; extra bytes written
+//     after we open are simply not seen by this query.
+//   - Scanner discards partial lines implicitly (each line terminated by \n).
+//
 // TODO(perf): Query scans the full file linearly. For production workloads
 // with large audit logs, replace with a database-backed implementation
 // (SQLite or PostgreSQL).
 func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
+	path := l.file.Name()
+	l.mu.Unlock()
 
-	// Read from beginning
-	readFile, err := os.Open(l.file.Name())
+	readFile, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
@@ -91,6 +104,10 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 
 	var results []Entry
 	scanner := bufio.NewScanner(readFile)
+	// Default Scanner buffer is 64KB; bump so large entries don't break the
+	// scan. Audit entries normally well under 4KB.
+	scanner.Buffer(make([]byte, 64*1024), 1<<20)
+
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {

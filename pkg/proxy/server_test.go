@@ -497,8 +497,8 @@ func TestHandleAuditQuery(t *testing.T) {
 
 // --- Dashboard ---
 
-func TestHandleDashboard(t *testing.T) {
-	srv := newTestServer(t)
+func TestHandleDashboard_UnauthenticatedServesLogin(t *testing.T) {
+	srv := newTestServer(t) // APIKey set → login page expected
 
 	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
 	w := httptest.NewRecorder()
@@ -507,36 +507,38 @@ func TestHandleDashboard(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	if !strings.Contains(w.Header().Get("Content-Type"), "text/html") {
-		t.Error("expected text/html content type")
-	}
-	if w.Header().Get("Cache-Control") != "no-store" {
-		t.Error("expected Cache-Control: no-store")
-	}
 	body := w.Body.String()
-	if !strings.Contains(body, "AgentGuard Dashboard") {
-		t.Error("dashboard should contain title")
+	if !strings.Contains(body, "AgentGuard — Sign in") {
+		t.Error("unauthenticated dashboard should serve the login page")
 	}
-	// Verify XSS fix: no innerHTML assignments for user data
-	if strings.Contains(body, ".innerHTML = `") {
-		t.Error("dashboard should not use innerHTML with template literals (XSS risk)")
+	if strings.Contains(body, "test-secret") {
+		t.Errorf("login page must not leak the API key anywhere in the HTML")
 	}
 }
 
-func TestHandleDashboard_APIKeyMetaTag(t *testing.T) {
-	srv := newTestServer(t) // has APIKey: "test-secret"
+func TestHandleDashboard_AuthenticatedServesDashboard(t *testing.T) {
+	srv := newTestServer(t)
+
+	sess, err := srv.sessions.Create()
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: sess.Token})
 	w := httptest.NewRecorder()
 	srv.handleDashboard(w, req)
 
 	body := w.Body.String()
-	if !strings.Contains(body, `<meta name="agentguard-api-key" content="test-secret">`) {
-		t.Error("dashboard should contain API key meta tag when APIKey is set")
+	if !strings.Contains(body, "AgentGuard Dashboard") {
+		t.Error("authenticated dashboard must serve the dashboard page")
+	}
+	if strings.Contains(body, "test-secret") {
+		t.Errorf("dashboard must never embed the API key in HTML")
 	}
 }
 
-func TestHandleDashboard_NoMetaTagWithoutAPIKey(t *testing.T) {
+func TestHandleDashboard_NoAPIKey_ServesDashboardFreely(t *testing.T) {
 	srv := newTestServer(t, func(c *Config) { c.APIKey = "" })
 
 	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
@@ -544,8 +546,35 @@ func TestHandleDashboard_NoMetaTagWithoutAPIKey(t *testing.T) {
 	srv.handleDashboard(w, req)
 
 	body := w.Body.String()
-	if strings.Contains(body, `<meta name="agentguard-api-key"`) {
-		t.Error("dashboard should NOT contain API key meta tag when APIKey is empty")
+	if !strings.Contains(body, "AgentGuard Dashboard") {
+		t.Error("with no API key configured, /dashboard should serve the dashboard directly")
+	}
+	if strings.Contains(body, `agentguard-api-key`) {
+		t.Error("dashboard must never embed an api-key meta tag")
+	}
+}
+
+func TestHandleDashboard_SecurityHeaders(t *testing.T) {
+	srv := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	w := httptest.NewRecorder()
+	srv.handleDashboard(w, req)
+
+	for _, h := range []string{"X-Content-Type-Options", "X-Frame-Options", "Referrer-Policy", "Cache-Control"} {
+		if w.Header().Get(h) == "" {
+			t.Errorf("missing security header %s", h)
+		}
+	}
+}
+
+func TestDashboardHTML_NoAPIKeyMetaTag(t *testing.T) {
+	// Compile-time guarantee: the API key must never appear in the embedded
+	// dashboard HTML, regardless of server configuration.
+	if strings.Contains(dashboardHTML, "agentguard-api-key") {
+		t.Fatal("dashboard HTML must not reference the old api-key meta tag")
+	}
+	if strings.Contains(dashboardHTML, "meta[name=\"agentguard-api-key\"]") {
+		t.Fatal("dashboard HTML must not read an api-key meta tag")
 	}
 }
 
@@ -557,16 +586,14 @@ func TestHandleApprove_NoAuthHeader(t *testing.T) {
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)
 
-	// No Authorization header
+	// No Authorization header, no cookie — must 401 through requireAuthOrSession.
 	req := httptest.NewRequest(http.MethodPost, "/v1/approve/"+pending.ID, nil)
 	w := httptest.NewRecorder()
-
-	// Must go through requireAuth middleware
-	handler := requireAuth(srv.cfg.APIKey, srv.handleApprove)
+	handler := requireAuthOrSession(srv.cfg.APIKey, srv.sessions, true, srv.handleApprove)
 	handler(w, req)
 
 	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 without auth header, got %d", w.Code)
+		t.Errorf("expected 401 without auth, got %d", w.Code)
 	}
 }
 
@@ -580,12 +607,11 @@ func TestHandleDeny_NoAuthHeader(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/deny/"+pending.ID, nil)
 	w := httptest.NewRecorder()
-
-	handler := requireAuth(srv.cfg.APIKey, srv.handleDeny)
+	handler := requireAuthOrSession(srv.cfg.APIKey, srv.sessions, true, srv.handleDeny)
 	handler(w, req)
 
 	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 without auth header, got %d", w.Code)
+		t.Errorf("expected 401 without auth, got %d", w.Code)
 	}
 }
 
@@ -654,9 +680,10 @@ func TestHandleStats(t *testing.T) {
 
 // --- Auth middleware ---
 
-func TestRequireAuth_ValidKey(t *testing.T) {
+func TestRequireAuthOrSession_ValidBearer(t *testing.T) {
+	store := NewSessionStore()
 	called := false
-	handler := requireAuth("secret", func(w http.ResponseWriter, r *http.Request) {
+	handler := requireAuthOrSession("secret", store, true, func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	})
@@ -667,16 +694,17 @@ func TestRequireAuth_ValidKey(t *testing.T) {
 	handler(w, req)
 
 	if !called {
-		t.Error("handler should have been called")
+		t.Error("handler should have been called with valid bearer")
 	}
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
 }
 
-func TestRequireAuth_InvalidKey(t *testing.T) {
+func TestRequireAuthOrSession_InvalidBearer(t *testing.T) {
+	store := NewSessionStore()
 	called := false
-	handler := requireAuth("secret", func(w http.ResponseWriter, r *http.Request) {
+	handler := requireAuthOrSession("secret", store, true, func(w http.ResponseWriter, r *http.Request) {
 		called = true
 	})
 
@@ -686,16 +714,17 @@ func TestRequireAuth_InvalidKey(t *testing.T) {
 	handler(w, req)
 
 	if called {
-		t.Error("handler should NOT have been called with wrong key")
+		t.Error("handler should NOT be called with wrong bearer")
 	}
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", w.Code)
 	}
 }
 
-func TestRequireAuth_NoKey(t *testing.T) {
+func TestRequireAuthOrSession_NoAPIKey_AllowsAll(t *testing.T) {
+	store := NewSessionStore()
 	called := false
-	handler := requireAuth("", func(w http.ResponseWriter, r *http.Request) {
+	handler := requireAuthOrSession("", store, true, func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	})
@@ -709,12 +738,13 @@ func TestRequireAuth_NoKey(t *testing.T) {
 	}
 }
 
-func TestRequireAuth_MalformedHeader(t *testing.T) {
-	handler := requireAuth("secret", func(w http.ResponseWriter, r *http.Request) {
+func TestRequireAuthOrSession_MalformedHeader(t *testing.T) {
+	store := NewSessionStore()
+	handler := requireAuthOrSession("secret", store, true, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler should NOT be called with malformed header")
 	})
 
-	// No "Bearer " prefix
+	// No "Bearer " prefix — treated as missing auth.
 	req := httptest.NewRequest(http.MethodPost, "/test", nil)
 	req.Header.Set("Authorization", "secret")
 	w := httptest.NewRecorder()
@@ -744,37 +774,54 @@ func TestNewServer_HasHTTPTimeouts(t *testing.T) {
 
 // --- CORS middleware ---
 
-func TestCORS_LocalhostAllowed(t *testing.T) {
+// Backward compat (v0.4.1): empty AllowedOrigin means permissive-localhost —
+// accept http://localhost:* and http://127.0.0.1:*, reject everything else.
+// This mirrors pre-v0.4.0 behavior and is safe because the dashboard no
+// longer embeds the API key and session cookies are SameSite=Strict.
+func TestCORS_EmptyAllowedOrigin_PermissiveLocalhost(t *testing.T) {
 	handler := withCORS("")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	req.Header.Set("Origin", "http://localhost:3000")
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
+	cases := []struct {
+		origin string
+		want   bool
+	}{
+		{"http://localhost:3000", true},
+		{"http://localhost:8080", true},
+		{"http://127.0.0.1:9999", true},
+		{"http://localhost", true},
+		{"http://127.0.0.1", true},
 
-	if w.Header().Get("Access-Control-Allow-Origin") != "http://localhost:3000" {
-		t.Error("expected localhost origin to be allowed")
+		// External origins must still be rejected.
+		{"https://evil.com", false},
+		// Hostname-prefix attack: must NOT slip through.
+		{"http://localhost.evil.com", false},
+		{"http://127.0.0.1.evil.com", false},
+		// No scheme/protocol-relative URL must not match.
+		{"//localhost:3000", false},
+	}
+
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		req.Header.Set("Origin", c.origin)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		got := w.Header().Get("Access-Control-Allow-Origin")
+		if c.want {
+			if got != c.origin {
+				t.Errorf("origin %q should be allowed, got ACAO=%q", c.origin, got)
+			}
+		} else {
+			if got != "" {
+				t.Errorf("origin %q should be rejected, got ACAO=%q", c.origin, got)
+			}
+		}
 	}
 }
 
-func TestCORS_ExternalBlocked(t *testing.T) {
-	handler := withCORS("")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	req.Header.Set("Origin", "https://evil.com")
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	if w.Header().Get("Access-Control-Allow-Origin") != "" {
-		t.Error("external origin should not be allowed")
-	}
-}
-
-func TestCORS_CustomOrigin(t *testing.T) {
+func TestCORS_ExactOriginMatch(t *testing.T) {
 	handler := withCORS("https://myapp.com")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -785,22 +832,66 @@ func TestCORS_CustomOrigin(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	if w.Header().Get("Access-Control-Allow-Origin") != "https://myapp.com" {
-		t.Error("custom origin should be allowed")
+		t.Error("exact origin match should be allowed")
+	}
+	if w.Header().Get("Access-Control-Allow-Credentials") != "true" {
+		t.Error("credentials mode must be enabled so session cookie is sent")
+	}
+	if !strings.Contains(w.Header().Get("Vary"), "Origin") {
+		t.Error("Vary: Origin must be set to prevent cache poisoning")
 	}
 }
 
-func TestCORS_Preflight(t *testing.T) {
-	handler := withCORS("")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func TestCORS_OriginMismatch_Rejected(t *testing.T) {
+	handler := withCORS("https://myapp.com")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Subtly different origin (trailing port) must NOT match.
+	for _, origin := range []string{"https://myapp.com:8443", "http://myapp.com", "https://myapp.com.evil.com"} {
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		req.Header.Set("Origin", origin)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("origin %q must not match %q but got ACAO=%q", origin, "https://myapp.com", got)
+		}
+	}
+}
+
+func TestCORS_Preflight_StrictMode(t *testing.T) {
+	handler := withCORS("https://app.example")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTeapot) // should not reach here
 	}))
 
 	req := httptest.NewRequest(http.MethodOptions, "/v1/check", nil)
-	req.Header.Set("Origin", "http://localhost:8080")
+	req.Header.Set("Origin", "https://app.example")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("preflight should return 200, got %d", w.Code)
+	if w.Code != http.StatusNoContent {
+		t.Errorf("preflight should short-circuit with 204, got %d", w.Code)
+	}
+}
+
+// Preflight also short-circuits in permissive-localhost mode so browsers
+// don't see the downstream 405/teapot.
+func TestCORS_Preflight_PermissiveLocalhost(t *testing.T) {
+	handler := withCORS("")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/v1/check", nil)
+	req.Header.Set("Origin", "http://localhost:3000")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("preflight should short-circuit with 204, got %d", w.Code)
+	}
+	if w.Header().Get("Access-Control-Allow-Origin") != "http://localhost:3000" {
+		t.Error("permissive-localhost mode must reflect the localhost origin on preflight")
 	}
 }
 
