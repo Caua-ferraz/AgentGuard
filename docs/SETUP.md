@@ -73,7 +73,98 @@ curl -X POST http://localhost:8080/v1/check \
 curl -X POST http://localhost:8080/v1/check \
   -H "Content-Type: application/json" \
   -d '{"scope": "shell", "command": "sudo apt install vim", "agent_id": "test"}'
+
+# Filesystem scope — DENIED because /etc is not in the allow list
+curl -X POST http://localhost:8080/v1/check \
+  -H "Content-Type: application/json" \
+  -d '{"scope": "filesystem", "action": "write", "path": "/etc/passwd", "agent_id": "test"}'
+
+# Network scope — ALLOWED (api.openai.com is whitelisted)
+curl -X POST http://localhost:8080/v1/check \
+  -H "Content-Type: application/json" \
+  -d '{"scope": "network", "domain": "api.openai.com", "agent_id": "test"}'
 ```
+
+---
+
+## Authentication
+
+By default (`--api-key` not set) the server binds to `127.0.0.1` only — safe
+for local dev, but approve/deny/audit/status are unauthenticated. For
+anything beyond local dev, set an API key:
+
+```bash
+./agentguard serve \
+  --policy configs/default.yaml \
+  --api-key YOUR_SECRET \
+  --dashboard
+
+# Or via environment (server + CLI both read this):
+export AGENTGUARD_API_KEY=YOUR_SECRET
+./agentguard serve --policy configs/default.yaml --dashboard
+```
+
+With an API key configured:
+
+| Endpoint | Who can call it |
+|---|---|
+| `POST /v1/check` | Anyone — the policy answer isn't sensitive. |
+| `POST /v1/approve/{id}`, `POST /v1/deny/{id}` | Bearer token **or** dashboard session + `X-CSRF-Token`. |
+| `GET /v1/status/{id}`, `GET /v1/audit` | Bearer token **or** dashboard session. |
+| `GET /dashboard`, `GET /api/*` | Dashboard session only (serves login page otherwise). |
+| `POST /auth/login`, `POST /auth/logout` | Unauthenticated (login validates the key; logout destroys the session). |
+| `GET /health`, `GET /metrics` | Unauthenticated. |
+
+### Dashboard login flow
+
+1. Visit `http://<server>/dashboard` — if not logged in, you get a login form.
+2. Enter the API key — the server issues an HTTP-only `ag_session` cookie
+   plus a JS-readable `ag_csrf` cookie (same token, double-submit pattern).
+3. Approve/deny buttons now work; the dashboard JS attaches `X-CSRF-Token`
+   automatically. The API key is **never** embedded in the HTML.
+4. `POST /auth/logout` destroys the session.
+
+### From `curl` with Bearer auth
+
+```bash
+export AGENTGUARD_API_KEY=YOUR_SECRET
+
+# Approve an action
+curl -X POST "http://localhost:8080/v1/approve/ap_abc123" \
+  -H "Authorization: Bearer $AGENTGUARD_API_KEY"
+
+# Query the audit log
+curl "http://localhost:8080/v1/audit?agent_id=my-bot&limit=20" \
+  -H "Authorization: Bearer $AGENTGUARD_API_KEY"
+```
+
+### From `curl` with session cookies
+
+```bash
+# 1. Login — capture cookies into a jar.
+curl -c /tmp/cj -X POST "http://localhost:8080/auth/login" \
+  -H "Content-Type: application/json" \
+  -d "{\"api_key\": \"$AGENTGUARD_API_KEY\"}"
+
+# 2. Use cookies on subsequent calls. Writes also need X-CSRF-Token
+#    (same value as the ag_csrf cookie).
+CSRF=$(awk '/ag_csrf/ {print $7}' /tmp/cj)
+curl -b /tmp/cj -X POST "http://localhost:8080/v1/approve/ap_abc123" \
+  -H "X-CSRF-Token: $CSRF"
+```
+
+### CORS for browser clients on other origins
+
+By default (no `--allowed-origin`), AgentGuard accepts CORS requests from
+any `http://localhost:*` or `http://127.0.0.1:*` origin. For production
+deployments where a specific frontend needs to talk to AgentGuard:
+
+```bash
+./agentguard serve --api-key YOUR_SECRET \
+  --allowed-origin https://console.your-company.com
+```
+
+Exact-match only — no wildcards, no subdomains.
 
 ---
 
@@ -101,15 +192,51 @@ pip install -e ".[dev]"
 ```python
 from agentguard import Guard
 
-guard = Guard("http://localhost:8080", agent_id="my-agent")
+# Both `base_url` and `api_key` fall back to environment variables if not
+# passed explicitly:
+#   AGENTGUARD_URL      → base_url (default: http://localhost:8080)
+#   AGENTGUARD_API_KEY  → api_key  (required when the server has --api-key)
+guard = Guard("http://localhost:8080", agent_id="my-agent", api_key="YOUR_SECRET")
 
+# --- Plain check ---
 result = guard.check("shell", command="ls -la")
 print(result.decision)  # "ALLOW"
 print(result.allowed)   # True
 
-result = guard.check("shell", command="rm -rf /")
-print(result.decision)  # "REQUIRE_APPROVAL"
-print(result.approval_url)  # http://localhost:8080/v1/approve/ap_...
+# --- Approval flow ---
+result = guard.check("shell", command="rm -rf /tmp/data")
+if result.needs_approval:
+    print(f"Visit {result.approval_url} or approve via CLI/SDK")
+
+    # Block until a human resolves it (or timeout → DENY).
+    resolved = guard.wait_for_approval(
+        result.approval_id, timeout=300, poll_interval=2,
+    )
+    if resolved.allowed:
+        run(command)
+
+# --- Programmatic approve / deny (needs api_key) ---
+guard.approve("ap_abc123")   # → True on success
+guard.deny("ap_abc123")      # → True on success
+
+# --- Cost guardrails ---
+r = guard.check(
+    "cost",
+    command="llm-call",
+    session_id="user-123",
+    est_cost=0.42,   # $0.42 for this action
+)
+# Engine atomically reserves the cost against max_per_session when allowed.
+
+# --- Auto-check every invocation with the @guarded decorator ---
+from agentguard import guarded
+
+@guarded("shell", guard=guard)
+def run_command(cmd: str):
+    os.system(cmd)
+
+run_command("ls -la")      # allowed → executes
+run_command("rm -rf /")    # denied → raises PermissionError
 ```
 
 ### LangChain Integration
@@ -186,14 +313,42 @@ npm run build
 ### Usage
 
 ```typescript
-import { AgentGuard } from '@agentguard/sdk';
+import { AgentGuard, guarded } from '@agentguard/sdk';
 
-const guard = new AgentGuard('http://localhost:8080');
+const guard = new AgentGuard({
+  baseUrl: 'http://localhost:8080',
+  agentId: 'my-bot',
+  apiKey: process.env.AGENTGUARD_API_KEY,
+  // failMode: 'deny' (default) — if the server is unreachable, check()
+  // returns DENY. Set to 'allow' only if you know what you're doing.
+});
 
+// Plain check
 const result = await guard.check('shell', { command: 'ls -la' });
-if (result.allowed) {
-  // proceed
+if (result.allowed) { /* proceed */ }
+
+// Approval flow
+const r = await guard.check('shell', { command: 'sudo restart' });
+if (r.needsApproval) {
+  const resolved = await guard.waitForApproval(r.approvalId!, 300_000, 2_000);
+  if (resolved.allowed) { /* proceed */ }
 }
+
+// Programmatic approve / deny (needs apiKey)
+await guard.approve('ap_abc123');
+await guard.deny('ap_abc123');
+
+// Cost guardrails
+await guard.check('cost', {
+  command: 'llm-call',
+  sessionId: 'user-123',
+  estCost: 0.42,
+});
+
+// Higher-order wrapper — every invocation goes through AgentGuard
+const safeExec = guarded(guard, 'shell', (cmd: string) => execAsync(cmd));
+await safeExec('ls -la');    // allowed → resolves
+await safeExec('rm -rf /');  // denied  → throws
 ```
 
 ---
@@ -204,24 +359,38 @@ if (result.allowed) {
 # Start the server
 agentguard serve --policy configs/default.yaml --dashboard --watch
 
-# Validate policy files
+# With authentication (also reads AGENTGUARD_API_KEY from the environment)
+agentguard serve --policy configs/default.yaml --api-key YOUR_SECRET --dashboard
+
+# Validate policy files (no server needed)
 agentguard validate --policy configs/default.yaml
 
-# Approve a pending action
-agentguard approve ap_abc123def456
+# Approve / deny — accept --api-key or AGENTGUARD_API_KEY env var.
+agentguard approve --api-key YOUR_SECRET ap_abc123def456
+AGENTGUARD_API_KEY=YOUR_SECRET agentguard deny ap_abc123def456
 
-# Deny a pending action
-agentguard deny ap_abc123def456
+# Check server status and pending approvals (auth required if server is gated)
+agentguard status --api-key YOUR_SECRET
 
-# Check server status and pending approvals
-agentguard status
-
-# Query the audit log
-agentguard audit --agent my-bot --decision DENY --limit 20
+# Query the audit log with filters
+agentguard audit --agent my-bot --decision DENY --limit 20 --api-key YOUR_SECRET
 
 # Print version
 agentguard version
 ```
+
+### `serve` flags reference
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--policy` | `configs/default.yaml` | Policy YAML file. |
+| `--port` | `8080` | Listen port. |
+| `--dashboard` | off | Enable `/dashboard` + `/api/*`. |
+| `--watch` | off | Hot-reload the policy on mtime change. |
+| `--audit-log` | `audit.jsonl` | JSON-lines audit log path. In Docker, defaults to `/var/lib/agentguard/audit.jsonl`. |
+| `--api-key` | unset (`AGENTGUARD_API_KEY` env) | Bearer token gating approve/deny/audit/status/dashboard. |
+| `--base-url` | `http://localhost:<port>` | External URL used to build `approval_url` values (e.g. when behind a reverse proxy). |
+| `--allowed-origin` | unset | Exact CORS origin to allow. Empty = permissive-localhost. |
 
 ---
 

@@ -256,6 +256,64 @@ await guard.check('cost', {
 });
 ```
 
+### Handling `REQUIRE_APPROVAL` from an agent
+
+Agents driving a long-running workflow usually need to **block** until a human
+clicks approve/deny. Both SDKs expose a polling helper:
+
+```python
+# Python
+result = guard.check("shell", command="sudo restart service")
+if result.needs_approval:
+    # Block up to 5 minutes, polling /v1/status every 2s. If --api-key is
+    # set on the server, api_key on Guard is attached automatically.
+    resolved = guard.wait_for_approval(result.approval_id, timeout=300, poll_interval=2)
+    if resolved.allowed:
+        run(command)
+
+# Human operators can approve/deny programmatically too (api_key required
+# if the server has --api-key set):
+guard.approve("ap_abc123")   # → True on success
+guard.deny("ap_abc123")
+```
+
+```typescript
+// TypeScript — same pattern
+const result = await guard.check('shell', { command: 'sudo restart service' });
+if (result.needsApproval) {
+  const resolved = await guard.waitForApproval(result.approvalId!, 300_000, 2_000);
+  if (resolved.allowed) run(command);
+}
+await guard.approve('ap_abc123');
+await guard.deny('ap_abc123');
+```
+
+### Decorator / HOF for auto-checking every call
+
+If you want every invocation of a function to pass through AgentGuard without
+writing the `guard.check(...)` plumbing each time:
+
+```python
+# Python — decorator on any function taking a command string.
+from agentguard import guarded
+
+@guarded("shell", guard=guard)
+def run_command(cmd: str):
+    os.system(cmd)
+
+run_command("ls -la")       # allowed → executes
+run_command("rm -rf /")     # denied → raises PermissionError
+```
+
+```typescript
+// TypeScript — higher-order function wrapping an async function.
+import { guarded } from '@agentguard/sdk';
+
+const safeExec = guarded(guard, 'shell', (cmd: string) => execAsync(cmd));
+await safeExec('ls -la');     // allowed → resolves
+await safeExec('rm -rf /');   // denied → throws
+```
+
 ## Architecture
 
 ```
@@ -451,6 +509,31 @@ agentguard deny       # Deny a pending action from CLI
 agentguard status     # Show server health and pending approvals
 agentguard audit      # Query the audit log
 agentguard version    # Print version
+```
+
+### `serve` flags
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--policy` | `configs/default.yaml` | Path to the policy YAML file. |
+| `--port` | `8080` | Port to listen on. |
+| `--dashboard` | off | Serve the web dashboard + `/api/*` endpoints. |
+| `--watch` | off | Reload the policy file on mtime change (2s poll). |
+| `--audit-log` | `audit.jsonl` | Where to write the JSON-lines audit log. |
+| `--api-key` | unset | Bearer token for approve/deny/audit/status (also `AGENTGUARD_API_KEY` env). |
+| `--base-url` | `http://localhost:<port>` | External URL used to build `approval_url` values (e.g. when behind a reverse proxy). |
+| `--allowed-origin` | unset | Exact CORS origin to allow. Empty = permissive-localhost (any `http://localhost:*` or `http://127.0.0.1:*`). |
+
+### Client subcommands accept auth
+
+`approve`, `deny`, `status`, `audit` all take `--api-key` or read
+`AGENTGUARD_API_KEY` from the environment. Required when the server was started
+with `--api-key`.
+
+```bash
+export AGENTGUARD_API_KEY=your-secret
+agentguard approve ap_abc123
+agentguard audit --agent my-bot --decision DENY --limit 20
 ```
 
 ## Limitations & Threat Model
