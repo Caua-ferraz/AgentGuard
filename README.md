@@ -56,8 +56,19 @@ go build -o agentguard ./cmd/agentguard
 # Or via Go install
 go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@latest
 
-# Or Docker
-docker run -d -p 8080:8080 -v ./configs:/etc/agentguard agentguard:latest
+# Or Docker (uses the baked-in /etc/agentguard/default.yaml and writes the
+# audit log to a volume so it survives restarts; runs as non-root user
+# agentguard:10001 inside the container)
+docker run -d -p 8080:8080 \
+  -v agentguard-audit:/var/lib/agentguard \
+  agentguard:latest
+
+# To override the policy, mount your own file over the baked-in one
+# (not the whole /etc/agentguard directory, which would hide the default):
+docker run -d -p 8080:8080 \
+  -v $(pwd)/configs/my-policy.yaml:/etc/agentguard/default.yaml:ro \
+  -v agentguard-audit:/var/lib/agentguard \
+  agentguard:latest
 ```
 
 ### Define a Policy

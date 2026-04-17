@@ -13,6 +13,16 @@ class MockAgentGuardHandler(BaseHTTPRequestHandler):
     Class-level attributes control the response for each endpoint.
     Override them via the ``mock_server`` fixture's ``handler_class`` before
     the request arrives.
+
+    Thread-safety note
+    ------------------
+    The fixture uses ``ThreadingHTTPServer`` so multiple requests can be
+    served in parallel (required by concurrency tests). ``last_request_body``
+    and ``last_request_headers`` are class-level slots written from every
+    handler thread — they reflect whichever request wrote LAST, not any
+    particular one. Tests that make a **single** call and then assert on
+    these slots are fine; tests that do multiple concurrent calls must
+    assert on their own results, not on this shared state.
     """
 
     # Default responses (overridden per-test via class attributes)

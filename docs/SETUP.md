@@ -236,14 +236,23 @@ docker build -t agentguard:latest .
 ### Run
 
 ```bash
-# With default policy
-docker run -d -p 8080:8080 --name agentguard agentguard:latest
+# With default policy (baked into the image). Mount a named volume for the
+# audit log so it survives container restarts.
+docker run -d -p 8080:8080 --name agentguard \
+  -v agentguard-audit:/var/lib/agentguard \
+  agentguard:latest
 
-# With custom policy
-docker run -d -p 8080:8080 \
-  -v $(pwd)/configs:/etc/agentguard \
-  agentguard:latest \
-  serve --policy /etc/agentguard/default.yaml --dashboard
+# With a custom policy — mount your YAML over the baked-in default file.
+# Do NOT mount the whole /etc/agentguard directory; that hides the default.
+docker run -d -p 8080:8080 --name agentguard \
+  -v $(pwd)/configs/my-policy.yaml:/etc/agentguard/default.yaml:ro \
+  -v agentguard-audit:/var/lib/agentguard \
+  agentguard:latest
+
+# The container runs as the non-root user agentguard (uid 10001). If you
+# bind-mount a host directory for the audit log, make sure it's writable
+# by uid 10001:
+#   sudo chown -R 10001:10001 /path/on/host
 ```
 
 ---
