@@ -60,6 +60,12 @@ type Config struct {
 	BaseURL string
 	// Version is the application version string shown in /health.
 	Version string
+	// TLSTerminatedUpstream tells the server that session cookies should be
+	// issued with Secure set regardless of whether the incoming request has
+	// r.TLS populated. Set this when AgentGuard runs behind a reverse proxy
+	// that terminates TLS and does not forward X-Forwarded-Proto. Default
+	// false preserves v0.4.0 behavior (cookie Secure keyed to r.TLS only).
+	TLSTerminatedUpstream bool
 }
 
 // Server is the AgentGuard HTTP proxy.

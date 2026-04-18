@@ -39,6 +39,7 @@ func main() {
 	apiKey := serveCmd.String("api-key", "", "Bearer token for approve/deny endpoints")
 	baseURL := serveCmd.String("base-url", "", "External base URL for approval links (default: http://localhost:<port>)")
 	allowedOrigin := serveCmd.String("allowed-origin", "", "Exact CORS origin to accept (e.g. https://app.example). Empty means permissive-localhost (any http://localhost:* or http://127.0.0.1:*) for backward compat.")
+	tlsTerminated := serveCmd.Bool("tls-terminated-upstream", false, "Issue session cookies with Secure regardless of r.TLS — set when behind a TLS-terminating reverse proxy that does not forward X-Forwarded-Proto")
 
 	validateCmd := flag.NewFlagSet("validate", flag.ExitOnError)
 	validateFile := validateCmd.String("policy", "configs/default.yaml", "Policy file to validate")
@@ -81,7 +82,7 @@ func main() {
 	case "serve":
 		_ = serveCmd.Parse(os.Args[2:]) // flag.ExitOnError handles errors
 		// Fall back to AGENTGUARD_API_KEY env if --api-key not supplied.
-		runServe(*policyFile, *port, *dashboard, *watch, *auditPath, resolveAPIKey(*apiKey), *baseURL, *allowedOrigin)
+		runServe(*policyFile, *port, *dashboard, *watch, *auditPath, resolveAPIKey(*apiKey), *baseURL, *allowedOrigin, *tlsTerminated)
 
 	case "validate":
 		_ = validateCmd.Parse(os.Args[2:])
@@ -146,7 +147,7 @@ Run 'agentguard <command> -h' for details on each command.
 `)
 }
 
-func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string) {
+func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool) {
 	if baseURL == "" {
 		baseURL = fmt.Sprintf("http://localhost:%d", port)
 	}
@@ -186,15 +187,16 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 
 	// Build and start proxy server
 	srv := proxy.NewServer(proxy.Config{
-		Port:             port,
-		Engine:           engine,
-		Logger:           logger,
-		DashboardEnabled: dashboardEnabled,
-		Notifier:         notifier,
-		APIKey:           apiKey,
-		BaseURL:          baseURL,
-		AllowedOrigin:    allowedOrigin,
-		Version:          version,
+		Port:                  port,
+		Engine:                engine,
+		Logger:                logger,
+		DashboardEnabled:      dashboardEnabled,
+		Notifier:              notifier,
+		APIKey:                apiKey,
+		BaseURL:               baseURL,
+		AllowedOrigin:         allowedOrigin,
+		Version:               version,
+		TLSTerminatedUpstream: tlsTerminatedUpstream,
 	})
 
 	// Graceful shutdown

@@ -159,7 +159,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   r.TLS != nil,
+		Secure:   r.TLS != nil || s.cfg.TLSTerminatedUpstream,
 		Expires:  sess.ExpiresAt,
 	})
 	// JS-readable companion cookie so the dashboard can attach X-CSRF-Token.
@@ -169,7 +169,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: false,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   r.TLS != nil,
+		Secure:   r.TLS != nil || s.cfg.TLSTerminatedUpstream,
 		Expires:  sess.ExpiresAt,
 	})
 
