@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -125,6 +126,61 @@ func TestFileLogger_LogAndQuery(t *testing.T) {
 	}
 	if len(results) != 1 {
 		t.Errorf("expected 1 entry with limit, got %d", len(results))
+	}
+}
+
+// TestFileLogger_Offset covers the Phase 1.1 Offset field on QueryFilter.
+// Offset discards the first N matching records before Limit is applied, so
+// that a UI paginating the audit log can page forward without re-scanning
+// from scratch.
+func TestFileLogger_Offset(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "offset.jsonl")
+	logger, err := NewFileLogger(path)
+	if err != nil {
+		t.Fatalf("NewFileLogger: %v", err)
+	}
+	defer logger.Close()
+
+	// Five entries, all for bot-o, with distinct commands so we can assert
+	// which slice came back.
+	for i := 0; i < 5; i++ {
+		if err := logger.Log(Entry{
+			Timestamp: time.Now().UTC(),
+			AgentID:   "bot-o",
+			Request:   policy.ActionRequest{Scope: "shell", Command: fmt.Sprintf("cmd-%d", i)},
+			Result:    policy.CheckResult{Decision: policy.Allow, Reason: "ok"},
+		}); err != nil {
+			t.Fatalf("Log: %v", err)
+		}
+	}
+
+	cases := []struct {
+		name     string
+		filter   QueryFilter
+		wantCmds []string
+	}{
+		{"no offset", QueryFilter{}, []string{"cmd-0", "cmd-1", "cmd-2", "cmd-3", "cmd-4"}},
+		{"offset skips first two", QueryFilter{Offset: 2}, []string{"cmd-2", "cmd-3", "cmd-4"}},
+		{"offset + limit paginates", QueryFilter{Offset: 2, Limit: 2}, []string{"cmd-2", "cmd-3"}},
+		{"offset past end is empty", QueryFilter{Offset: 100}, nil},
+		{"negative offset treated as zero", QueryFilter{Offset: -3, Limit: 1}, []string{"cmd-0"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := logger.Query(tc.filter)
+			if err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			if len(got) != len(tc.wantCmds) {
+				t.Fatalf("got %d entries, want %d", len(got), len(tc.wantCmds))
+			}
+			for i, want := range tc.wantCmds {
+				if got[i].Request.Command != want {
+					t.Errorf("entry %d: got %q, want %q", i, got[i].Request.Command, want)
+				}
+			}
+		})
 	}
 }
 

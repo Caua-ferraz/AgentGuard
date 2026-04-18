@@ -29,6 +29,10 @@ type Logger interface {
 }
 
 // QueryFilter specifies criteria for querying audit logs.
+//
+// Offset is applied after filtering but before the Limit is reached: the first
+// Offset matching records are discarded, then up to Limit records are
+// collected. A Limit of 0 means "no cap" (compat with v0.4.0).
 type QueryFilter struct {
 	AgentID   string     `json:"agent_id,omitempty"`
 	SessionID string     `json:"session_id,omitempty"`
@@ -36,6 +40,7 @@ type QueryFilter struct {
 	Scope     string     `json:"scope,omitempty"`
 	Since     *time.Time `json:"since,omitempty"`
 	Limit     int        `json:"limit,omitempty"`
+	Offset    int        `json:"offset,omitempty"`
 }
 
 // DefaultFilePermissions is the Unix file mode for newly created audit log files.
@@ -108,6 +113,13 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 	// scan. Audit entries normally well under 4KB.
 	scanner.Buffer(make([]byte, 64*1024), 1<<20)
 
+	// skip counts remaining matches to discard before results are collected.
+	// A negative Offset is treated as zero (defensive: handler should clamp).
+	skip := filter.Offset
+	if skip < 0 {
+		skip = 0
+	}
+
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -119,9 +131,14 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 			continue // skip corrupt lines
 		}
 
-		if matchesFilter(entry, filter) {
-			results = append(results, entry)
+		if !matchesFilter(entry, filter) {
+			continue
 		}
+		if skip > 0 {
+			skip--
+			continue
+		}
+		results = append(results, entry)
 
 		if filter.Limit > 0 && len(results) >= filter.Limit {
 			break

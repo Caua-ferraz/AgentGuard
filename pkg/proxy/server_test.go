@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -493,6 +494,115 @@ func TestHandleAuditQuery(t *testing.T) {
 	if len(entries) != 1 {
 		t.Errorf("expected 1 network entry, got %d", len(entries))
 	}
+}
+
+// TestHandleAuditQuery_LimitAndOffset exercises the Phase 1.1 query-string
+// contract on /v1/audit: ?limit is honored (default 100, ceiling
+// MaxAuditQueryLimit, clamped silently above ceiling, 400 below 1 or
+// non-numeric), ?offset skips matching records before results are collected.
+func TestHandleAuditQuery_LimitAndOffset(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Write 5 entries so limit/offset behavior is visible.
+	for i := 0; i < 5; i++ {
+		body := fmt.Sprintf(`{"scope":"shell","command":"cmd-%d","agent_id":"bot-lim"}`, i)
+		r := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+		srv.handleCheck(httptest.NewRecorder(), r)
+	}
+
+	decode := func(t *testing.T, raw []byte) []audit.Entry {
+		t.Helper()
+		var out []audit.Entry
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatalf("decode response %q: %v", string(raw), err)
+		}
+		return out
+	}
+
+	t.Run("no limit returns default", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?agent_id=bot-lim", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("code = %d, want 200", w.Code)
+		}
+		// We wrote 5, default limit is 100, so we get all 5 back.
+		if got := len(decode(t, w.Body.Bytes())); got != 5 {
+			t.Errorf("got %d entries, want 5", got)
+		}
+	})
+
+	t.Run("explicit limit caps results", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?agent_id=bot-lim&limit=2", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("code = %d, want 200", w.Code)
+		}
+		if got := len(decode(t, w.Body.Bytes())); got != 2 {
+			t.Errorf("got %d entries, want 2", got)
+		}
+	})
+
+	t.Run("limit above ceiling is silently clamped", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?limit=999999", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("code = %d, want 200 (clamp, not reject): body=%s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("limit below minimum is rejected", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?limit=0", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("code = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("non-integer limit is rejected", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?limit=abc", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("code = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("offset skips initial matches", func(t *testing.T) {
+		// limit=2, offset=2 should return entries 3 and 4 (0-indexed: 2 and 3).
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?agent_id=bot-lim&limit=2&offset=2", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		entries := decode(t, w.Body.Bytes())
+		if len(entries) != 2 {
+			t.Fatalf("got %d entries, want 2", len(entries))
+		}
+		if entries[0].Request.Command != "cmd-2" || entries[1].Request.Command != "cmd-3" {
+			t.Errorf("offset=2 returned wrong records: [%s, %s]",
+				entries[0].Request.Command, entries[1].Request.Command)
+		}
+	})
+
+	t.Run("negative offset is rejected", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?offset=-1", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("code = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("non-integer offset is rejected", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?offset=xyz", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("code = %d, want 400", w.Code)
+		}
+	})
 }
 
 // --- Dashboard ---

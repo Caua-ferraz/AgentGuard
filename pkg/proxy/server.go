@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,8 +22,13 @@ import (
 )
 
 const (
-	// DefaultAuditQueryLimit is the max entries returned by the audit query endpoint.
+	// DefaultAuditQueryLimit is the entry count returned when the client does
+	// not supply ?limit=.
 	DefaultAuditQueryLimit = 100
+	// MaxAuditQueryLimit is the hard ceiling on ?limit=. Clients asking for
+	// more receive this many entries (silently clamped); the ceiling exists
+	// so a client cannot request an unbounded scan of the audit file.
+	MaxAuditQueryLimit = 1000
 	// SSEChannelBufferSize is the buffer size for Server-Sent Events channels.
 	SSEChannelBufferSize = 64
 	// ApprovalIDPrefix is the prefix for generated approval IDs.
@@ -363,13 +369,34 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAuditQuery returns filtered audit log entries.
+//
+// Query-string contract (stable as of v0.4.1):
+//   - ?limit=N — integer in [1, MaxAuditQueryLimit]. Values above the ceiling
+//     are clamped silently. Missing/empty uses DefaultAuditQueryLimit.
+//     Non-integers or values < 1 return 400.
+//   - ?offset=N — integer ≥ 0. Defaults to 0. Non-integers or negatives
+//     return 400.
+//
+// Prior to v0.4.1 the handler ignored ?limit= and always passed 100.
 func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
+	limit, err := parseBoundedInt(r.URL.Query().Get("limit"), DefaultAuditQueryLimit, 1, MaxAuditQueryLimit)
+	if err != nil {
+		http.Error(w, "invalid limit: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	offset, err := parseBoundedInt(r.URL.Query().Get("offset"), 0, 0, -1)
+	if err != nil {
+		http.Error(w, "invalid offset: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	filter := audit.QueryFilter{
 		AgentID:   r.URL.Query().Get("agent_id"),
 		SessionID: r.URL.Query().Get("session_id"),
 		Decision:  r.URL.Query().Get("decision"),
 		Scope:     r.URL.Query().Get("scope"),
-		Limit:     DefaultAuditQueryLimit,
+		Limit:     limit,
+		Offset:    offset,
 	}
 
 	entries, err := s.cfg.Logger.Query(filter)
@@ -380,6 +407,34 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(entries)
+}
+
+// parseBoundedInt parses an optional query-string integer.
+//
+//   - An empty raw value returns defaultVal, no error.
+//   - A non-integer returns an error (handler should map to 400).
+//   - min is the inclusive lower bound. Values below min return an error.
+//   - max is the inclusive upper bound. Values above max are clamped to max
+//     (silently), not rejected. Pass max=-1 for no upper bound.
+//
+// The asymmetry — reject below, clamp above — matches how operators expect
+// these knobs to behave: a negative limit is a bug, a huge limit is usually
+// "give me all of them" and we want a safe ceiling rather than a 400.
+func parseBoundedInt(raw string, defaultVal, minVal, maxVal int) (int, error) {
+	if raw == "" {
+		return defaultVal, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("not an integer: %q", raw)
+	}
+	if n < minVal {
+		return 0, fmt.Errorf("value %d below minimum %d", n, minVal)
+	}
+	if maxVal >= 0 && n > maxVal {
+		return maxVal, nil
+	}
+	return n, nil
 }
 
 // handleHealth returns server health status.
