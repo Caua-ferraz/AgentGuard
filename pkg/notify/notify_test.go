@@ -159,6 +159,76 @@ func TestRedactor(t *testing.T) {
 	}
 }
 
+func TestRedactor_WithExtraPatterns(t *testing.T) {
+	r, err := DefaultRedactor().WithExtraPatterns([]string{
+		`ACME_[A-Z0-9]{12}`, // hypothetical org-specific key prefix
+	})
+	if err != nil {
+		t.Fatalf("WithExtraPatterns: %v", err)
+	}
+
+	got := r.redactString("leaked ACME_ABC123DEF456 here")
+	if !strings.Contains(got, "[REDACTED]") || strings.Contains(got, "ACME_ABC123DEF456") {
+		t.Errorf("extra pattern must redact ACME_* keys, got %q", got)
+	}
+
+	// Built-in patterns must still fire alongside the new one.
+	if got := r.redactString("bearer abc.def"); got == "bearer abc.def" {
+		t.Errorf("extra_patterns must not disable built-ins, got %q", got)
+	}
+}
+
+func TestRedactor_WithExtraPatterns_EmptyIsNoop(t *testing.T) {
+	r := DefaultRedactor()
+	got, err := r.WithExtraPatterns(nil)
+	if err != nil {
+		t.Errorf("nil extras must not error: %v", err)
+	}
+	if got != r {
+		t.Error("nil extras must return the same receiver")
+	}
+}
+
+func TestRedactor_WithExtraPatterns_InvalidRegex(t *testing.T) {
+	r := DefaultRedactor()
+	before := len(r.patterns)
+	_, err := r.WithExtraPatterns([]string{`[unclosed`})
+	if err == nil {
+		t.Fatal("invalid regex must return an error")
+	}
+	if len(r.patterns) != before {
+		t.Errorf("pattern list should be unchanged after error; before=%d after=%d", before, len(r.patterns))
+	}
+}
+
+func TestDispatcher_UsesExtraRedactionPatterns(t *testing.T) {
+	cfg := policy.NotificationCfg{
+		Redaction: policy.RedactionCfg{
+			ExtraPatterns: []string{`ORG_[A-Z0-9]{8}`},
+		},
+	}
+	d := NewDispatcherWithOpts(cfg, 1, 4)
+	defer d.Close()
+
+	captured := &capturingNotifier{}
+	d.notifiers = []Notifier{captured}
+
+	d.Send(Event{
+		Type:    "denied",
+		Request: policy.ActionRequest{Command: "upload ORG_ABCD1234 to s3"},
+	})
+	// Give the worker a tick to consume.
+	time.Sleep(50 * time.Millisecond)
+
+	got := captured.Get()
+	if strings.Contains(got.Request.Command, "ORG_ABCD1234") {
+		t.Errorf("extra pattern must redact ORG_* from command, got %q", got.Request.Command)
+	}
+	if !strings.Contains(got.Request.Command, "[REDACTED]") {
+		t.Errorf("expected [REDACTED] in command, got %q", got.Request.Command)
+	}
+}
+
 func TestRedactor_PreservesSafeStrings(t *testing.T) {
 	r := DefaultRedactor()
 	for _, s := range []string{

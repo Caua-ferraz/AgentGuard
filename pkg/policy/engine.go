@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -92,6 +93,17 @@ type AgentCfg struct {
 type NotificationCfg struct {
 	ApprovalRequired []NotifyTarget `yaml:"approval_required,omitempty"`
 	OnDeny           []NotifyTarget `yaml:"on_deny,omitempty"`
+	Redaction        RedactionCfg   `yaml:"redaction,omitempty"`
+}
+
+// RedactionCfg tunes the secret-redactor used by the notify dispatcher.
+//
+// ExtraPatterns are appended to the built-in DefaultRedactor list. Operators
+// use this to mask org-specific secret formats (e.g. internal API key prefixes)
+// without patching the binary. Patterns are Go regexp syntax (RE2); invalid
+// patterns are rejected at policy load.
+type RedactionCfg struct {
+	ExtraPatterns []string `yaml:"extra_patterns,omitempty"`
 }
 
 // NotifyTarget is a notification destination.
@@ -136,6 +148,14 @@ func LoadFromFile(path string) (*Policy, error) {
 					}
 				}
 			}
+		}
+	}
+
+	// Validate notification redaction patterns compile as RE2 regexes.
+	// Fail fast at load rather than at first notification dispatch.
+	for i, p := range pol.Notifications.Redaction.ExtraPatterns {
+		if _, err := regexp.Compile(p); err != nil {
+			return nil, fmt.Errorf("notifications.redaction.extra_patterns[%d]: invalid regex %q: %w", i, p, err)
 		}
 	}
 
