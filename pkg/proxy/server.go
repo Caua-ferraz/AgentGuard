@@ -162,8 +162,33 @@ func NewServer(cfg Config) *Server {
 	// Wire up history querier for conditional rule evaluation
 	cfg.Engine.SetHistoryQuerier(&auditHistoryAdapter{logger: cfg.Logger})
 
-	// Seed in-memory counters from existing audit log so stats survive restarts.
-	if existing, err := cfg.Logger.Query(audit.QueryFilter{}); err == nil {
+	// Seed in-memory counters from the existing audit log so stats survive
+	// restarts. A large audit file rescanned from scratch on every boot can
+	// stall startup and delay /metrics accuracy, so when the Logger is a
+	// FileLogger we persist a byte-offset checkpoint and resume from there.
+	// Other Logger implementations (e.g. SQLiteLogger) fall back to a full
+	// Query() — their scan cost is their own concern.
+	type pathReporter interface{ Path() string }
+	if pr, ok := cfg.Logger.(pathReporter); ok && pr.Path() != "" {
+		path := pr.Path()
+		cp, cpErr := audit.ReadCheckpoint(path)
+		if cpErr != nil {
+			log.Printf("WARN: audit checkpoint read failed (%v); replaying full log", cpErr)
+		}
+		newOffset, err := audit.ReplayFrom(path, cp, func(e audit.Entry) {
+			metrics.IncDecision(string(e.Result.Decision))
+		})
+		if err != nil {
+			log.Printf("WARN: audit replay failed (%v); counters may be under-seeded", err)
+		} else if newOffset > 0 {
+			// Best-effort: a failed checkpoint write just means the next
+			// boot re-scans. No need to surface the error at startup.
+			_ = audit.WriteCheckpoint(path, audit.Checkpoint{
+				Offset:    newOffset,
+				AuditSize: newOffset,
+			})
+		}
+	} else if existing, err := cfg.Logger.Query(audit.QueryFilter{}); err == nil {
 		for _, e := range existing {
 			metrics.IncDecision(string(e.Result.Decision))
 		}

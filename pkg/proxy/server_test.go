@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1395,4 +1397,118 @@ func TestHandleCheck_EmptyBody(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for empty body, got %d", w.Code)
 	}
+}
+
+// --- Startup checkpoint ---
+
+// TestNewServer_WritesStartupCheckpoint: after NewServer boots on a file
+// with existing audit entries, a checkpoint must exist so a future boot
+// can resume instead of rescanning.
+func TestNewServer_WritesStartupCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+
+	// Pre-populate an audit file.
+	seed, err := audit.NewFileLogger(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := seed.Log(audit.Entry{
+			Timestamp: time.Now().UTC(),
+			AgentID:   "seed",
+			Result:    policy.CheckResult{Decision: policy.Allow},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed.Close()
+
+	// Boot a server against the same file.
+	logger, err := audit.NewFileLogger(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { logger.Close() })
+
+	cfg := Config{
+		Engine:   policy.NewEngine(&policy.Policy{Version: "1", Name: "x"}),
+		Logger:   logger,
+		Notifier: notify.NewDispatcher(policy.NotificationCfg{}),
+		Version:  "test",
+	}
+	_ = NewServer(cfg)
+
+	cp, err := audit.ReadCheckpoint(logPath)
+	if err != nil {
+		t.Fatalf("ReadCheckpoint: %v", err)
+	}
+	if cp == nil {
+		t.Fatal("NewServer must write a checkpoint after seeding counters")
+	}
+	if cp.Offset <= 0 {
+		t.Errorf("expected positive checkpoint offset, got %d", cp.Offset)
+	}
+}
+
+// TestNewServer_ResumesFromCheckpoint: a pre-existing checkpoint covering
+// the full file must prevent NewServer's seed loop from double-counting
+// when new entries arrive only after the checkpoint was written.
+func TestNewServer_ResumesFromCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+
+	// Write a handful of entries.
+	seed, err := audit.NewFileLogger(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		if err := seed.Log(audit.Entry{
+			Timestamp: time.Now().UTC(),
+			AgentID:   "pre",
+			Result:    policy.CheckResult{Decision: policy.Allow},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed.Close()
+
+	// Pretend a previous boot already processed everything.
+	info, err := fileSize(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := audit.WriteCheckpoint(logPath, audit.Checkpoint{Offset: info, AuditSize: info}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Snapshot the allowed counter before boot — the seeder must not bump it.
+	before := atomic.LoadUint64(&metrics.AllowedTotal)
+
+	logger, err := audit.NewFileLogger(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { logger.Close() })
+
+	_ = NewServer(Config{
+		Engine:   policy.NewEngine(&policy.Policy{Version: "1", Name: "x"}),
+		Logger:   logger,
+		Notifier: notify.NewDispatcher(policy.NotificationCfg{}),
+		Version:  "test",
+	})
+
+	after := atomic.LoadUint64(&metrics.AllowedTotal)
+	if after != before {
+		t.Errorf("checkpointed file must be skipped on boot; AllowedTotal went from %d to %d", before, after)
+	}
+}
+
+func fileSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
 }
