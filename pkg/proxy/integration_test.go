@@ -641,7 +641,10 @@ func TestIntegration_401vs403(t *testing.T) {
 func TestIntegration_OversizedBodyRejected(t *testing.T) {
 	s := newIntegrationServer(t)
 
-	body := strings.Repeat("x", MaxRequestBodySize+1)
+	// Must be valid-looking JSON so the decoder actually reads past the
+	// MaxBytesReader limit (a raw blob errors at the first token and never
+	// trips the size enforcement).
+	body := `{"command":"` + strings.Repeat("x", MaxRequestBodySize+1) + `"}`
 	req, _ := http.NewRequest(http.MethodPost, s.ts.URL+"/v1/check", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
@@ -650,8 +653,8 @@ func TestIntegration_OversizedBodyRejected(t *testing.T) {
 		t.Fatalf("do: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 400 {
-		t.Errorf("oversized body should give 400, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized body should give 413, got %d", resp.StatusCode)
 	}
 }
 

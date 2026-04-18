@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
+	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 	"github.com/Caua-ferraz/AgentGuard/pkg/notify"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
@@ -222,14 +223,47 @@ func TestHandleCheck_InvalidJSON(t *testing.T) {
 func TestHandleCheck_OversizedBody(t *testing.T) {
 	srv := newTestServer(t)
 
-	// Create a body larger than MaxRequestBodySize (1 MB)
-	bigBody := strings.Repeat("x", MaxRequestBodySize+1)
+	// Snapshot the rejection counter before the test so we can verify a
+	// strictly-positive delta (the counter is process-global and may carry
+	// state from earlier tests).
+	before := metrics.RequestRejectedSnapshot()[metrics.RejectedBodyTooLarge]
+
+	// Create a VALID-looking JSON body whose total size exceeds
+	// MaxRequestBodySize. Using a raw non-JSON blob would fail at the first
+	// decoder token (invalid character), never triggering MaxBytesReader.
+	// A giant JSON string value forces the decoder to consume past the limit.
+	bigBody := `{"command":"` + strings.Repeat("x", MaxRequestBodySize+1) + `"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(bigBody))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.handleCheck(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for oversized body, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413 for oversized body, got %d: %s", w.Code, w.Body.String())
+	}
+
+	after := metrics.RequestRejectedSnapshot()[metrics.RejectedBodyTooLarge]
+	if after != before+1 {
+		t.Errorf("expected body_too_large counter to increment by 1; before=%d after=%d", before, after)
+	}
+}
+
+// Verify the counter is exposed in Prometheus output with the reason label.
+func TestMetrics_RequestRejectedTotalExposed(t *testing.T) {
+	// Seed a rejection so the counter is present.
+	metrics.IncRequestRejected(metrics.RejectedBodyTooLarge)
+
+	srv := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	srv.handleMetrics(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "agentguard_request_rejected_total") {
+		t.Error("expected agentguard_request_rejected_total in /metrics output")
+	}
+	if !strings.Contains(body, `reason="body_too_large"`) {
+		t.Errorf("expected reason=\"body_too_large\" label, got:\n%s", body)
 	}
 }
 

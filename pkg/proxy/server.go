@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -279,6 +280,18 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodySize)
 	var req policy.ActionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// Distinguish "body too large" from other parse errors so that the
+		// enforcement of MaxRequestBodySize is observable. http.MaxBytesError
+		// is the canonical error returned by MaxBytesReader when the limit
+		// is hit (stdlib, Go 1.19+).
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			metrics.IncRequestRejected(metrics.RejectedBodyTooLarge)
+			log.Printf("WARN: request body exceeds limit: remote=%s content_length=%d limit=%d",
+				r.RemoteAddr, r.ContentLength, MaxRequestBodySize)
+			http.Error(w, fmt.Sprintf("Request body too large (limit %d bytes)", MaxRequestBodySize), http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
 		return
 	}
