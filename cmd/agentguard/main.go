@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -10,11 +11,13 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
+	"github.com/Caua-ferraz/AgentGuard/pkg/migrate"
 	"github.com/Caua-ferraz/AgentGuard/pkg/notify"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 	"github.com/Caua-ferraz/AgentGuard/pkg/proxy"
@@ -60,6 +63,15 @@ func main() {
 	auditLimit := auditCmd.Int("limit", 50, "Max entries to return")
 	auditKey := auditCmd.String("api-key", "", "Bearer token (overrides AGENTGUARD_API_KEY)")
 
+	migrateCmd := flag.NewFlagSet("migrate", flag.ExitOnError)
+	migrateAuditPath := migrateCmd.String("audit-log", "audit.jsonl", "Path to audit log file")
+	migrateCheckpoint := migrateCmd.String("checkpoint", "", "Path to replay checkpoint (default: <audit-dir>/.replay-checkpoint)")
+	migrateBackupDir := migrateCmd.String("backup-dir", "", "Directory for rollback backups (default: same dir as --audit-log)")
+	migrateDryRun := migrateCmd.Bool("dry-run", false, "Log intended actions without touching disk")
+	migrateList := migrateCmd.Bool("list", false, "List registered migrations and exit")
+	migrateID := migrateCmd.String("id", "", "Run only the named migration (operator override; runs even if Detect=false)")
+	migrateReset := migrateCmd.Bool("reset-checkpoint", false, "Delete the replay checkpoint before running (forces full replay on next start)")
+
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
@@ -101,6 +113,10 @@ func main() {
 		_ = auditCmd.Parse(os.Args[2:])
 		runAuditQuery(*auditQueryURL, *auditAgent, *auditDecision, *auditScope, *auditLimit, resolveAPIKey(*auditKey))
 
+	case "migrate":
+		_ = migrateCmd.Parse(os.Args[2:])
+		runMigrate(*migrateAuditPath, *migrateCheckpoint, *migrateBackupDir, *migrateDryRun, *migrateList, *migrateID, *migrateReset)
+
 	case "version":
 		fmt.Printf("agentguard %s (%s)\n", version, commit)
 
@@ -123,6 +139,7 @@ Commands:
   deny        Deny a pending action by ID
   status      Show connected agents and pending actions
   audit       Query the audit log
+  migrate     Run on-disk schema migrations (see docs/FILE_FORMATS.md)
   version     Print version information
 
 Run 'agentguard <command> -h' for details on each command.
@@ -382,3 +399,53 @@ func runAuditQuery(baseURL, agent, decision, scope string, limit int, apiKey str
 		}
 	}
 }
+
+// runMigrate implements the `agentguard migrate` subcommand. It is a thin
+// wrapper that wires the CLI flags into migrate.RunCLI — the framework
+// handles registry lookup, dry-run semantics, and logging.
+//
+// The --reset-checkpoint flag deletes the replay checkpoint before running
+// any migration, forcing the next server start to do a full replay. This is
+// the escape hatch for operators who suspect the checkpoint is corrupt or
+// was written by an incompatible build.
+func runMigrate(auditPath, checkpointPath, backupDir string, dryRun, list bool, id string, resetCheckpoint bool) {
+	if checkpointPath == "" {
+		// Default to <audit-dir>/.replay-checkpoint.
+		dir := filepathDir(auditPath)
+		checkpointPath = filepathJoin(dir, ".replay-checkpoint")
+	}
+	if backupDir == "" {
+		backupDir = filepathDir(auditPath)
+	}
+
+	if resetCheckpoint {
+		if err := os.Remove(checkpointPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "migrate: could not remove checkpoint %s: %v\n", checkpointPath, err)
+			os.Exit(1)
+		}
+		fmt.Printf("migrate: checkpoint removed (%s)\n", checkpointPath)
+	}
+
+	env := migrate.Env{
+		AuditLogPath:   auditPath,
+		CheckpointPath: checkpointPath,
+		BackupDir:      backupDir,
+		Stdout:         os.Stdout,
+	}
+	opts := migrate.CLIOptions{
+		DryRun: dryRun,
+		ID:     id,
+		List:   list,
+	}
+	if err := migrate.RunCLI(context.Background(), env, opts); err != nil {
+		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// filepathDir and filepathJoin wrap path/filepath so runMigrate stays
+// readable without adding another top-level import block rewrite. They are
+// here (rather than in a helpers file) because they are the only uses in
+// main.go today — pulling them into a shared file would be premature.
+func filepathDir(p string) string  { return filepath.Dir(p) }
+func filepathJoin(a, b string) string { return filepath.Join(a, b) }
