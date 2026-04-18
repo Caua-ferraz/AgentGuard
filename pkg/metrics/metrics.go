@@ -93,8 +93,19 @@ func SetPendingApprovals(n int) {
 
 // -- Histograms --------------------------------------------------------------
 
-// durationBuckets are shared upper-bounds in milliseconds.
-var durationBuckets = []float64{0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000}
+// durationBuckets are shared upper-bounds in milliseconds. The tail (2500,
+// 5000, 10000) covers events that are rare on the hot path but visible in
+// practice: a slow audit-file fsync, a policy reload contending with
+// Engine.Check, a rate-limit lock under heavy fan-out. Without these
+// buckets, anything over 1 s all lands in +Inf and p99 loses resolution.
+//
+// These boundaries are treated as a stable contract: re-bucketing
+// invalidates historical Prometheus data (see CHANGELOG v0.4.1). Only
+// append new boundaries at the tail; do not edit or reorder existing ones.
+var durationBuckets = []float64{
+	0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000,
+	2500, 5000, 10000,
+}
 
 // Histogram tracks a distribution using cumulative bucket counts.
 // Each bucket counts observations with value ≤ the bucket bound, which is the
