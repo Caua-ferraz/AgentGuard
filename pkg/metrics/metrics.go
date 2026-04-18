@@ -12,8 +12,12 @@ package metrics
 import (
 	"fmt"
 	"io"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/Caua-ferraz/AgentGuard/pkg/deprecation"
 )
 
 // -- Counters ----------------------------------------------------------------
@@ -144,6 +148,40 @@ func WritePrometheus(w io.Writer) {
 	writeHistogram(w, "agentguard_audit_write_duration_ms",
 		"Time spent in Logger.Log (audit file write) in milliseconds.",
 		AuditWriteDuration)
+
+	writeDeprecations(w)
+}
+
+// writeDeprecations emits a labeled counter for every deprecated feature that
+// has been used at least once in this process. Cardinality is bounded by the
+// "feature" column in docs/DEPRECATIONS.md. Keys are sorted so the exposition
+// order is stable across scrapes.
+func writeDeprecations(w io.Writer) {
+	snap := deprecation.Snapshot()
+	const name = "agentguard_deprecations_used_total"
+	const help = "Times a deprecated feature was used, labeled by stable feature key (see docs/DEPRECATIONS.md)."
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+	if len(snap) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(snap))
+	for k := range snap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(w, "%s{feature=\"%s\"} %d\n", name, escapeLabel(k), snap[k])
+	}
+}
+
+// escapeLabel escapes a Prometheus label value per the text exposition spec:
+// backslash, double-quote, and newline are the only special characters.
+func escapeLabel(s string) string {
+	if !strings.ContainsAny(s, "\\\"\n") {
+		return s
+	}
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
+	return r.Replace(s)
 }
 
 func writeCounter(w io.Writer, name, help string, value uint64) {
