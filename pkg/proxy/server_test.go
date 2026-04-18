@@ -1245,6 +1245,68 @@ func TestNewServer_LocalhostBindingWithoutAPIKey(t *testing.T) {
 	}
 }
 
+func TestSessionCostSweeper_Lifecycle(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	logger, _ := audit.NewFileLogger(logPath)
+	defer logger.Close()
+
+	pol := &policy.Policy{
+		Version: "1",
+		Name:    "sweep-test",
+		Rules: []policy.RuleSet{
+			{Scope: "cost", Limits: &policy.CostLimits{MaxPerAction: "$5.00", MaxPerSession: "$100.00"}},
+		},
+	}
+
+	// TTL=0 (default) must NOT start a sweeper goroutine.
+	srvNoTTL := NewServer(Config{
+		Port:    0,
+		Engine:  policy.NewEngine(pol),
+		Logger:  logger,
+		Version: "test",
+	})
+	if srvNoTTL.sweeperDone != nil {
+		t.Error("sweeperDone should be nil when SessionCostTTL=0 (sweep disabled)")
+	}
+
+	// TTL>0 starts the sweeper and Shutdown cleans it up.
+	engine := policy.NewEngine(pol)
+	srv := NewServer(Config{
+		Port:                     0,
+		Engine:                   engine,
+		Logger:                   logger,
+		Version:                  "test",
+		SessionCostTTL:           10 * time.Millisecond,
+		SessionCostSweepInterval: 5 * time.Millisecond,
+	})
+	if srv.sweeperDone == nil {
+		t.Fatal("sweeperDone should be set when SessionCostTTL>0")
+	}
+
+	// Seed a stale entry and wait for at least two sweep ticks.
+	engine.RecordCost("s", 1.00)
+	// Backdate lastUpdated via a second RecordCost that advances time -- but we
+	// can't reach the unexported field from here. Instead, rely on the ticker:
+	// after a couple of intervals the fresh entry stays (it's not older than
+	// TTL), but we just validate the goroutine runs and Shutdown unblocks it.
+	time.Sleep(20 * time.Millisecond)
+
+	// Shutdown must close sweeperDone without panicking.
+	srv.Shutdown()
+
+	// The sweeper channel must now be closed — a receive returns immediately.
+	select {
+	case <-srv.sweeperDone:
+		// ok, channel closed as expected
+	case <-time.After(time.Second):
+		t.Error("sweeperDone was not closed by Shutdown")
+	}
+
+	// Calling Shutdown twice must not panic (idempotence via sync.Once).
+	srv.Shutdown()
+}
+
 func TestNewServer_AllInterfaceBindingWithAPIKey(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")

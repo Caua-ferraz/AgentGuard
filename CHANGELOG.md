@@ -45,7 +45,7 @@ _Nothing yet._
 - `ApprovalQueue` eviction is LRU instead of "drop every resolved entry at once". When the queue is at capacity, the oldest resolved entry is evicted first; if none are resolved, new approvals are rejected with `503 Service Unavailable` and a `Retry-After` header rather than silently dropped.
 - Session store: when the in-memory session cap (`MaxSessions = 1024`) is reached, new logins receive `503` with a clear message instead of silently evicting the oldest active session. Heavy dashboard users who previously hit the cap will notice a visible failure where there used to be a silent one.
 - Policy watcher uses fsnotify to detect atomic-replace rewrites immediately, with a 2 s poll fallback when fsnotify is unavailable. No user-visible contract change.
-- `sessionCosts` map has a TTL sweep goroutine (5 min interval) so long-running servers do not accumulate per-session cost entries indefinitely.
+- `sessionCosts` map has an opt-in TTL sweep goroutine (`--session-cost-ttl`, `--session-cost-sweep-interval`) so long-running servers do not accumulate per-session cost entries indefinitely. Defaults to disabled (`0`), preserving v0.4.0 behavior; sweep interval defaults to `max(ttl/4, 1m)` when only the TTL is set.
 - Histogram buckets for `agentguard_*_duration_ms` extend past 1 s (new 2500 ms, 5000 ms, 10 000 ms buckets) to capture tail behavior under load. Not configurable: altering bucket boundaries later invalidates historical data.
 - Webhook notifier honors the new `notify.dispatch_timeout`; the hard-coded 10 s falls away.
 

@@ -232,19 +232,28 @@ type HistoryQuerier interface {
 	RecentActions(agentID string, scope string, since time.Time) ([]HistoryEntry, error)
 }
 
+// sessionCostEntry tracks cumulative cost for a session plus the last time
+// the entry was touched. lastUpdated enables TTL-based eviction of stale
+// session accumulators; without it, long-running processes would accrete
+// one entry per session_id forever.
+type sessionCostEntry struct {
+	cost        float64
+	lastUpdated time.Time
+}
+
 // Engine evaluates actions against a policy.
 type Engine struct {
 	mu           sync.RWMutex
 	policy       *Policy
 	history      HistoryQuerier
-	sessionCosts map[string]float64 // session_id -> cumulative cost
+	sessionCosts map[string]sessionCostEntry // session_id -> entry
 }
 
 // NewEngine creates a policy engine with the given policy.
 func NewEngine(pol *Policy) *Engine {
 	return &Engine{
 		policy:       pol,
-		sessionCosts: make(map[string]float64),
+		sessionCosts: make(map[string]sessionCostEntry),
 	}
 }
 
@@ -267,7 +276,10 @@ func (e *Engine) RecordCost(sessionID string, cost float64) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.sessionCosts[sessionID] += cost
+	entry := e.sessionCosts[sessionID]
+	entry.cost += cost
+	entry.lastUpdated = time.Now()
+	e.sessionCosts[sessionID] = entry
 }
 
 // RefundCost subtracts from the session accumulator. Used if a reserved cost
@@ -278,17 +290,51 @@ func (e *Engine) RefundCost(sessionID string, cost float64) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.sessionCosts[sessionID] -= cost
-	if e.sessionCosts[sessionID] < 0 {
-		e.sessionCosts[sessionID] = 0
+	entry := e.sessionCosts[sessionID]
+	entry.cost -= cost
+	if entry.cost < 0 {
+		entry.cost = 0
 	}
+	entry.lastUpdated = time.Now()
+	e.sessionCosts[sessionID] = entry
 }
 
 // SessionCost returns the accumulated cost for a session (for testing).
 func (e *Engine) SessionCost(sessionID string) float64 {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.sessionCosts[sessionID]
+	return e.sessionCosts[sessionID].cost
+}
+
+// SweepSessionCosts removes session-cost entries whose last update was more
+// than maxAge ago. Returns the number of entries evicted. A non-positive
+// maxAge is treated as "disabled" and returns 0 without scanning.
+//
+// Called by a periodic goroutine in the proxy; exposed here so engine-only
+// tests and out-of-band callers can trigger a sweep directly.
+func (e *Engine) SweepSessionCosts(maxAge time.Duration) int {
+	if maxAge <= 0 {
+		return 0
+	}
+	cutoff := time.Now().Add(-maxAge)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	n := 0
+	for id, entry := range e.sessionCosts {
+		if entry.lastUpdated.Before(cutoff) {
+			delete(e.sessionCosts, id)
+			n++
+		}
+	}
+	return n
+}
+
+// SessionCostCount returns the number of tracked session cost entries
+// (useful for metrics and tests).
+func (e *Engine) SessionCostCount() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return len(e.sessionCosts)
 }
 
 // UpdatePolicy hot-swaps the active policy.
@@ -518,7 +564,7 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 		}
 	}
 	if req.SessionID != "" && maxPerSession > 0 && req.EstCost > 0 {
-		cumulative := e.sessionCosts[req.SessionID]
+		cumulative := e.sessionCosts[req.SessionID].cost
 		if cumulative+req.EstCost > maxPerSession {
 			return CheckResult{
 				Decision: Deny,
@@ -548,7 +594,10 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 
 	// Allow — reserve the cost against the session accumulator atomically.
 	if req.SessionID != "" && req.EstCost > 0 {
-		e.sessionCosts[req.SessionID] += req.EstCost
+		entry := e.sessionCosts[req.SessionID]
+		entry.cost += req.EstCost
+		entry.lastUpdated = time.Now()
+		e.sessionCosts[req.SessionID] = entry
 	}
 
 	return CheckResult{

@@ -503,6 +503,115 @@ func TestSessionCost_IndependentSessions(t *testing.T) {
 	}
 }
 
+// --- SweepSessionCosts TTL eviction ---
+
+func TestSweepSessionCosts_EvictsStale(t *testing.T) {
+	pol := &Policy{
+		Version: "1",
+		Name:    "session-cost-sweep",
+		Rules: []RuleSet{
+			{
+				Scope: "cost",
+				Limits: &CostLimits{
+					MaxPerAction:  "$5.00",
+					MaxPerSession: "$100.00",
+				},
+			},
+		},
+	}
+	engine := NewEngine(pol)
+
+	// Reserve cost for two sessions — both map entries are now fresh.
+	if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "old"}); r.Decision != Allow {
+		t.Fatalf("expected ALLOW for old, got %s: %s", r.Decision, r.Reason)
+	}
+	if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "fresh"}); r.Decision != Allow {
+		t.Fatalf("expected ALLOW for fresh, got %s: %s", r.Decision, r.Reason)
+	}
+
+	// Backdate "old" so it is older than the TTL window.
+	engine.mu.Lock()
+	oldEntry := engine.sessionCosts["old"]
+	oldEntry.lastUpdated = time.Now().Add(-2 * time.Hour)
+	engine.sessionCosts["old"] = oldEntry
+	engine.mu.Unlock()
+
+	n := engine.SweepSessionCosts(time.Hour)
+	if n != 1 {
+		t.Errorf("expected 1 eviction, got %d", n)
+	}
+	if engine.SessionCostCount() != 1 {
+		t.Errorf("expected 1 entry remaining, got %d", engine.SessionCostCount())
+	}
+	if got := engine.SessionCost("old"); got != 0 {
+		t.Errorf("stale session should have been evicted, got $%.2f", got)
+	}
+	if got := engine.SessionCost("fresh"); got != 1.00 {
+		t.Errorf("fresh session should be preserved at $1.00, got $%.2f", got)
+	}
+}
+
+func TestSweepSessionCosts_ZeroOrNegativeIsNoop(t *testing.T) {
+	pol := &Policy{
+		Version: "1",
+		Name:    "session-cost-sweep",
+		Rules: []RuleSet{
+			{
+				Scope: "cost",
+				Limits: &CostLimits{
+					MaxPerAction:  "$5.00",
+					MaxPerSession: "$100.00",
+				},
+			},
+		},
+	}
+	engine := NewEngine(pol)
+	engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "s"})
+
+	// Backdate so the entry would look stale under any positive TTL.
+	engine.mu.Lock()
+	entry := engine.sessionCosts["s"]
+	entry.lastUpdated = time.Now().Add(-24 * time.Hour)
+	engine.sessionCosts["s"] = entry
+	engine.mu.Unlock()
+
+	if n := engine.SweepSessionCosts(0); n != 0 {
+		t.Errorf("TTL=0 must be a no-op, got %d evictions", n)
+	}
+	if n := engine.SweepSessionCosts(-time.Hour); n != 0 {
+		t.Errorf("negative TTL must be a no-op, got %d evictions", n)
+	}
+	if engine.SessionCostCount() != 1 {
+		t.Errorf("disabled sweep must preserve entries, got %d", engine.SessionCostCount())
+	}
+}
+
+func TestSweepSessionCosts_PreservesActiveReservation(t *testing.T) {
+	// A session that keeps making checks must never be evicted while active —
+	// each Check refreshes lastUpdated.
+	pol := &Policy{
+		Version: "1",
+		Name:    "session-cost-sweep",
+		Rules: []RuleSet{
+			{
+				Scope: "cost",
+				Limits: &CostLimits{
+					MaxPerAction:  "$5.00",
+					MaxPerSession: "$100.00",
+				},
+			},
+		},
+	}
+	engine := NewEngine(pol)
+	engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "active"})
+
+	// A sweep with a very short TTL immediately after an update should NOT
+	// evict — the entry's lastUpdated is essentially time.Now().
+	if n := engine.SweepSessionCosts(time.Millisecond); n != 0 {
+		t.Errorf("fresh entry must not be evicted, got %d", n)
+	}
+}
+
 func TestSessionCost_NoSessionID(t *testing.T) {
 	pol := &Policy{
 		Version: "1",

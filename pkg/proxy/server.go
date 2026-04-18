@@ -66,6 +66,16 @@ type Config struct {
 	// that terminates TLS and does not forward X-Forwarded-Proto. Default
 	// false preserves v0.4.0 behavior (cookie Secure keyed to r.TLS only).
 	TLSTerminatedUpstream bool
+
+	// SessionCostTTL bounds how long an idle session_id entry lingers in the
+	// cost accumulator map. A periodic goroutine evicts entries whose last
+	// write was more than TTL ago. Zero disables the sweep (v0.4.0 behavior:
+	// entries accumulate for the process lifetime).
+	SessionCostTTL time.Duration
+	// SessionCostSweepInterval controls how often the sweeper runs. If zero
+	// and SessionCostTTL > 0, it defaults to SessionCostTTL/4 with a floor
+	// of 1 minute.
+	SessionCostSweepInterval time.Duration
 }
 
 // Server is the AgentGuard HTTP proxy.
@@ -75,6 +85,10 @@ type Server struct {
 	approval *ApprovalQueue
 	limiter  *ratelimit.Limiter
 	sessions *SessionStore
+	// sweeperDone signals the session-cost sweeper goroutine to stop.
+	// Nil when the sweeper is not running. Closed exactly once via sweeperStop.
+	sweeperDone chan struct{}
+	sweeperStop sync.Once
 }
 
 // ApprovalQueue manages pending approval requests.
@@ -204,7 +218,38 @@ func NewServer(cfg Config) *Server {
 		IdleTimeout:       120 * time.Second,
 	}
 
+	// Start the session-cost sweeper if TTL is configured.
+	if cfg.SessionCostTTL > 0 {
+		interval := cfg.SessionCostSweepInterval
+		if interval <= 0 {
+			interval = cfg.SessionCostTTL / 4
+			if interval < time.Minute {
+				interval = time.Minute
+			}
+		}
+		s.sweeperDone = make(chan struct{})
+		go s.runSessionCostSweeper(interval, cfg.SessionCostTTL)
+	}
+
 	return s
+}
+
+// runSessionCostSweeper periodically calls Engine.SweepSessionCosts until
+// sweeperDone is closed. Evictions are logged at INFO when non-zero so
+// operators can see the background work without grepping metrics.
+func (s *Server) runSessionCostSweeper(interval, ttl time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.sweeperDone:
+			return
+		case <-t.C:
+			if n := s.cfg.Engine.SweepSessionCosts(ttl); n > 0 {
+				log.Printf("INFO: session-cost sweeper evicted %d entries (ttl=%s)", n, ttl)
+			}
+		}
+	}
 }
 
 // Start begins listening for requests.
@@ -212,8 +257,11 @@ func (s *Server) Start() error {
 	return s.http.ListenAndServe()
 }
 
-// Shutdown gracefully stops the server.
+// Shutdown gracefully stops the server. Safe to call multiple times.
 func (s *Server) Shutdown() {
+	if s.sweeperDone != nil {
+		s.sweeperStop.Do(func() { close(s.sweeperDone) })
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
 	defer cancel()
 	if err := s.http.Shutdown(ctx); err != nil {

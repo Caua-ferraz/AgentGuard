@@ -40,6 +40,8 @@ func main() {
 	baseURL := serveCmd.String("base-url", "", "External base URL for approval links (default: http://localhost:<port>)")
 	allowedOrigin := serveCmd.String("allowed-origin", "", "Exact CORS origin to accept (e.g. https://app.example). Empty means permissive-localhost (any http://localhost:* or http://127.0.0.1:*) for backward compat.")
 	tlsTerminated := serveCmd.Bool("tls-terminated-upstream", false, "Issue session cookies with Secure regardless of r.TLS — set when behind a TLS-terminating reverse proxy that does not forward X-Forwarded-Proto")
+	sessionCostTTL := serveCmd.Duration("session-cost-ttl", 0, "If > 0, evict session-cost accumulator entries idle longer than this duration (e.g. 24h). Zero preserves v0.4.0 behavior (entries never expire).")
+	sessionCostSweep := serveCmd.Duration("session-cost-sweep-interval", 0, "How often to run the session-cost sweeper. Defaults to max(session-cost-ttl/4, 1m).")
 
 	validateCmd := flag.NewFlagSet("validate", flag.ExitOnError)
 	validateFile := validateCmd.String("policy", "configs/default.yaml", "Policy file to validate")
@@ -82,7 +84,7 @@ func main() {
 	case "serve":
 		_ = serveCmd.Parse(os.Args[2:]) // flag.ExitOnError handles errors
 		// Fall back to AGENTGUARD_API_KEY env if --api-key not supplied.
-		runServe(*policyFile, *port, *dashboard, *watch, *auditPath, resolveAPIKey(*apiKey), *baseURL, *allowedOrigin, *tlsTerminated)
+		runServe(*policyFile, *port, *dashboard, *watch, *auditPath, resolveAPIKey(*apiKey), *baseURL, *allowedOrigin, *tlsTerminated, *sessionCostTTL, *sessionCostSweep)
 
 	case "validate":
 		_ = validateCmd.Parse(os.Args[2:])
@@ -147,7 +149,7 @@ Run 'agentguard <command> -h' for details on each command.
 `)
 }
 
-func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool) {
+func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration) {
 	if baseURL == "" {
 		baseURL = fmt.Sprintf("http://localhost:%d", port)
 	}
@@ -195,8 +197,10 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		APIKey:                apiKey,
 		BaseURL:               baseURL,
 		AllowedOrigin:         allowedOrigin,
-		Version:               version,
-		TLSTerminatedUpstream: tlsTerminatedUpstream,
+		Version:                  version,
+		TLSTerminatedUpstream:    tlsTerminatedUpstream,
+		SessionCostTTL:           sessionCostTTL,
+		SessionCostSweepInterval: sessionCostSweep,
 	})
 
 	// Graceful shutdown
