@@ -1,9 +1,11 @@
 package audit
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -338,5 +340,193 @@ func TestFileLogger_FileContent(t *testing.T) {
 	}
 	if len(data) == 0 {
 		t.Error("expected non-empty log file")
+	}
+}
+
+// --- Schema v2 header ---
+
+func TestFileLogger_NewFileWritesSchemaHeader(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+
+	logger, err := NewFileLogger(path)
+	if err != nil {
+		t.Fatalf("NewFileLogger: %v", err)
+	}
+	logger.Close()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	firstLine := strings.SplitN(string(data), "\n", 2)[0]
+	if !strings.HasPrefix(firstLine, `{"_meta"`) {
+		t.Errorf("first line of a new audit file must be the _meta header, got %q", firstLine)
+	}
+
+	// Unmarshal and verify schema version.
+	var env struct {
+		Meta struct {
+			SchemaVersion int       `json:"schema_version"`
+			CreatedAt     time.Time `json:"created_at"`
+		} `json:"_meta"`
+	}
+	if err := json.Unmarshal([]byte(firstLine), &env); err != nil {
+		t.Fatalf("parse meta: %v", err)
+	}
+	if env.Meta.SchemaVersion != CurrentSchemaVersion {
+		t.Errorf("expected schema_version=%d, got %d", CurrentSchemaVersion, env.Meta.SchemaVersion)
+	}
+	if env.Meta.CreatedAt.IsZero() {
+		t.Error("created_at must be set in meta record")
+	}
+}
+
+func TestFileLogger_DoesNotDuplicateHeaderOnReopen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+
+	// First open: header should be written.
+	l1, err := NewFileLogger(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = l1.Log(Entry{Timestamp: time.Now().UTC(), AgentID: "a"})
+	l1.Close()
+
+	// Second open: file already has content, no new header.
+	l2, err := NewFileLogger(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = l2.Log(Entry{Timestamp: time.Now().UTC(), AgentID: "b"})
+	l2.Close()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := strings.Count(string(data), `{"_meta"`)
+	if count != 1 {
+		t.Errorf("expected exactly 1 _meta line across reopens, got %d; contents:\n%s", count, data)
+	}
+}
+
+func TestFileLogger_Query_SkipsMetaLines(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+
+	logger, err := NewFileLogger(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = logger.Log(Entry{Timestamp: time.Now().UTC(), AgentID: "a"})
+	_ = logger.Log(Entry{Timestamp: time.Now().UTC(), AgentID: "b"})
+	logger.Close()
+
+	entries, err := logger.Query(QueryFilter{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("expected exactly 2 entries (meta skipped), got %d: %+v", len(entries), entries)
+	}
+	for _, e := range entries {
+		if e.AgentID == "" {
+			t.Errorf("Query returned a record with empty AgentID — looks like the _meta line leaked through: %+v", e)
+		}
+	}
+}
+
+func TestFileLogger_Query_ToleratesLegacyHeaderlessFile(t *testing.T) {
+	// Simulate a v0.4.0 audit file that has no _meta header.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.jsonl")
+
+	legacy := `{"timestamp":"2025-01-01T00:00:00Z","agent_id":"legacy-a","request":{},"result":{"decision":"ALLOW"}}
+{"timestamp":"2025-01-01T00:00:01Z","agent_id":"legacy-b","request":{},"result":{"decision":"DENY"}}
+`
+	if err := os.WriteFile(path, []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Opening against a non-empty, headerless file must NOT inject a header.
+	logger, err := NewFileLogger(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Close()
+
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), `{"_meta"`) {
+		t.Errorf("NewFileLogger must not add a header to a non-empty legacy file; got:\n%s", data)
+	}
+
+	// Query still returns both legacy entries.
+	l2, err := NewFileLogger(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l2.Close()
+	entries, err := l2.Query(QueryFilter{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("expected 2 legacy entries readable, got %d", len(entries))
+	}
+}
+
+// --- ReadMeta ---
+
+func TestReadMeta_SchemaV2File(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	l, err := NewFileLogger(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
+
+	m, err := ReadMeta(path)
+	if err != nil {
+		t.Fatalf("ReadMeta: %v", err)
+	}
+	if m == nil {
+		t.Fatal("expected non-nil meta for v2 file")
+	}
+	if m.SchemaVersion != CurrentSchemaVersion {
+		t.Errorf("expected v%d, got v%d", CurrentSchemaVersion, m.SchemaVersion)
+	}
+}
+
+func TestReadMeta_LegacyFileReturnsNil(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.jsonl")
+	if err := os.WriteFile(path, []byte(`{"timestamp":"2025-01-01T00:00:00Z","agent_id":"x","request":{},"result":{"decision":"ALLOW"}}`+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	m, err := ReadMeta(path)
+	if err != nil {
+		t.Fatalf("ReadMeta: %v", err)
+	}
+	if m != nil {
+		t.Errorf("expected nil meta for headerless file, got %+v", m)
+	}
+}
+
+func TestReadMeta_RefusesNewerSchema(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "future.jsonl")
+	future := fmt.Sprintf(`{"_meta":{"schema_version":%d,"created_at":"2030-01-01T00:00:00Z"}}`+"\n", CurrentSchemaVersion+5)
+	if err := os.WriteFile(path, []byte(future), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ReadMeta(path)
+	if err == nil {
+		t.Fatal("ReadMeta must refuse schema_version > CurrentSchemaVersion")
+	}
+	if !strings.Contains(err.Error(), "schema_version") {
+		t.Errorf("error should mention schema_version, got: %v", err)
 	}
 }
