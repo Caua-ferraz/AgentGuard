@@ -5,12 +5,15 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/Caua-ferraz/AgentGuard/pkg/deprecation"
 )
 
 // Decision represents the outcome of a policy check.
@@ -90,6 +93,17 @@ type AgentCfg struct {
 type NotificationCfg struct {
 	ApprovalRequired []NotifyTarget `yaml:"approval_required,omitempty"`
 	OnDeny           []NotifyTarget `yaml:"on_deny,omitempty"`
+	Redaction        RedactionCfg   `yaml:"redaction,omitempty"`
+}
+
+// RedactionCfg tunes the secret-redactor used by the notify dispatcher.
+//
+// ExtraPatterns are appended to the built-in DefaultRedactor list. Operators
+// use this to mask org-specific secret formats (e.g. internal API key prefixes)
+// without patching the binary. Patterns are Go regexp syntax (RE2); invalid
+// patterns are rejected at policy load.
+type RedactionCfg struct {
+	ExtraPatterns []string `yaml:"extra_patterns,omitempty"`
 }
 
 // NotifyTarget is a notification destination.
@@ -137,6 +151,14 @@ func LoadFromFile(path string) (*Policy, error) {
 		}
 	}
 
+	// Validate notification redaction patterns compile as RE2 regexes.
+	// Fail fast at load rather than at first notification dispatch.
+	for i, p := range pol.Notifications.Redaction.ExtraPatterns {
+		if _, err := regexp.Compile(p); err != nil {
+			return nil, fmt.Errorf("notifications.redaction.extra_patterns[%d]: invalid regex %q: %w", i, p, err)
+		}
+	}
+
 	// Warn (but don't fail) on conditions with time_window and no require_prior.
 	// These are effectively no-ops at runtime — TimeWindow has nothing to
 	// time-bound. We keep v0.4.0 pass-through behavior here for backward
@@ -147,13 +169,24 @@ func LoadFromFile(path string) (*Policy, error) {
 }
 
 // warnTimeWindowOnlyConditions scans every rule for conditions that set
-// TimeWindow but not RequirePrior and emits a single log line naming the
-// scope and rule identifier. It does NOT fail the load.
+// TimeWindow but not RequirePrior and emits a log line naming each offender.
+// It does NOT fail the load.
+//
+// As of v0.4.1 this pattern is a deprecation: v0.5.0 will reject such
+// policies at load time. We fire deprecation.Warn once per policy load
+// that contains any orphan rule — that increments
+// agentguard_deprecations_used_total{feature="policy.time_window_without_require_prior"}
+// once per load, which is the right cardinality for "is this still in use"
+// (a policy with 3 orphan rules reloaded once is one usage event, not three).
+//
+// See docs/DEPRECATIONS.md for removal target and migration path.
 func warnTimeWindowOnlyConditions(pol *Policy) {
+	hasOrphan := false
 	check := func(scope, kind string, rules []Rule) {
 		for _, r := range rules {
 			for _, c := range r.Conditions {
 				if c.RequirePrior == "" && c.TimeWindow != "" {
+					hasOrphan = true
 					id := r.Pattern
 					if id == "" {
 						id = r.Action
@@ -177,6 +210,13 @@ func warnTimeWindowOnlyConditions(pol *Policy) {
 			check("agents."+agentID+"/"+rs.Scope, "deny", rs.Deny)
 			check("agents."+agentID+"/"+rs.Scope, "require_approval", rs.RequireApproval)
 		}
+	}
+
+	if hasOrphan {
+		deprecation.Warn(
+			"policy.time_window_without_require_prior",
+			"deprecated in v0.4.1, will error in v0.5.0; pair time_window with require_prior or remove it. See docs/DEPRECATIONS.md.",
+		)
 	}
 }
 
@@ -212,19 +252,28 @@ type HistoryQuerier interface {
 	RecentActions(agentID string, scope string, since time.Time) ([]HistoryEntry, error)
 }
 
+// sessionCostEntry tracks cumulative cost for a session plus the last time
+// the entry was touched. lastUpdated enables TTL-based eviction of stale
+// session accumulators; without it, long-running processes would accrete
+// one entry per session_id forever.
+type sessionCostEntry struct {
+	cost        float64
+	lastUpdated time.Time
+}
+
 // Engine evaluates actions against a policy.
 type Engine struct {
 	mu           sync.RWMutex
 	policy       *Policy
 	history      HistoryQuerier
-	sessionCosts map[string]float64 // session_id -> cumulative cost
+	sessionCosts map[string]sessionCostEntry // session_id -> entry
 }
 
 // NewEngine creates a policy engine with the given policy.
 func NewEngine(pol *Policy) *Engine {
 	return &Engine{
 		policy:       pol,
-		sessionCosts: make(map[string]float64),
+		sessionCosts: make(map[string]sessionCostEntry),
 	}
 }
 
@@ -247,7 +296,10 @@ func (e *Engine) RecordCost(sessionID string, cost float64) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.sessionCosts[sessionID] += cost
+	entry := e.sessionCosts[sessionID]
+	entry.cost += cost
+	entry.lastUpdated = time.Now()
+	e.sessionCosts[sessionID] = entry
 }
 
 // RefundCost subtracts from the session accumulator. Used if a reserved cost
@@ -258,17 +310,51 @@ func (e *Engine) RefundCost(sessionID string, cost float64) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.sessionCosts[sessionID] -= cost
-	if e.sessionCosts[sessionID] < 0 {
-		e.sessionCosts[sessionID] = 0
+	entry := e.sessionCosts[sessionID]
+	entry.cost -= cost
+	if entry.cost < 0 {
+		entry.cost = 0
 	}
+	entry.lastUpdated = time.Now()
+	e.sessionCosts[sessionID] = entry
 }
 
 // SessionCost returns the accumulated cost for a session (for testing).
 func (e *Engine) SessionCost(sessionID string) float64 {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.sessionCosts[sessionID]
+	return e.sessionCosts[sessionID].cost
+}
+
+// SweepSessionCosts removes session-cost entries whose last update was more
+// than maxAge ago. Returns the number of entries evicted. A non-positive
+// maxAge is treated as "disabled" and returns 0 without scanning.
+//
+// Called by a periodic goroutine in the proxy; exposed here so engine-only
+// tests and out-of-band callers can trigger a sweep directly.
+func (e *Engine) SweepSessionCosts(maxAge time.Duration) int {
+	if maxAge <= 0 {
+		return 0
+	}
+	cutoff := time.Now().Add(-maxAge)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	n := 0
+	for id, entry := range e.sessionCosts {
+		if entry.lastUpdated.Before(cutoff) {
+			delete(e.sessionCosts, id)
+			n++
+		}
+	}
+	return n
+}
+
+// SessionCostCount returns the number of tracked session cost entries
+// (useful for metrics and tests).
+func (e *Engine) SessionCostCount() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return len(e.sessionCosts)
 }
 
 // UpdatePolicy hot-swaps the active policy.
@@ -498,7 +584,7 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 		}
 	}
 	if req.SessionID != "" && maxPerSession > 0 && req.EstCost > 0 {
-		cumulative := e.sessionCosts[req.SessionID]
+		cumulative := e.sessionCosts[req.SessionID].cost
 		if cumulative+req.EstCost > maxPerSession {
 			return CheckResult{
 				Decision: Deny,
@@ -528,7 +614,10 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 
 	// Allow — reserve the cost against the session accumulator atomically.
 	if req.SessionID != "" && req.EstCost > 0 {
-		e.sessionCosts[req.SessionID] += req.EstCost
+		entry := e.sessionCosts[req.SessionID]
+		entry.cost += req.EstCost
+		entry.lastUpdated = time.Now()
+		e.sessionCosts[req.SessionID] = entry
 	}
 
 	return CheckResult{

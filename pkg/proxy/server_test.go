@@ -3,14 +3,18 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
+	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 	"github.com/Caua-ferraz/AgentGuard/pkg/notify"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
@@ -221,14 +225,47 @@ func TestHandleCheck_InvalidJSON(t *testing.T) {
 func TestHandleCheck_OversizedBody(t *testing.T) {
 	srv := newTestServer(t)
 
-	// Create a body larger than MaxRequestBodySize (1 MB)
-	bigBody := strings.Repeat("x", MaxRequestBodySize+1)
+	// Snapshot the rejection counter before the test so we can verify a
+	// strictly-positive delta (the counter is process-global and may carry
+	// state from earlier tests).
+	before := metrics.RequestRejectedSnapshot()[metrics.RejectedBodyTooLarge]
+
+	// Create a VALID-looking JSON body whose total size exceeds
+	// MaxRequestBodySize. Using a raw non-JSON blob would fail at the first
+	// decoder token (invalid character), never triggering MaxBytesReader.
+	// A giant JSON string value forces the decoder to consume past the limit.
+	bigBody := `{"command":"` + strings.Repeat("x", MaxRequestBodySize+1) + `"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(bigBody))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.handleCheck(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for oversized body, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413 for oversized body, got %d: %s", w.Code, w.Body.String())
+	}
+
+	after := metrics.RequestRejectedSnapshot()[metrics.RejectedBodyTooLarge]
+	if after != before+1 {
+		t.Errorf("expected body_too_large counter to increment by 1; before=%d after=%d", before, after)
+	}
+}
+
+// Verify the counter is exposed in Prometheus output with the reason label.
+func TestMetrics_RequestRejectedTotalExposed(t *testing.T) {
+	// Seed a rejection so the counter is present.
+	metrics.IncRequestRejected(metrics.RejectedBodyTooLarge)
+
+	srv := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	srv.handleMetrics(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "agentguard_request_rejected_total") {
+		t.Error("expected agentguard_request_rejected_total in /metrics output")
+	}
+	if !strings.Contains(body, `reason="body_too_large"`) {
+		t.Errorf("expected reason=\"body_too_large\" label, got:\n%s", body)
 	}
 }
 
@@ -493,6 +530,115 @@ func TestHandleAuditQuery(t *testing.T) {
 	if len(entries) != 1 {
 		t.Errorf("expected 1 network entry, got %d", len(entries))
 	}
+}
+
+// TestHandleAuditQuery_LimitAndOffset exercises the Phase 1.1 query-string
+// contract on /v1/audit: ?limit is honored (default 100, ceiling
+// MaxAuditQueryLimit, clamped silently above ceiling, 400 below 1 or
+// non-numeric), ?offset skips matching records before results are collected.
+func TestHandleAuditQuery_LimitAndOffset(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Write 5 entries so limit/offset behavior is visible.
+	for i := 0; i < 5; i++ {
+		body := fmt.Sprintf(`{"scope":"shell","command":"cmd-%d","agent_id":"bot-lim"}`, i)
+		r := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+		srv.handleCheck(httptest.NewRecorder(), r)
+	}
+
+	decode := func(t *testing.T, raw []byte) []audit.Entry {
+		t.Helper()
+		var out []audit.Entry
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatalf("decode response %q: %v", string(raw), err)
+		}
+		return out
+	}
+
+	t.Run("no limit returns default", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?agent_id=bot-lim", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("code = %d, want 200", w.Code)
+		}
+		// We wrote 5, default limit is 100, so we get all 5 back.
+		if got := len(decode(t, w.Body.Bytes())); got != 5 {
+			t.Errorf("got %d entries, want 5", got)
+		}
+	})
+
+	t.Run("explicit limit caps results", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?agent_id=bot-lim&limit=2", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("code = %d, want 200", w.Code)
+		}
+		if got := len(decode(t, w.Body.Bytes())); got != 2 {
+			t.Errorf("got %d entries, want 2", got)
+		}
+	})
+
+	t.Run("limit above ceiling is silently clamped", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?limit=999999", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("code = %d, want 200 (clamp, not reject): body=%s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("limit below minimum is rejected", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?limit=0", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("code = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("non-integer limit is rejected", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?limit=abc", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("code = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("offset skips initial matches", func(t *testing.T) {
+		// limit=2, offset=2 should return entries 3 and 4 (0-indexed: 2 and 3).
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?agent_id=bot-lim&limit=2&offset=2", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		entries := decode(t, w.Body.Bytes())
+		if len(entries) != 2 {
+			t.Fatalf("got %d entries, want 2", len(entries))
+		}
+		if entries[0].Request.Command != "cmd-2" || entries[1].Request.Command != "cmd-3" {
+			t.Errorf("offset=2 returned wrong records: [%s, %s]",
+				entries[0].Request.Command, entries[1].Request.Command)
+		}
+	})
+
+	t.Run("negative offset is rejected", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?offset=-1", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("code = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("non-integer offset is rejected", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?offset=xyz", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("code = %d, want 400", w.Code)
+		}
+	})
 }
 
 // --- Dashboard ---
@@ -1135,6 +1281,68 @@ func TestNewServer_LocalhostBindingWithoutAPIKey(t *testing.T) {
 	}
 }
 
+func TestSessionCostSweeper_Lifecycle(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	logger, _ := audit.NewFileLogger(logPath)
+	defer logger.Close()
+
+	pol := &policy.Policy{
+		Version: "1",
+		Name:    "sweep-test",
+		Rules: []policy.RuleSet{
+			{Scope: "cost", Limits: &policy.CostLimits{MaxPerAction: "$5.00", MaxPerSession: "$100.00"}},
+		},
+	}
+
+	// TTL=0 (default) must NOT start a sweeper goroutine.
+	srvNoTTL := NewServer(Config{
+		Port:    0,
+		Engine:  policy.NewEngine(pol),
+		Logger:  logger,
+		Version: "test",
+	})
+	if srvNoTTL.sweeperDone != nil {
+		t.Error("sweeperDone should be nil when SessionCostTTL=0 (sweep disabled)")
+	}
+
+	// TTL>0 starts the sweeper and Shutdown cleans it up.
+	engine := policy.NewEngine(pol)
+	srv := NewServer(Config{
+		Port:                     0,
+		Engine:                   engine,
+		Logger:                   logger,
+		Version:                  "test",
+		SessionCostTTL:           10 * time.Millisecond,
+		SessionCostSweepInterval: 5 * time.Millisecond,
+	})
+	if srv.sweeperDone == nil {
+		t.Fatal("sweeperDone should be set when SessionCostTTL>0")
+	}
+
+	// Seed a stale entry and wait for at least two sweep ticks.
+	engine.RecordCost("s", 1.00)
+	// Backdate lastUpdated via a second RecordCost that advances time -- but we
+	// can't reach the unexported field from here. Instead, rely on the ticker:
+	// after a couple of intervals the fresh entry stays (it's not older than
+	// TTL), but we just validate the goroutine runs and Shutdown unblocks it.
+	time.Sleep(20 * time.Millisecond)
+
+	// Shutdown must close sweeperDone without panicking.
+	srv.Shutdown()
+
+	// The sweeper channel must now be closed — a receive returns immediately.
+	select {
+	case <-srv.sweeperDone:
+		// ok, channel closed as expected
+	case <-time.After(time.Second):
+		t.Error("sweeperDone was not closed by Shutdown")
+	}
+
+	// Calling Shutdown twice must not panic (idempotence via sync.Once).
+	srv.Shutdown()
+}
+
 func TestNewServer_AllInterfaceBindingWithAPIKey(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")
@@ -1189,4 +1397,118 @@ func TestHandleCheck_EmptyBody(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for empty body, got %d", w.Code)
 	}
+}
+
+// --- Startup checkpoint ---
+
+// TestNewServer_WritesStartupCheckpoint: after NewServer boots on a file
+// with existing audit entries, a checkpoint must exist so a future boot
+// can resume instead of rescanning.
+func TestNewServer_WritesStartupCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+
+	// Pre-populate an audit file.
+	seed, err := audit.NewFileLogger(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := seed.Log(audit.Entry{
+			Timestamp: time.Now().UTC(),
+			AgentID:   "seed",
+			Result:    policy.CheckResult{Decision: policy.Allow},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed.Close()
+
+	// Boot a server against the same file.
+	logger, err := audit.NewFileLogger(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { logger.Close() })
+
+	cfg := Config{
+		Engine:   policy.NewEngine(&policy.Policy{Version: "1", Name: "x"}),
+		Logger:   logger,
+		Notifier: notify.NewDispatcher(policy.NotificationCfg{}),
+		Version:  "test",
+	}
+	_ = NewServer(cfg)
+
+	cp, err := audit.ReadCheckpoint(logPath)
+	if err != nil {
+		t.Fatalf("ReadCheckpoint: %v", err)
+	}
+	if cp == nil {
+		t.Fatal("NewServer must write a checkpoint after seeding counters")
+	}
+	if cp.Offset <= 0 {
+		t.Errorf("expected positive checkpoint offset, got %d", cp.Offset)
+	}
+}
+
+// TestNewServer_ResumesFromCheckpoint: a pre-existing checkpoint covering
+// the full file must prevent NewServer's seed loop from double-counting
+// when new entries arrive only after the checkpoint was written.
+func TestNewServer_ResumesFromCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+
+	// Write a handful of entries.
+	seed, err := audit.NewFileLogger(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		if err := seed.Log(audit.Entry{
+			Timestamp: time.Now().UTC(),
+			AgentID:   "pre",
+			Result:    policy.CheckResult{Decision: policy.Allow},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed.Close()
+
+	// Pretend a previous boot already processed everything.
+	info, err := fileSize(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := audit.WriteCheckpoint(logPath, audit.Checkpoint{Offset: info, AuditSize: info}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Snapshot the allowed counter before boot — the seeder must not bump it.
+	before := atomic.LoadUint64(&metrics.AllowedTotal)
+
+	logger, err := audit.NewFileLogger(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { logger.Close() })
+
+	_ = NewServer(Config{
+		Engine:   policy.NewEngine(&policy.Policy{Version: "1", Name: "x"}),
+		Logger:   logger,
+		Notifier: notify.NewDispatcher(policy.NotificationCfg{}),
+		Version:  "test",
+	})
+
+	after := atomic.LoadUint64(&metrics.AllowedTotal)
+	if after != before {
+		t.Errorf("checkpointed file must be skipped on boot; AllowedTotal went from %d to %d", before, after)
+	}
+}
+
+func fileSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
 }

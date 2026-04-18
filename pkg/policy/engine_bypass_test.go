@@ -2,9 +2,13 @@ package policy
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/Caua-ferraz/AgentGuard/pkg/deprecation"
 )
 
 // TestGlobMatch_SegmentBoundaries locks in the segment-matching semantics of
@@ -196,6 +200,76 @@ func TestNormalizeRequest_URLEncoded(t *testing.T) {
 	})
 	if r.Decision != Deny {
 		t.Errorf("URL-encoded traversal must be denied, got %s: %s", r.Decision, r.Reason)
+	}
+}
+
+// TestConditionalRule_TimeWindowOnly_DeprecationCounter verifies that loading
+// a policy with an orphan time_window (no require_prior) bumps the
+// deprecation counter exposed by pkg/deprecation. This is the signal
+// operators scrape before upgrading to v0.5.0, which will turn the warning
+// into a load error.
+//
+// Contract under test:
+//   - Each LoadFromFile call that observes at least one orphan rule
+//     increments the counter by exactly 1 (not once per orphan rule — see
+//     the comment in warnTimeWindowOnlyConditions).
+//   - A policy with no orphan rules does NOT increment the counter.
+//   - Evaluation behavior is unchanged (covered by
+//     TestConditionalRule_TimeWindowOnly_BackwardCompat below).
+func TestConditionalRule_TimeWindowOnly_DeprecationCounter(t *testing.T) {
+	const featureKey = "policy.time_window_without_require_prior"
+	deprecation.Reset()
+
+	// Orphan policy: time_window present, require_prior absent.
+	orphan := `
+version: "1"
+name: "orphan-tw"
+rules:
+  - scope: shell
+    allow:
+      - pattern: "deploy *"
+        conditions:
+          - time_window: "1h"
+`
+	// Clean policy: no conditions.
+	clean := `
+version: "1"
+name: "clean"
+rules:
+  - scope: shell
+    allow:
+      - pattern: "ls *"
+`
+
+	dir := t.TempDir()
+	orphanPath := filepath.Join(dir, "orphan.yaml")
+	cleanPath := filepath.Join(dir, "clean.yaml")
+	if err := os.WriteFile(orphanPath, []byte(orphan), 0600); err != nil {
+		t.Fatalf("write orphan: %v", err)
+	}
+	if err := os.WriteFile(cleanPath, []byte(clean), 0600); err != nil {
+		t.Fatalf("write clean: %v", err)
+	}
+
+	if _, err := LoadFromFile(orphanPath); err != nil {
+		t.Fatalf("load orphan: %v", err)
+	}
+	if got := deprecation.Count(featureKey); got != 1 {
+		t.Errorf("after first orphan load: count = %d, want 1", got)
+	}
+
+	if _, err := LoadFromFile(orphanPath); err != nil {
+		t.Fatalf("reload orphan: %v", err)
+	}
+	if got := deprecation.Count(featureKey); got != 2 {
+		t.Errorf("after second orphan load: count = %d, want 2 (one increment per load)", got)
+	}
+
+	if _, err := LoadFromFile(cleanPath); err != nil {
+		t.Fatalf("load clean: %v", err)
+	}
+	if got := deprecation.Count(featureKey); got != 2 {
+		t.Errorf("clean load must not bump counter: count = %d, want 2", got)
 	}
 }
 

@@ -12,19 +12,55 @@ package metrics
 import (
 	"fmt"
 	"io"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/Caua-ferraz/AgentGuard/pkg/deprecation"
 )
 
 // -- Counters ----------------------------------------------------------------
 
 var (
-	ChecksTotal       uint64 // all /v1/check requests
-	AllowedTotal      uint64
-	DeniedTotal       uint64
-	ApprovalTotal     uint64 // REQUIRE_APPROVAL decisions
-	RateLimitedTotal  uint64 // rate-limit denies
+	ChecksTotal      uint64 // all /v1/check requests
+	AllowedTotal     uint64
+	DeniedTotal      uint64
+	ApprovalTotal    uint64 // REQUIRE_APPROVAL decisions
+	RateLimitedTotal uint64 // rate-limit denies
+
+	// Labeled counter for requests rejected before policy evaluation.
+	// Keyed by a short, bounded-cardinality reason string.
+	requestRejectedMu    sync.Mutex
+	requestRejectedCount = map[string]uint64{}
 )
+
+// Well-known reason labels for IncRequestRejected. Other reasons are allowed
+// but callers must keep the cardinality bounded.
+const (
+	RejectedBodyTooLarge = "body_too_large"
+)
+
+// IncRequestRejected increments agentguard_request_rejected_total{reason=...}.
+func IncRequestRejected(reason string) {
+	if reason == "" {
+		reason = "unknown"
+	}
+	requestRejectedMu.Lock()
+	requestRejectedCount[reason]++
+	requestRejectedMu.Unlock()
+}
+
+// RequestRejectedSnapshot returns a copy of the current counts (for tests).
+func RequestRejectedSnapshot() map[string]uint64 {
+	requestRejectedMu.Lock()
+	defer requestRejectedMu.Unlock()
+	out := make(map[string]uint64, len(requestRejectedCount))
+	for k, v := range requestRejectedCount {
+		out[k] = v
+	}
+	return out
+}
 
 // IncDecision increments the appropriate decision counter.
 func IncDecision(decision string) {
@@ -144,6 +180,67 @@ func WritePrometheus(w io.Writer) {
 	writeHistogram(w, "agentguard_audit_write_duration_ms",
 		"Time spent in Logger.Log (audit file write) in milliseconds.",
 		AuditWriteDuration)
+
+	writeRequestRejected(w)
+	writeDeprecations(w)
+}
+
+// writeRequestRejected emits the labeled rejection counter. Always emits the
+// HELP/TYPE lines so scrapers see the metric even when no rejections have
+// happened yet.
+func writeRequestRejected(w io.Writer) {
+	const name = "agentguard_request_rejected_total"
+	const help = "Requests rejected before policy evaluation, by reason (e.g. body_too_large)."
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+	requestRejectedMu.Lock()
+	snap := make(map[string]uint64, len(requestRejectedCount))
+	for k, v := range requestRejectedCount {
+		snap[k] = v
+	}
+	requestRejectedMu.Unlock()
+	if len(snap) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(snap))
+	for k := range snap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(w, "%s{reason=\"%s\"} %d\n", name, escapeLabel(k), snap[k])
+	}
+}
+
+// writeDeprecations emits a labeled counter for every deprecated feature that
+// has been used at least once in this process. Cardinality is bounded by the
+// "feature" column in docs/DEPRECATIONS.md. Keys are sorted so the exposition
+// order is stable across scrapes.
+func writeDeprecations(w io.Writer) {
+	snap := deprecation.Snapshot()
+	const name = "agentguard_deprecations_used_total"
+	const help = "Times a deprecated feature was used, labeled by stable feature key (see docs/DEPRECATIONS.md)."
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+	if len(snap) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(snap))
+	for k := range snap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(w, "%s{feature=\"%s\"} %d\n", name, escapeLabel(k), snap[k])
+	}
+}
+
+// escapeLabel escapes a Prometheus label value per the text exposition spec:
+// backslash, double-quote, and newline are the only special characters.
+func escapeLabel(s string) string {
+	if !strings.ContainsAny(s, "\\\"\n") {
+		return s
+	}
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
+	return r.Replace(s)
 }
 
 func writeCounter(w io.Writer, name, help string, value uint64) {

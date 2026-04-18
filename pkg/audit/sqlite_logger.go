@@ -179,11 +179,21 @@ func (l *SQLiteLogger) Query(filter QueryFilter) ([]Entry, error) {
 	}
 	query += " ORDER BY id ASC"
 
-	// LIMIT is parameterized to avoid SQL injection even though the caller is
-	// currently trusted. Treat unbounded (Limit <= 0) as "no limit".
+	// LIMIT/OFFSET are parameterized to avoid SQL injection even though the
+	// caller is currently trusted. Treat Limit <= 0 as "no limit". SQLite
+	// requires a LIMIT to accept an OFFSET, so when the caller asks for an
+	// offset without a limit we fall back to LIMIT -1 (SQLite convention for
+	// "no limit with offset").
 	if filter.Limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, filter.Limit)
+		if filter.Offset > 0 {
+			query += " OFFSET ?"
+			args = append(args, filter.Offset)
+		}
+	} else if filter.Offset > 0 {
+		query += " LIMIT -1 OFFSET ?"
+		args = append(args, filter.Offset)
 	}
 
 	rows, err := l.db.Query(query, args...)

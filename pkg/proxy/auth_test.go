@@ -203,6 +203,58 @@ func TestHandleLogin_Success(t *testing.T) {
 	}
 }
 
+func TestHandleLogin_TLSTerminatedUpstreamSetsSecure(t *testing.T) {
+	// With TLSTerminatedUpstream=true, cookies must be issued with Secure=true
+	// even though the inbound request has r.TLS==nil (plaintext hop from the
+	// TLS-terminating reverse proxy).
+	srv := newTestServer(t, func(c *Config) { c.TLSTerminatedUpstream = true })
+
+	body := `{"api_key":"test-secret"}`
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if req.TLS != nil {
+		t.Fatal("httptest plaintext request should have nil TLS")
+	}
+	w := httptest.NewRecorder()
+	srv.handleLogin(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name != SessionCookieName && c.Name != CSRFCookieName {
+			continue
+		}
+		if !c.Secure {
+			t.Errorf("cookie %q must have Secure=true when TLSTerminatedUpstream=true", c.Name)
+		}
+	}
+}
+
+func TestHandleLogin_DefaultNoTLSNoSecure(t *testing.T) {
+	// Default (TLSTerminatedUpstream=false) preserves v0.4.0 behavior: cookies
+	// are emitted without Secure when the request arrives over plaintext.
+	srv := newTestServer(t) // default: TLSTerminatedUpstream=false
+
+	body := `{"api_key":"test-secret"}`
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleLogin(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name != SessionCookieName && c.Name != CSRFCookieName {
+			continue
+		}
+		if c.Secure {
+			t.Errorf("cookie %q should not have Secure=true on plaintext request with default config", c.Name)
+		}
+	}
+}
+
 func TestHandleLogin_WrongKey(t *testing.T) {
 	srv := newTestServer(t)
 	body := `{"api_key":"wrong"}`

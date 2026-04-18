@@ -1,6 +1,8 @@
 package policy
 
 import (
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -389,5 +391,50 @@ func TestLoadFromFile_Invalid(t *testing.T) {
 	_, err := LoadFromFile("/tmp/nonexistent_policy_file.yaml")
 	if err == nil {
 		t.Error("expected error for non-existent file")
+	}
+}
+
+func TestLoadFromFile_RejectsInvalidRedactionPattern(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/policy.yaml"
+	yaml := `version: "1"
+name: test
+notifications:
+  redaction:
+    extra_patterns:
+      - "[unclosed"
+`
+	if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := LoadFromFile(path)
+	if err == nil {
+		t.Fatal("expected error for invalid regex in extra_patterns")
+	}
+	if !strings.Contains(err.Error(), "extra_patterns") {
+		t.Errorf("error should mention extra_patterns, got: %v", err)
+	}
+}
+
+func TestLoadFromFile_AcceptsValidRedactionPattern(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/policy.yaml"
+	yaml := `version: "1"
+name: test
+notifications:
+  redaction:
+    extra_patterns:
+      - "ACME_[A-Z0-9]{12}"
+      - "(?i)internal_secret"
+`
+	if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	pol, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("valid extras should load, got: %v", err)
+	}
+	if len(pol.Notifications.Redaction.ExtraPatterns) != 2 {
+		t.Errorf("expected 2 extra patterns, got %d", len(pol.Notifications.Redaction.ExtraPatterns))
 	}
 }

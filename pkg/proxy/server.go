@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,8 +23,13 @@ import (
 )
 
 const (
-	// DefaultAuditQueryLimit is the max entries returned by the audit query endpoint.
+	// DefaultAuditQueryLimit is the entry count returned when the client does
+	// not supply ?limit=.
 	DefaultAuditQueryLimit = 100
+	// MaxAuditQueryLimit is the hard ceiling on ?limit=. Clients asking for
+	// more receive this many entries (silently clamped); the ceiling exists
+	// so a client cannot request an unbounded scan of the audit file.
+	MaxAuditQueryLimit = 1000
 	// SSEChannelBufferSize is the buffer size for Server-Sent Events channels.
 	SSEChannelBufferSize = 64
 	// ApprovalIDPrefix is the prefix for generated approval IDs.
@@ -54,6 +61,22 @@ type Config struct {
 	BaseURL string
 	// Version is the application version string shown in /health.
 	Version string
+	// TLSTerminatedUpstream tells the server that session cookies should be
+	// issued with Secure set regardless of whether the incoming request has
+	// r.TLS populated. Set this when AgentGuard runs behind a reverse proxy
+	// that terminates TLS and does not forward X-Forwarded-Proto. Default
+	// false preserves v0.4.0 behavior (cookie Secure keyed to r.TLS only).
+	TLSTerminatedUpstream bool
+
+	// SessionCostTTL bounds how long an idle session_id entry lingers in the
+	// cost accumulator map. A periodic goroutine evicts entries whose last
+	// write was more than TTL ago. Zero disables the sweep (v0.4.0 behavior:
+	// entries accumulate for the process lifetime).
+	SessionCostTTL time.Duration
+	// SessionCostSweepInterval controls how often the sweeper runs. If zero
+	// and SessionCostTTL > 0, it defaults to SessionCostTTL/4 with a floor
+	// of 1 minute.
+	SessionCostSweepInterval time.Duration
 }
 
 // Server is the AgentGuard HTTP proxy.
@@ -63,6 +86,10 @@ type Server struct {
 	approval *ApprovalQueue
 	limiter  *ratelimit.Limiter
 	sessions *SessionStore
+	// sweeperDone signals the session-cost sweeper goroutine to stop.
+	// Nil when the sweeper is not running. Closed exactly once via sweeperStop.
+	sweeperDone chan struct{}
+	sweeperStop sync.Once
 }
 
 // ApprovalQueue manages pending approval requests.
@@ -135,8 +162,33 @@ func NewServer(cfg Config) *Server {
 	// Wire up history querier for conditional rule evaluation
 	cfg.Engine.SetHistoryQuerier(&auditHistoryAdapter{logger: cfg.Logger})
 
-	// Seed in-memory counters from existing audit log so stats survive restarts.
-	if existing, err := cfg.Logger.Query(audit.QueryFilter{}); err == nil {
+	// Seed in-memory counters from the existing audit log so stats survive
+	// restarts. A large audit file rescanned from scratch on every boot can
+	// stall startup and delay /metrics accuracy, so when the Logger is a
+	// FileLogger we persist a byte-offset checkpoint and resume from there.
+	// Other Logger implementations (e.g. SQLiteLogger) fall back to a full
+	// Query() — their scan cost is their own concern.
+	type pathReporter interface{ Path() string }
+	if pr, ok := cfg.Logger.(pathReporter); ok && pr.Path() != "" {
+		path := pr.Path()
+		cp, cpErr := audit.ReadCheckpoint(path)
+		if cpErr != nil {
+			log.Printf("WARN: audit checkpoint read failed (%v); replaying full log", cpErr)
+		}
+		newOffset, err := audit.ReplayFrom(path, cp, func(e audit.Entry) {
+			metrics.IncDecision(string(e.Result.Decision))
+		})
+		if err != nil {
+			log.Printf("WARN: audit replay failed (%v); counters may be under-seeded", err)
+		} else if newOffset > 0 {
+			// Best-effort: a failed checkpoint write just means the next
+			// boot re-scans. No need to surface the error at startup.
+			_ = audit.WriteCheckpoint(path, audit.Checkpoint{
+				Offset:    newOffset,
+				AuditSize: newOffset,
+			})
+		}
+	} else if existing, err := cfg.Logger.Query(audit.QueryFilter{}); err == nil {
 		for _, e := range existing {
 			metrics.IncDecision(string(e.Result.Decision))
 		}
@@ -192,7 +244,38 @@ func NewServer(cfg Config) *Server {
 		IdleTimeout:       120 * time.Second,
 	}
 
+	// Start the session-cost sweeper if TTL is configured.
+	if cfg.SessionCostTTL > 0 {
+		interval := cfg.SessionCostSweepInterval
+		if interval <= 0 {
+			interval = cfg.SessionCostTTL / 4
+			if interval < time.Minute {
+				interval = time.Minute
+			}
+		}
+		s.sweeperDone = make(chan struct{})
+		go s.runSessionCostSweeper(interval, cfg.SessionCostTTL)
+	}
+
 	return s
+}
+
+// runSessionCostSweeper periodically calls Engine.SweepSessionCosts until
+// sweeperDone is closed. Evictions are logged at INFO when non-zero so
+// operators can see the background work without grepping metrics.
+func (s *Server) runSessionCostSweeper(interval, ttl time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.sweeperDone:
+			return
+		case <-t.C:
+			if n := s.cfg.Engine.SweepSessionCosts(ttl); n > 0 {
+				log.Printf("INFO: session-cost sweeper evicted %d entries (ttl=%s)", n, ttl)
+			}
+		}
+	}
 }
 
 // Start begins listening for requests.
@@ -200,8 +283,11 @@ func (s *Server) Start() error {
 	return s.http.ListenAndServe()
 }
 
-// Shutdown gracefully stops the server.
+// Shutdown gracefully stops the server. Safe to call multiple times.
 func (s *Server) Shutdown() {
+	if s.sweeperDone != nil {
+		s.sweeperStop.Do(func() { close(s.sweeperDone) })
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
 	defer cancel()
 	if err := s.http.Shutdown(ctx); err != nil {
@@ -219,6 +305,18 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodySize)
 	var req policy.ActionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// Distinguish "body too large" from other parse errors so that the
+		// enforcement of MaxRequestBodySize is observable. http.MaxBytesError
+		// is the canonical error returned by MaxBytesReader when the limit
+		// is hit (stdlib, Go 1.19+).
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			metrics.IncRequestRejected(metrics.RejectedBodyTooLarge)
+			log.Printf("WARN: request body exceeds limit: remote=%s content_length=%d limit=%d",
+				r.RemoteAddr, r.ContentLength, MaxRequestBodySize)
+			http.Error(w, fmt.Sprintf("Request body too large (limit %d bytes)", MaxRequestBodySize), http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -363,13 +461,34 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAuditQuery returns filtered audit log entries.
+//
+// Query-string contract (stable as of v0.4.1):
+//   - ?limit=N — integer in [1, MaxAuditQueryLimit]. Values above the ceiling
+//     are clamped silently. Missing/empty uses DefaultAuditQueryLimit.
+//     Non-integers or values < 1 return 400.
+//   - ?offset=N — integer ≥ 0. Defaults to 0. Non-integers or negatives
+//     return 400.
+//
+// Prior to v0.4.1 the handler ignored ?limit= and always passed 100.
 func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
+	limit, err := parseBoundedInt(r.URL.Query().Get("limit"), DefaultAuditQueryLimit, 1, MaxAuditQueryLimit)
+	if err != nil {
+		http.Error(w, "invalid limit: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	offset, err := parseBoundedInt(r.URL.Query().Get("offset"), 0, 0, -1)
+	if err != nil {
+		http.Error(w, "invalid offset: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	filter := audit.QueryFilter{
 		AgentID:   r.URL.Query().Get("agent_id"),
 		SessionID: r.URL.Query().Get("session_id"),
 		Decision:  r.URL.Query().Get("decision"),
 		Scope:     r.URL.Query().Get("scope"),
-		Limit:     DefaultAuditQueryLimit,
+		Limit:     limit,
+		Offset:    offset,
 	}
 
 	entries, err := s.cfg.Logger.Query(filter)
@@ -380,6 +499,34 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(entries)
+}
+
+// parseBoundedInt parses an optional query-string integer.
+//
+//   - An empty raw value returns defaultVal, no error.
+//   - A non-integer returns an error (handler should map to 400).
+//   - min is the inclusive lower bound. Values below min return an error.
+//   - max is the inclusive upper bound. Values above max are clamped to max
+//     (silently), not rejected. Pass max=-1 for no upper bound.
+//
+// The asymmetry — reject below, clamp above — matches how operators expect
+// these knobs to behave: a negative limit is a bug, a huge limit is usually
+// "give me all of them" and we want a safe ceiling rather than a 400.
+func parseBoundedInt(raw string, defaultVal, minVal, maxVal int) (int, error) {
+	if raw == "" {
+		return defaultVal, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("not an integer: %q", raw)
+	}
+	if n < minVal {
+		return 0, fmt.Errorf("value %d below minimum %d", n, minVal)
+	}
+	if maxVal >= 0 && n > maxVal {
+		return maxVal, nil
+	}
+	return n, nil
 }
 
 // handleHealth returns server health status.

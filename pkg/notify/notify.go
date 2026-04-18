@@ -67,10 +67,18 @@ func NewDispatcher(cfg policy.NotificationCfg) *Dispatcher {
 // NewDispatcherWithOpts allows tuning the worker count and queue size. Used
 // primarily by tests.
 func NewDispatcherWithOpts(cfg policy.NotificationCfg, workers, queueSize int) *Dispatcher {
+	// Policy load has already validated that extra patterns compile, so any
+	// error here is a programmer mistake (e.g. a caller that skipped
+	// LoadFromFile). Surface it via log rather than silently dropping.
+	redactor, err := DefaultRedactor().WithExtraPatterns(cfg.Redaction.ExtraPatterns)
+	if err != nil {
+		log.Printf("notify: ignoring extra_patterns (%v) — redactor will use defaults only", err)
+		redactor = DefaultRedactor()
+	}
 	d := &Dispatcher{
 		queue:    make(chan dispatchJob, queueSize),
 		done:     make(chan struct{}),
-		redactor: DefaultRedactor(),
+		redactor: redactor,
 	}
 
 	for _, t := range cfg.ApprovalRequired {
@@ -330,6 +338,28 @@ func DefaultRedactor() *Redactor {
 			regexp.MustCompile(`(?i)(secret|token|password|api[_\-]?key)\s*=\s*\S+`),
 		},
 	}
+}
+
+// WithExtraPatterns appends operator-supplied regexes to the redactor's
+// pattern list and returns the receiver. An invalid pattern returns an error
+// and leaves the receiver unmodified.
+//
+// Patterns are evaluated in order: built-in defaults first, then extras.
+// A later pattern can overlap an earlier match — redaction is idempotent.
+func (r *Redactor) WithExtraPatterns(extras []string) (*Redactor, error) {
+	if len(extras) == 0 {
+		return r, nil
+	}
+	compiled := make([]*regexp.Regexp, 0, len(extras))
+	for i, p := range extras {
+		re, err := regexp.Compile(p)
+		if err != nil {
+			return r, fmt.Errorf("extra_patterns[%d] %q: %w", i, p, err)
+		}
+		compiled = append(compiled, re)
+	}
+	r.patterns = append(r.patterns, compiled...)
+	return r, nil
 }
 
 // Redact returns a copy of the event with sensitive substrings replaced by
