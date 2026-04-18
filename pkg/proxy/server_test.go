@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1087,39 +1088,130 @@ func TestApprovalQueue_ResolveRemovesFromList(t *testing.T) {
 	}
 }
 
-func TestApprovalQueue_EvictsResolved(t *testing.T) {
-	q := &ApprovalQueue{pending: make(map[string]*PendingAction)}
-
-	// Add and resolve entries to fill the map
-	for i := 0; i < MaxPendingApprovals; i++ {
-		pa := mustAdd(t, q,
-			policy.ActionRequest{Scope: "shell", Command: "sudo test"},
-			policy.CheckResult{Decision: policy.RequireApproval},
-		)
-		_ = q.Resolve(pa.ID, policy.Allow)
+// TestApprovalQueue_EvictsOldestResolvedOnly: at capacity, Add evicts
+// exactly one entry — the resolved entry with the earliest CreatedAt.
+// Other resolved entries are left alone; they may still be useful for
+// /v1/status polling until they too age out.
+func TestApprovalQueue_EvictsOldestResolvedOnly(t *testing.T) {
+	q := &ApprovalQueue{
+		pending: make(map[string]*PendingAction),
+		maxSize: 3,
 	}
 
-	// Map should be at capacity (resolved entries are still in the map)
+	// Add three entries spaced in CreatedAt order. The three Add() calls are
+	// serialized by the queue mutex so their CreatedAt values are strictly
+	// increasing, but nanosecond resolution on fast hosts could collide —
+	// force distinct timestamps after the fact to keep the LRU tie-break
+	// deterministic.
+	older := mustAdd(t, q, policy.ActionRequest{Scope: "shell", Command: "sudo a"}, policy.CheckResult{Decision: policy.RequireApproval})
+	middle := mustAdd(t, q, policy.ActionRequest{Scope: "shell", Command: "sudo b"}, policy.CheckResult{Decision: policy.RequireApproval})
+	newest := mustAdd(t, q, policy.ActionRequest{Scope: "shell", Command: "sudo c"}, policy.CheckResult{Decision: policy.RequireApproval})
+	q.mu.Lock()
+	q.pending[older.ID].CreatedAt = time.Unix(1, 0)
+	q.pending[middle.ID].CreatedAt = time.Unix(2, 0)
+	q.pending[newest.ID].CreatedAt = time.Unix(3, 0)
+	q.mu.Unlock()
+
+	// Resolve both `older` and `middle`. The next Add must evict `older` —
+	// not `middle`, even though both are resolved.
+	if err := q.Resolve(older.ID, policy.Allow); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Resolve(middle.ID, policy.Allow); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh := mustAdd(t, q, policy.ActionRequest{Scope: "shell", Command: "sudo d"}, policy.CheckResult{Decision: policy.RequireApproval})
+
 	q.mu.RLock()
-	sizeBefore := len(q.pending)
-	q.mu.RUnlock()
-	if sizeBefore != MaxPendingApprovals {
-		t.Fatalf("expected %d entries before eviction, got %d", MaxPendingApprovals, sizeBefore)
+	defer q.mu.RUnlock()
+
+	if _, ok := q.pending[older.ID]; ok {
+		t.Error("oldest resolved entry should have been evicted")
+	}
+	if _, ok := q.pending[middle.ID]; !ok {
+		t.Error("newer resolved entry must NOT be evicted — LRU drops only the oldest")
+	}
+	if _, ok := q.pending[newest.ID]; !ok {
+		t.Error("unresolved entry must survive eviction")
+	}
+	if _, ok := q.pending[fresh.ID]; !ok {
+		t.Error("newly-added entry must be present after the Add that triggered eviction")
+	}
+	if got := len(q.pending); got != 3 {
+		t.Errorf("queue size after eviction+add = %d, want 3 (at cap)", got)
+	}
+}
+
+// TestApprovalQueue_FullRejectsWhenAllUnresolved: when every slot is still
+// unresolved, Add must refuse with ErrApprovalQueueFull so the HTTP layer
+// can respond 503 + Retry-After instead of generating an approval ID the
+// agent will poll in vain.
+func TestApprovalQueue_FullRejectsWhenAllUnresolved(t *testing.T) {
+	q := &ApprovalQueue{
+		pending: make(map[string]*PendingAction),
+		maxSize: 2,
+	}
+	mustAdd(t, q, policy.ActionRequest{Scope: "shell", Command: "sudo a"}, policy.CheckResult{Decision: policy.RequireApproval})
+	mustAdd(t, q, policy.ActionRequest{Scope: "shell", Command: "sudo b"}, policy.CheckResult{Decision: policy.RequireApproval})
+
+	_, err := q.Add(
+		policy.ActionRequest{Scope: "shell", Command: "sudo c"},
+		policy.CheckResult{Decision: policy.RequireApproval},
+	)
+	if err == nil {
+		t.Fatal("Add at full capacity with no resolved entries must return an error")
+	}
+	if !errors.Is(err, ErrApprovalQueueFull) {
+		t.Errorf("error should be ErrApprovalQueueFull, got %v", err)
 	}
 
-	// Adding one more should trigger eviction of resolved entries
-	mustAdd(t, q,
-		policy.ActionRequest{Scope: "shell", Command: "sudo new"},
+	// Nothing was added, nothing was evicted — invariants must hold.
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	if got := len(q.pending); got != 2 {
+		t.Errorf("queue size after rejected Add = %d, want 2", got)
+	}
+}
+
+// TestHandleCheck_503OnApprovalQueueFull: when the policy says
+// REQUIRE_APPROVAL but the queue is full of unresolved entries, the HTTP
+// handler must respond 503 with a numeric Retry-After header — not 500.
+func TestHandleCheck_503OnApprovalQueueFull(t *testing.T) {
+	s := newTestServer(t)
+
+	// Shrink the queue to 1 and pre-fill it with an unresolved entry so the
+	// next /v1/check that would require approval is guaranteed to hit the
+	// capacity branch.
+	s.approval.maxSize = 1
+	mustAdd(t, s.approval,
+		policy.ActionRequest{Scope: "shell", Command: "sudo prefill"},
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)
 
-	q.mu.RLock()
-	sizeAfter := len(q.pending)
-	q.mu.RUnlock()
+	body, err := json.Marshal(policy.ActionRequest{
+		AgentID: "bot",
+		Scope:   "shell",
+		Command: "sudo rm -rf /tmp/thing", // matches the REQUIRE_APPROVAL rule in newTestServer
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/check", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rw := httptest.NewRecorder()
 
-	// All resolved entries evicted, only the new one remains
-	if sizeAfter != 1 {
-		t.Errorf("expected 1 entry after eviction, got %d", sizeAfter)
+	s.handleCheck(rw, req)
+
+	if rw.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rw.Code)
+	}
+	ra := rw.Header().Get("Retry-After")
+	if ra == "" {
+		t.Error("Retry-After header must be set on 503")
+	}
+	if ra != fmt.Sprint(ApprovalQueueFullRetryAfterSeconds) {
+		t.Errorf("Retry-After = %q, want %q", ra, fmt.Sprint(ApprovalQueueFullRetryAfterSeconds))
 	}
 }
 

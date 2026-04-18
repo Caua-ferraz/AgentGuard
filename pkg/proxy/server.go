@@ -39,9 +39,22 @@ const (
 	// MaxRequestBodySize is the maximum allowed size of incoming request bodies (1 MB).
 	MaxRequestBodySize = 1 << 20
 	// MaxPendingApprovals is the maximum number of entries (pending + resolved) kept
-	// in the approval queue. When exceeded, the oldest resolved entries are evicted.
+	// in the approval queue. When at capacity, the oldest resolved entry is
+	// evicted first (LRU); if every slot holds an unresolved entry, new
+	// approvals are rejected with 503 rather than silently dropped.
 	MaxPendingApprovals = 10000
+	// ApprovalQueueFullRetryAfterSeconds is the Retry-After value returned
+	// when the approval queue is full and no resolved entries are available
+	// to evict. Operators tune MaxPendingApprovals or drain pending items;
+	// clients should back off roughly this long before retrying.
+	ApprovalQueueFullRetryAfterSeconds = 30
 )
+
+// ErrApprovalQueueFull is returned by ApprovalQueue.Add when the queue is at
+// capacity and every entry is still unresolved. The HTTP handler maps this
+// to 503 + Retry-After so the caller knows to back off rather than treating
+// it as a generic 500.
+var ErrApprovalQueueFull = errors.New("approval queue full: no resolved entries to evict")
 
 // Config holds the server configuration.
 type Config struct {
@@ -93,10 +106,17 @@ type Server struct {
 }
 
 // ApprovalQueue manages pending approval requests.
+//
+// maxSize caps the total number of entries (resolved + unresolved) so a
+// spike of approval-required traffic with no operator around cannot exhaust
+// memory. It is exposed as a field rather than a package const so tests can
+// shrink it without faking 10 000 entries; production code always uses
+// MaxPendingApprovals via NewServer.
 type ApprovalQueue struct {
 	mu       sync.RWMutex
 	pending  map[string]*PendingAction
 	watchers []chan AuditEvent
+	maxSize  int
 }
 
 // PendingAction is an action waiting for human approval.
@@ -154,6 +174,7 @@ func NewServer(cfg Config) *Server {
 		cfg: cfg,
 		approval: &ApprovalQueue{
 			pending: make(map[string]*PendingAction),
+			maxSize: MaxPendingApprovals,
 		},
 		limiter:  ratelimit.New(),
 		sessions: NewSessionStore(),
@@ -350,6 +371,16 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	if result.Decision == policy.RequireApproval {
 		pending, err := s.approval.Add(req, result)
 		if err != nil {
+			if errors.Is(err, ErrApprovalQueueFull) {
+				// Tell the client this is a transient capacity problem, not
+				// a permanent failure. Retry-After is advisory; tune via
+				// ApprovalQueueFullRetryAfterSeconds or grow
+				// MaxPendingApprovals if operators report repeated 503s.
+				log.Printf("approval queue full: %d unresolved entries", s.approval.PendingCount())
+				w.Header().Set("Retry-After", strconv.Itoa(ApprovalQueueFullRetryAfterSeconds))
+				http.Error(w, "approval queue full; retry later", http.StatusServiceUnavailable)
+				return
+			}
 			log.Printf("approval queue error: %v", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
@@ -658,13 +689,25 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 // ApprovalQueue methods
 
+// Add registers a new pending approval. If the queue is at capacity the
+// oldest resolved entry is evicted first (LRU on CreatedAt; resolution does
+// not rewind it, so the eviction target is the entry that has been around
+// the longest). If every slot is still unresolved, Add returns
+// ErrApprovalQueueFull and the caller is expected to surface 503 +
+// Retry-After — silently dropping the request would leave the agent
+// waiting forever on an ID that does not exist.
 func (q *ApprovalQueue) Add(req policy.ActionRequest, result policy.CheckResult) (*PendingAction, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	// Evict oldest resolved entries if at capacity
-	if len(q.pending) >= MaxPendingApprovals {
-		q.evictResolvedLocked()
+	cap := q.maxSize
+	if cap <= 0 {
+		cap = MaxPendingApprovals
+	}
+	if len(q.pending) >= cap {
+		if !q.evictOldestResolvedLocked() {
+			return nil, ErrApprovalQueueFull
+		}
 	}
 
 	var b [16]byte
@@ -683,14 +726,30 @@ func (q *ApprovalQueue) Add(req policy.ActionRequest, result policy.CheckResult)
 	return pa, nil
 }
 
-// evictResolvedLocked removes all resolved entries from the queue.
+// evictOldestResolvedLocked drops exactly one entry: the resolved entry with
+// the earliest CreatedAt. Returns true when something was evicted, false
+// when every entry is still unresolved. The linear scan is O(n), but n is
+// capped at maxSize and eviction only fires when Add hits the cap — not on
+// the hot path of normal traffic.
+//
 // Must be called with q.mu held.
-func (q *ApprovalQueue) evictResolvedLocked() {
+func (q *ApprovalQueue) evictOldestResolvedLocked() bool {
+	var oldestID string
+	var oldestCreated time.Time
 	for id, pa := range q.pending {
-		if pa.Resolved {
-			delete(q.pending, id)
+		if !pa.Resolved {
+			continue
+		}
+		if oldestID == "" || pa.CreatedAt.Before(oldestCreated) {
+			oldestID = id
+			oldestCreated = pa.CreatedAt
 		}
 	}
+	if oldestID == "" {
+		return false
+	}
+	delete(q.pending, oldestID)
+	return true
 }
 
 func (q *ApprovalQueue) Resolve(id string, decision policy.Decision) error {
