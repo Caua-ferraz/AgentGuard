@@ -18,6 +18,7 @@ import (
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
 	"github.com/Caua-ferraz/AgentGuard/pkg/migrate"
+	_ "github.com/Caua-ferraz/AgentGuard/pkg/migrate/v040_to_v041" // register the v0.4.0 → v0.4.1 audit schema migration
 	"github.com/Caua-ferraz/AgentGuard/pkg/notify"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 	"github.com/Caua-ferraz/AgentGuard/pkg/proxy"
@@ -159,6 +160,18 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		log.Fatalf("Failed to load policy %s: %v", policyFile, err)
 	}
 	log.Printf("Loaded policy: %s (%d rules across %d scopes)", pol.Name, pol.RuleCount(), pol.ScopeCount())
+
+	// Run startup migrations BEFORE opening the audit logger. An in-place
+	// rewrite (e.g. v040_to_v041 prepending a _meta header) has to happen
+	// before we start appending new entries — otherwise the next write
+	// would land in a file the migration is about to rename.
+	migEnv := migrate.Env{
+		AuditLogPath:   auditPath,
+		CheckpointPath: auditPath + audit.CheckpointSuffix,
+	}
+	if err := migrate.RunStartup(context.Background(), migEnv); err != nil {
+		log.Fatalf("Startup migration failed: %v", err)
+	}
 
 	// Initialize audit logger
 	logger, err := audit.NewFileLogger(auditPath)
