@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/Caua-ferraz/AgentGuard/pkg/deprecation"
 )
 
 // Decision represents the outcome of a policy check.
@@ -147,13 +149,24 @@ func LoadFromFile(path string) (*Policy, error) {
 }
 
 // warnTimeWindowOnlyConditions scans every rule for conditions that set
-// TimeWindow but not RequirePrior and emits a single log line naming the
-// scope and rule identifier. It does NOT fail the load.
+// TimeWindow but not RequirePrior and emits a log line naming each offender.
+// It does NOT fail the load.
+//
+// As of v0.4.1 this pattern is a deprecation: v0.5.0 will reject such
+// policies at load time. We fire deprecation.Warn once per policy load
+// that contains any orphan rule — that increments
+// agentguard_deprecations_used_total{feature="policy.time_window_without_require_prior"}
+// once per load, which is the right cardinality for "is this still in use"
+// (a policy with 3 orphan rules reloaded once is one usage event, not three).
+//
+// See docs/DEPRECATIONS.md for removal target and migration path.
 func warnTimeWindowOnlyConditions(pol *Policy) {
+	hasOrphan := false
 	check := func(scope, kind string, rules []Rule) {
 		for _, r := range rules {
 			for _, c := range r.Conditions {
 				if c.RequirePrior == "" && c.TimeWindow != "" {
+					hasOrphan = true
 					id := r.Pattern
 					if id == "" {
 						id = r.Action
@@ -177,6 +190,13 @@ func warnTimeWindowOnlyConditions(pol *Policy) {
 			check("agents."+agentID+"/"+rs.Scope, "deny", rs.Deny)
 			check("agents."+agentID+"/"+rs.Scope, "require_approval", rs.RequireApproval)
 		}
+	}
+
+	if hasOrphan {
+		deprecation.Warn(
+			"policy.time_window_without_require_prior",
+			"deprecated in v0.4.1, will error in v0.5.0; pair time_window with require_prior or remove it. See docs/DEPRECATIONS.md.",
+		)
 	}
 }
 
