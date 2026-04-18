@@ -76,10 +76,17 @@ type QueryFilter struct {
 const DefaultFilePermissions = 0600
 
 // FileLogger writes audit entries as JSON lines to a file.
+//
+// Rotation: when rotCfg.MaxSize > 0, every Log() call stats the underlying
+// file after the write and hands off to rotateLocked() once the live file
+// meets or exceeds the threshold. Rotation is opt-in at v0.4.1 (wired via
+// NewFileLoggerWithRotation); callers using the zero-rotation NewFileLogger
+// keep v0.4.0's unbounded-growth behaviour.
 type FileLogger struct {
-	mu   sync.Mutex
-	file *os.File
-	enc  *json.Encoder
+	mu     sync.Mutex
+	file   *os.File
+	enc    *json.Encoder
+	rotCfg RotationConfig
 }
 
 // NewFileLogger creates a new file-based audit logger.
@@ -128,6 +135,13 @@ func NewFileLogger(path string) (*FileLogger, error) {
 }
 
 // Log writes an audit entry to the log file.
+//
+// When RotationConfig.MaxSize is non-zero, the underlying file is stat'd
+// after a successful encode and rotateLocked() fires if the live file has
+// reached the size threshold. Rotation errors are returned to the caller
+// because the entry that triggered rotation has already been persisted —
+// a rotation failure here is a signal the operator needs to act on, not a
+// write that silently dropped data.
 func (l *FileLogger) Log(entry Entry) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -136,7 +150,18 @@ func (l *FileLogger) Log(entry Entry) error {
 		entry.Timestamp = time.Now().UTC()
 	}
 
-	return l.enc.Encode(entry)
+	if err := l.enc.Encode(entry); err != nil {
+		return err
+	}
+
+	if l.rotCfg.MaxSize > 0 {
+		if info, err := l.file.Stat(); err == nil && info.Size() >= l.rotCfg.MaxSize {
+			if err := l.rotateLocked(); err != nil {
+				return fmt.Errorf("audit rotation: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 // Query reads the log file and filters entries.
