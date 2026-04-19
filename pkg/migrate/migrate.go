@@ -28,6 +28,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 	"io"
 	"log"
 	"sort"
@@ -177,19 +179,28 @@ func RunStartup(ctx context.Context, env Env) error {
 		}
 		need, err := m.Detect(ctx, env)
 		if err != nil {
+			// Treat detection error as a failure for observability — the
+			// run below will abort anyway. Status is set BEFORE the
+			// return so /metrics (if scraped in this process lifetime,
+			// e.g. from a recovery flow) sees the outcome.
+			metrics.SetMigrationStatus(m.FromVersion(), m.ToVersion(), metrics.MigrationStatusFailed, 1)
 			return fmt.Errorf("migrate: detect %s: %w", m.ID(), err)
 		}
 		if !need {
+			metrics.SetMigrationStatus(m.FromVersion(), m.ToVersion(), metrics.MigrationStatusSkipped, 1)
 			continue
 		}
 		lg.Printf("migrate: running %s (%s -> %s): %s", m.ID(), m.FromVersion(), m.ToVersion(), m.Description())
 		res, err := m.Migrate(ctx, env, false)
 		if err != nil {
+			metrics.SetMigrationStatus(m.FromVersion(), m.ToVersion(), metrics.MigrationStatusFailed, 1)
 			return fmt.Errorf("migrate: %s failed: %w", m.ID(), err)
 		}
 		if err := m.Verify(ctx, env); err != nil {
+			metrics.SetMigrationStatus(m.FromVersion(), m.ToVersion(), metrics.MigrationStatusFailed, 1)
 			return fmt.Errorf("migrate: %s post-verify failed: %w", m.ID(), err)
 		}
+		metrics.SetMigrationStatus(m.FromVersion(), m.ToVersion(), metrics.MigrationStatusRan, 1)
 		lg.Printf("migrate: %s complete (%s)", m.ID(), summarizeStats(res))
 		ran++
 	}

@@ -124,6 +124,52 @@ func IncAuditRotation() {
 	atomic.AddUint64(&AuditRotationsTotal, 1)
 }
 
+// Migration status: a gauge describing what happened to each registered
+// audit-schema migration at startup. The label tuple (from, to, status) is
+// bounded because each Migration has a single From/To pair and status is
+// drawn from {ran, skipped, failed}. Value is 1 for the current outcome
+// and 0 for the others — Prometheus can then do `max by (from,to) (...)`.
+type migrationStatusKey struct {
+	From, To, Status string
+}
+
+const (
+	MigrationStatusRan     = "ran"
+	MigrationStatusSkipped = "skipped"
+	MigrationStatusFailed  = "failed"
+)
+
+var (
+	migrationStatusMu sync.Mutex
+	migrationStatus   = map[migrationStatusKey]int64{}
+)
+
+// SetMigrationStatus updates the migration-status gauge for a given
+// (from, to, status) triple. Callers typically record one ran/skipped/
+// failed value per migration per startup.
+func SetMigrationStatus(from, to, status string, value int64) {
+	if from == "" {
+		from = "unknown"
+	}
+	if to == "" {
+		to = "unknown"
+	}
+	if status == "" {
+		status = "unknown"
+	}
+	migrationStatusMu.Lock()
+	migrationStatus[migrationStatusKey{From: from, To: to, Status: status}] = value
+	migrationStatusMu.Unlock()
+}
+
+// MigrationStatusFor returns the gauge value for a (from, to, status) triple
+// (for tests).
+func MigrationStatusFor(from, to, status string) int64 {
+	migrationStatusMu.Lock()
+	defer migrationStatusMu.Unlock()
+	return migrationStatus[migrationStatusKey{From: from, To: to, Status: status}]
+}
+
 // Notify dispatch metrics:
 //
 //   agentguard_notify_queue_depth (gauge) — current length of the shared
@@ -492,7 +538,45 @@ func WritePrometheus(w io.Writer) {
 	writeApprovalEvicted(w)
 	writeRateLimitBucketEvicted(w)
 	writeSSEDropped(w)
+	writeMigrationStatus(w)
 	writeDeprecations(w)
+}
+
+// writeMigrationStatus emits agentguard_audit_migration_status{from,to,status}.
+// The triple is bounded by the registered migrations' From/To pairs times
+// the fixed status set {ran, skipped, failed}. Always emits HELP/TYPE so
+// the series is visible before the first migration is observed.
+func writeMigrationStatus(w io.Writer) {
+	const name = "agentguard_audit_migration_status"
+	const help = "Audit-schema migration outcome gauge, labeled by from/to versions and status (ran|skipped|failed)."
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n", name, help, name)
+
+	migrationStatusMu.Lock()
+	snap := make(map[migrationStatusKey]int64, len(migrationStatus))
+	for k, v := range migrationStatus {
+		snap[k] = v
+	}
+	migrationStatusMu.Unlock()
+	if len(snap) == 0 {
+		return
+	}
+	keys := make([]migrationStatusKey, 0, len(snap))
+	for k := range snap {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].From != keys[j].From {
+			return keys[i].From < keys[j].From
+		}
+		if keys[i].To != keys[j].To {
+			return keys[i].To < keys[j].To
+		}
+		return keys[i].Status < keys[j].Status
+	})
+	for _, k := range keys {
+		fmt.Fprintf(w, "%s{from=\"%s\",to=\"%s\",status=\"%s\"} %d\n",
+			name, escapeLabel(k.From), escapeLabel(k.To), escapeLabel(k.Status), snap[k])
+	}
 }
 
 // writeNotifyDispatchDuration emits the labeled histogram

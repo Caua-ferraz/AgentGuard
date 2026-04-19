@@ -7,6 +7,8 @@ import (
 	"log"
 	"strings"
 	"testing"
+
+	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 )
 
 // fakeMigration is a test double. Each field controls one observable
@@ -100,6 +102,61 @@ func TestRunStartup_RunsDetectedMigrations(t *testing.T) {
 	}
 	if !c.migrated || !c.verified {
 		t.Errorf("c should have migrated+verified")
+	}
+}
+
+// TestRunStartup_SetsMigrationStatusMetric: each Migration triggers exactly
+// one metric series — ran, skipped, or failed — so operators can tell from
+// a scrape whether the deployment booted past the expected schema. Unique
+// version labels isolate the test from prior test state.
+func TestRunStartup_SetsMigrationStatusMetric(t *testing.T) {
+	ResetForTest()
+	ran := newFake("metric-ran")
+	ran.from = "mA"
+	ran.to = "mB"
+	skipped := newFake("metric-skipped")
+	skipped.from = "mC"
+	skipped.to = "mD"
+	skipped.detectOk = false
+	Register(ran)
+	Register(skipped)
+
+	if err := RunStartup(context.Background(), Env{}); err != nil {
+		t.Fatalf("RunStartup: %v", err)
+	}
+
+	if got := metrics.MigrationStatusFor("mA", "mB", metrics.MigrationStatusRan); got != 1 {
+		t.Errorf("ran migration gauge = %d, want 1", got)
+	}
+	if got := metrics.MigrationStatusFor("mC", "mD", metrics.MigrationStatusSkipped); got != 1 {
+		t.Errorf("skipped migration gauge = %d, want 1", got)
+	}
+	// The skipped migration must NOT have a "ran" row, and vice versa.
+	if got := metrics.MigrationStatusFor("mA", "mB", metrics.MigrationStatusSkipped); got != 0 {
+		t.Errorf("ran migration should not also be skipped; got=%d", got)
+	}
+	if got := metrics.MigrationStatusFor("mC", "mD", metrics.MigrationStatusRan); got != 0 {
+		t.Errorf("skipped migration should not also be ran; got=%d", got)
+	}
+}
+
+// TestRunStartup_MarksFailureInMetric: a migrate error stamps the failed
+// gauge before returning so operators can see what was in flight when the
+// process aborted.
+func TestRunStartup_MarksFailureInMetric(t *testing.T) {
+	ResetForTest()
+	m := newFake("metric-failed")
+	m.from = "fA"
+	m.to = "fB"
+	m.migrateErr = errors.New("boom-metric")
+	Register(m)
+
+	err := RunStartup(context.Background(), Env{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := metrics.MigrationStatusFor("fA", "fB", metrics.MigrationStatusFailed); got != 1 {
+		t.Errorf("failed migration gauge = %d, want 1", got)
 	}
 }
 
