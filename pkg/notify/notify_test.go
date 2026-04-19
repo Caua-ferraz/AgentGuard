@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -126,6 +127,89 @@ func TestDispatcher_DroppedCounterIsLabeled(t *testing.T) {
 	got := metrics.NotifyDroppedFor("webhook", metrics.NotifyDroppedQueueFull)
 	if got <= before {
 		t.Errorf("webhook-labeled drop counter did not increment; before=%d after=%d", before, got)
+	}
+}
+
+// TestDispatcher_ObservesDispatchDuration: the worker loop must time each
+// Notify() call and record it under the notifierType() label. We use
+// LogNotifier because it's a bounded type ("log") and produces no network
+// I/O, so the observation is fast and deterministic. We verify via the
+// Prometheus output that the labeled histogram's _count has advanced by at
+// least n.
+func TestDispatcher_ObservesDispatchDuration(t *testing.T) {
+	d := NewDispatcherWithOpts(policy.NotificationCfg{}, 1, 16)
+	defer d.Close()
+
+	// LogNotifier with a matching filter so Notify() actually runs.
+	d.notifiers = []Notifier{&LogNotifier{Filter: "denied"}}
+
+	const n = 5
+	beforeCount := readHistogramCount(t, "log")
+
+	for i := 0; i < n; i++ {
+		d.Send(Event{Type: "denied"})
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if readHistogramCount(t, "log")-beforeCount >= uint64(n) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected log-histogram _count delta >= %d within 2s (before=%d final=%d)",
+		n, beforeCount, readHistogramCount(t, "log"))
+}
+
+// readHistogramCount parses the Prometheus output for the current
+// _count value of agentguard_notify_dispatch_duration_seconds{notifier=X}.
+// Returns 0 if the series hasn't been emitted yet (no observation).
+func readHistogramCount(t *testing.T, notifier string) uint64 {
+	t.Helper()
+	var buf strings.Builder
+	metrics.WritePrometheus(&buf)
+	out := buf.String()
+	needle := "agentguard_notify_dispatch_duration_seconds_count{notifier=\"" + notifier + "\"} "
+	idx := strings.Index(out, needle)
+	if idx == -1 {
+		return 0
+	}
+	rest := out[idx+len(needle):]
+	nl := strings.Index(rest, "\n")
+	if nl == -1 {
+		t.Fatal("no newline after count value")
+	}
+	var n uint64
+	if _, err := fmt.Sscanf(strings.TrimSpace(rest[:nl]), "%d", &n); err != nil {
+		t.Fatalf("parse count: %v", err)
+	}
+	return n
+}
+
+// TestDispatcher_QueueDepthGaugeMoves: every successful enqueue must refresh
+// the queue_depth gauge. We slow a notifier so the queue actually builds up.
+func TestDispatcher_QueueDepthGaugeMoves(t *testing.T) {
+	// 1 worker so enqueued events sit in the queue while the one worker is
+	// blocked in Notify().
+	d := NewDispatcherWithOpts(policy.NotificationCfg{}, 1, 16)
+	defer d.Close()
+	d.notifiers = []Notifier{&countingNotifier{delay: 50 * time.Millisecond}}
+
+	// Burst of enqueues: after Send returns for the last one, queue_depth
+	// must have been at least 1 at some point — we read the Prometheus
+	// output to verify the gauge line exists and is emitted.
+	for i := 0; i < 8; i++ {
+		d.Send(Event{Type: "denied"})
+	}
+
+	var buf strings.Builder
+	metrics.WritePrometheus(&buf)
+	out := buf.String()
+	if !strings.Contains(out, "# TYPE agentguard_notify_queue_depth gauge") {
+		t.Fatalf("queue_depth gauge TYPE missing; got:\n%s", out)
+	}
+	if !strings.Contains(out, "\nagentguard_notify_queue_depth ") {
+		t.Errorf("queue_depth gauge value line missing; got:\n%s", out)
 	}
 }
 

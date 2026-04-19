@@ -124,6 +124,64 @@ func IncAuditRotation() {
 	atomic.AddUint64(&AuditRotationsTotal, 1)
 }
 
+// Notify dispatch metrics:
+//
+//   agentguard_notify_queue_depth (gauge) — current length of the shared
+//       dispatch channel. Set from the dispatcher on each Send attempt; a
+//       scrape-time read would race with enqueue without additional locking.
+//   agentguard_notify_dispatch_duration_seconds{notifier} (histogram) —
+//       wall-clock time spent in Notifier.Notify() per notifier type. Label
+//       cardinality is bounded by notifierType() (webhook|slack|console|log|unknown).
+//
+// The histogram is stored as a lazy map of (notifier type → *Histogram).
+// Seconds buckets mirror typical notifier costs: sub-10ms for console/log,
+// tens-to-hundreds-of-ms for webhook/slack, with a tail capturing the 10 s
+// default HTTP timeout.
+var notifyQueueDepth int64
+
+var notifySecondsBuckets = []float64{
+	0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
+}
+
+var (
+	notifyDispatchMu   sync.Mutex
+	notifyDispatchHist = map[string]*Histogram{}
+)
+
+// SetNotifyQueueDepth updates the notify dispatch queue depth gauge.
+func SetNotifyQueueDepth(n int) {
+	atomic.StoreInt64(&notifyQueueDepth, int64(n))
+}
+
+// ObserveNotifyDispatch records a dispatch latency in seconds for the named
+// notifier type. A missing histogram is created lazily; cardinality is
+// bounded to the notifierType() domain in pkg/notify.
+func ObserveNotifyDispatch(notifier string, seconds float64) {
+	if notifier == "" {
+		notifier = "unknown"
+	}
+	notifyDispatchMu.Lock()
+	h, ok := notifyDispatchHist[notifier]
+	if !ok {
+		h = newHistogram(notifySecondsBuckets)
+		notifyDispatchHist[notifier] = h
+	}
+	notifyDispatchMu.Unlock()
+	h.Observe(seconds)
+}
+
+// notifyDispatchSnapshot returns a shallow map copy so the emitter can walk
+// without holding notifyDispatchMu across I/O.
+func notifyDispatchSnapshot() map[string]*Histogram {
+	notifyDispatchMu.Lock()
+	defer notifyDispatchMu.Unlock()
+	out := make(map[string]*Histogram, len(notifyDispatchHist))
+	for k, v := range notifyDispatchHist {
+		out[k] = v
+	}
+	return out
+}
+
 // SSE subscribers + dropped-events counter. The gauge is maintained via
 // increment/decrement on Subscribe/Unsubscribe rather than via a
 // scrape-time read so the /metrics handler doesn't have to take the
@@ -412,6 +470,11 @@ func WritePrometheus(w io.Writer) {
 		"Current number of connected Server-Sent Events subscribers on /api/stream.",
 		float64(atomic.LoadInt64(&sseSubscribers)))
 
+	writeGauge(w, "agentguard_notify_queue_depth",
+		"Current length of the shared notify dispatch queue (sampled at last enqueue).",
+		float64(atomic.LoadInt64(&notifyQueueDepth)))
+	writeNotifyDispatchDuration(w)
+
 	writeCounter(w, "agentguard_audit_replay_entries_total",
 		"Audit log entries re-read at startup to seed in-memory counters.",
 		atomic.LoadUint64(&AuditReplayEntriesTotal))
@@ -430,6 +493,39 @@ func WritePrometheus(w io.Writer) {
 	writeRateLimitBucketEvicted(w)
 	writeSSEDropped(w)
 	writeDeprecations(w)
+}
+
+// writeNotifyDispatchDuration emits the labeled histogram
+// agentguard_notify_dispatch_duration_seconds{notifier=...}. Always emits
+// HELP/TYPE so the scraper sees the metric even when no dispatch has
+// happened yet.
+func writeNotifyDispatchDuration(w io.Writer) {
+	const name = "agentguard_notify_dispatch_duration_seconds"
+	const help = "Wall-clock time spent in Notifier.Notify() per notifier type, in seconds."
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s histogram\n", name, help, name)
+
+	snap := notifyDispatchSnapshot()
+	if len(snap) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(snap))
+	for k := range snap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, notifier := range keys {
+		h := snap[notifier]
+		buckets, counts, sum, total := h.Snapshot()
+		lv := escapeLabel(notifier)
+		for i, b := range buckets {
+			fmt.Fprintf(w, "%s_bucket{notifier=\"%s\",le=\"%g\"} %d\n",
+				name, lv, b, counts[i])
+		}
+		fmt.Fprintf(w, "%s_bucket{notifier=\"%s\",le=\"+Inf\"} %d\n",
+			name, lv, counts[len(buckets)])
+		fmt.Fprintf(w, "%s_sum{notifier=\"%s\"} %g\n", name, lv, sum)
+		fmt.Fprintf(w, "%s_count{notifier=\"%s\"} %d\n", name, lv, total)
+	}
 }
 
 // writeSSEDropped emits agentguard_sse_events_dropped_total{reason=...}.

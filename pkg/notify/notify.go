@@ -108,7 +108,14 @@ func (d *Dispatcher) worker() {
 			if !ok {
 				return
 			}
-			if err := job.notifier.Notify(job.event); err != nil {
+			// Time each dispatch so operators can alert on slow webhooks
+			// (default timeout is 10s — a p95 creeping past 1s usually
+			// precedes outright timeouts). The label is bounded by
+			// notifierType()'s closed switch.
+			start := time.Now()
+			err := job.notifier.Notify(job.event)
+			metrics.ObserveNotifyDispatch(notifierType(job.notifier), time.Since(start).Seconds())
+			if err != nil {
 				log.Printf("notify error (%T): %v", job.notifier, err)
 			}
 		}
@@ -152,6 +159,10 @@ func (d *Dispatcher) Send(event Event) {
 	for _, n := range d.notifiers {
 		select {
 		case d.queue <- dispatchJob{notifier: n, event: event}:
+			// Sampling the depth right after enqueue gives a
+			// lock-free, enqueue-biased view — good enough for a gauge
+			// whose purpose is to answer "is the queue filling up?".
+			metrics.SetNotifyQueueDepth(len(d.queue))
 		default:
 			// Keep the package-level atomic around for anyone already reading
 			// it directly; the Prometheus-labeled counter is the new surface.
