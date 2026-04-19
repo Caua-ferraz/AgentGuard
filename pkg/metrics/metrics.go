@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/deprecation"
 )
@@ -87,6 +88,40 @@ func RateLimitBucketEvictedFor(scope string) uint64 {
 	rateLimitEvictedMu.Lock()
 	defer rateLimitEvictedMu.Unlock()
 	return rateLimitEvictedCount[scope]
+}
+
+// Audit replay + rotation counters. Replay happens once at startup (seeding
+// in-memory decision counters from the audit log); rotations happen inline
+// on FileLogger.Log when the size threshold is crossed.
+var (
+	AuditReplayEntriesTotal uint64
+	AuditRotationsTotal     uint64
+
+	// auditReplayDurationSeconds is the duration (in seconds) of the most
+	// recent replay. Gauge, not histogram: replay is a one-shot startup
+	// event; a histogram would accumulate at most one observation per
+	// process lifetime and offer no additional detail.
+	auditReplayDurationSeconds int64 // stored as nanoseconds via atomic.Int64
+)
+
+// SetAuditReplayDuration records the duration of the startup audit replay.
+// Expressed in seconds in the Prometheus output; nanoseconds are stored
+// atomically under the hood so the setter is a single instruction.
+func SetAuditReplayDuration(d time.Duration) {
+	atomic.StoreInt64(&auditReplayDurationSeconds, int64(d))
+}
+
+// AddAuditReplayEntries records entries processed during replay. Cumulative
+// across multiple replays in pathological re-entrance, but in the normal
+// single-replay-per-process case just equals that one replay's count.
+func AddAuditReplayEntries(n uint64) {
+	atomic.AddUint64(&AuditReplayEntriesTotal, n)
+}
+
+// IncAuditRotation increments agentguard_audit_rotations_total. Called from
+// the FileLogger rotation success path after the new live file is open.
+func IncAuditRotation() {
+	atomic.AddUint64(&AuditRotationsTotal, 1)
 }
 
 // rateLimitBuckets is the current tracked-bucket gauge. Refreshed at each
@@ -321,6 +356,18 @@ func WritePrometheus(w io.Writer) {
 	writeGauge(w, "agentguard_ratelimit_buckets",
 		"Current number of active rate-limit token buckets tracked in memory.",
 		float64(atomic.LoadInt64(&rateLimitBuckets)))
+
+	writeCounter(w, "agentguard_audit_replay_entries_total",
+		"Audit log entries re-read at startup to seed in-memory counters.",
+		atomic.LoadUint64(&AuditReplayEntriesTotal))
+	writeCounter(w, "agentguard_audit_rotations_total",
+		"Audit file rotations triggered by the live-file size threshold.",
+		atomic.LoadUint64(&AuditRotationsTotal))
+	// Replay duration is stored as nanoseconds; emit as seconds to match the
+	// Prometheus base-unit convention.
+	writeGauge(w, "agentguard_audit_replay_duration_seconds",
+		"Wall-clock duration of the most recent startup audit replay.",
+		time.Duration(atomic.LoadInt64(&auditReplayDurationSeconds)).Seconds())
 
 	writeRequestRejected(w)
 	writeNotifyDropped(w)

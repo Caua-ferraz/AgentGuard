@@ -190,6 +190,8 @@ func NewServer(cfg Config) *Server {
 	// Other Logger implementations (e.g. SQLiteLogger) fall back to a full
 	// Query() — their scan cost is their own concern.
 	type pathReporter interface{ Path() string }
+	replayStart := time.Now()
+	var replayed uint64
 	if pr, ok := cfg.Logger.(pathReporter); ok && pr.Path() != "" {
 		path := pr.Path()
 		cp, cpErr := audit.ReadCheckpoint(path)
@@ -198,6 +200,7 @@ func NewServer(cfg Config) *Server {
 		}
 		newOffset, err := audit.ReplayFrom(path, cp, func(e audit.Entry) {
 			metrics.IncDecision(string(e.Result.Decision))
+			replayed++
 		})
 		if err != nil {
 			log.Printf("WARN: audit replay failed (%v); counters may be under-seeded", err)
@@ -212,8 +215,11 @@ func NewServer(cfg Config) *Server {
 	} else if existing, err := cfg.Logger.Query(audit.QueryFilter{}); err == nil {
 		for _, e := range existing {
 			metrics.IncDecision(string(e.Result.Decision))
+			replayed++
 		}
 	}
+	metrics.AddAuditReplayEntries(replayed)
+	metrics.SetAuditReplayDuration(time.Since(replayStart))
 
 	mux := http.NewServeMux()
 

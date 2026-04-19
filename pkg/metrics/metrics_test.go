@@ -3,7 +3,9 @@ package metrics
 import (
 	"bytes"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/deprecation"
 )
@@ -227,6 +229,45 @@ func TestWritePrometheus_RateLimitEvictedLabels(t *testing.T) {
 	shellIdx := strings.Index(out, `agentguard_ratelimit_bucket_evictions_total{scope="shell"}`)
 	if netIdx == -1 || shellIdx == -1 || netIdx >= shellIdx {
 		t.Errorf("labels not sorted; network=%d shell=%d", netIdx, shellIdx)
+	}
+}
+
+// TestWritePrometheus_AuditReplayAndRotations: all three audit-observability
+// series are present (header + value) so scrapers can index them from the
+// first scrape, even when replay has not yet run.
+func TestWritePrometheus_AuditReplayAndRotations(t *testing.T) {
+	atomic.StoreUint64(&AuditReplayEntriesTotal, 0)
+	atomic.StoreUint64(&AuditRotationsTotal, 0)
+	SetAuditReplayDuration(0)
+
+	AddAuditReplayEntries(1234)
+	IncAuditRotation()
+	IncAuditRotation()
+	IncAuditRotation()
+	SetAuditReplayDuration(750 * time.Millisecond)
+
+	var buf bytes.Buffer
+	WritePrometheus(&buf)
+	out := buf.String()
+
+	if !strings.Contains(out, "agentguard_audit_replay_entries_total 1234") {
+		t.Errorf("replay entries counter missing; got:\n%s", out)
+	}
+	if !strings.Contains(out, "agentguard_audit_rotations_total 3") {
+		t.Errorf("rotations counter missing; got:\n%s", out)
+	}
+	// 750ms = 0.75s; Prometheus %g formats 0.75 cleanly.
+	if !strings.Contains(out, "agentguard_audit_replay_duration_seconds 0.75") {
+		t.Errorf("replay duration gauge missing or wrong; got:\n%s", out)
+	}
+	if !strings.Contains(out, "# TYPE agentguard_audit_replay_entries_total counter") {
+		t.Errorf("replay entries TYPE missing; got:\n%s", out)
+	}
+	if !strings.Contains(out, "# TYPE agentguard_audit_rotations_total counter") {
+		t.Errorf("rotations TYPE missing; got:\n%s", out)
+	}
+	if !strings.Contains(out, "# TYPE agentguard_audit_replay_duration_seconds gauge") {
+		t.Errorf("replay duration TYPE missing; got:\n%s", out)
 	}
 }
 
