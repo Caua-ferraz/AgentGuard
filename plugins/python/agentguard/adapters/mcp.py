@@ -147,6 +147,21 @@ class GuardedMCPServer:
         params = request.get("params", {})
 
         if method == "initialize":
+            # MCP clients advertise their protocol version in params. We pin to
+            # MCP_PROTOCOL_VERSION and do not yet negotiate — real negotiation
+            # is a v0.5.0 design item. If the client wants a different version
+            # (usually newer), log a single WARN to stderr so operators can
+            # see version drift, then respond with our pinned version. stdout
+            # is reserved for JSON-RPC on the stdio transport, so the warning
+            # MUST go to stderr.
+            client_version = params.get("protocolVersion") if isinstance(params, dict) else None
+            if client_version and client_version != MCP_PROTOCOL_VERSION:
+                sys.stderr.write(
+                    f"WARN agentguard.mcp: client requested protocolVersion "
+                    f"{client_version!r}, pinning to {MCP_PROTOCOL_VERSION!r} "
+                    f"(negotiation is a v0.5.0 design item)\n"
+                )
+                sys.stderr.flush()
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
