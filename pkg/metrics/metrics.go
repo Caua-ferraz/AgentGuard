@@ -124,6 +124,57 @@ func IncAuditRotation() {
 	atomic.AddUint64(&AuditRotationsTotal, 1)
 }
 
+// SSE subscribers + dropped-events counter. The gauge is maintained via
+// increment/decrement on Subscribe/Unsubscribe rather than via a
+// scrape-time read so the /metrics handler doesn't have to take the
+// ApprovalQueue lock. Dropped events are labeled by a bounded reason
+// string; slow_consumer is the only reason the current broadcast path
+// produces.
+var sseSubscribers int64
+
+const (
+	// SSEDroppedSlowConsumer labels a broadcast that was discarded because
+	// the per-subscriber channel was full (the subscriber isn't draining
+	// fast enough). This is the fail-fast drop in broadcastLocked's
+	// default case.
+	SSEDroppedSlowConsumer = "slow_consumer"
+)
+
+var (
+	sseDroppedMu    sync.Mutex
+	sseDroppedCount = map[string]uint64{}
+)
+
+// IncSSESubscribers is called on Subscribe. Matching dec runs on
+// Unsubscribe so the gauge stays accurate even if a client drops without
+// the server side noticing (Unsubscribe is always called from the SSE
+// handler's defer).
+func IncSSESubscribers() {
+	atomic.AddInt64(&sseSubscribers, 1)
+}
+
+// DecSSESubscribers is the counterpart to IncSSESubscribers.
+func DecSSESubscribers() {
+	atomic.AddInt64(&sseSubscribers, -1)
+}
+
+// IncSSEEventDropped bumps the labeled counter for an SSE broadcast drop.
+func IncSSEEventDropped(reason string) {
+	if reason == "" {
+		reason = "unknown"
+	}
+	sseDroppedMu.Lock()
+	sseDroppedCount[reason]++
+	sseDroppedMu.Unlock()
+}
+
+// SSEEventDroppedFor returns the count for a specific reason (for tests).
+func SSEEventDroppedFor(reason string) uint64 {
+	sseDroppedMu.Lock()
+	defer sseDroppedMu.Unlock()
+	return sseDroppedCount[reason]
+}
+
 // rateLimitBuckets is the current tracked-bucket gauge. Refreshed at each
 // /metrics scrape by the handler calling SetRateLimitBuckets.
 var rateLimitBuckets int64
@@ -357,6 +408,10 @@ func WritePrometheus(w io.Writer) {
 		"Current number of active rate-limit token buckets tracked in memory.",
 		float64(atomic.LoadInt64(&rateLimitBuckets)))
 
+	writeGauge(w, "agentguard_sse_subscribers",
+		"Current number of connected Server-Sent Events subscribers on /api/stream.",
+		float64(atomic.LoadInt64(&sseSubscribers)))
+
 	writeCounter(w, "agentguard_audit_replay_entries_total",
 		"Audit log entries re-read at startup to seed in-memory counters.",
 		atomic.LoadUint64(&AuditReplayEntriesTotal))
@@ -373,7 +428,34 @@ func WritePrometheus(w io.Writer) {
 	writeNotifyDropped(w)
 	writeApprovalEvicted(w)
 	writeRateLimitBucketEvicted(w)
+	writeSSEDropped(w)
 	writeDeprecations(w)
+}
+
+// writeSSEDropped emits agentguard_sse_events_dropped_total{reason=...}.
+// Always emits HELP/TYPE so the scraper sees the series before the first
+// drop.
+func writeSSEDropped(w io.Writer) {
+	const name = "agentguard_sse_events_dropped_total"
+	const help = "Server-Sent Events dropped before reaching the subscriber, labeled by reason (slow_consumer)."
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+	sseDroppedMu.Lock()
+	snap := make(map[string]uint64, len(sseDroppedCount))
+	for k, v := range sseDroppedCount {
+		snap[k] = v
+	}
+	sseDroppedMu.Unlock()
+	if len(snap) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(snap))
+	for k := range snap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(w, "%s{reason=\"%s\"} %d\n", name, escapeLabel(k), snap[k])
+	}
 }
 
 // writeRateLimitBucketEvicted emits the scope-labeled eviction counter.

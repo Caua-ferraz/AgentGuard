@@ -818,6 +818,7 @@ func (q *ApprovalQueue) Subscribe() chan AuditEvent {
 	defer q.mu.Unlock()
 	ch := make(chan AuditEvent, SSEChannelBufferSize)
 	q.watchers = append(q.watchers, ch)
+	metrics.IncSSESubscribers()
 	return ch
 }
 
@@ -827,6 +828,7 @@ func (q *ApprovalQueue) Unsubscribe(ch chan AuditEvent) {
 	for i, w := range q.watchers {
 		if w == ch {
 			q.watchers = append(q.watchers[:i], q.watchers[i+1:]...)
+			metrics.DecSSESubscribers()
 			break
 		}
 	}
@@ -850,7 +852,11 @@ func (q *ApprovalQueue) broadcastLocked(event AuditEvent) {
 		select {
 		case ch <- event:
 		default:
-			// Drop if consumer is slow
+			// Drop if consumer is slow. The metric lets ops see which
+			// deployments have backed-up SSE subscribers — a persistent
+			// non-zero rate usually means a dashboard tab left open on
+			// battery-throttled hardware.
+			metrics.IncSSEEventDropped(metrics.SSEDroppedSlowConsumer)
 		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1085,6 +1086,86 @@ func TestApprovalQueue_ResolveRemovesFromList(t *testing.T) {
 	list := q.List()
 	if len(list) != 0 {
 		t.Errorf("expected 0 pending after resolve, got %d", len(list))
+	}
+}
+
+// TestApprovalQueue_SubscribeTracksGauge: Subscribe/Unsubscribe must keep
+// the agentguard_sse_subscribers gauge in sync — this is the only way
+// operators can see whether SSE clients are actually connected.
+func TestApprovalQueue_SubscribeTracksGauge(t *testing.T) {
+	q := &ApprovalQueue{
+		pending: make(map[string]*PendingAction),
+		maxSize: 10,
+	}
+
+	// Snapshot via Prometheus output; comparing deltas avoids leaking from
+	// other tests that also touch SSE state.
+	readGauge := func() int64 {
+		var buf bytes.Buffer
+		metrics.WritePrometheus(&buf)
+		out := buf.String()
+		// Anchor on "\n<metric> " — the substring "agentguard_sse_subscribers "
+		// also appears in the HELP and TYPE lines, which begin with '#'.
+		const prefix = "\nagentguard_sse_subscribers "
+		idx := strings.Index(out, prefix)
+		if idx == -1 {
+			t.Fatalf("sse subscribers data line missing; out:\n%s", out)
+		}
+		line := out[idx+len(prefix):]
+		nl := strings.Index(line, "\n")
+		if nl == -1 {
+			t.Fatal("no newline after gauge value")
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(line[:nl]), 10, 64)
+		if err != nil {
+			t.Fatalf("gauge value parse: %v", err)
+		}
+		return n
+	}
+
+	before := readGauge()
+	a := q.Subscribe()
+	b := q.Subscribe()
+	if got := readGauge(); got != before+2 {
+		t.Errorf("gauge after 2 subs = %d, want %d", got, before+2)
+	}
+	q.Unsubscribe(a)
+	if got := readGauge(); got != before+1 {
+		t.Errorf("gauge after 1 unsub = %d, want %d", got, before+1)
+	}
+	q.Unsubscribe(b)
+	if got := readGauge(); got != before {
+		t.Errorf("gauge after all unsubs = %d, want %d", got, before)
+	}
+}
+
+// TestApprovalQueue_BroadcastDropsIncrementCounter: when a subscriber
+// can't keep up, broadcastLocked drops the event into the default branch.
+// That drop must be visible via
+// agentguard_sse_events_dropped_total{reason="slow_consumer"}; silent
+// drops are the exact pathology the metric exists to surface.
+func TestApprovalQueue_BroadcastDropsIncrementCounter(t *testing.T) {
+	q := &ApprovalQueue{
+		pending: make(map[string]*PendingAction),
+		maxSize: 10,
+	}
+
+	ch := q.Subscribe()
+	defer q.Unsubscribe(ch)
+
+	// Fill the buffer without draining. One more broadcast than
+	// SSEChannelBufferSize guarantees at least one drop.
+	for i := 0; i < SSEChannelBufferSize; i++ {
+		q.Broadcast(AuditEvent{Type: "check"})
+	}
+
+	before := metrics.SSEEventDroppedFor(metrics.SSEDroppedSlowConsumer)
+	q.Broadcast(AuditEvent{Type: "check"}) // must drop
+	q.Broadcast(AuditEvent{Type: "check"}) // must drop
+	after := metrics.SSEEventDroppedFor(metrics.SSEDroppedSlowConsumer)
+
+	if got := after - before; got != 2 {
+		t.Errorf("slow_consumer drops = %d, want 2", got)
 	}
 }
 
