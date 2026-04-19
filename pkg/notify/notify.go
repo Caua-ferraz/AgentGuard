@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
@@ -81,11 +82,23 @@ func NewDispatcherWithOpts(cfg policy.NotificationCfg, workers, queueSize int) *
 		redactor: redactor,
 	}
 
+	// Resolve the dispatch-level timeout once. Per-target overrides are
+	// resolved inside targetToNotifier against this value so operators who
+	// set only `notifications.dispatch_timeout` get it applied uniformly.
+	dispatchTimeout := policy.DefaultNotifyDispatchTimeout
+	if s := cfg.DispatchTimeout; s != "" {
+		if parsed, err := time.ParseDuration(s); err == nil && parsed > 0 {
+			dispatchTimeout = parsed
+		} else {
+			log.Printf("notify: ignoring invalid dispatch_timeout %q (%v) — using %s", s, err, dispatchTimeout)
+		}
+	}
+
 	for _, t := range cfg.ApprovalRequired {
-		d.notifiers = append(d.notifiers, targetToNotifier(t, "approval_required"))
+		d.notifiers = append(d.notifiers, targetToNotifier(t, "approval_required", dispatchTimeout))
 	}
 	for _, t := range cfg.OnDeny {
-		d.notifiers = append(d.notifiers, targetToNotifier(t, "denied"))
+		d.notifiers = append(d.notifiers, targetToNotifier(t, "denied", dispatchTimeout))
 	}
 
 	if workers < 1 {
@@ -107,7 +120,14 @@ func (d *Dispatcher) worker() {
 			if !ok {
 				return
 			}
-			if err := job.notifier.Notify(job.event); err != nil {
+			// Time each dispatch so operators can alert on slow webhooks
+			// (default timeout is 10s — a p95 creeping past 1s usually
+			// precedes outright timeouts). The label is bounded by
+			// notifierType()'s closed switch.
+			start := time.Now()
+			err := job.notifier.Notify(job.event)
+			metrics.ObserveNotifyDispatch(notifierType(job.notifier), time.Since(start).Seconds())
+			if err != nil {
 				log.Printf("notify error (%T): %v", job.notifier, err)
 			}
 		}
@@ -120,12 +140,14 @@ func (d *Dispatcher) Close() {
 	close(d.done)
 }
 
-func targetToNotifier(t policy.NotifyTarget, eventFilter string) Notifier {
+func targetToNotifier(t policy.NotifyTarget, eventFilter string, dispatchTimeout time.Duration) Notifier {
+	// Only webhook/slack honor timeout — console and log are synchronous
+	// and in-process, so a timeout has nothing to act on.
 	switch t.Type {
 	case "webhook":
-		return &WebhookNotifier{URL: t.URL, Filter: eventFilter, client: &http.Client{Timeout: DefaultHTTPTimeout}}
+		return &WebhookNotifier{URL: t.URL, Filter: eventFilter, client: &http.Client{Timeout: t.ResolvedTimeout(dispatchTimeout)}}
 	case "slack":
-		return &SlackNotifier{WebhookURL: t.URL, Filter: eventFilter, client: &http.Client{Timeout: DefaultHTTPTimeout}}
+		return &SlackNotifier{WebhookURL: t.URL, Filter: eventFilter, client: &http.Client{Timeout: t.ResolvedTimeout(dispatchTimeout)}}
 	case "console":
 		return &ConsoleNotifier{Filter: eventFilter}
 	case "log":
@@ -151,9 +173,35 @@ func (d *Dispatcher) Send(event Event) {
 	for _, n := range d.notifiers {
 		select {
 		case d.queue <- dispatchJob{notifier: n, event: event}:
+			// Sampling the depth right after enqueue gives a
+			// lock-free, enqueue-biased view — good enough for a gauge
+			// whose purpose is to answer "is the queue filling up?".
+			metrics.SetNotifyQueueDepth(len(d.queue))
 		default:
+			// Keep the package-level atomic around for anyone already reading
+			// it directly; the Prometheus-labeled counter is the new surface.
 			atomic.AddUint64(&DroppedEvents, 1)
+			metrics.IncNotifyDropped(notifierType(n), metrics.NotifyDroppedQueueFull)
 		}
+	}
+}
+
+// notifierType maps a Notifier to the bounded-cardinality label used in
+// Prometheus. Adding a new Notifier implementation requires a case here —
+// unknowns land under "unknown" so an operator sees the drop rather than
+// silently losing it.
+func notifierType(n Notifier) string {
+	switch n.(type) {
+	case *WebhookNotifier:
+		return "webhook"
+	case *SlackNotifier:
+		return "slack"
+	case *ConsoleNotifier:
+		return "console"
+	case *LogNotifier:
+		return "log"
+	default:
+		return "unknown"
 	}
 }
 

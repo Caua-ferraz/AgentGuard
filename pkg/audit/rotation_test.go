@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
@@ -68,6 +70,55 @@ func TestRotation_SizeTriggered(t *testing.T) {
 			names = append(names, e.Name())
 		}
 		t.Fatalf("expected at least one archive after size-triggered rotation; dir contents: %v", names)
+	}
+}
+
+// TestRotation_IncrementsRotationCounter: every successful rotation bumps
+// agentguard_audit_rotations_total so operators can graph rotation
+// frequency. A half-completed rotate would return before the counter fires.
+func TestRotation_IncrementsRotationCounter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+
+	logger, err := NewFileLoggerWithRotation(path, RotationConfig{MaxSize: 512})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logger.Close()
+
+	before := atomic.LoadUint64(&metrics.AuditRotationsTotal)
+
+	for i := 0; i < 20; i++ {
+		if err := logger.Log(logBlob("bot")); err != nil {
+			t.Fatalf("Log: %v", err)
+		}
+	}
+
+	after := atomic.LoadUint64(&metrics.AuditRotationsTotal)
+	if after <= before {
+		t.Errorf("rotation counter did not advance: before=%d after=%d", before, after)
+	}
+
+	// Cross-check: at least one archive exists so we know rotation fired
+	// for real (not just an early-return path that somehow bumped the
+	// counter). We can't require counter == archive count because
+	// ArchiveTimestampFormat has 1-second resolution — multiple rotations
+	// within one second rename onto the same archive path and overwrite.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var archives int
+	for _, e := range entries {
+		if e.Name() == "audit.jsonl" || e.IsDir() {
+			continue
+		}
+		if strings.HasPrefix(e.Name(), "audit.jsonl.") {
+			archives++
+		}
+	}
+	if archives == 0 {
+		t.Error("counter advanced but no archive file present — rotation may not have actually happened")
 	}
 }
 

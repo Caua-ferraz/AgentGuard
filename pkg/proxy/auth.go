@@ -5,8 +5,10 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,8 +28,24 @@ const (
 	CSRFCookieName    = "ag_csrf"
 	CSRFHeaderName    = "X-CSRF-Token"
 	SessionTTL        = 1 * time.Hour
-	MaxSessions       = 1024 // cap memory; oldest evicted when exceeded
+	// MaxSessions caps the in-memory session table. New logins at capacity
+	// are rejected with 503 (see ErrSessionStoreFull) rather than silently
+	// evicting the oldest live session — silent eviction used to log out a
+	// real operator mid-approval if a thundering herd of dashboard tabs
+	// racked up sessions. Expired entries are swept before rejecting, so a
+	// store full of stale sessions does not block new logins.
+	MaxSessions = 1024
+	// SessionStoreFullRetryAfterSeconds is the Retry-After value returned on
+	// 503 when MaxSessions is exhausted. 5s is short enough for a human to
+	// notice the delay and long enough to avoid hammering the endpoint.
+	SessionStoreFullRetryAfterSeconds = 5
 )
+
+// ErrSessionStoreFull is returned by SessionStore.Create when every slot is
+// held by a live (non-expired) session. handleLogin maps this to 503 +
+// Retry-After so the dashboard shows a visible failure instead of the old
+// silent evict-the-oldest behavior.
+var ErrSessionStoreFull = errors.New("session store full: too many active sessions")
 
 // Session represents an authenticated dashboard session. The token value is
 // stored in an HTTP-only cookie AND returned in the login response body so the
@@ -42,41 +60,75 @@ type Session struct {
 type SessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]Session
+	// ttl bounds how long a newly-issued session stays valid. A zero value
+	// falls through to SessionTTL so older call sites (and tests that
+	// construct a store via NewSessionStore()) keep v0.4.0 semantics.
+	ttl time.Duration
 }
 
-// NewSessionStore creates an empty in-memory session store.
+// NewSessionStore creates an empty in-memory session store using the
+// package-default SessionTTL. Prefer NewSessionStoreWithTTL in wiring code
+// that reads the TTL from policy config.
 func NewSessionStore() *SessionStore {
-	return &SessionStore{sessions: make(map[string]Session)}
+	return NewSessionStoreWithTTL(SessionTTL)
+}
+
+// NewSessionStoreWithTTL creates an empty store whose Create() will issue
+// sessions that expire after d. A non-positive d falls back to SessionTTL
+// so callers can pass the raw policy value without an extra guard.
+func NewSessionStoreWithTTL(d time.Duration) *SessionStore {
+	if d <= 0 {
+		d = SessionTTL
+	}
+	return &SessionStore{sessions: make(map[string]Session), ttl: d}
 }
 
 // Create issues a new session token with the configured TTL.
+//
+// When the store is already at MaxSessions, Create first sweeps expired
+// entries (cheap dead-weight cleanup) and only returns ErrSessionStoreFull
+// if every remaining slot is still live. This replaces v0.4.0's silent
+// evict-the-oldest-live-session behavior — that silently kicked a real
+// operator out mid-approval whenever a rogue set of dashboard tabs racked
+// up more than MaxSessions entries.
 func (s *SessionStore) Create() (Session, error) {
 	var b [32]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return Session{}, fmt.Errorf("session token rand: %w", err)
 	}
 	token := hex.EncodeToString(b[:])
-	sess := Session{Token: token, ExpiresAt: time.Now().Add(SessionTTL)}
+	ttl := s.ttl
+	if ttl <= 0 {
+		ttl = SessionTTL
+	}
+	sess := Session{Token: token, ExpiresAt: time.Now().Add(ttl)}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Cap memory: if at limit, evict the oldest entry. Simple O(n) scan is
-	// fine because MaxSessions is small and evictions are rare.
 	if len(s.sessions) >= MaxSessions {
-		var oldestToken string
-		var oldestExpiry time.Time
-		for tok, existing := range s.sessions {
-			if oldestToken == "" || existing.ExpiresAt.Before(oldestExpiry) {
-				oldestToken = tok
-				oldestExpiry = existing.ExpiresAt
-			}
+		s.sweepExpiredLocked()
+		if len(s.sessions) >= MaxSessions {
+			return Session{}, ErrSessionStoreFull
 		}
-		delete(s.sessions, oldestToken)
 	}
 
 	s.sessions[token] = sess
 	return sess, nil
+}
+
+// sweepExpiredLocked drops every session whose ExpiresAt has already passed.
+// O(n) scan, but n ≤ MaxSessions and this is only invoked on the slow path
+// when Create hits the cap.
+//
+// Must be called with s.mu held.
+func (s *SessionStore) sweepExpiredLocked() {
+	now := time.Now()
+	for tok, sess := range s.sessions {
+		if now.After(sess.ExpiresAt) {
+			delete(s.sessions, tok)
+		}
+	}
 }
 
 // Validate returns true iff the provided token exists and is not expired.
@@ -149,6 +201,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	sess, err := s.sessions.Create()
 	if err != nil {
+		if errors.Is(err, ErrSessionStoreFull) {
+			// Visible failure: operator knows to retry (or grow MaxSessions)
+			// instead of being silently signed out of an existing session.
+			w.Header().Set("Retry-After", strconv.Itoa(SessionStoreFullRetryAfterSeconds))
+			http.Error(w, "session store full; retry later", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, "session creation failed", http.StatusInternalServerError)
 		return
 	}

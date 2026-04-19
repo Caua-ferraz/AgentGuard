@@ -12,6 +12,8 @@ from agentguard import (
     DECISION_REQUIRE_APPROVAL,
     DEFAULT_BASE_URL,
     DEFAULT_TIMEOUT,
+    FAIL_MODE_ALLOW,
+    FAIL_MODE_DENY,
 )
 from tests.conftest import MockAgentGuardHandler
 
@@ -128,6 +130,27 @@ class TestGuardCheck:
         result = g.check("shell", command="echo hi")
         assert result.denied
         assert "unreachable" in result.reason.lower()
+
+    def test_check_unreachable_fail_open(self):
+        """fail_mode='allow' turns unreachable into ALLOW.
+
+        Locks the Phase-5.1 parity-prep contract: the default is still
+        'deny' (see test_check_unreachable_fails_closed), and an explicit
+        'allow' is required to opt into fail-open — mirroring the TS SDK
+        where `failMode: 'allow'` has always been an explicit opt-in.
+        """
+        g = Guard("http://127.0.0.1:1", timeout=1, fail_mode=FAIL_MODE_ALLOW)
+        result = g.check("shell", command="echo hi")
+        assert result.allowed
+        assert "allow" in result.reason.lower()
+
+    def test_fail_mode_invalid_raises(self):
+        with pytest.raises(ValueError):
+            Guard(fail_mode="maybe")
+
+    def test_fail_mode_defaults_to_deny(self):
+        g = Guard()
+        assert g.fail_mode == FAIL_MODE_DENY
 
     def test_check_sends_correct_payload(self, mock_server):
         g = Guard(mock_server, agent_id="test-agent")

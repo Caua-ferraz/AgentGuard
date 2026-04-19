@@ -39,9 +39,22 @@ const (
 	// MaxRequestBodySize is the maximum allowed size of incoming request bodies (1 MB).
 	MaxRequestBodySize = 1 << 20
 	// MaxPendingApprovals is the maximum number of entries (pending + resolved) kept
-	// in the approval queue. When exceeded, the oldest resolved entries are evicted.
+	// in the approval queue. When at capacity, the oldest resolved entry is
+	// evicted first (LRU); if every slot holds an unresolved entry, new
+	// approvals are rejected with 503 rather than silently dropped.
 	MaxPendingApprovals = 10000
+	// ApprovalQueueFullRetryAfterSeconds is the Retry-After value returned
+	// when the approval queue is full and no resolved entries are available
+	// to evict. Operators tune MaxPendingApprovals or drain pending items;
+	// clients should back off roughly this long before retrying.
+	ApprovalQueueFullRetryAfterSeconds = 30
 )
+
+// ErrApprovalQueueFull is returned by ApprovalQueue.Add when the queue is at
+// capacity and every entry is still unresolved. The HTTP handler maps this
+// to 503 + Retry-After so the caller knows to back off rather than treating
+// it as a generic 500.
+var ErrApprovalQueueFull = errors.New("approval queue full: no resolved entries to evict")
 
 // Config holds the server configuration.
 type Config struct {
@@ -77,6 +90,23 @@ type Config struct {
 	// and SessionCostTTL > 0, it defaults to SessionCostTTL/4 with a floor
 	// of 1 minute.
 	SessionCostSweepInterval time.Duration
+
+	// SessionTTL overrides the dashboard session cookie lifetime. Zero or
+	// negative falls back to SessionTTL (the package-level default). Wired
+	// from policy's proxy.session.ttl.
+	SessionTTL time.Duration
+	// MaxRequestBodyBytes overrides the POST /v1/check body cap. Zero or
+	// negative falls back to MaxRequestBodySize. Wired from policy's
+	// proxy.request.max_body_bytes.
+	MaxRequestBodyBytes int64
+	// AuditDefaultLimit overrides the default ?limit= on /v1/audit. Zero or
+	// negative falls back to DefaultAuditQueryLimit. Wired from policy's
+	// proxy.audit.default_limit.
+	AuditDefaultLimit int
+	// AuditMaxLimit overrides the hard ceiling on ?limit= for /v1/audit.
+	// Zero or negative falls back to MaxAuditQueryLimit. Wired from
+	// policy's proxy.audit.max_limit.
+	AuditMaxLimit int
 }
 
 // Server is the AgentGuard HTTP proxy.
@@ -90,13 +120,26 @@ type Server struct {
 	// Nil when the sweeper is not running. Closed exactly once via sweeperStop.
 	sweeperDone chan struct{}
 	sweeperStop sync.Once
+	// Resolved tunables. Set once in NewServer from Config or package
+	// defaults so the hot paths (handleCheck, handleAuditQuery) do not
+	// re-evaluate fallbacks on every request.
+	maxRequestBodyBytes int64
+	auditDefaultLimit   int
+	auditMaxLimit       int
 }
 
 // ApprovalQueue manages pending approval requests.
+//
+// maxSize caps the total number of entries (resolved + unresolved) so a
+// spike of approval-required traffic with no operator around cannot exhaust
+// memory. It is exposed as a field rather than a package const so tests can
+// shrink it without faking 10 000 entries; production code always uses
+// MaxPendingApprovals via NewServer.
 type ApprovalQueue struct {
 	mu       sync.RWMutex
 	pending  map[string]*PendingAction
 	watchers []chan AuditEvent
+	maxSize  int
 }
 
 // PendingAction is an action waiting for human approval.
@@ -154,9 +197,13 @@ func NewServer(cfg Config) *Server {
 		cfg: cfg,
 		approval: &ApprovalQueue{
 			pending: make(map[string]*PendingAction),
+			maxSize: MaxPendingApprovals,
 		},
-		limiter:  ratelimit.New(),
-		sessions: NewSessionStore(),
+		limiter:             ratelimit.New(),
+		sessions:            NewSessionStoreWithTTL(cfg.SessionTTL),
+		maxRequestBodyBytes: resolveInt64(cfg.MaxRequestBodyBytes, MaxRequestBodySize),
+		auditDefaultLimit:   resolveInt(cfg.AuditDefaultLimit, DefaultAuditQueryLimit),
+		auditMaxLimit:       resolveInt(cfg.AuditMaxLimit, MaxAuditQueryLimit),
 	}
 
 	// Wire up history querier for conditional rule evaluation
@@ -169,6 +216,8 @@ func NewServer(cfg Config) *Server {
 	// Other Logger implementations (e.g. SQLiteLogger) fall back to a full
 	// Query() — their scan cost is their own concern.
 	type pathReporter interface{ Path() string }
+	replayStart := time.Now()
+	var replayed uint64
 	if pr, ok := cfg.Logger.(pathReporter); ok && pr.Path() != "" {
 		path := pr.Path()
 		cp, cpErr := audit.ReadCheckpoint(path)
@@ -177,6 +226,7 @@ func NewServer(cfg Config) *Server {
 		}
 		newOffset, err := audit.ReplayFrom(path, cp, func(e audit.Entry) {
 			metrics.IncDecision(string(e.Result.Decision))
+			replayed++
 		})
 		if err != nil {
 			log.Printf("WARN: audit replay failed (%v); counters may be under-seeded", err)
@@ -191,8 +241,11 @@ func NewServer(cfg Config) *Server {
 	} else if existing, err := cfg.Logger.Query(audit.QueryFilter{}); err == nil {
 		for _, e := range existing {
 			metrics.IncDecision(string(e.Result.Decision))
+			replayed++
 		}
 	}
+	metrics.AddAuditReplayEntries(replayed)
+	metrics.SetAuditReplayDuration(time.Since(replayStart))
 
 	mux := http.NewServeMux()
 
@@ -302,7 +355,8 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodySize)
+	limit := s.maxRequestBodyBytes
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	var req policy.ActionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		// Distinguish "body too large" from other parse errors so that the
@@ -313,8 +367,8 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &mbe) {
 			metrics.IncRequestRejected(metrics.RejectedBodyTooLarge)
 			log.Printf("WARN: request body exceeds limit: remote=%s content_length=%d limit=%d",
-				r.RemoteAddr, r.ContentLength, MaxRequestBodySize)
-			http.Error(w, fmt.Sprintf("Request body too large (limit %d bytes)", MaxRequestBodySize), http.StatusRequestEntityTooLarge)
+				r.RemoteAddr, r.ContentLength, limit)
+			http.Error(w, fmt.Sprintf("Request body too large (limit %d bytes)", limit), http.StatusRequestEntityTooLarge)
 			return
 		}
 		http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
@@ -350,6 +404,16 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	if result.Decision == policy.RequireApproval {
 		pending, err := s.approval.Add(req, result)
 		if err != nil {
+			if errors.Is(err, ErrApprovalQueueFull) {
+				// Tell the client this is a transient capacity problem, not
+				// a permanent failure. Retry-After is advisory; tune via
+				// ApprovalQueueFullRetryAfterSeconds or grow
+				// MaxPendingApprovals if operators report repeated 503s.
+				log.Printf("approval queue full: %d unresolved entries", s.approval.PendingCount())
+				w.Header().Set("Retry-After", strconv.Itoa(ApprovalQueueFullRetryAfterSeconds))
+				http.Error(w, "approval queue full; retry later", http.StatusServiceUnavailable)
+				return
+			}
 			log.Printf("approval queue error: %v", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
@@ -471,7 +535,7 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 //
 // Prior to v0.4.1 the handler ignored ?limit= and always passed 100.
 func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
-	limit, err := parseBoundedInt(r.URL.Query().Get("limit"), DefaultAuditQueryLimit, 1, MaxAuditQueryLimit)
+	limit, err := parseBoundedInt(r.URL.Query().Get("limit"), s.auditDefaultLimit, 1, s.auditMaxLimit)
 	if err != nil {
 		http.Error(w, "invalid limit: "+err.Error(), http.StatusBadRequest)
 		return
@@ -512,6 +576,23 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 // The asymmetry — reject below, clamp above — matches how operators expect
 // these knobs to behave: a negative limit is a bug, a huge limit is usually
 // "give me all of them" and we want a safe ceiling rather than a 400.
+// resolveInt returns override when strictly positive, otherwise fallback.
+// Used to flatten policy-driven tunables into effective runtime values at
+// server construction so request-path code does not branch per call.
+func resolveInt(override, fallback int) int {
+	if override > 0 {
+		return override
+	}
+	return fallback
+}
+
+func resolveInt64(override, fallback int64) int64 {
+	if override > 0 {
+		return override
+	}
+	return fallback
+}
+
 func parseBoundedInt(raw string, defaultVal, minVal, maxVal int) (int, error) {
 	if raw == "" {
 		return defaultVal, nil
@@ -541,6 +622,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// PendingCount counts under RLock without allocating a slice — matters
 	// because this endpoint is scraped on a schedule.
 	metrics.SetPendingApprovals(s.approval.PendingCount())
+	// Refresh the rate-limit bucket gauge from the limiter; BucketCount()
+	// takes the limiter lock for a single len() read.
+	metrics.SetRateLimitBuckets(s.limiter.BucketCount())
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	metrics.WritePrometheus(w)
 }
@@ -658,13 +742,27 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 // ApprovalQueue methods
 
+// Add registers a new pending approval. If the queue is at capacity the
+// oldest resolved entry is evicted first (LRU on CreatedAt; resolution does
+// not rewind it, so the eviction target is the entry that has been around
+// the longest). If every slot is still unresolved, Add returns
+// ErrApprovalQueueFull and the caller is expected to surface 503 +
+// Retry-After — silently dropping the request would leave the agent
+// waiting forever on an ID that does not exist.
 func (q *ApprovalQueue) Add(req policy.ActionRequest, result policy.CheckResult) (*PendingAction, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	// Evict oldest resolved entries if at capacity
-	if len(q.pending) >= MaxPendingApprovals {
-		q.evictResolvedLocked()
+	cap := q.maxSize
+	if cap <= 0 {
+		cap = MaxPendingApprovals
+	}
+	if len(q.pending) >= cap {
+		if !q.evictOldestResolvedLocked() {
+			metrics.IncApprovalEvicted(metrics.ApprovalEvictedQueueFull)
+			return nil, ErrApprovalQueueFull
+		}
+		metrics.IncApprovalEvicted(metrics.ApprovalEvictedLRUResolved)
 	}
 
 	var b [16]byte
@@ -683,14 +781,30 @@ func (q *ApprovalQueue) Add(req policy.ActionRequest, result policy.CheckResult)
 	return pa, nil
 }
 
-// evictResolvedLocked removes all resolved entries from the queue.
+// evictOldestResolvedLocked drops exactly one entry: the resolved entry with
+// the earliest CreatedAt. Returns true when something was evicted, false
+// when every entry is still unresolved. The linear scan is O(n), but n is
+// capped at maxSize and eviction only fires when Add hits the cap — not on
+// the hot path of normal traffic.
+//
 // Must be called with q.mu held.
-func (q *ApprovalQueue) evictResolvedLocked() {
+func (q *ApprovalQueue) evictOldestResolvedLocked() bool {
+	var oldestID string
+	var oldestCreated time.Time
 	for id, pa := range q.pending {
-		if pa.Resolved {
-			delete(q.pending, id)
+		if !pa.Resolved {
+			continue
+		}
+		if oldestID == "" || pa.CreatedAt.Before(oldestCreated) {
+			oldestID = id
+			oldestCreated = pa.CreatedAt
 		}
 	}
+	if oldestID == "" {
+		return false
+	}
+	delete(q.pending, oldestID)
+	return true
 }
 
 func (q *ApprovalQueue) Resolve(id string, decision policy.Decision) error {
@@ -748,6 +862,7 @@ func (q *ApprovalQueue) Subscribe() chan AuditEvent {
 	defer q.mu.Unlock()
 	ch := make(chan AuditEvent, SSEChannelBufferSize)
 	q.watchers = append(q.watchers, ch)
+	metrics.IncSSESubscribers()
 	return ch
 }
 
@@ -757,6 +872,7 @@ func (q *ApprovalQueue) Unsubscribe(ch chan AuditEvent) {
 	for i, w := range q.watchers {
 		if w == ch {
 			q.watchers = append(q.watchers[:i], q.watchers[i+1:]...)
+			metrics.DecSSESubscribers()
 			break
 		}
 	}
@@ -780,7 +896,11 @@ func (q *ApprovalQueue) broadcastLocked(event AuditEvent) {
 		select {
 		case ch <- event:
 		default:
-			// Drop if consumer is slow
+			// Drop if consumer is slow. The metric lets ops see which
+			// deployments have backed-up SSE subscribers — a persistent
+			// non-zero rate usually means a dashboard tab left open on
+			// battery-throttled hardware.
+			metrics.IncSSEEventDropped(metrics.SSEDroppedSlowConsumer)
 		}
 	}
 }

@@ -25,7 +25,7 @@ import (
 )
 
 var (
-	version = "0.4.0"
+	version = "0.4.1"
 	commit  = "dev"
 )
 
@@ -200,20 +200,27 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		defer watcher.Close()
 	}
 
-	// Build and start proxy server
+	// Build and start proxy server. Policy-driven tunables (session TTL,
+	// request body cap, audit query bounds) are resolved through Policy
+	// accessors so an operator gets the documented defaults when the
+	// relevant YAML key is absent.
 	srv := proxy.NewServer(proxy.Config{
-		Port:                  port,
-		Engine:                engine,
-		Logger:                logger,
-		DashboardEnabled:      dashboardEnabled,
-		Notifier:              notifier,
-		APIKey:                apiKey,
-		BaseURL:               baseURL,
-		AllowedOrigin:         allowedOrigin,
+		Port:                     port,
+		Engine:                   engine,
+		Logger:                   logger,
+		DashboardEnabled:         dashboardEnabled,
+		Notifier:                 notifier,
+		APIKey:                   apiKey,
+		BaseURL:                  baseURL,
+		AllowedOrigin:            allowedOrigin,
 		Version:                  version,
 		TLSTerminatedUpstream:    tlsTerminatedUpstream,
 		SessionCostTTL:           sessionCostTTL,
 		SessionCostSweepInterval: sessionCostSweep,
+		SessionTTL:               pol.SessionTTL(),
+		MaxRequestBodyBytes:      pol.MaxRequestBodyBytes(),
+		AuditDefaultLimit:        pol.AuditDefaultLimit(),
+		AuditMaxLimit:            pol.AuditMaxLimit(),
 	})
 
 	// Graceful shutdown

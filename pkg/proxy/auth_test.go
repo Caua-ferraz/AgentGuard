@@ -2,10 +2,13 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,6 +37,28 @@ func TestSessionStore_CreateValidate(t *testing.T) {
 	}
 }
 
+// TestSessionStore_CustomTTL verifies that NewSessionStoreWithTTL honors
+// the caller-supplied lifetime and that a non-positive value falls back to
+// the package default. Protects the proxy.session.ttl wiring path.
+func TestSessionStore_CustomTTL(t *testing.T) {
+	short := 250 * time.Millisecond
+	s := NewSessionStoreWithTTL(short)
+	sess, err := s.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	deadline := time.Now().Add(short + 50*time.Millisecond)
+	if sess.ExpiresAt.After(deadline) {
+		t.Errorf("ExpiresAt %v past expected %v", sess.ExpiresAt, deadline)
+	}
+	// Non-positive TTL => package default.
+	s2 := NewSessionStoreWithTTL(0)
+	sess2, _ := s2.Create()
+	if got := time.Until(sess2.ExpiresAt); got < SessionTTL-time.Second {
+		t.Errorf("zero TTL should fall back to SessionTTL (%v); got remaining %v", SessionTTL, got)
+	}
+}
+
 func TestSessionStore_Destroy(t *testing.T) {
 	s := NewSessionStore()
 	sess, _ := s.Create()
@@ -58,38 +83,70 @@ func TestSessionStore_Expires(t *testing.T) {
 	}
 }
 
-// TestSessionStore_CapacityEviction proves the oldest session is evicted
-// when the store would exceed MaxSessions.
-func TestSessionStore_CapacityEviction(t *testing.T) {
+// TestSessionStore_RejectsNewWhenFull verifies the v0.4.1 behavior: when
+// every slot holds a live session, Create returns ErrSessionStoreFull and
+// the caller (handleLogin) is expected to surface 503. Earlier versions
+// silently evicted the oldest live session here, which kicked a real
+// operator out of an active session.
+func TestSessionStore_RejectsNewWhenFull(t *testing.T) {
 	s := NewSessionStore()
-	// Fill to capacity with fabricated sessions (fast path — bypass Create
-	// so we can control expiry ordering).
+
+	// Fill with live sessions (ExpiresAt well in the future).
 	s.mu.Lock()
 	for i := 0; i < MaxSessions; i++ {
 		tok := hexToken(i)
 		s.sessions[tok] = Session{
 			Token:     tok,
-			ExpiresAt: time.Now().Add(time.Duration(i) * time.Second),
+			ExpiresAt: time.Now().Add(time.Hour),
 		}
 	}
 	s.mu.Unlock()
 
-	if s.Count() != MaxSessions {
-		t.Fatalf("setup: expected %d sessions, got %d", MaxSessions, s.Count())
-	}
-
-	// Oldest expires at +0s; this should be evicted when Create runs.
-	oldest := hexToken(0)
-
 	_, err := s.Create()
+	if err == nil {
+		t.Fatal("Create on a full store must return an error, not silently evict")
+	}
+	if !errors.Is(err, ErrSessionStoreFull) {
+		t.Errorf("want ErrSessionStoreFull, got %v", err)
+	}
+
+	// No live session was harmed: every one of the MaxSessions tokens is
+	// still valid.
+	for i := 0; i < MaxSessions; i++ {
+		if !s.Validate(hexToken(i)) {
+			t.Errorf("session %d was evicted; reject-new must leave existing sessions alone", i)
+			break
+		}
+	}
+}
+
+// TestSessionStore_SweepsExpiredBeforeRejecting: a store "full" of expired
+// entries must not block new logins. Create sweeps expired sessions before
+// checking capacity.
+func TestSessionStore_SweepsExpiredBeforeRejecting(t *testing.T) {
+	s := NewSessionStore()
+
+	// Fill with already-expired sessions.
+	s.mu.Lock()
+	for i := 0; i < MaxSessions; i++ {
+		tok := hexToken(i)
+		s.sessions[tok] = Session{
+			Token:     tok,
+			ExpiresAt: time.Now().Add(-time.Second),
+		}
+	}
+	s.mu.Unlock()
+
+	sess, err := s.Create()
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatalf("Create must succeed after expired sweep, got %v", err)
 	}
-	if s.Count() != MaxSessions {
-		t.Errorf("expected count to stay at %d after eviction, got %d", MaxSessions, s.Count())
+	if !s.Validate(sess.Token) {
+		t.Error("newly-created session must validate")
 	}
-	if s.Validate(oldest) {
-		t.Error("oldest session should have been evicted")
+	// After the sweep, only the new live session should remain.
+	if got := s.Count(); got != 1 {
+		t.Errorf("expected 1 session after sweep+create, got %d", got)
 	}
 }
 
@@ -113,15 +170,19 @@ func hexToken(i int) string {
 	return string(b)
 }
 
-// TestSessionStore_ConcurrentCreate stresses the eviction path under
+// TestSessionStore_ConcurrentCreate stresses the reject-new path under
 // concurrent creators. With the race detector this asserts no data race.
+// Workers×per deliberately exceeds MaxSessions, so some Creates are
+// expected to return ErrSessionStoreFull once the store fills up — that is
+// the new contract, not a test failure.
 func TestSessionStore_ConcurrentCreate(t *testing.T) {
 	s := NewSessionStore()
 
 	const workers = 32
-	const per = 50
+	const per = 50 // 32*50 = 1600 > MaxSessions=1024
 
 	var wg sync.WaitGroup
+	var full atomic.Uint64
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -129,7 +190,11 @@ func TestSessionStore_ConcurrentCreate(t *testing.T) {
 			for j := 0; j < per; j++ {
 				sess, err := s.Create()
 				if err != nil {
-					t.Errorf("Create: %v", err)
+					if errors.Is(err, ErrSessionStoreFull) {
+						full.Add(1)
+						continue
+					}
+					t.Errorf("unexpected Create error: %v", err)
 					return
 				}
 				if !s.Validate(sess.Token) {
@@ -143,6 +208,13 @@ func TestSessionStore_ConcurrentCreate(t *testing.T) {
 
 	if got := s.Count(); got > MaxSessions {
 		t.Errorf("session count must never exceed MaxSessions=%d, got %d", MaxSessions, got)
+	}
+	if full.Load() == 0 {
+		// Not an error per se, but the test is designed to exercise the
+		// rejection path — if nothing was rejected, either MaxSessions was
+		// raised or the workload was shrunk. Flag it so future edits do not
+		// silently stop exercising the new behavior.
+		t.Errorf("expected at least one ErrSessionStoreFull rejection across %d creates", workers*per)
 	}
 }
 
@@ -252,6 +324,41 @@ func TestHandleLogin_DefaultNoTLSNoSecure(t *testing.T) {
 		if c.Secure {
 			t.Errorf("cookie %q should not have Secure=true on plaintext request with default config", c.Name)
 		}
+	}
+}
+
+// TestHandleLogin_503OnSessionStoreFull: when the session store is full of
+// live sessions, /auth/login must respond 503 with a numeric Retry-After
+// header rather than a generic 500 ("session creation failed").
+func TestHandleLogin_503OnSessionStoreFull(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Pre-fill the store with live fabricated sessions.
+	srv.sessions.mu.Lock()
+	for i := 0; i < MaxSessions; i++ {
+		tok := hexToken(i)
+		srv.sessions.sessions[tok] = Session{
+			Token:     tok,
+			ExpiresAt: time.Now().Add(time.Hour),
+		}
+	}
+	srv.sessions.mu.Unlock()
+
+	body := `{"api_key":"test-secret"}`
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleLogin(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%q", w.Code, w.Body.String())
+	}
+	ra := w.Header().Get("Retry-After")
+	if ra == "" {
+		t.Error("Retry-After header must be set on 503")
+	}
+	if ra != fmt.Sprint(SessionStoreFullRetryAfterSeconds) {
+		t.Errorf("Retry-After = %q, want %q", ra, fmt.Sprint(SessionStoreFullRetryAfterSeconds))
 	}
 }
 

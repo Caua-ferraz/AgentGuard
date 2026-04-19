@@ -100,6 +100,47 @@ class TestInitialize:
         assert "tools" in caps
         assert caps["tools"]["listChanged"] is False
 
+    def test_matching_protocol_version_is_silent(self, capsys):
+        """Client requesting the pinned version must not emit any warning."""
+        s = GuardedMCPServer(guard_url=DEFAULT_BASE_URL)
+        resp = s._handle_request({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": MCP_PROTOCOL_VERSION},
+        })
+        assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
+        assert capsys.readouterr().err == ""
+
+    def test_mismatched_protocol_version_warns_but_pins(self, capsys):
+        """Client requesting a newer (or different) version triggers a stderr
+        warning but the server still pins to MCP_PROTOCOL_VERSION. Locks the
+        Phase-5.2 contract: actual negotiation is deferred to v0.5.0."""
+        s = GuardedMCPServer(guard_url=DEFAULT_BASE_URL)
+        resp = s._handle_request({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "2099-12-31"},
+        })
+        assert resp["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
+
+        err = capsys.readouterr().err
+        assert "WARN" in err
+        assert "agentguard.mcp" in err
+        assert "2099-12-31" in err
+        assert MCP_PROTOCOL_VERSION in err
+
+    def test_missing_protocol_version_is_silent(self, capsys):
+        """Older/minimal clients that omit protocolVersion must not be warned
+        about — silent acceptance is the back-compat path."""
+        s = GuardedMCPServer(guard_url=DEFAULT_BASE_URL)
+        s._handle_request({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        s._handle_request({
+            "jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {},
+        })
+        assert capsys.readouterr().err == ""
+
 
 # ---------------------------------------------------------------------------
 # tools/list

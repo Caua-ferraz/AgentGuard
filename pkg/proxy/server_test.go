@@ -3,11 +3,13 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -219,6 +221,35 @@ func TestHandleCheck_InvalidJSON(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+// TestHandleCheck_OversizedBody_CustomLimit verifies that a policy-supplied
+// MaxRequestBodyBytes tightens the accepted request size. Using a small
+// override lets the test stay fast (no need to allocate a 1 MiB body) and
+// exercises the same rejection path as the default-sized test below.
+func TestHandleCheck_OversizedBody_CustomLimit(t *testing.T) {
+	const customLimit = int64(256)
+	srv := newTestServer(t, func(c *Config) {
+		c.MaxRequestBodyBytes = customLimit
+	})
+	before := metrics.RequestRejectedSnapshot()[metrics.RejectedBodyTooLarge]
+
+	body := `{"command":"` + strings.Repeat("x", int(customLimit)+1) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleCheck(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 under custom limit, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "256 bytes") {
+		t.Errorf("error message should cite the effective limit; got %q", w.Body.String())
+	}
+	after := metrics.RequestRejectedSnapshot()[metrics.RejectedBodyTooLarge]
+	if after != before+1 {
+		t.Errorf("rejection counter: before=%d after=%d, expected +1", before, after)
 	}
 }
 
@@ -637,6 +668,47 @@ func TestHandleAuditQuery_LimitAndOffset(t *testing.T) {
 		srv.handleAuditQuery(w, req)
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("code = %d, want 400", w.Code)
+		}
+	})
+}
+
+// TestHandleAuditQuery_CustomDefaultAndMaxLimit verifies that the Phase-4
+// audit limit overrides drive both the "no ?limit supplied" default and the
+// "limit above ceiling" clamp. Uses an explicit default below the row count
+// so the default-path effect is visible, and a ceiling well below the
+// package default so the clamp path is observable without writing 1000 rows.
+func TestHandleAuditQuery_CustomDefaultAndMaxLimit(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) {
+		c.AuditDefaultLimit = 3
+		c.AuditMaxLimit = 5
+	})
+	for i := 0; i < 10; i++ {
+		body := fmt.Sprintf(`{"scope":"shell","command":"cmd-%d","agent_id":"bot-cfg"}`, i)
+		r := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+		srv.handleCheck(httptest.NewRecorder(), r)
+	}
+	decode := func(raw []byte) int {
+		var out []audit.Entry
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return len(out)
+	}
+
+	t.Run("default_limit_from_config", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?agent_id=bot-cfg", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		if got := decode(w.Body.Bytes()); got != 3 {
+			t.Errorf("default-limit path returned %d, want 3", got)
+		}
+	})
+	t.Run("ceiling_clamped_to_max", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?agent_id=bot-cfg&limit=999", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		if got := decode(w.Body.Bytes()); got != 5 {
+			t.Errorf("limit-above-ceiling should clamp to %d, got %d", 5, got)
 		}
 	})
 }
@@ -1087,39 +1159,218 @@ func TestApprovalQueue_ResolveRemovesFromList(t *testing.T) {
 	}
 }
 
-func TestApprovalQueue_EvictsResolved(t *testing.T) {
-	q := &ApprovalQueue{pending: make(map[string]*PendingAction)}
-
-	// Add and resolve entries to fill the map
-	for i := 0; i < MaxPendingApprovals; i++ {
-		pa := mustAdd(t, q,
-			policy.ActionRequest{Scope: "shell", Command: "sudo test"},
-			policy.CheckResult{Decision: policy.RequireApproval},
-		)
-		_ = q.Resolve(pa.ID, policy.Allow)
+// TestApprovalQueue_SubscribeTracksGauge: Subscribe/Unsubscribe must keep
+// the agentguard_sse_subscribers gauge in sync — this is the only way
+// operators can see whether SSE clients are actually connected.
+func TestApprovalQueue_SubscribeTracksGauge(t *testing.T) {
+	q := &ApprovalQueue{
+		pending: make(map[string]*PendingAction),
+		maxSize: 10,
 	}
 
-	// Map should be at capacity (resolved entries are still in the map)
+	// Snapshot via Prometheus output; comparing deltas avoids leaking from
+	// other tests that also touch SSE state.
+	readGauge := func() int64 {
+		var buf bytes.Buffer
+		metrics.WritePrometheus(&buf)
+		out := buf.String()
+		// Anchor on "\n<metric> " — the substring "agentguard_sse_subscribers "
+		// also appears in the HELP and TYPE lines, which begin with '#'.
+		const prefix = "\nagentguard_sse_subscribers "
+		idx := strings.Index(out, prefix)
+		if idx == -1 {
+			t.Fatalf("sse subscribers data line missing; out:\n%s", out)
+		}
+		line := out[idx+len(prefix):]
+		nl := strings.Index(line, "\n")
+		if nl == -1 {
+			t.Fatal("no newline after gauge value")
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(line[:nl]), 10, 64)
+		if err != nil {
+			t.Fatalf("gauge value parse: %v", err)
+		}
+		return n
+	}
+
+	before := readGauge()
+	a := q.Subscribe()
+	b := q.Subscribe()
+	if got := readGauge(); got != before+2 {
+		t.Errorf("gauge after 2 subs = %d, want %d", got, before+2)
+	}
+	q.Unsubscribe(a)
+	if got := readGauge(); got != before+1 {
+		t.Errorf("gauge after 1 unsub = %d, want %d", got, before+1)
+	}
+	q.Unsubscribe(b)
+	if got := readGauge(); got != before {
+		t.Errorf("gauge after all unsubs = %d, want %d", got, before)
+	}
+}
+
+// TestApprovalQueue_BroadcastDropsIncrementCounter: when a subscriber
+// can't keep up, broadcastLocked drops the event into the default branch.
+// That drop must be visible via
+// agentguard_sse_events_dropped_total{reason="slow_consumer"}; silent
+// drops are the exact pathology the metric exists to surface.
+func TestApprovalQueue_BroadcastDropsIncrementCounter(t *testing.T) {
+	q := &ApprovalQueue{
+		pending: make(map[string]*PendingAction),
+		maxSize: 10,
+	}
+
+	ch := q.Subscribe()
+	defer q.Unsubscribe(ch)
+
+	// Fill the buffer without draining. One more broadcast than
+	// SSEChannelBufferSize guarantees at least one drop.
+	for i := 0; i < SSEChannelBufferSize; i++ {
+		q.Broadcast(AuditEvent{Type: "check"})
+	}
+
+	before := metrics.SSEEventDroppedFor(metrics.SSEDroppedSlowConsumer)
+	q.Broadcast(AuditEvent{Type: "check"}) // must drop
+	q.Broadcast(AuditEvent{Type: "check"}) // must drop
+	after := metrics.SSEEventDroppedFor(metrics.SSEDroppedSlowConsumer)
+
+	if got := after - before; got != 2 {
+		t.Errorf("slow_consumer drops = %d, want 2", got)
+	}
+}
+
+// TestApprovalQueue_EvictsOldestResolvedOnly: at capacity, Add evicts
+// exactly one entry — the resolved entry with the earliest CreatedAt.
+// Other resolved entries are left alone; they may still be useful for
+// /v1/status polling until they too age out.
+func TestApprovalQueue_EvictsOldestResolvedOnly(t *testing.T) {
+	q := &ApprovalQueue{
+		pending: make(map[string]*PendingAction),
+		maxSize: 3,
+	}
+
+	// Add three entries spaced in CreatedAt order. The three Add() calls are
+	// serialized by the queue mutex so their CreatedAt values are strictly
+	// increasing, but nanosecond resolution on fast hosts could collide —
+	// force distinct timestamps after the fact to keep the LRU tie-break
+	// deterministic.
+	older := mustAdd(t, q, policy.ActionRequest{Scope: "shell", Command: "sudo a"}, policy.CheckResult{Decision: policy.RequireApproval})
+	middle := mustAdd(t, q, policy.ActionRequest{Scope: "shell", Command: "sudo b"}, policy.CheckResult{Decision: policy.RequireApproval})
+	newest := mustAdd(t, q, policy.ActionRequest{Scope: "shell", Command: "sudo c"}, policy.CheckResult{Decision: policy.RequireApproval})
+	q.mu.Lock()
+	q.pending[older.ID].CreatedAt = time.Unix(1, 0)
+	q.pending[middle.ID].CreatedAt = time.Unix(2, 0)
+	q.pending[newest.ID].CreatedAt = time.Unix(3, 0)
+	q.mu.Unlock()
+
+	// Resolve both `older` and `middle`. The next Add must evict `older` —
+	// not `middle`, even though both are resolved.
+	if err := q.Resolve(older.ID, policy.Allow); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Resolve(middle.ID, policy.Allow); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeEvicted := metrics.ApprovalEvictedFor(metrics.ApprovalEvictedLRUResolved)
+	fresh := mustAdd(t, q, policy.ActionRequest{Scope: "shell", Command: "sudo d"}, policy.CheckResult{Decision: policy.RequireApproval})
+	if got := metrics.ApprovalEvictedFor(metrics.ApprovalEvictedLRUResolved); got != beforeEvicted+1 {
+		t.Errorf("lru_resolved counter did not advance by 1: before=%d after=%d", beforeEvicted, got)
+	}
+
 	q.mu.RLock()
-	sizeBefore := len(q.pending)
-	q.mu.RUnlock()
-	if sizeBefore != MaxPendingApprovals {
-		t.Fatalf("expected %d entries before eviction, got %d", MaxPendingApprovals, sizeBefore)
+	defer q.mu.RUnlock()
+
+	if _, ok := q.pending[older.ID]; ok {
+		t.Error("oldest resolved entry should have been evicted")
+	}
+	if _, ok := q.pending[middle.ID]; !ok {
+		t.Error("newer resolved entry must NOT be evicted — LRU drops only the oldest")
+	}
+	if _, ok := q.pending[newest.ID]; !ok {
+		t.Error("unresolved entry must survive eviction")
+	}
+	if _, ok := q.pending[fresh.ID]; !ok {
+		t.Error("newly-added entry must be present after the Add that triggered eviction")
+	}
+	if got := len(q.pending); got != 3 {
+		t.Errorf("queue size after eviction+add = %d, want 3 (at cap)", got)
+	}
+}
+
+// TestApprovalQueue_FullRejectsWhenAllUnresolved: when every slot is still
+// unresolved, Add must refuse with ErrApprovalQueueFull so the HTTP layer
+// can respond 503 + Retry-After instead of generating an approval ID the
+// agent will poll in vain.
+func TestApprovalQueue_FullRejectsWhenAllUnresolved(t *testing.T) {
+	q := &ApprovalQueue{
+		pending: make(map[string]*PendingAction),
+		maxSize: 2,
+	}
+	mustAdd(t, q, policy.ActionRequest{Scope: "shell", Command: "sudo a"}, policy.CheckResult{Decision: policy.RequireApproval})
+	mustAdd(t, q, policy.ActionRequest{Scope: "shell", Command: "sudo b"}, policy.CheckResult{Decision: policy.RequireApproval})
+
+	beforeRejected := metrics.ApprovalEvictedFor(metrics.ApprovalEvictedQueueFull)
+	_, err := q.Add(
+		policy.ActionRequest{Scope: "shell", Command: "sudo c"},
+		policy.CheckResult{Decision: policy.RequireApproval},
+	)
+	if err == nil {
+		t.Fatal("Add at full capacity with no resolved entries must return an error")
+	}
+	if !errors.Is(err, ErrApprovalQueueFull) {
+		t.Errorf("error should be ErrApprovalQueueFull, got %v", err)
+	}
+	if got := metrics.ApprovalEvictedFor(metrics.ApprovalEvictedQueueFull); got != beforeRejected+1 {
+		t.Errorf("queue_full counter did not advance by 1: before=%d after=%d", beforeRejected, got)
 	}
 
-	// Adding one more should trigger eviction of resolved entries
-	mustAdd(t, q,
-		policy.ActionRequest{Scope: "shell", Command: "sudo new"},
+	// Nothing was added, nothing was evicted — invariants must hold.
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	if got := len(q.pending); got != 2 {
+		t.Errorf("queue size after rejected Add = %d, want 2", got)
+	}
+}
+
+// TestHandleCheck_503OnApprovalQueueFull: when the policy says
+// REQUIRE_APPROVAL but the queue is full of unresolved entries, the HTTP
+// handler must respond 503 with a numeric Retry-After header — not 500.
+func TestHandleCheck_503OnApprovalQueueFull(t *testing.T) {
+	s := newTestServer(t)
+
+	// Shrink the queue to 1 and pre-fill it with an unresolved entry so the
+	// next /v1/check that would require approval is guaranteed to hit the
+	// capacity branch.
+	s.approval.maxSize = 1
+	mustAdd(t, s.approval,
+		policy.ActionRequest{Scope: "shell", Command: "sudo prefill"},
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)
 
-	q.mu.RLock()
-	sizeAfter := len(q.pending)
-	q.mu.RUnlock()
+	body, err := json.Marshal(policy.ActionRequest{
+		AgentID: "bot",
+		Scope:   "shell",
+		Command: "sudo rm -rf /tmp/thing", // matches the REQUIRE_APPROVAL rule in newTestServer
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/check", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rw := httptest.NewRecorder()
 
-	// All resolved entries evicted, only the new one remains
-	if sizeAfter != 1 {
-		t.Errorf("expected 1 entry after eviction, got %d", sizeAfter)
+	s.handleCheck(rw, req)
+
+	if rw.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rw.Code)
+	}
+	ra := rw.Header().Get("Retry-After")
+	if ra == "" {
+		t.Error("Retry-After header must be set on 503")
+	}
+	if ra != fmt.Sprint(ApprovalQueueFullRetryAfterSeconds) {
+		t.Errorf("Retry-After = %q, want %q", ra, fmt.Sprint(ApprovalQueueFullRetryAfterSeconds))
 	}
 }
 

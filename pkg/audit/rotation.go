@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 )
 
 // ArchiveTimestampFormat is the format used to suffix archived audit files.
@@ -122,6 +124,11 @@ func (l *FileLogger) rotateLocked() error {
 			log.Printf("WARN: audit archive prune failed: %v", err)
 		}
 	}
+
+	// Count only successful rotations: a half-completed rotate returns above
+	// before we reach here, and observability would otherwise be misleading
+	// (a stuck rotation doesn't "count" as a rotation operators should see).
+	metrics.IncAuditRotation()
 	return nil
 }
 

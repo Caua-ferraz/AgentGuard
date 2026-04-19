@@ -42,6 +42,15 @@ ENDPOINT_APPROVE = "/v1/approve/"
 ENDPOINT_DENY = "/v1/deny/"
 ENDPOINT_STATUS = "/v1/status/"
 
+# Fail-mode values for the Guard() constructor. "deny" fails closed when the
+# AgentGuard proxy is unreachable (the v0.4.0 default and current v0.4.1
+# default). "allow" fails open — permitted as an explicit opt-in for agents
+# whose threat model treats AgentGuard as best-effort; the caller is
+# responsible for any resulting safety implications.
+FAIL_MODE_DENY = "deny"
+FAIL_MODE_ALLOW = "allow"
+_VALID_FAIL_MODES = (FAIL_MODE_DENY, FAIL_MODE_ALLOW)
+
 
 @dataclass
 class CheckResult:
@@ -68,11 +77,45 @@ class CheckResult:
 class Guard:
     """Client for the AgentGuard proxy."""
 
-    def __init__(self, base_url: str = "", agent_id: str = "", timeout: int = DEFAULT_TIMEOUT, api_key: str = ""):
+    def __init__(
+        self,
+        base_url: str = "",
+        agent_id: str = "",
+        timeout: int = DEFAULT_TIMEOUT,
+        api_key: str = "",
+        fail_mode: str = FAIL_MODE_DENY,
+    ):
+        """Construct a Guard client.
+
+        Args:
+            base_url: Proxy URL. Falls back to AGENTGUARD_URL or the
+                package default.
+            agent_id: Stable identifier sent with every check.
+            timeout: HTTP timeout in seconds for individual calls.
+            api_key: Bearer token for /v1/approve, /v1/deny, /v1/status.
+                Falls back to AGENTGUARD_API_KEY.
+            fail_mode: Behavior when the proxy is unreachable. "deny" (the
+                v0.4.0 default, current v0.4.1 default) returns a DENY
+                result so the agent fails closed. "allow" returns an ALLOW
+                result — use only when the threat model treats AgentGuard
+                as best-effort and the caller accepts the safety trade-off.
+                An invalid value raises ValueError at construction so the
+                bug surfaces at startup instead of mid-request.
+
+        v0.5.0 parity note: the TypeScript SDK already honors `failMode`,
+        default `"deny"`. v0.5.0 will align both SDKs on explicit fail-mode
+        documentation. Adding `fail_mode` now is purely forward-compatible;
+        omitting it preserves v0.4.0 semantics exactly.
+        """
+        if fail_mode not in _VALID_FAIL_MODES:
+            raise ValueError(
+                f"fail_mode must be one of {_VALID_FAIL_MODES!r}, got {fail_mode!r}"
+            )
         self.base_url = (base_url or os.environ.get("AGENTGUARD_URL", DEFAULT_BASE_URL)).rstrip("/")
         self.agent_id = agent_id
         self.timeout = timeout
         self.api_key = api_key or os.environ.get("AGENTGUARD_API_KEY", "")
+        self.fail_mode = fail_mode
 
     def check(
         self,
@@ -143,10 +186,13 @@ class Guard:
                     approval_url=body.get("approval_url", ""),
                 )
         except error.URLError as e:
-            # If AgentGuard is unreachable, default to deny (fail closed)
+            # Transport failure. fail_mode picks the safe default: "deny"
+            # preserves v0.4.0 fail-closed semantics; "allow" is an opt-in
+            # for callers whose threat model treats AgentGuard as advisory.
+            decision = DECISION_ALLOW if self.fail_mode == FAIL_MODE_ALLOW else DECISION_DENY
             return CheckResult(
-                decision=DECISION_DENY,
-                reason=f"AgentGuard unreachable: {e}",
+                decision=decision,
+                reason=f"AgentGuard unreachable ({self.fail_mode}): {e}",
             )
 
     def _auth_headers(self) -> dict:

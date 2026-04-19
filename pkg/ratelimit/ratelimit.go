@@ -2,8 +2,11 @@ package ratelimit
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 )
 
 const (
@@ -85,8 +88,21 @@ func (l *Limiter) evictStaleLocked() {
 	for key, b := range l.buckets {
 		if now.Sub(b.lastRefill) >= b.window {
 			delete(l.buckets, key)
+			metrics.IncRateLimitBucketEvicted(scopeFromKey(key))
 		}
 	}
+}
+
+// scopeFromKey extracts the scope prefix from a limiter key in the
+// "scope:agent_id" format used by the proxy. Unknown formats return
+// "unknown" so the counter stays well-labeled. The scope is the only
+// bounded-cardinality piece of the key, which is why the agent_id side is
+// discarded (millions of agent IDs would blow up Prometheus series).
+func scopeFromKey(key string) string {
+	if i := strings.IndexByte(key, ':'); i >= 0 {
+		return key[:i]
+	}
+	return "unknown"
 }
 
 // ParseWindow converts a window string like "1m", "30s", "1h" to a Duration.

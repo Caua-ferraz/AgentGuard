@@ -1,12 +1,15 @@
 package notify
 
 import (
+	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
@@ -31,6 +34,81 @@ func (c *countingNotifier) Count() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.calls
+}
+
+// TestDispatcher_DispatchTimeoutAppliedGlobally: a notifications.dispatch_timeout
+// at the cfg level must propagate to the http.Client of every webhook/slack
+// target that did not set its own `timeout` override.
+func TestDispatcher_DispatchTimeoutAppliedGlobally(t *testing.T) {
+	cfg := policy.NotificationCfg{
+		DispatchTimeout: "1500ms",
+		ApprovalRequired: []policy.NotifyTarget{
+			{Type: "webhook", URL: "http://unused.test"},
+		},
+		OnDeny: []policy.NotifyTarget{
+			{Type: "slack", URL: "http://unused.test"},
+		},
+	}
+	d := NewDispatcher(cfg)
+	defer d.Close()
+
+	if n := len(d.notifiers); n != 2 {
+		t.Fatalf("expected 2 notifiers, got %d", n)
+	}
+	wh, ok := d.notifiers[0].(*WebhookNotifier)
+	if !ok {
+		t.Fatalf("first notifier type = %T, want *WebhookNotifier", d.notifiers[0])
+	}
+	if got, want := wh.client.Timeout, 1500*time.Millisecond; got != want {
+		t.Errorf("webhook timeout = %v, want %v (from dispatch_timeout)", got, want)
+	}
+	sl, ok := d.notifiers[1].(*SlackNotifier)
+	if !ok {
+		t.Fatalf("second notifier type = %T, want *SlackNotifier", d.notifiers[1])
+	}
+	if got, want := sl.client.Timeout, 1500*time.Millisecond; got != want {
+		t.Errorf("slack timeout = %v, want %v (from dispatch_timeout)", got, want)
+	}
+}
+
+// TestDispatcher_DispatchTimeoutPerTargetOverride: a per-target `timeout`
+// wins over the dispatch-level default, and targets that omit `timeout`
+// inherit the dispatch default. Protects the inheritance contract documented
+// on NotifyTarget.Timeout.
+func TestDispatcher_DispatchTimeoutPerTargetOverride(t *testing.T) {
+	cfg := policy.NotificationCfg{
+		DispatchTimeout: "2s",
+		ApprovalRequired: []policy.NotifyTarget{
+			{Type: "webhook", URL: "http://a.test", Timeout: "500ms"},
+			{Type: "webhook", URL: "http://b.test"}, // inherits 2s
+		},
+	}
+	d := NewDispatcher(cfg)
+	defer d.Close()
+
+	a := d.notifiers[0].(*WebhookNotifier)
+	b := d.notifiers[1].(*WebhookNotifier)
+	if got, want := a.client.Timeout, 500*time.Millisecond; got != want {
+		t.Errorf("per-target override = %v, want %v", got, want)
+	}
+	if got, want := b.client.Timeout, 2*time.Second; got != want {
+		t.Errorf("inherited default = %v, want %v", got, want)
+	}
+}
+
+// TestDispatcher_DispatchTimeoutDefaultsWhenUnset: an empty DispatchTimeout
+// must fall back to policy.DefaultNotifyDispatchTimeout so removing the
+// config key restores v0.4.0 behavior exactly.
+func TestDispatcher_DispatchTimeoutDefaultsWhenUnset(t *testing.T) {
+	cfg := policy.NotificationCfg{
+		ApprovalRequired: []policy.NotifyTarget{{Type: "webhook", URL: "http://x"}},
+	}
+	d := NewDispatcher(cfg)
+	defer d.Close()
+	wh := d.notifiers[0].(*WebhookNotifier)
+	if got, want := wh.client.Timeout, policy.DefaultNotifyDispatchTimeout; got != want {
+		t.Errorf("default dispatch timeout = %v, want %v", got, want)
+	}
 }
 
 func TestDispatcher_DispatchesAllEvents(t *testing.T) {
@@ -89,6 +167,124 @@ func TestDispatcher_BoundedConcurrency(t *testing.T) {
 	if slow.Count() >= burst {
 		t.Errorf("slow notifier should have received far fewer than %d events, got %d",
 			burst, slow.Count())
+	}
+}
+
+// TestDispatcher_DroppedCounterIsLabeled: when the queue overflows the
+// Prometheus counter agentguard_notify_events_dropped_total must get
+// incremented with the correct notifier type label, not only the legacy
+// unlabeled package atomic.
+func TestDispatcher_DroppedCounterIsLabeled(t *testing.T) {
+	before := metrics.NotifyDroppedFor("webhook", metrics.NotifyDroppedQueueFull)
+
+	// 1 worker, queue=1, so a small burst overflows immediately.
+	d := NewDispatcherWithOpts(policy.NotificationCfg{}, 1, 1)
+	defer d.Close()
+
+	// WebhookNotifier pointed at an unroutable loopback port; each Notify
+	// will block on TCP until the short client Timeout expires, so the
+	// worker is slow enough to let the queue fill.
+	slow := &WebhookNotifier{
+		URL:    "http://127.0.0.1:1",
+		client: &http.Client{Timeout: 50 * time.Millisecond},
+	}
+	d.notifiers = []Notifier{slow}
+
+	for i := 0; i < 64; i++ {
+		d.Send(Event{Type: "denied"})
+	}
+
+	// A small delay is enough: drops happen synchronously inside Send
+	// when the buffered channel is full, so the counter is already
+	// incremented by the time Send returns.
+	time.Sleep(10 * time.Millisecond)
+
+	got := metrics.NotifyDroppedFor("webhook", metrics.NotifyDroppedQueueFull)
+	if got <= before {
+		t.Errorf("webhook-labeled drop counter did not increment; before=%d after=%d", before, got)
+	}
+}
+
+// TestDispatcher_ObservesDispatchDuration: the worker loop must time each
+// Notify() call and record it under the notifierType() label. We use
+// LogNotifier because it's a bounded type ("log") and produces no network
+// I/O, so the observation is fast and deterministic. We verify via the
+// Prometheus output that the labeled histogram's _count has advanced by at
+// least n.
+func TestDispatcher_ObservesDispatchDuration(t *testing.T) {
+	d := NewDispatcherWithOpts(policy.NotificationCfg{}, 1, 16)
+	defer d.Close()
+
+	// LogNotifier with a matching filter so Notify() actually runs.
+	d.notifiers = []Notifier{&LogNotifier{Filter: "denied"}}
+
+	const n = 5
+	beforeCount := readHistogramCount(t, "log")
+
+	for i := 0; i < n; i++ {
+		d.Send(Event{Type: "denied"})
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if readHistogramCount(t, "log")-beforeCount >= uint64(n) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected log-histogram _count delta >= %d within 2s (before=%d final=%d)",
+		n, beforeCount, readHistogramCount(t, "log"))
+}
+
+// readHistogramCount parses the Prometheus output for the current
+// _count value of agentguard_notify_dispatch_duration_seconds{notifier=X}.
+// Returns 0 if the series hasn't been emitted yet (no observation).
+func readHistogramCount(t *testing.T, notifier string) uint64 {
+	t.Helper()
+	var buf strings.Builder
+	metrics.WritePrometheus(&buf)
+	out := buf.String()
+	needle := "agentguard_notify_dispatch_duration_seconds_count{notifier=\"" + notifier + "\"} "
+	idx := strings.Index(out, needle)
+	if idx == -1 {
+		return 0
+	}
+	rest := out[idx+len(needle):]
+	nl := strings.Index(rest, "\n")
+	if nl == -1 {
+		t.Fatal("no newline after count value")
+	}
+	var n uint64
+	if _, err := fmt.Sscanf(strings.TrimSpace(rest[:nl]), "%d", &n); err != nil {
+		t.Fatalf("parse count: %v", err)
+	}
+	return n
+}
+
+// TestDispatcher_QueueDepthGaugeMoves: every successful enqueue must refresh
+// the queue_depth gauge. We slow a notifier so the queue actually builds up.
+func TestDispatcher_QueueDepthGaugeMoves(t *testing.T) {
+	// 1 worker so enqueued events sit in the queue while the one worker is
+	// blocked in Notify().
+	d := NewDispatcherWithOpts(policy.NotificationCfg{}, 1, 16)
+	defer d.Close()
+	d.notifiers = []Notifier{&countingNotifier{delay: 50 * time.Millisecond}}
+
+	// Burst of enqueues: after Send returns for the last one, queue_depth
+	// must have been at least 1 at some point — we read the Prometheus
+	// output to verify the gauge line exists and is emitted.
+	for i := 0; i < 8; i++ {
+		d.Send(Event{Type: "denied"})
+	}
+
+	var buf strings.Builder
+	metrics.WritePrometheus(&buf)
+	out := buf.String()
+	if !strings.Contains(out, "# TYPE agentguard_notify_queue_depth gauge") {
+		t.Fatalf("queue_depth gauge TYPE missing; got:\n%s", out)
+	}
+	if !strings.Contains(out, "\nagentguard_notify_queue_depth ") {
+		t.Errorf("queue_depth gauge value line missing; got:\n%s", out)
 	}
 }
 
