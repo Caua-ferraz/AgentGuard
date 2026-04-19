@@ -1,12 +1,14 @@
 package notify
 
 import (
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
@@ -89,6 +91,41 @@ func TestDispatcher_BoundedConcurrency(t *testing.T) {
 	if slow.Count() >= burst {
 		t.Errorf("slow notifier should have received far fewer than %d events, got %d",
 			burst, slow.Count())
+	}
+}
+
+// TestDispatcher_DroppedCounterIsLabeled: when the queue overflows the
+// Prometheus counter agentguard_notify_events_dropped_total must get
+// incremented with the correct notifier type label, not only the legacy
+// unlabeled package atomic.
+func TestDispatcher_DroppedCounterIsLabeled(t *testing.T) {
+	before := metrics.NotifyDroppedFor("webhook", metrics.NotifyDroppedQueueFull)
+
+	// 1 worker, queue=1, so a small burst overflows immediately.
+	d := NewDispatcherWithOpts(policy.NotificationCfg{}, 1, 1)
+	defer d.Close()
+
+	// WebhookNotifier pointed at an unroutable loopback port; each Notify
+	// will block on TCP until the short client Timeout expires, so the
+	// worker is slow enough to let the queue fill.
+	slow := &WebhookNotifier{
+		URL:    "http://127.0.0.1:1",
+		client: &http.Client{Timeout: 50 * time.Millisecond},
+	}
+	d.notifiers = []Notifier{slow}
+
+	for i := 0; i < 64; i++ {
+		d.Send(Event{Type: "denied"})
+	}
+
+	// A small delay is enough: drops happen synchronously inside Send
+	// when the buffered channel is full, so the counter is already
+	// incremented by the time Send returns.
+	time.Sleep(10 * time.Millisecond)
+
+	got := metrics.NotifyDroppedFor("webhook", metrics.NotifyDroppedQueueFull)
+	if got <= before {
+		t.Errorf("webhook-labeled drop counter did not increment; before=%d after=%d", before, got)
 	}
 }
 

@@ -52,6 +52,59 @@ func TestWritePrometheus_NoDeprecationsEmitsHeaderOnly(t *testing.T) {
 	}
 }
 
+// TestWritePrometheus_NotifyDroppedHeaderOnly: with no drops recorded, the
+// exposition still includes HELP/TYPE so a scraper picks up the series
+// definition. No label lines should appear.
+func TestWritePrometheus_NotifyDroppedHeaderOnly(t *testing.T) {
+	// Isolate: flush whatever previous test ran.
+	notifyDroppedMu.Lock()
+	notifyDroppedCount = map[notifyDroppedKey]uint64{}
+	notifyDroppedMu.Unlock()
+
+	var buf bytes.Buffer
+	WritePrometheus(&buf)
+	out := buf.String()
+
+	if !strings.Contains(out, "# TYPE agentguard_notify_events_dropped_total counter") {
+		t.Fatalf("TYPE header missing; got:\n%s", out)
+	}
+	if strings.Contains(out, "agentguard_notify_events_dropped_total{") {
+		t.Errorf("unexpected label lines with empty counter, got:\n%s", out)
+	}
+}
+
+// TestWritePrometheus_NotifyDroppedLabels: counters are emitted with the
+// (notifier, reason) label pair and in sorted order for stable scrape
+// output.
+func TestWritePrometheus_NotifyDroppedLabels(t *testing.T) {
+	notifyDroppedMu.Lock()
+	notifyDroppedCount = map[notifyDroppedKey]uint64{}
+	notifyDroppedMu.Unlock()
+
+	IncNotifyDropped("webhook", NotifyDroppedQueueFull)
+	IncNotifyDropped("webhook", NotifyDroppedQueueFull)
+	IncNotifyDropped("slack", NotifyDroppedQueueFull)
+
+	var buf bytes.Buffer
+	WritePrometheus(&buf)
+	out := buf.String()
+
+	if !strings.Contains(out,
+		`agentguard_notify_events_dropped_total{notifier="slack",reason="queue_full"} 1`) {
+		t.Errorf("slack line missing or wrong count; got:\n%s", out)
+	}
+	if !strings.Contains(out,
+		`agentguard_notify_events_dropped_total{notifier="webhook",reason="queue_full"} 2`) {
+		t.Errorf("webhook line missing or wrong count; got:\n%s", out)
+	}
+	// slack < webhook alphabetically.
+	slackIdx := strings.Index(out, `notifier="slack"`)
+	webhookIdx := strings.Index(out, `notifier="webhook"`)
+	if slackIdx == -1 || webhookIdx == -1 || slackIdx >= webhookIdx {
+		t.Errorf("labels not sorted; slack=%d webhook=%d", slackIdx, webhookIdx)
+	}
+}
+
 func TestEscapeLabel(t *testing.T) {
 	cases := []struct {
 		in, want string

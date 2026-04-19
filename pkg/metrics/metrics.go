@@ -41,6 +41,61 @@ const (
 	RejectedBodyTooLarge = "body_too_large"
 )
 
+// Well-known reason labels for IncNotifyDropped. Kept bounded so the
+// Prometheus series cardinality stays predictable.
+const (
+	NotifyDroppedQueueFull = "queue_full"
+)
+
+// notifyDroppedKey is the composite label key (notifier + reason) for
+// agentguard_notify_events_dropped_total. Using a struct as the map key
+// keeps the two-dimensional label space cheap without allocating strings.
+type notifyDroppedKey struct {
+	Notifier string
+	Reason   string
+}
+
+var (
+	notifyDroppedMu    sync.Mutex
+	notifyDroppedCount = map[notifyDroppedKey]uint64{}
+)
+
+// IncNotifyDropped increments the labeled counter for a notification drop.
+// notifier should be a bounded-cardinality notifier type
+// ("webhook"/"slack"/"console"/"log"); reason should be a stable NotifyDropped*
+// constant. Callers MUST NOT pass agent- or user-supplied strings here — that
+// would explode Prometheus cardinality.
+func IncNotifyDropped(notifier, reason string) {
+	if notifier == "" {
+		notifier = "unknown"
+	}
+	if reason == "" {
+		reason = "unknown"
+	}
+	notifyDroppedMu.Lock()
+	notifyDroppedCount[notifyDroppedKey{Notifier: notifier, Reason: reason}]++
+	notifyDroppedMu.Unlock()
+}
+
+// NotifyDroppedSnapshot returns a copy of the current counts (for tests).
+func NotifyDroppedSnapshot() map[notifyDroppedKey]uint64 {
+	notifyDroppedMu.Lock()
+	defer notifyDroppedMu.Unlock()
+	out := make(map[notifyDroppedKey]uint64, len(notifyDroppedCount))
+	for k, v := range notifyDroppedCount {
+		out[k] = v
+	}
+	return out
+}
+
+// NotifyDroppedFor returns the count for a specific (notifier, reason) pair
+// (for tests).
+func NotifyDroppedFor(notifier, reason string) uint64 {
+	notifyDroppedMu.Lock()
+	defer notifyDroppedMu.Unlock()
+	return notifyDroppedCount[notifyDroppedKey{Notifier: notifier, Reason: reason}]
+}
+
 // IncRequestRejected increments agentguard_request_rejected_total{reason=...}.
 func IncRequestRejected(reason string) {
 	if reason == "" {
@@ -193,7 +248,41 @@ func WritePrometheus(w io.Writer) {
 		AuditWriteDuration)
 
 	writeRequestRejected(w)
+	writeNotifyDropped(w)
 	writeDeprecations(w)
+}
+
+// writeNotifyDropped emits agentguard_notify_events_dropped_total with the
+// two-dimensional (notifier, reason) label. Always emits HELP/TYPE so a
+// Prometheus scraper sees the metric even when no drops have happened.
+func writeNotifyDropped(w io.Writer) {
+	const name = "agentguard_notify_events_dropped_total"
+	const help = "Notifier events dropped before delivery, by notifier type and reason (e.g. queue_full)."
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+	notifyDroppedMu.Lock()
+	snap := make(map[notifyDroppedKey]uint64, len(notifyDroppedCount))
+	for k, v := range notifyDroppedCount {
+		snap[k] = v
+	}
+	notifyDroppedMu.Unlock()
+	if len(snap) == 0 {
+		return
+	}
+	// Deterministic exposition order: sort by (notifier, reason).
+	keys := make([]notifyDroppedKey, 0, len(snap))
+	for k := range snap {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].Notifier != keys[j].Notifier {
+			return keys[i].Notifier < keys[j].Notifier
+		}
+		return keys[i].Reason < keys[j].Reason
+	})
+	for _, k := range keys {
+		fmt.Fprintf(w, "%s{notifier=\"%s\",reason=\"%s\"} %d\n",
+			name, escapeLabel(k.Notifier), escapeLabel(k.Reason), snap[k])
+	}
 }
 
 // writeRequestRejected emits the labeled rejection counter. Always emits the

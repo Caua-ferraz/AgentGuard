@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
@@ -152,8 +153,30 @@ func (d *Dispatcher) Send(event Event) {
 		select {
 		case d.queue <- dispatchJob{notifier: n, event: event}:
 		default:
+			// Keep the package-level atomic around for anyone already reading
+			// it directly; the Prometheus-labeled counter is the new surface.
 			atomic.AddUint64(&DroppedEvents, 1)
+			metrics.IncNotifyDropped(notifierType(n), metrics.NotifyDroppedQueueFull)
 		}
+	}
+}
+
+// notifierType maps a Notifier to the bounded-cardinality label used in
+// Prometheus. Adding a new Notifier implementation requires a case here —
+// unknowns land under "unknown" so an operator sees the drop rather than
+// silently losing it.
+func notifierType(n Notifier) string {
+	switch n.(type) {
+	case *WebhookNotifier:
+		return "webhook"
+	case *SlackNotifier:
+		return "slack"
+	case *ConsoleNotifier:
+		return "console"
+	case *LogNotifier:
+		return "log"
+	default:
+		return "unknown"
 	}
 }
 
