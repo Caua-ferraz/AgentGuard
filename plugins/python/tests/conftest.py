@@ -70,6 +70,18 @@ class MockAgentGuardHandler(BaseHTTPRequestHandler):
         pass  # suppress noisy output during tests
 
 
+class _DeepBacklogHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a larger listen backlog.
+
+    socketserver.TCPServer defaults request_queue_size to 5. Under the
+    32-thread burst in test_concurrent_tool_calls the kernel was RST-ing
+    the overflow connections on CI Linux runners (flaky 29/32 assertion).
+    128 comfortably absorbs the burst; the effective value is capped by
+    net.core.somaxconn on the host, but 128 matches Linux's common cap.
+    """
+    request_queue_size = 128
+
+
 @pytest.fixture()
 def mock_server():
     """Start a mock AgentGuard HTTP server on an OS-assigned port.
@@ -79,8 +91,10 @@ def mock_server():
     """
     # ThreadingHTTPServer handles each connection on its own thread. The
     # single-threaded HTTPServer used to drop concurrent requests with
-    # ConnectionResetError under load (reproduced flakily in CI).
-    server = ThreadingHTTPServer(("127.0.0.1", 0), MockAgentGuardHandler)
+    # ConnectionResetError under load (reproduced flakily in CI); the
+    # deep-backlog subclass further prevents the 32-thread burst from
+    # overflowing the listen queue.
+    server = _DeepBacklogHTTPServer(("127.0.0.1", 0), MockAgentGuardHandler)
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

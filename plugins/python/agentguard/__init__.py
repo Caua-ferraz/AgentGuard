@@ -185,10 +185,23 @@ class Guard:
                     approval_id=body.get("approval_id", ""),
                     approval_url=body.get("approval_url", ""),
                 )
-        except error.URLError as e:
+        except (error.URLError, OSError, json.JSONDecodeError) as e:
             # Transport failure. fail_mode picks the safe default: "deny"
             # preserves v0.4.0 fail-closed semantics; "allow" is an opt-in
             # for callers whose threat model treats AgentGuard as advisory.
+            #
+            # We catch three classes here:
+            #   - URLError: urlopen() connection-phase failures (connect
+            #     refused, DNS, SSL).
+            #   - OSError: post-connect transport failures raised from
+            #     resp.read() — ConnectionResetError, BrokenPipeError,
+            #     socket.timeout under heavy concurrency. These are NOT
+            #     URLError subclasses, so before this catch they would
+            #     propagate to the caller and (in threaded callers like
+            #     the MCP adapter) silently kill the worker.
+            #   - JSONDecodeError: a truncated/garbage response body is
+            #     an unreachable-proxy symptom from the caller's point
+            #     of view; fail_mode is the right knob.
             decision = DECISION_ALLOW if self.fail_mode == FAIL_MODE_ALLOW else DECISION_DENY
             return CheckResult(
                 decision=decision,
