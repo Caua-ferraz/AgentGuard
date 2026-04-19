@@ -224,6 +224,35 @@ func TestHandleCheck_InvalidJSON(t *testing.T) {
 	}
 }
 
+// TestHandleCheck_OversizedBody_CustomLimit verifies that a policy-supplied
+// MaxRequestBodyBytes tightens the accepted request size. Using a small
+// override lets the test stay fast (no need to allocate a 1 MiB body) and
+// exercises the same rejection path as the default-sized test below.
+func TestHandleCheck_OversizedBody_CustomLimit(t *testing.T) {
+	const customLimit = int64(256)
+	srv := newTestServer(t, func(c *Config) {
+		c.MaxRequestBodyBytes = customLimit
+	})
+	before := metrics.RequestRejectedSnapshot()[metrics.RejectedBodyTooLarge]
+
+	body := `{"command":"` + strings.Repeat("x", int(customLimit)+1) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleCheck(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 under custom limit, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "256 bytes") {
+		t.Errorf("error message should cite the effective limit; got %q", w.Body.String())
+	}
+	after := metrics.RequestRejectedSnapshot()[metrics.RejectedBodyTooLarge]
+	if after != before+1 {
+		t.Errorf("rejection counter: before=%d after=%d, expected +1", before, after)
+	}
+}
+
 func TestHandleCheck_OversizedBody(t *testing.T) {
 	srv := newTestServer(t)
 
@@ -639,6 +668,47 @@ func TestHandleAuditQuery_LimitAndOffset(t *testing.T) {
 		srv.handleAuditQuery(w, req)
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("code = %d, want 400", w.Code)
+		}
+	})
+}
+
+// TestHandleAuditQuery_CustomDefaultAndMaxLimit verifies that the Phase-4
+// audit limit overrides drive both the "no ?limit supplied" default and the
+// "limit above ceiling" clamp. Uses an explicit default below the row count
+// so the default-path effect is visible, and a ceiling well below the
+// package default so the clamp path is observable without writing 1000 rows.
+func TestHandleAuditQuery_CustomDefaultAndMaxLimit(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) {
+		c.AuditDefaultLimit = 3
+		c.AuditMaxLimit = 5
+	})
+	for i := 0; i < 10; i++ {
+		body := fmt.Sprintf(`{"scope":"shell","command":"cmd-%d","agent_id":"bot-cfg"}`, i)
+		r := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+		srv.handleCheck(httptest.NewRecorder(), r)
+	}
+	decode := func(raw []byte) int {
+		var out []audit.Entry
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return len(out)
+	}
+
+	t.Run("default_limit_from_config", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?agent_id=bot-cfg", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		if got := decode(w.Body.Bytes()); got != 3 {
+			t.Errorf("default-limit path returned %d, want 3", got)
+		}
+	})
+	t.Run("ceiling_clamped_to_max", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit?agent_id=bot-cfg&limit=999", nil)
+		w := httptest.NewRecorder()
+		srv.handleAuditQuery(w, req)
+		if got := decode(w.Body.Bytes()); got != 5 {
+			t.Errorf("limit-above-ceiling should clamp to %d, got %d", 5, got)
 		}
 	})
 }

@@ -60,11 +60,27 @@ type Session struct {
 type SessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]Session
+	// ttl bounds how long a newly-issued session stays valid. A zero value
+	// falls through to SessionTTL so older call sites (and tests that
+	// construct a store via NewSessionStore()) keep v0.4.0 semantics.
+	ttl time.Duration
 }
 
-// NewSessionStore creates an empty in-memory session store.
+// NewSessionStore creates an empty in-memory session store using the
+// package-default SessionTTL. Prefer NewSessionStoreWithTTL in wiring code
+// that reads the TTL from policy config.
 func NewSessionStore() *SessionStore {
-	return &SessionStore{sessions: make(map[string]Session)}
+	return NewSessionStoreWithTTL(SessionTTL)
+}
+
+// NewSessionStoreWithTTL creates an empty store whose Create() will issue
+// sessions that expire after d. A non-positive d falls back to SessionTTL
+// so callers can pass the raw policy value without an extra guard.
+func NewSessionStoreWithTTL(d time.Duration) *SessionStore {
+	if d <= 0 {
+		d = SessionTTL
+	}
+	return &SessionStore{sessions: make(map[string]Session), ttl: d}
 }
 
 // Create issues a new session token with the configured TTL.
@@ -81,7 +97,11 @@ func (s *SessionStore) Create() (Session, error) {
 		return Session{}, fmt.Errorf("session token rand: %w", err)
 	}
 	token := hex.EncodeToString(b[:])
-	sess := Session{Token: token, ExpiresAt: time.Now().Add(SessionTTL)}
+	ttl := s.ttl
+	if ttl <= 0 {
+		ttl = SessionTTL
+	}
+	sess := Session{Token: token, ExpiresAt: time.Now().Add(ttl)}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -37,6 +37,28 @@ func TestSessionStore_CreateValidate(t *testing.T) {
 	}
 }
 
+// TestSessionStore_CustomTTL verifies that NewSessionStoreWithTTL honors
+// the caller-supplied lifetime and that a non-positive value falls back to
+// the package default. Protects the proxy.session.ttl wiring path.
+func TestSessionStore_CustomTTL(t *testing.T) {
+	short := 250 * time.Millisecond
+	s := NewSessionStoreWithTTL(short)
+	sess, err := s.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	deadline := time.Now().Add(short + 50*time.Millisecond)
+	if sess.ExpiresAt.After(deadline) {
+		t.Errorf("ExpiresAt %v past expected %v", sess.ExpiresAt, deadline)
+	}
+	// Non-positive TTL => package default.
+	s2 := NewSessionStoreWithTTL(0)
+	sess2, _ := s2.Create()
+	if got := time.Until(sess2.ExpiresAt); got < SessionTTL-time.Second {
+		t.Errorf("zero TTL should fall back to SessionTTL (%v); got remaining %v", SessionTTL, got)
+	}
+}
+
 func TestSessionStore_Destroy(t *testing.T) {
 	s := NewSessionStore()
 	sess, _ := s.Create()

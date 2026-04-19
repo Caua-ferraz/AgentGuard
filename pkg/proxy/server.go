@@ -90,6 +90,23 @@ type Config struct {
 	// and SessionCostTTL > 0, it defaults to SessionCostTTL/4 with a floor
 	// of 1 minute.
 	SessionCostSweepInterval time.Duration
+
+	// SessionTTL overrides the dashboard session cookie lifetime. Zero or
+	// negative falls back to SessionTTL (the package-level default). Wired
+	// from policy's proxy.session.ttl.
+	SessionTTL time.Duration
+	// MaxRequestBodyBytes overrides the POST /v1/check body cap. Zero or
+	// negative falls back to MaxRequestBodySize. Wired from policy's
+	// proxy.request.max_body_bytes.
+	MaxRequestBodyBytes int64
+	// AuditDefaultLimit overrides the default ?limit= on /v1/audit. Zero or
+	// negative falls back to DefaultAuditQueryLimit. Wired from policy's
+	// proxy.audit.default_limit.
+	AuditDefaultLimit int
+	// AuditMaxLimit overrides the hard ceiling on ?limit= for /v1/audit.
+	// Zero or negative falls back to MaxAuditQueryLimit. Wired from
+	// policy's proxy.audit.max_limit.
+	AuditMaxLimit int
 }
 
 // Server is the AgentGuard HTTP proxy.
@@ -103,6 +120,12 @@ type Server struct {
 	// Nil when the sweeper is not running. Closed exactly once via sweeperStop.
 	sweeperDone chan struct{}
 	sweeperStop sync.Once
+	// Resolved tunables. Set once in NewServer from Config or package
+	// defaults so the hot paths (handleCheck, handleAuditQuery) do not
+	// re-evaluate fallbacks on every request.
+	maxRequestBodyBytes int64
+	auditDefaultLimit   int
+	auditMaxLimit       int
 }
 
 // ApprovalQueue manages pending approval requests.
@@ -176,8 +199,11 @@ func NewServer(cfg Config) *Server {
 			pending: make(map[string]*PendingAction),
 			maxSize: MaxPendingApprovals,
 		},
-		limiter:  ratelimit.New(),
-		sessions: NewSessionStore(),
+		limiter:             ratelimit.New(),
+		sessions:            NewSessionStoreWithTTL(cfg.SessionTTL),
+		maxRequestBodyBytes: resolveInt64(cfg.MaxRequestBodyBytes, MaxRequestBodySize),
+		auditDefaultLimit:   resolveInt(cfg.AuditDefaultLimit, DefaultAuditQueryLimit),
+		auditMaxLimit:       resolveInt(cfg.AuditMaxLimit, MaxAuditQueryLimit),
 	}
 
 	// Wire up history querier for conditional rule evaluation
@@ -329,7 +355,8 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodySize)
+	limit := s.maxRequestBodyBytes
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	var req policy.ActionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		// Distinguish "body too large" from other parse errors so that the
@@ -340,8 +367,8 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &mbe) {
 			metrics.IncRequestRejected(metrics.RejectedBodyTooLarge)
 			log.Printf("WARN: request body exceeds limit: remote=%s content_length=%d limit=%d",
-				r.RemoteAddr, r.ContentLength, MaxRequestBodySize)
-			http.Error(w, fmt.Sprintf("Request body too large (limit %d bytes)", MaxRequestBodySize), http.StatusRequestEntityTooLarge)
+				r.RemoteAddr, r.ContentLength, limit)
+			http.Error(w, fmt.Sprintf("Request body too large (limit %d bytes)", limit), http.StatusRequestEntityTooLarge)
 			return
 		}
 		http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
@@ -508,7 +535,7 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 //
 // Prior to v0.4.1 the handler ignored ?limit= and always passed 100.
 func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
-	limit, err := parseBoundedInt(r.URL.Query().Get("limit"), DefaultAuditQueryLimit, 1, MaxAuditQueryLimit)
+	limit, err := parseBoundedInt(r.URL.Query().Get("limit"), s.auditDefaultLimit, 1, s.auditMaxLimit)
 	if err != nil {
 		http.Error(w, "invalid limit: "+err.Error(), http.StatusBadRequest)
 		return
@@ -549,6 +576,23 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 // The asymmetry — reject below, clamp above — matches how operators expect
 // these knobs to behave: a negative limit is a bug, a huge limit is usually
 // "give me all of them" and we want a safe ceiling rather than a 400.
+// resolveInt returns override when strictly positive, otherwise fallback.
+// Used to flatten policy-driven tunables into effective runtime values at
+// server construction so request-path code does not branch per call.
+func resolveInt(override, fallback int) int {
+	if override > 0 {
+		return override
+	}
+	return fallback
+}
+
+func resolveInt64(override, fallback int64) int64 {
+	if override > 0 {
+		return override
+	}
+	return fallback
+}
+
 func parseBoundedInt(raw string, defaultVal, minVal, maxVal int) (int, error) {
 	if raw == "" {
 		return defaultVal, nil
