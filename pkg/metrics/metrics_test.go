@@ -105,6 +105,61 @@ func TestWritePrometheus_NotifyDroppedLabels(t *testing.T) {
 	}
 }
 
+// TestWritePrometheus_ApprovalEvictedHeaderOnly: with no evictions recorded,
+// the exposition still includes HELP/TYPE so a scraper picks up the series
+// definition. No label lines should appear.
+func TestWritePrometheus_ApprovalEvictedHeaderOnly(t *testing.T) {
+	approvalEvictedMu.Lock()
+	approvalEvictedCount = map[string]uint64{}
+	approvalEvictedMu.Unlock()
+
+	var buf bytes.Buffer
+	WritePrometheus(&buf)
+	out := buf.String()
+
+	if !strings.Contains(out, "# TYPE agentguard_approvals_evicted_total counter") {
+		t.Fatalf("TYPE header missing; got:\n%s", out)
+	}
+	if strings.Contains(out, "agentguard_approvals_evicted_total{") {
+		t.Errorf("unexpected label lines with empty counter, got:\n%s", out)
+	}
+}
+
+// TestWritePrometheus_ApprovalEvictedLabels: counters are emitted with the
+// reason label and in sorted order for stable scrape output. Both reasons
+// (lru_resolved, queue_full) must be present so operators can distinguish
+// "need a bigger queue" from "need more approvers".
+func TestWritePrometheus_ApprovalEvictedLabels(t *testing.T) {
+	approvalEvictedMu.Lock()
+	approvalEvictedCount = map[string]uint64{}
+	approvalEvictedMu.Unlock()
+
+	IncApprovalEvicted(ApprovalEvictedLRUResolved)
+	IncApprovalEvicted(ApprovalEvictedLRUResolved)
+	IncApprovalEvicted(ApprovalEvictedQueueFull)
+
+	var buf bytes.Buffer
+	WritePrometheus(&buf)
+	out := buf.String()
+
+	if !strings.Contains(out,
+		`agentguard_approvals_evicted_total{reason="lru_resolved"} 2`) {
+		t.Errorf("lru_resolved line missing or wrong count; got:\n%s", out)
+	}
+	if !strings.Contains(out,
+		`agentguard_approvals_evicted_total{reason="queue_full"} 1`) {
+		t.Errorf("queue_full line missing or wrong count; got:\n%s", out)
+	}
+	// lru_resolved < queue_full alphabetically. Anchor on the full metric
+	// name so we don't accidentally match reason="queue_full" from the
+	// notify_dropped series (which is emitted earlier in the exposition).
+	lruIdx := strings.Index(out, `agentguard_approvals_evicted_total{reason="lru_resolved"}`)
+	qfIdx := strings.Index(out, `agentguard_approvals_evicted_total{reason="queue_full"}`)
+	if lruIdx == -1 || qfIdx == -1 || lruIdx >= qfIdx {
+		t.Errorf("labels not sorted; lru=%d queue_full=%d", lruIdx, qfIdx)
+	}
+}
+
 func TestEscapeLabel(t *testing.T) {
 	cases := []struct {
 		in, want string

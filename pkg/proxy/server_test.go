@@ -1121,7 +1121,11 @@ func TestApprovalQueue_EvictsOldestResolvedOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	beforeEvicted := metrics.ApprovalEvictedFor(metrics.ApprovalEvictedLRUResolved)
 	fresh := mustAdd(t, q, policy.ActionRequest{Scope: "shell", Command: "sudo d"}, policy.CheckResult{Decision: policy.RequireApproval})
+	if got := metrics.ApprovalEvictedFor(metrics.ApprovalEvictedLRUResolved); got != beforeEvicted+1 {
+		t.Errorf("lru_resolved counter did not advance by 1: before=%d after=%d", beforeEvicted, got)
+	}
 
 	q.mu.RLock()
 	defer q.mu.RUnlock()
@@ -1155,6 +1159,7 @@ func TestApprovalQueue_FullRejectsWhenAllUnresolved(t *testing.T) {
 	mustAdd(t, q, policy.ActionRequest{Scope: "shell", Command: "sudo a"}, policy.CheckResult{Decision: policy.RequireApproval})
 	mustAdd(t, q, policy.ActionRequest{Scope: "shell", Command: "sudo b"}, policy.CheckResult{Decision: policy.RequireApproval})
 
+	beforeRejected := metrics.ApprovalEvictedFor(metrics.ApprovalEvictedQueueFull)
 	_, err := q.Add(
 		policy.ActionRequest{Scope: "shell", Command: "sudo c"},
 		policy.CheckResult{Decision: policy.RequireApproval},
@@ -1164,6 +1169,9 @@ func TestApprovalQueue_FullRejectsWhenAllUnresolved(t *testing.T) {
 	}
 	if !errors.Is(err, ErrApprovalQueueFull) {
 		t.Errorf("error should be ErrApprovalQueueFull, got %v", err)
+	}
+	if got := metrics.ApprovalEvictedFor(metrics.ApprovalEvictedQueueFull); got != beforeRejected+1 {
+		t.Errorf("queue_full counter did not advance by 1: before=%d after=%d", beforeRejected, got)
 	}
 
 	// Nothing was added, nothing was evicted — invariants must hold.

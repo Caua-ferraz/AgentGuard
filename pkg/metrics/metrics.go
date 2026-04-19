@@ -47,6 +47,39 @@ const (
 	NotifyDroppedQueueFull = "queue_full"
 )
 
+// Well-known reason labels for IncApprovalEvicted. When the approval queue
+// is at capacity, either an old resolved entry is dropped to make room
+// (lru_resolved) or the request is refused with 503 because nothing was
+// resolved (queue_full). Both paths increment this counter so operators
+// can distinguish "we need a bigger queue" from "we need more approvers".
+const (
+	ApprovalEvictedLRUResolved = "lru_resolved"
+	ApprovalEvictedQueueFull   = "queue_full"
+)
+
+var (
+	approvalEvictedMu    sync.Mutex
+	approvalEvictedCount = map[string]uint64{}
+)
+
+// IncApprovalEvicted increments agentguard_approvals_evicted_total{reason=...}.
+// Cardinality is bounded to the ApprovalEvicted* constants above.
+func IncApprovalEvicted(reason string) {
+	if reason == "" {
+		reason = "unknown"
+	}
+	approvalEvictedMu.Lock()
+	approvalEvictedCount[reason]++
+	approvalEvictedMu.Unlock()
+}
+
+// ApprovalEvictedFor returns the count for a specific reason (for tests).
+func ApprovalEvictedFor(reason string) uint64 {
+	approvalEvictedMu.Lock()
+	defer approvalEvictedMu.Unlock()
+	return approvalEvictedCount[reason]
+}
+
 // notifyDroppedKey is the composite label key (notifier + reason) for
 // agentguard_notify_events_dropped_total. Using a struct as the map key
 // keeps the two-dimensional label space cheap without allocating strings.
@@ -249,7 +282,34 @@ func WritePrometheus(w io.Writer) {
 
 	writeRequestRejected(w)
 	writeNotifyDropped(w)
+	writeApprovalEvicted(w)
 	writeDeprecations(w)
+}
+
+// writeApprovalEvicted emits agentguard_approvals_evicted_total{reason=...}.
+// Always emits HELP/TYPE so scrapers see the metric even before the first
+// eviction.
+func writeApprovalEvicted(w io.Writer) {
+	const name = "agentguard_approvals_evicted_total"
+	const help = "Approval queue entries removed under capacity pressure, by reason (lru_resolved|queue_full)."
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+	approvalEvictedMu.Lock()
+	snap := make(map[string]uint64, len(approvalEvictedCount))
+	for k, v := range approvalEvictedCount {
+		snap[k] = v
+	}
+	approvalEvictedMu.Unlock()
+	if len(snap) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(snap))
+	for k := range snap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(w, "%s{reason=\"%s\"} %d\n", name, escapeLabel(k), snap[k])
+	}
 }
 
 // writeNotifyDropped emits agentguard_notify_events_dropped_total with the

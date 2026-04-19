@@ -706,8 +706,10 @@ func (q *ApprovalQueue) Add(req policy.ActionRequest, result policy.CheckResult)
 	}
 	if len(q.pending) >= cap {
 		if !q.evictOldestResolvedLocked() {
+			metrics.IncApprovalEvicted(metrics.ApprovalEvictedQueueFull)
 			return nil, ErrApprovalQueueFull
 		}
+		metrics.IncApprovalEvicted(metrics.ApprovalEvictedLRUResolved)
 	}
 
 	var b [16]byte
