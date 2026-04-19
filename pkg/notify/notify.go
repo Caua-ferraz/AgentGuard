@@ -82,11 +82,23 @@ func NewDispatcherWithOpts(cfg policy.NotificationCfg, workers, queueSize int) *
 		redactor: redactor,
 	}
 
+	// Resolve the dispatch-level timeout once. Per-target overrides are
+	// resolved inside targetToNotifier against this value so operators who
+	// set only `notifications.dispatch_timeout` get it applied uniformly.
+	dispatchTimeout := policy.DefaultNotifyDispatchTimeout
+	if s := cfg.DispatchTimeout; s != "" {
+		if parsed, err := time.ParseDuration(s); err == nil && parsed > 0 {
+			dispatchTimeout = parsed
+		} else {
+			log.Printf("notify: ignoring invalid dispatch_timeout %q (%v) — using %s", s, err, dispatchTimeout)
+		}
+	}
+
 	for _, t := range cfg.ApprovalRequired {
-		d.notifiers = append(d.notifiers, targetToNotifier(t, "approval_required"))
+		d.notifiers = append(d.notifiers, targetToNotifier(t, "approval_required", dispatchTimeout))
 	}
 	for _, t := range cfg.OnDeny {
-		d.notifiers = append(d.notifiers, targetToNotifier(t, "denied"))
+		d.notifiers = append(d.notifiers, targetToNotifier(t, "denied", dispatchTimeout))
 	}
 
 	if workers < 1 {
@@ -128,12 +140,14 @@ func (d *Dispatcher) Close() {
 	close(d.done)
 }
 
-func targetToNotifier(t policy.NotifyTarget, eventFilter string) Notifier {
+func targetToNotifier(t policy.NotifyTarget, eventFilter string, dispatchTimeout time.Duration) Notifier {
+	// Only webhook/slack honor timeout — console and log are synchronous
+	// and in-process, so a timeout has nothing to act on.
 	switch t.Type {
 	case "webhook":
-		return &WebhookNotifier{URL: t.URL, Filter: eventFilter, client: &http.Client{Timeout: DefaultHTTPTimeout}}
+		return &WebhookNotifier{URL: t.URL, Filter: eventFilter, client: &http.Client{Timeout: t.ResolvedTimeout(dispatchTimeout)}}
 	case "slack":
-		return &SlackNotifier{WebhookURL: t.URL, Filter: eventFilter, client: &http.Client{Timeout: DefaultHTTPTimeout}}
+		return &SlackNotifier{WebhookURL: t.URL, Filter: eventFilter, client: &http.Client{Timeout: t.ResolvedTimeout(dispatchTimeout)}}
 	case "console":
 		return &ConsoleNotifier{Filter: eventFilter}
 	case "log":

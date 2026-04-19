@@ -36,6 +36,81 @@ func (c *countingNotifier) Count() int {
 	return c.calls
 }
 
+// TestDispatcher_DispatchTimeoutAppliedGlobally: a notifications.dispatch_timeout
+// at the cfg level must propagate to the http.Client of every webhook/slack
+// target that did not set its own `timeout` override.
+func TestDispatcher_DispatchTimeoutAppliedGlobally(t *testing.T) {
+	cfg := policy.NotificationCfg{
+		DispatchTimeout: "1500ms",
+		ApprovalRequired: []policy.NotifyTarget{
+			{Type: "webhook", URL: "http://unused.test"},
+		},
+		OnDeny: []policy.NotifyTarget{
+			{Type: "slack", URL: "http://unused.test"},
+		},
+	}
+	d := NewDispatcher(cfg)
+	defer d.Close()
+
+	if n := len(d.notifiers); n != 2 {
+		t.Fatalf("expected 2 notifiers, got %d", n)
+	}
+	wh, ok := d.notifiers[0].(*WebhookNotifier)
+	if !ok {
+		t.Fatalf("first notifier type = %T, want *WebhookNotifier", d.notifiers[0])
+	}
+	if got, want := wh.client.Timeout, 1500*time.Millisecond; got != want {
+		t.Errorf("webhook timeout = %v, want %v (from dispatch_timeout)", got, want)
+	}
+	sl, ok := d.notifiers[1].(*SlackNotifier)
+	if !ok {
+		t.Fatalf("second notifier type = %T, want *SlackNotifier", d.notifiers[1])
+	}
+	if got, want := sl.client.Timeout, 1500*time.Millisecond; got != want {
+		t.Errorf("slack timeout = %v, want %v (from dispatch_timeout)", got, want)
+	}
+}
+
+// TestDispatcher_DispatchTimeoutPerTargetOverride: a per-target `timeout`
+// wins over the dispatch-level default, and targets that omit `timeout`
+// inherit the dispatch default. Protects the inheritance contract documented
+// on NotifyTarget.Timeout.
+func TestDispatcher_DispatchTimeoutPerTargetOverride(t *testing.T) {
+	cfg := policy.NotificationCfg{
+		DispatchTimeout: "2s",
+		ApprovalRequired: []policy.NotifyTarget{
+			{Type: "webhook", URL: "http://a.test", Timeout: "500ms"},
+			{Type: "webhook", URL: "http://b.test"}, // inherits 2s
+		},
+	}
+	d := NewDispatcher(cfg)
+	defer d.Close()
+
+	a := d.notifiers[0].(*WebhookNotifier)
+	b := d.notifiers[1].(*WebhookNotifier)
+	if got, want := a.client.Timeout, 500*time.Millisecond; got != want {
+		t.Errorf("per-target override = %v, want %v", got, want)
+	}
+	if got, want := b.client.Timeout, 2*time.Second; got != want {
+		t.Errorf("inherited default = %v, want %v", got, want)
+	}
+}
+
+// TestDispatcher_DispatchTimeoutDefaultsWhenUnset: an empty DispatchTimeout
+// must fall back to policy.DefaultNotifyDispatchTimeout so removing the
+// config key restores v0.4.0 behavior exactly.
+func TestDispatcher_DispatchTimeoutDefaultsWhenUnset(t *testing.T) {
+	cfg := policy.NotificationCfg{
+		ApprovalRequired: []policy.NotifyTarget{{Type: "webhook", URL: "http://x"}},
+	}
+	d := NewDispatcher(cfg)
+	defer d.Close()
+	wh := d.notifiers[0].(*WebhookNotifier)
+	if got, want := wh.client.Timeout, policy.DefaultNotifyDispatchTimeout; got != want {
+		t.Errorf("default dispatch timeout = %v, want %v", got, want)
+	}
+}
+
 func TestDispatcher_DispatchesAllEvents(t *testing.T) {
 	d := NewDispatcherWithOpts(policy.NotificationCfg{}, 4, 64)
 	defer d.Close()
