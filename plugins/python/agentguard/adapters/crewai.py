@@ -47,7 +47,26 @@ class GuardedCrewTool:
             self.args_schema = tool.args_schema
 
     def _infer_scope(self, tool_input: Any) -> str:
-        """Infer scope from the tool input."""
+        """Infer scope from the tool input.
+
+        Order of precedence:
+          1. Runtime input inspection — if `tool_input` is a dict carrying a
+             url/domain/path key, upgrade the scope to network/filesystem.
+             This mirrors the LangChain adapter's `_infer_scope(params)`
+             behavior and lets a generic shell-scoped tool be promoted at
+             invocation time.
+          2. Keyword inference over the tool's name+description (preserved
+             from v0.4.0 for backward compatibility).
+          3. The explicitly configured scope (`self._scope`).
+
+        The signature is preserved so existing subclasses that override this
+        method continue to work unchanged.
+        """
+        if isinstance(tool_input, dict):
+            if tool_input.get("url") or tool_input.get("domain"):
+                return "network"
+            if tool_input.get("path") or tool_input.get("file_path"):
+                return "filesystem"
         combined = f"{self.name} {self.description}".lower()
         if any(kw in combined for kw in ["http", "api", "fetch", "request", "url", "web"]):
             return "network"

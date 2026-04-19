@@ -33,6 +33,7 @@ MCP config (claude_desktop_config.json / .cursor/mcp.json):
 """
 
 import json
+import re
 import sys
 from typing import Any, Callable, Dict, List, Optional
 from agentguard import Guard, CheckResult, DEFAULT_BASE_URL
@@ -40,6 +41,33 @@ from agentguard import Guard, CheckResult, DEFAULT_BASE_URL
 # MCP protocol constants
 MCP_PROTOCOL_VERSION = "2024-11-05"
 SDK_VERSION = "0.4.1"
+
+# Secret patterns mirrored from pkg/notify/notify.go's DefaultRedactor. The
+# MCP adapter forwards handler exception text back to the client as a
+# content block; raw exception strings can carry bearer tokens, AWS keys,
+# or credentials embedded in KEY=value form. Keeping this list in sync with
+# the Go-side redactor means MCP egress matches webhook/Slack egress
+# hygiene. A fresh `list()` so external callers who mutate it don't
+# accidentally blank out redaction for the whole process.
+_REDACT_PATTERNS = [
+    re.compile(r"(?i)bearer\s+[A-Za-z0-9_\-\.]+"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"ghp_[A-Za-z0-9]{36,}"),
+    re.compile(r"xox[baprs]-[A-Za-z0-9\-]+"),
+    re.compile(r"(?i)(secret|token|password|api[_\-]?key)\s*=\s*\S+"),
+]
+
+
+def _redact(text: str) -> str:
+    """Scrub obvious secret patterns from a string before returning it to
+    the MCP client. Mirrors pkg/notify.DefaultRedactor. Returns the input
+    unchanged when empty or when no pattern matches.
+    """
+    if not text:
+        return text
+    for p in _REDACT_PATTERNS:
+        text = p.sub("[REDACTED]", text)
+    return text
 
 
 class ToolDefinition:
@@ -277,11 +305,24 @@ class GuardedMCPServer:
                 },
             }
         except Exception as e:
+            # The client is an arbitrary MCP consumer (Claude Desktop,
+            # Cursor, a script); any secret embedded in the exception
+            # message would cross that trust boundary. Log the raw text
+            # to stderr for operator diagnostics, return only a redacted
+            # copy + the exception type over the wire.
+            sys.stderr.write(
+                f"agentguard.mcp: tool {tool_name!r} handler raised "
+                f"{type(e).__name__}: {e}\n"
+            )
+            sys.stderr.flush()
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {
-                    "content": [{"type": "text", "text": f"Error: {e}"}],
+                    "content": [{
+                        "type": "text",
+                        "text": f"Error ({type(e).__name__}): {_redact(str(e))}",
+                    }],
                     "isError": True,
                 },
             }

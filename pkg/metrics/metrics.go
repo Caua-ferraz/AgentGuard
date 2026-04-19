@@ -90,6 +90,19 @@ func RateLimitBucketEvictedFor(scope string) uint64 {
 	return rateLimitEvictedCount[scope]
 }
 
+// AuditCorruptLinesTotal counts audit log lines that failed JSON parse
+// during Query() and were skipped. Rare in practice — the usual cause is
+// a crash between the write syscall and the newline flush, or disk
+// corruption. Kept visible via /metrics so operators can spot silent
+// audit-file degradation instead of discovering it when a query returns
+// fewer entries than expected.
+var AuditCorruptLinesTotal uint64
+
+// IncAuditCorruptLine bumps agentguard_audit_corrupt_lines_total.
+func IncAuditCorruptLine() {
+	atomic.AddUint64(&AuditCorruptLinesTotal, 1)
+}
+
 // Audit replay + rotation counters. Replay happens once at startup (seeding
 // in-memory decision counters from the audit log); rotations happen inline
 // on FileLogger.Log when the size threshold is crossed.
@@ -527,6 +540,9 @@ func WritePrometheus(w io.Writer) {
 	writeCounter(w, "agentguard_audit_rotations_total",
 		"Audit file rotations triggered by the live-file size threshold.",
 		atomic.LoadUint64(&AuditRotationsTotal))
+	writeCounter(w, "agentguard_audit_corrupt_lines_total",
+		"Audit log lines that failed JSON parse during Query() and were skipped.",
+		atomic.LoadUint64(&AuditCorruptLinesTotal))
 	// Replay duration is stored as nanoseconds; emit as seconds to match the
 	// Prometheus base-unit convention.
 	writeGauge(w, "agentguard_audit_replay_duration_seconds",

@@ -81,6 +81,23 @@ export interface AgentGuardOptions {
   failMode?: "deny" | "allow";
 }
 
+/**
+ * Read a process.env variable without assuming Node. Returns undefined if
+ * the runtime has no `process` (browsers, Deno without --compat, etc.) or
+ * if the variable is unset/empty. Keeps the SDK usable in non-Node
+ * contexts while still honoring env fallback when it is available — this
+ * matches the Python SDK's `base_url or os.environ.get(...)` pattern.
+ */
+function readEnv(name: string): string | undefined {
+  try {
+    const p = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+    const v = p && p.env ? p.env[name] : undefined;
+    return v && v.length > 0 ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 class CheckResultImpl implements CheckResult {
   decision: "ALLOW" | "DENY" | "REQUIRE_APPROVAL";
   reason: string;
@@ -107,6 +124,78 @@ class CheckResultImpl implements CheckResult {
   }
 }
 
+/**
+ * Base class for AgentGuard policy-failure errors thrown by {@link guarded}.
+ *
+ * Backward-compatibility note
+ * ---------------------------
+ * Prior to v0.5.0 the {@link guarded} HOF threw plain `Error` instances with
+ * human-readable messages. v0.5.0 introduces these typed subclasses so
+ * callers can `catch (e) { if (e instanceof AgentGuardDeniedError) ... }`
+ * and read structured fields (`result`, `approvalId`, `approvalUrl`). The
+ * message text is preserved exactly — existing string/regex matchers keep
+ * working — and every subclass extends the standard `Error`, so generic
+ * `catch { ... }` handlers are unaffected.
+ */
+export class AgentGuardError extends Error {
+  readonly result?: CheckResult;
+
+  constructor(message: string, result?: CheckResult) {
+    super(message);
+    this.name = "AgentGuardError";
+    this.result = result;
+    // Fix instanceof across downstream transpile targets (ES5).
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/** Thrown when the policy decision was DENY. */
+export class AgentGuardDeniedError extends AgentGuardError {
+  constructor(message: string, result?: CheckResult) {
+    super(message, result);
+    this.name = "AgentGuardDeniedError";
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Thrown when the policy decision was REQUIRE_APPROVAL and the
+ * decorator/HOF was not configured to wait for resolution.
+ */
+export class AgentGuardApprovalRequiredError extends AgentGuardError {
+  readonly approvalId: string;
+  readonly approvalUrl: string;
+
+  constructor(
+    message: string,
+    result?: CheckResult,
+    approvalId = "",
+    approvalUrl = ""
+  ) {
+    super(message, result);
+    this.name = "AgentGuardApprovalRequiredError";
+    this.approvalId = approvalId;
+    this.approvalUrl = approvalUrl;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Thrown when `waitForApproval` was requested but the action did not resolve
+ * before the deadline. `result` carries the synthetic DENY/"Approval timed
+ * out" produced by {@link AgentGuard.waitForApproval}.
+ */
+export class AgentGuardApprovalTimeoutError extends AgentGuardError {
+  readonly approvalId: string;
+
+  constructor(message: string, result?: CheckResult, approvalId = "") {
+    super(message, result);
+    this.name = "AgentGuardApprovalTimeoutError";
+    this.approvalId = approvalId;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 export class AgentGuard {
   private baseUrl: string;
   private agentId: string;
@@ -115,20 +204,27 @@ export class AgentGuard {
   private failMode: "deny" | "allow";
 
   constructor(baseUrlOrOptions?: string | AgentGuardOptions) {
+    // Environment fallbacks mirror the Python SDK: AGENTGUARD_URL supplies
+    // baseUrl when the caller did not pass one; AGENTGUARD_API_KEY supplies
+    // apiKey. Explicit values in the options object override the env var
+    // so callers that genuinely want to disable auth can pass apiKey: "".
+    const envBaseUrl = readEnv("AGENTGUARD_URL");
+    const envApiKey = readEnv("AGENTGUARD_API_KEY") ?? "";
+
     if (typeof baseUrlOrOptions === "string") {
       this.baseUrl = baseUrlOrOptions.replace(/\/$/, "");
       this.agentId = "";
-      this.apiKey = "";
+      this.apiKey = envApiKey;
       this.timeout = 5000;
       this.failMode = "deny";
     } else {
       const opts = baseUrlOrOptions ?? {};
-      this.baseUrl = (opts.baseUrl ?? "http://localhost:8080").replace(
+      this.baseUrl = (opts.baseUrl ?? envBaseUrl ?? "http://localhost:8080").replace(
         /\/$/,
         ""
       );
       this.agentId = opts.agentId ?? "";
-      this.apiKey = opts.apiKey ?? "";
+      this.apiKey = opts.apiKey ?? envApiKey;
       this.timeout = opts.timeout ?? 5000;
       this.failMode = opts.failMode ?? "deny";
     }
@@ -267,15 +363,43 @@ export class AgentGuard {
 }
 
 /**
+ * Optional configuration for {@link guarded}.
+ *
+ * `waitForApproval: true` dispatches on the resolved decision instead of
+ * throwing immediately on REQUIRE_APPROVAL — mirrors the Python SDK's
+ * `wait_for_approval=True`. Defaults preserve v0.4.x behavior exactly.
+ */
+export interface GuardedOptions<T extends (...args: unknown[]) => Promise<unknown>> {
+  /** Custom extractor for the `CheckOptions` payload from the wrapped function's args. */
+  getCheckOptions?: (...args: Parameters<T>) => CheckOptions;
+  /** Block until a human approves/denies when the decision is REQUIRE_APPROVAL. Default false. */
+  waitForApproval?: boolean;
+  /** Total time to wait for a resolution, in ms. Default 300_000. */
+  approvalTimeoutMs?: number;
+  /** Poll interval while waiting, in ms. Default 2_000. */
+  approvalPollIntervalMs?: number;
+}
+
+/**
  * Higher-order function that wraps an async function with an AgentGuard check.
+ *
+ * Overloads preserve v0.4.x ergonomics — callers can still pass a fourth
+ * positional `getCheckOptions` callback — while adding a typed options
+ * object for v0.5.0 callers that want `waitForApproval`.
  *
  * @example
  * ```ts
  * const guard = new AgentGuard('http://localhost:8080');
  * const safeExec = guarded(guard, 'shell', (cmd: string) => exec(cmd));
  *
- * await safeExec('ls -la');        // ✅ Allowed
- * await safeExec('rm -rf /');      // ❌ Throws PermissionError
+ * await safeExec('ls -la');        // Allowed → runs
+ * await safeExec('rm -rf /');      // DENY → throws AgentGuardDeniedError
+ *
+ * // Opt-in: block until a human approves.
+ * const reviewed = guarded(guard, 'shell', (cmd: string) => exec(cmd), {
+ *   waitForApproval: true,
+ *   approvalTimeoutMs: 60_000,
+ * });
  * ```
  */
 export function guarded<T extends (...args: unknown[]) => Promise<unknown>>(
@@ -283,7 +407,32 @@ export function guarded<T extends (...args: unknown[]) => Promise<unknown>>(
   scope: string,
   fn: T,
   getCheckOptions?: (...args: Parameters<T>) => CheckOptions
+): T;
+export function guarded<T extends (...args: unknown[]) => Promise<unknown>>(
+  guard: AgentGuard,
+  scope: string,
+  fn: T,
+  options: GuardedOptions<T>
+): T;
+export function guarded<T extends (...args: unknown[]) => Promise<unknown>>(
+  guard: AgentGuard,
+  scope: string,
+  fn: T,
+  optionsOrGetCheckOptions?:
+    | ((...args: Parameters<T>) => CheckOptions)
+    | GuardedOptions<T>
 ): T {
+  // Normalize the overload — treat a bare callback as the v0.4.x shape.
+  const opts: GuardedOptions<T> =
+    typeof optionsOrGetCheckOptions === "function"
+      ? { getCheckOptions: optionsOrGetCheckOptions }
+      : optionsOrGetCheckOptions ?? {};
+
+  const waitForApproval = opts.waitForApproval ?? false;
+  const approvalTimeoutMs = opts.approvalTimeoutMs ?? 300_000;
+  const approvalPollIntervalMs = opts.approvalPollIntervalMs ?? 2_000;
+  const getCheckOptions = opts.getCheckOptions;
+
   return (async (...args: Parameters<T>) => {
     const options = getCheckOptions
       ? getCheckOptions(...args)
@@ -293,13 +442,43 @@ export function guarded<T extends (...args: unknown[]) => Promise<unknown>>(
 
     if (result.allowed) {
       return fn(...args);
-    } else if (result.needsApproval) {
-      throw new Error(
-        `Action requires approval. Approve at: ${result.approvalUrl}`
-      );
-    } else {
-      throw new Error(`Action denied by AgentGuard: ${result.reason}`);
     }
+
+    if (result.needsApproval) {
+      if (waitForApproval) {
+        const resolved = await guard.waitForApproval(
+          result.approvalId ?? "",
+          approvalTimeoutMs,
+          approvalPollIntervalMs
+        );
+        if (resolved.allowed) {
+          return fn(...args);
+        }
+        if (resolved.denied && resolved.reason === "Approval timed out") {
+          throw new AgentGuardApprovalTimeoutError(
+            `Approval for ${result.approvalId ?? ""} timed out after ${approvalTimeoutMs}ms`,
+            resolved,
+            result.approvalId ?? ""
+          );
+        }
+        throw new AgentGuardDeniedError(
+          `Action denied by AgentGuard: ${resolved.reason}`,
+          resolved
+        );
+      }
+      // Default v0.4.x behavior — message text preserved.
+      throw new AgentGuardApprovalRequiredError(
+        `Action requires approval. Approve at: ${result.approvalUrl}`,
+        result,
+        result.approvalId ?? "",
+        result.approvalUrl ?? ""
+      );
+    }
+
+    throw new AgentGuardDeniedError(
+      `Action denied by AgentGuard: ${result.reason}`,
+      result
+    );
   }) as T;
 }
 

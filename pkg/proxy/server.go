@@ -381,7 +381,17 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	if rlCfg := s.cfg.Engine.RateLimitConfig(req.Scope, req.AgentID); rlCfg != nil {
 		window, err := ratelimit.ParseWindow(rlCfg.Window)
 		if err == nil {
-			key := fmt.Sprintf("%s:%s", req.Scope, req.AgentID)
+			// Normalize an empty agent_id so two distinct callers that both
+			// omit the field do not implicitly share the key "scope:" with
+			// any legitimate agent whose id is the literal empty string.
+			// All anonymous callers still share a single bucket per scope
+			// by design — partitioning by remote IP would require plumbing
+			// and opens a DoS vector via IP floods against MaxBuckets.
+			agentID := req.AgentID
+			if agentID == "" {
+				agentID = "anonymous"
+			}
+			key := fmt.Sprintf("%s:%s", req.Scope, agentID)
 			if err := s.limiter.Allow(key, rlCfg.MaxRequests, window); err != nil {
 				metrics.IncRateLimited()
 				result := policy.CheckResult{

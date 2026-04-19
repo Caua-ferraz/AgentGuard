@@ -74,6 +74,64 @@ class CheckResult:
         return self.decision == DECISION_REQUIRE_APPROVAL
 
 
+# --- Typed exceptions raised by the @guarded decorator ---
+#
+# All three extend PermissionError so callers that already catch
+# PermissionError (the v0.4.0/v0.4.1 behavior) keep working unchanged.
+# New callers can catch the specific subclass and read structured fields
+# (result, approval_id, approval_url) instead of parsing error strings.
+
+class AgentGuardError(PermissionError):
+    """Base class for AgentGuard-raised permission failures.
+
+    Carries the originating :class:`CheckResult` (if any) so callers can
+    inspect the decision, matched rule, and approval metadata without
+    re-running the check. Messages preserve the v0.4.1 string format so
+    existing regex/text matchers continue to work.
+    """
+
+    def __init__(self, message: str, result: Optional[CheckResult] = None):
+        super().__init__(message)
+        self.result = result
+
+
+class AgentGuardDenied(AgentGuardError):
+    """Raised when the policy decision was DENY."""
+
+
+class AgentGuardApprovalRequired(AgentGuardError):
+    """Raised when the policy decision was REQUIRE_APPROVAL and the
+    decorator was not configured to wait.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        result: Optional[CheckResult] = None,
+        approval_id: str = "",
+        approval_url: str = "",
+    ):
+        super().__init__(message, result)
+        self.approval_id = approval_id
+        self.approval_url = approval_url
+
+
+class AgentGuardApprovalTimeout(AgentGuardError):
+    """Raised when wait_for_approval was requested but the approval did
+    not resolve before the deadline. The underlying ``result`` is the
+    synthetic DENY/"Approval timed out" produced by :meth:`Guard.wait_for_approval`.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        result: Optional[CheckResult] = None,
+        approval_id: str = "",
+    ):
+        super().__init__(message, result)
+        self.approval_id = approval_id
+
+
 class Guard:
     """Client for the AgentGuard proxy."""
 
@@ -278,15 +336,46 @@ class Guard:
 
 
 # Convenience decorator for guarding functions
-def guarded(scope: str, guard: Optional[Guard] = None, **check_kwargs):
+def guarded(
+    scope: str,
+    guard: Optional[Guard] = None,
+    *,
+    wait_for_approval: bool = False,
+    approval_timeout: int = DEFAULT_APPROVAL_TIMEOUT,
+    approval_poll_interval: int = DEFAULT_POLL_INTERVAL,
+    **check_kwargs,
+):
     """Decorator that checks policy before executing a function.
 
-    Usage:
-        guard = Guard("http://localhost:8080")
-
+    Default behavior (v0.4.0/v0.4.1 compatible):
         @guarded("shell", guard=guard)
         def run_command(cmd: str):
             os.system(cmd)
+
+        run_command("ls")        # executes if ALLOW
+        run_command("rm -rf /")  # raises AgentGuardDenied (a PermissionError)
+
+    Opt-in block-until-resolved:
+        @guarded(
+            "cost",
+            guard=guard,
+            wait_for_approval=True,
+            approval_timeout=300,
+            approval_poll_interval=2,
+        )
+        def expensive_call(prompt: str):
+            ...
+
+    On REQUIRE_APPROVAL, with ``wait_for_approval=True`` the wrapper calls
+    :meth:`Guard.wait_for_approval` and then dispatches on the resolved
+    decision: ALLOW runs the function, DENY raises :class:`AgentGuardDenied`,
+    a synthetic "Approval timed out" raises :class:`AgentGuardApprovalTimeout`.
+    With ``wait_for_approval=False`` (default), the wrapper raises
+    :class:`AgentGuardApprovalRequired` immediately — preserving v0.4.1
+    behavior exactly, because that class extends ``PermissionError``.
+
+    All raised exceptions extend :class:`PermissionError`, so existing
+    ``except PermissionError:`` handlers continue to work unchanged.
     """
     def decorator(func):
         @functools.wraps(func)
@@ -295,13 +384,42 @@ def guarded(scope: str, guard: Optional[Guard] = None, **check_kwargs):
             # Try to extract meaningful info from args
             cmd = args[0] if args else kwargs.get("command", kwargs.get("cmd", ""))
             result = g.check(scope, command=str(cmd), **check_kwargs)
+
             if result.allowed:
                 return func(*args, **kwargs)
-            elif result.needs_approval:
-                raise PermissionError(
-                    f"Action requires approval. Approve at: {result.approval_url}"
+
+            if result.needs_approval:
+                if wait_for_approval:
+                    # Block until a human resolves or the deadline elapses.
+                    resolved = g.wait_for_approval(
+                        result.approval_id,
+                        timeout=approval_timeout,
+                        poll_interval=approval_poll_interval,
+                    )
+                    if resolved.allowed:
+                        return func(*args, **kwargs)
+                    if resolved.denied and resolved.reason == "Approval timed out":
+                        raise AgentGuardApprovalTimeout(
+                            f"Approval for {result.approval_id} timed out after "
+                            f"{approval_timeout}s",
+                            result=resolved,
+                            approval_id=result.approval_id,
+                        )
+                    raise AgentGuardDenied(
+                        f"Action denied by AgentGuard: {resolved.reason}",
+                        result=resolved,
+                    )
+                raise AgentGuardApprovalRequired(
+                    # Preserve v0.4.1 message text so text-matchers still hit.
+                    f"Action requires approval. Approve at: {result.approval_url}",
+                    result=result,
+                    approval_id=result.approval_id,
+                    approval_url=result.approval_url,
                 )
-            else:
-                raise PermissionError(f"Action denied by AgentGuard: {result.reason}")
+
+            raise AgentGuardDenied(
+                f"Action denied by AgentGuard: {result.reason}",
+                result=result,
+            )
         return wrapper
     return decorator

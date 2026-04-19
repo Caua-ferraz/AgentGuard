@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"sync"
 	"time"
 
+	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
@@ -205,6 +207,11 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 		skip = 0
 	}
 
+	// Log at most one corrupt-line warning per Query call so a single bad
+	// byte in a multi-megabyte audit file does not flood stderr. The
+	// Prometheus counter still counts every occurrence.
+	corruptLogged := false
+
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -218,7 +225,16 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 
 		var entry Entry
 		if err := json.Unmarshal(line, &entry); err != nil {
-			continue // skip corrupt lines
+			// Silent skip (v0.4.0 behavior) is dangerous: a gradually
+			// corrupted audit file would return fewer entries than expected
+			// with no signal. Count every corrupt line and log the first
+			// occurrence per query so the operator sees the degradation.
+			metrics.IncAuditCorruptLine()
+			if !corruptLogged {
+				log.Printf("WARN audit: skipping corrupt line in %s (%v)", path, err)
+				corruptLogged = true
+			}
+			continue
 		}
 
 		if !matchesFilter(entry, filter) {
