@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGlobMatch(t *testing.T) {
@@ -436,5 +437,197 @@ notifications:
 	}
 	if len(pol.Notifications.Redaction.ExtraPatterns) != 2 {
 		t.Errorf("expected 2 extra patterns, got %d", len(pol.Notifications.Redaction.ExtraPatterns))
+	}
+}
+
+// TestLoadFromFile_TunablesDefaults: a policy without any `proxy:` /
+// `notifications.dispatch_timeout` keys must load clean and every resolver
+// must return the documented default. Locks the v0.4.0-compatible default
+// surface so a future refactor does not silently change it.
+func TestLoadFromFile_TunablesDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/policy.yaml"
+	yaml := `version: "1"
+name: bare
+`
+	if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	pol, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("bare policy should load: %v", err)
+	}
+	if got := pol.SessionTTL(); got != DefaultSessionTTL {
+		t.Errorf("SessionTTL default = %v, want %v", got, DefaultSessionTTL)
+	}
+	if got := pol.MaxRequestBodyBytes(); got != DefaultMaxRequestBodyBytes {
+		t.Errorf("MaxRequestBodyBytes default = %d, want %d", got, DefaultMaxRequestBodyBytes)
+	}
+	if got := pol.AuditDefaultLimit(); got != DefaultAuditDefaultLimit {
+		t.Errorf("AuditDefaultLimit default = %d, want %d", got, DefaultAuditDefaultLimit)
+	}
+	if got := pol.AuditMaxLimit(); got != DefaultAuditMaxLimit {
+		t.Errorf("AuditMaxLimit default = %d, want %d", got, DefaultAuditMaxLimit)
+	}
+	if got := pol.NotifyDispatchTimeout(); got != DefaultNotifyDispatchTimeout {
+		t.Errorf("NotifyDispatchTimeout default = %v, want %v", got, DefaultNotifyDispatchTimeout)
+	}
+}
+
+// TestLoadFromFile_TunablesExplicit: explicit values override defaults and
+// are surfaced by the resolver methods. Includes a per-target timeout to
+// exercise the NotifyTarget.ResolvedTimeout fallback path.
+func TestLoadFromFile_TunablesExplicit(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/policy.yaml"
+	yaml := `version: "1"
+name: tuned
+proxy:
+  session:
+    ttl: "30m"
+  request:
+    max_body_bytes: 262144
+  audit:
+    default_limit: 25
+    max_limit: 500
+notifications:
+  dispatch_timeout: "3s"
+  approval_required:
+    - type: webhook
+      url: "http://example/hook"
+      timeout: "7s"
+  on_deny:
+    - type: webhook
+      url: "http://example/deny"
+`
+	if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	pol, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("valid tuned policy should load: %v", err)
+	}
+	if got, want := pol.SessionTTL(), 30*time.Minute; got != want {
+		t.Errorf("SessionTTL = %v, want %v", got, want)
+	}
+	if got, want := pol.MaxRequestBodyBytes(), int64(262144); got != want {
+		t.Errorf("MaxRequestBodyBytes = %d, want %d", got, want)
+	}
+	if got, want := pol.AuditDefaultLimit(), 25; got != want {
+		t.Errorf("AuditDefaultLimit = %d, want %d", got, want)
+	}
+	if got, want := pol.AuditMaxLimit(), 500; got != want {
+		t.Errorf("AuditMaxLimit = %d, want %d", got, want)
+	}
+	if got, want := pol.NotifyDispatchTimeout(), 3*time.Second; got != want {
+		t.Errorf("NotifyDispatchTimeout = %v, want %v", got, want)
+	}
+	// Per-target: first ApprovalRequired wins its own timeout; first OnDeny
+	// falls back to the dispatch-level default.
+	fallback := pol.NotifyDispatchTimeout()
+	if got, want := pol.Notifications.ApprovalRequired[0].ResolvedTimeout(fallback), 7*time.Second; got != want {
+		t.Errorf("ApprovalRequired[0] timeout = %v, want %v", got, want)
+	}
+	if got, want := pol.Notifications.OnDeny[0].ResolvedTimeout(fallback), 3*time.Second; got != want {
+		t.Errorf("OnDeny[0] timeout fallback = %v, want %v", got, want)
+	}
+}
+
+// TestLoadFromFile_RejectsBadTunables drives each validator branch through
+// the table. Every row is expected to fail at load with a message mentioning
+// the offending YAML path, so operators can fix the right key.
+func TestLoadFromFile_RejectsBadTunables(t *testing.T) {
+	cases := []struct {
+		name     string
+		yaml     string
+		wantPath string
+	}{
+		{
+			name:     "session_ttl_unparseable",
+			wantPath: "proxy.session.ttl",
+			yaml: `version: "1"
+name: x
+proxy:
+  session:
+    ttl: "1hr"
+`,
+		},
+		{
+			name:     "session_ttl_zero",
+			wantPath: "proxy.session.ttl",
+			yaml: `version: "1"
+name: x
+proxy:
+  session:
+    ttl: "0s"
+`,
+		},
+		{
+			name:     "request_max_body_negative",
+			wantPath: "proxy.request.max_body_bytes",
+			yaml: `version: "1"
+name: x
+proxy:
+  request:
+    max_body_bytes: -1
+`,
+		},
+		{
+			name:     "audit_default_negative",
+			wantPath: "proxy.audit.default_limit",
+			yaml: `version: "1"
+name: x
+proxy:
+  audit:
+    default_limit: -5
+`,
+		},
+		{
+			name:     "audit_max_below_default",
+			wantPath: "proxy.audit.max_limit",
+			yaml: `version: "1"
+name: x
+proxy:
+  audit:
+    default_limit: 200
+    max_limit: 50
+`,
+		},
+		{
+			name:     "dispatch_timeout_unparseable",
+			wantPath: "notifications.dispatch_timeout",
+			yaml: `version: "1"
+name: x
+notifications:
+  dispatch_timeout: "nope"
+`,
+		},
+		{
+			name:     "per_target_timeout_zero",
+			wantPath: "notifications.approval_required[0].timeout",
+			yaml: `version: "1"
+name: x
+notifications:
+  approval_required:
+    - type: webhook
+      url: "http://x"
+      timeout: "0s"
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := t.TempDir() + "/policy.yaml"
+			if err := os.WriteFile(path, []byte(tc.yaml), 0600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			_, err := LoadFromFile(path)
+			if err == nil {
+				t.Fatalf("expected validation error for %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.wantPath) {
+				t.Errorf("error %q should mention %q", err.Error(), tc.wantPath)
+			}
+		})
 	}
 }

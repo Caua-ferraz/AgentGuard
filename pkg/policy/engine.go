@@ -42,6 +42,54 @@ type Policy struct {
 	Rules         []RuleSet           `yaml:"rules"`
 	Agents        map[string]AgentCfg `yaml:"agents,omitempty"`
 	Notifications NotificationCfg     `yaml:"notifications,omitempty"`
+	// Proxy carries server-side tunables (session TTL, request body limit,
+	// audit query bounds). All subfields are optional; unset values fall
+	// back to the Default* constants below, which match v0.4.0 behavior.
+	Proxy ProxyCfg `yaml:"proxy,omitempty"`
+}
+
+// Defaults applied when the corresponding config key is unset. These
+// preserve v0.4.0 behavior so a policy file written against v0.4.0 keeps
+// its exact runtime semantics after upgrade.
+const (
+	DefaultSessionTTL            = 1 * time.Hour
+	DefaultMaxRequestBodyBytes   = int64(1 << 20) // 1 MiB
+	DefaultAuditDefaultLimit     = 100
+	DefaultAuditMaxLimit         = 1000
+	DefaultNotifyDispatchTimeout = 10 * time.Second
+)
+
+// ProxyCfg groups server-side tunables under the `proxy:` YAML key. Each
+// subsection is independently optional.
+type ProxyCfg struct {
+	Session SessionCfg `yaml:"session,omitempty"`
+	Request RequestCfg `yaml:"request,omitempty"`
+	Audit   AuditCfg   `yaml:"audit,omitempty"`
+}
+
+// SessionCfg tunes the dashboard session store.
+type SessionCfg struct {
+	// TTL is how long a /auth/login session stays valid. Parsed as a Go
+	// duration string ("1h", "30m"). Empty string => DefaultSessionTTL.
+	TTL string `yaml:"ttl,omitempty"`
+}
+
+// RequestCfg tunes incoming-request acceptance limits.
+type RequestCfg struct {
+	// MaxBodyBytes caps POST /v1/check body size. 0 => DefaultMaxRequestBodyBytes.
+	// Requests larger than this receive 413 and increment
+	// agentguard_request_rejected_total{reason="body_too_large"}.
+	MaxBodyBytes int64 `yaml:"max_body_bytes,omitempty"`
+}
+
+// AuditCfg tunes the /v1/audit query endpoint.
+type AuditCfg struct {
+	// DefaultLimit is the row count returned when the caller omits ?limit=.
+	// 0 => DefaultAuditDefaultLimit.
+	DefaultLimit int `yaml:"default_limit,omitempty"`
+	// MaxLimit is the hard ceiling; ?limit= values above it are clamped.
+	// 0 => DefaultAuditMaxLimit. Must be >= DefaultLimit if both are set.
+	MaxLimit int `yaml:"max_limit,omitempty"`
 }
 
 // RuleSet groups rules by scope.
@@ -94,6 +142,10 @@ type NotificationCfg struct {
 	ApprovalRequired []NotifyTarget `yaml:"approval_required,omitempty"`
 	OnDeny           []NotifyTarget `yaml:"on_deny,omitempty"`
 	Redaction        RedactionCfg   `yaml:"redaction,omitempty"`
+	// DispatchTimeout is the default per-notification HTTP timeout applied
+	// to webhook and Slack targets that do not set their own `timeout`.
+	// Parsed as a Go duration string. Empty => DefaultNotifyDispatchTimeout.
+	DispatchTimeout string `yaml:"dispatch_timeout,omitempty"`
 }
 
 // RedactionCfg tunes the secret-redactor used by the notify dispatcher.
@@ -108,9 +160,15 @@ type RedactionCfg struct {
 
 // NotifyTarget is a notification destination.
 type NotifyTarget struct {
-	Type  string `yaml:"type"`  // "webhook", "slack", "console", "log"
+	Type  string `yaml:"type"` // "webhook", "slack", "console", "log"
 	URL   string `yaml:"url,omitempty"`
 	Level string `yaml:"level,omitempty"`
+	// Timeout optionally overrides NotificationCfg.DispatchTimeout for this
+	// specific target. Only webhook and slack notifiers honor it; console
+	// and log targets are synchronous and local. Empty string => inherit
+	// the notifications.dispatch_timeout value (which itself defaults to
+	// DefaultNotifyDispatchTimeout when unset).
+	Timeout string `yaml:"timeout,omitempty"`
 }
 
 // LoadFromFile reads and parses a policy YAML file.
@@ -157,6 +215,13 @@ func LoadFromFile(path string) (*Policy, error) {
 		if _, err := regexp.Compile(p); err != nil {
 			return nil, fmt.Errorf("notifications.redaction.extra_patterns[%d]: invalid regex %q: %w", i, p, err)
 		}
+	}
+
+	// Validate proxy and notification tunables: parse durations, bound-check
+	// integers. Fail at load so an operator who types "1hr" instead of "1h"
+	// finds out before a session tries to expire.
+	if err := validateTunables(&pol); err != nil {
+		return nil, err
 	}
 
 	// Warn (but don't fail) on conditions with time_window and no require_prior.
@@ -218,6 +283,151 @@ func warnTimeWindowOnlyConditions(pol *Policy) {
 			"deprecated in v0.4.1, will error in v0.5.0; pair time_window with require_prior or remove it. See docs/DEPRECATIONS.md.",
 		)
 	}
+}
+
+// validateTunables bounds-checks every Phase-4 config key. Durations must
+// parse with time.ParseDuration and be strictly positive when present; byte
+// and row limits must be strictly positive when present; audit MaxLimit, if
+// set, must be >= audit DefaultLimit (including the case where one is set
+// explicitly and the other relies on its default).
+//
+// Called from LoadFromFile after schema-level parsing. Errors returned here
+// include the YAML path so operators can fix the right key without greping.
+func validateTunables(pol *Policy) error {
+	if s := pol.Proxy.Session.TTL; s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("proxy.session.ttl: %w", err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("proxy.session.ttl: must be > 0, got %q", s)
+		}
+	}
+	if n := pol.Proxy.Request.MaxBodyBytes; n < 0 {
+		return fmt.Errorf("proxy.request.max_body_bytes: must be > 0, got %d", n)
+	}
+	if n := pol.Proxy.Audit.DefaultLimit; n < 0 {
+		return fmt.Errorf("proxy.audit.default_limit: must be > 0, got %d", n)
+	}
+	if n := pol.Proxy.Audit.MaxLimit; n < 0 {
+		return fmt.Errorf("proxy.audit.max_limit: must be > 0, got %d", n)
+	}
+	// Resolve both limits through their defaults so an explicit DefaultLimit
+	// paired with an unset MaxLimit still validates against the default
+	// ceiling (and vice versa).
+	dl := pol.Proxy.Audit.DefaultLimit
+	if dl == 0 {
+		dl = DefaultAuditDefaultLimit
+	}
+	ml := pol.Proxy.Audit.MaxLimit
+	if ml == 0 {
+		ml = DefaultAuditMaxLimit
+	}
+	if ml < dl {
+		return fmt.Errorf("proxy.audit.max_limit (%d) must be >= proxy.audit.default_limit (%d)", ml, dl)
+	}
+	if s := pol.Notifications.DispatchTimeout; s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("notifications.dispatch_timeout: %w", err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("notifications.dispatch_timeout: must be > 0, got %q", s)
+		}
+	}
+	for i, t := range pol.Notifications.ApprovalRequired {
+		if err := validateTargetTimeout(t, fmt.Sprintf("notifications.approval_required[%d].timeout", i)); err != nil {
+			return err
+		}
+	}
+	for i, t := range pol.Notifications.OnDeny {
+		if err := validateTargetTimeout(t, fmt.Sprintf("notifications.on_deny[%d].timeout", i)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateTargetTimeout(t NotifyTarget, path string) error {
+	if t.Timeout == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(t.Timeout)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	if d <= 0 {
+		return fmt.Errorf("%s: must be > 0, got %q", path, t.Timeout)
+	}
+	return nil
+}
+
+// SessionTTL returns the configured session TTL or DefaultSessionTTL when
+// unset. Guarantees a positive duration.
+func (p *Policy) SessionTTL() time.Duration {
+	if d, ok := parsePositiveDuration(p.Proxy.Session.TTL); ok {
+		return d
+	}
+	return DefaultSessionTTL
+}
+
+// MaxRequestBodyBytes returns the configured request body cap, or
+// DefaultMaxRequestBodyBytes when unset.
+func (p *Policy) MaxRequestBodyBytes() int64 {
+	if p.Proxy.Request.MaxBodyBytes > 0 {
+		return p.Proxy.Request.MaxBodyBytes
+	}
+	return DefaultMaxRequestBodyBytes
+}
+
+// AuditDefaultLimit returns the configured default audit page size, or
+// DefaultAuditDefaultLimit when unset.
+func (p *Policy) AuditDefaultLimit() int {
+	if p.Proxy.Audit.DefaultLimit > 0 {
+		return p.Proxy.Audit.DefaultLimit
+	}
+	return DefaultAuditDefaultLimit
+}
+
+// AuditMaxLimit returns the configured hard ceiling on audit page size, or
+// DefaultAuditMaxLimit when unset.
+func (p *Policy) AuditMaxLimit() int {
+	if p.Proxy.Audit.MaxLimit > 0 {
+		return p.Proxy.Audit.MaxLimit
+	}
+	return DefaultAuditMaxLimit
+}
+
+// NotifyDispatchTimeout returns the global dispatch HTTP timeout or
+// DefaultNotifyDispatchTimeout when unset.
+func (p *Policy) NotifyDispatchTimeout() time.Duration {
+	if d, ok := parsePositiveDuration(p.Notifications.DispatchTimeout); ok {
+		return d
+	}
+	return DefaultNotifyDispatchTimeout
+}
+
+// ResolvedTimeout returns the effective per-target HTTP timeout, falling
+// back to the supplied dispatch-level default when the target did not set
+// its own. Invalid durations (which LoadFromFile already rejects, but
+// callers that construct NotifyTarget directly in tests can bypass) fall
+// through to the default.
+func (t NotifyTarget) ResolvedTimeout(fallback time.Duration) time.Duration {
+	if d, ok := parsePositiveDuration(t.Timeout); ok {
+		return d
+	}
+	return fallback
+}
+
+func parsePositiveDuration(s string) (time.Duration, bool) {
+	if s == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return 0, false
+	}
+	return d, true
 }
 
 // RuleCount returns the total number of individual rules.
