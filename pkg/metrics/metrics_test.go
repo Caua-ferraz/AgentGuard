@@ -160,6 +160,76 @@ func TestWritePrometheus_ApprovalEvictedLabels(t *testing.T) {
 	}
 }
 
+// TestWritePrometheus_RateLimitBucketsGauge: the gauge is always present so
+// scrapers see the definition even before any bucket is created. Value must
+// reflect the most recent SetRateLimitBuckets call.
+func TestWritePrometheus_RateLimitBucketsGauge(t *testing.T) {
+	SetRateLimitBuckets(42)
+	defer SetRateLimitBuckets(0)
+
+	var buf bytes.Buffer
+	WritePrometheus(&buf)
+	out := buf.String()
+
+	if !strings.Contains(out, "# TYPE agentguard_ratelimit_buckets gauge") {
+		t.Fatalf("gauge TYPE missing; got:\n%s", out)
+	}
+	if !strings.Contains(out, "agentguard_ratelimit_buckets 42") {
+		t.Errorf("gauge value missing; got:\n%s", out)
+	}
+}
+
+// TestWritePrometheus_RateLimitEvictedHeaderOnly: with nothing evicted,
+// still emit HELP/TYPE and no label lines.
+func TestWritePrometheus_RateLimitEvictedHeaderOnly(t *testing.T) {
+	rateLimitEvictedMu.Lock()
+	rateLimitEvictedCount = map[string]uint64{}
+	rateLimitEvictedMu.Unlock()
+
+	var buf bytes.Buffer
+	WritePrometheus(&buf)
+	out := buf.String()
+
+	if !strings.Contains(out, "# TYPE agentguard_ratelimit_bucket_evictions_total counter") {
+		t.Fatalf("TYPE header missing; got:\n%s", out)
+	}
+	if strings.Contains(out, "agentguard_ratelimit_bucket_evictions_total{") {
+		t.Errorf("unexpected label lines with empty counter, got:\n%s", out)
+	}
+}
+
+// TestWritePrometheus_RateLimitEvictedLabels: counters are emitted with the
+// scope label and in sorted order for stable scrape output.
+func TestWritePrometheus_RateLimitEvictedLabels(t *testing.T) {
+	rateLimitEvictedMu.Lock()
+	rateLimitEvictedCount = map[string]uint64{}
+	rateLimitEvictedMu.Unlock()
+
+	IncRateLimitBucketEvicted("shell")
+	IncRateLimitBucketEvicted("shell")
+	IncRateLimitBucketEvicted("network")
+
+	var buf bytes.Buffer
+	WritePrometheus(&buf)
+	out := buf.String()
+
+	if !strings.Contains(out,
+		`agentguard_ratelimit_bucket_evictions_total{scope="network"} 1`) {
+		t.Errorf("network line missing or wrong count; got:\n%s", out)
+	}
+	if !strings.Contains(out,
+		`agentguard_ratelimit_bucket_evictions_total{scope="shell"} 2`) {
+		t.Errorf("shell line missing or wrong count; got:\n%s", out)
+	}
+	// network < shell alphabetically — anchor on the full metric name to
+	// avoid collisions with scope="..." labels on other series.
+	netIdx := strings.Index(out, `agentguard_ratelimit_bucket_evictions_total{scope="network"}`)
+	shellIdx := strings.Index(out, `agentguard_ratelimit_bucket_evictions_total{scope="shell"}`)
+	if netIdx == -1 || shellIdx == -1 || netIdx >= shellIdx {
+		t.Errorf("labels not sorted; network=%d shell=%d", netIdx, shellIdx)
+	}
+}
+
 func TestEscapeLabel(t *testing.T) {
 	cases := []struct {
 		in, want string

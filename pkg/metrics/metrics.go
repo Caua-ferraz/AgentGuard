@@ -62,6 +62,44 @@ var (
 	approvalEvictedCount = map[string]uint64{}
 )
 
+// Rate-limit bucket eviction is labeled by scope (a bounded-cardinality
+// value from the policy — e.g. "shell", "network", "filesystem"). A key of
+// the form "scope:agent_id" is split by the caller before incrementing.
+var (
+	rateLimitEvictedMu    sync.Mutex
+	rateLimitEvictedCount = map[string]uint64{}
+)
+
+// IncRateLimitBucketEvicted increments
+// agentguard_ratelimit_bucket_evictions_total{scope=...}. Cardinality is
+// bounded by the set of policy scopes (typically < 20 across a deployment).
+func IncRateLimitBucketEvicted(scope string) {
+	if scope == "" {
+		scope = "unknown"
+	}
+	rateLimitEvictedMu.Lock()
+	rateLimitEvictedCount[scope]++
+	rateLimitEvictedMu.Unlock()
+}
+
+// RateLimitBucketEvictedFor returns the eviction count for a scope (for tests).
+func RateLimitBucketEvictedFor(scope string) uint64 {
+	rateLimitEvictedMu.Lock()
+	defer rateLimitEvictedMu.Unlock()
+	return rateLimitEvictedCount[scope]
+}
+
+// rateLimitBuckets is the current tracked-bucket gauge. Refreshed at each
+// /metrics scrape by the handler calling SetRateLimitBuckets.
+var rateLimitBuckets int64
+
+// SetRateLimitBuckets updates the rate-limit bucket gauge. Called from the
+// /metrics handler with Limiter.BucketCount() so operators can see bucket
+// growth without exporting the limiter internals.
+func SetRateLimitBuckets(n int) {
+	atomic.StoreInt64(&rateLimitBuckets, int64(n))
+}
+
 // IncApprovalEvicted increments agentguard_approvals_evicted_total{reason=...}.
 // Cardinality is bounded to the ApprovalEvicted* constants above.
 func IncApprovalEvicted(reason string) {
@@ -280,10 +318,41 @@ func WritePrometheus(w io.Writer) {
 		"Time spent in Logger.Log (audit file write) in milliseconds.",
 		AuditWriteDuration)
 
+	writeGauge(w, "agentguard_ratelimit_buckets",
+		"Current number of active rate-limit token buckets tracked in memory.",
+		float64(atomic.LoadInt64(&rateLimitBuckets)))
+
 	writeRequestRejected(w)
 	writeNotifyDropped(w)
 	writeApprovalEvicted(w)
+	writeRateLimitBucketEvicted(w)
 	writeDeprecations(w)
+}
+
+// writeRateLimitBucketEvicted emits the scope-labeled eviction counter.
+// Always emits HELP/TYPE so a scrape sees the series definition before any
+// eviction has occurred.
+func writeRateLimitBucketEvicted(w io.Writer) {
+	const name = "agentguard_ratelimit_bucket_evictions_total"
+	const help = "Rate-limit token buckets evicted under capacity pressure (MaxBuckets), labeled by policy scope."
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+	rateLimitEvictedMu.Lock()
+	snap := make(map[string]uint64, len(rateLimitEvictedCount))
+	for k, v := range rateLimitEvictedCount {
+		snap[k] = v
+	}
+	rateLimitEvictedMu.Unlock()
+	if len(snap) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(snap))
+	for k := range snap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(w, "%s{scope=\"%s\"} %d\n", name, escapeLabel(k), snap[k])
+	}
 }
 
 // writeApprovalEvicted emits agentguard_approvals_evicted_total{reason=...}.

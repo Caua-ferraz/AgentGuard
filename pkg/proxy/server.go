@@ -572,6 +572,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// PendingCount counts under RLock without allocating a slice — matters
 	// because this endpoint is scraped on a schedule.
 	metrics.SetPendingApprovals(s.approval.PendingCount())
+	// Refresh the rate-limit bucket gauge from the limiter; BucketCount()
+	// takes the limiter lock for a single len() read.
+	metrics.SetRateLimitBuckets(s.limiter.BucketCount())
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	metrics.WritePrometheus(w)
 }
