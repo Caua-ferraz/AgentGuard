@@ -14,9 +14,12 @@
   <a href="#policy-engine">Policy Engine</a> •
   <a href="#dashboard">Dashboard</a> •
   <a href="#adapters">Adapters</a> •
+  <a href="#production-checklist">Production</a> •
   <a href="docs/SETUP.md">Setup Guide</a> •
   <a href="docs/CONTRIBUTING.md">Contributing</a>
 </p>
+
+> **Running AgentGuard in production?** Jump to the [Production checklist](#production-checklist) before exposing it beyond localhost. The four most common misconfigurations (no API key → localhost-only bind, missing `--tls-terminated-upstream` behind an HTTPS proxy, wrong `--base-url`, and unrotated audit log) all have one-line fixes documented there.
 
 
 ## The Problem
@@ -535,6 +538,43 @@ export AGENTGUARD_API_KEY=your-secret
 agentguard approve ap_abc123
 agentguard audit --agent my-bot --decision DENY --limit 20
 ```
+
+## Production checklist
+
+Before exposing AgentGuard beyond `localhost`, verify each of these — every item below maps to a one-line flag or config change, and skipping any of them is the source of >80% of the issues reported after a first production deploy.
+
+- [ ] **Set `--api-key`** (or `AGENTGUARD_API_KEY`). Without it, AgentGuard binds to `127.0.0.1` only — remote agents cannot connect.
+- [ ] **Set `--base-url`** to the public URL the dashboard is reachable at. Otherwise approval links in Slack / webhooks point at `http://localhost:8080`.
+- [ ] **Pass `--tls-terminated-upstream`** if you terminate TLS at an upstream reverse proxy. Otherwise session cookies are issued without `Secure`, browsers drop them, and the dashboard login loops.
+- [ ] **Set `--allowed-origin`** to your frontend's exact origin (e.g. `https://app.example.com`). The default is permissive-localhost only.
+- [ ] **Mount a writable volume** for the audit log (`--audit-log /var/lib/agentguard/audit.jsonl` + a volume in Docker/K8s). No mount → log lost on restart.
+- [ ] **Plan audit log rotation.** AgentGuard does not rotate `audit.jsonl`; startup replays the whole file to seed metrics. Ship + truncate externally.
+- [ ] **Stay on `replicas: 1`** unless you have read [`docs/OPERATIONS.md`](docs/OPERATIONS.md). Rate-limit buckets and session-cost accumulators are per-instance — multi-replica deployments let agents burst past limits by round-robin.
+
+See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for a full reference config (nginx + Docker Compose + Kubernetes), [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for day-2 operations, [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) for metrics and alerts, [`docs/TUNING.md`](docs/TUNING.md) for every knob, and [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) keyed by symptom.
+
+### Full documentation index
+
+| Topic | Doc |
+|---|---|
+| Getting started | [`docs/SETUP.md`](docs/SETUP.md) |
+| Policy YAML schema + gotchas | [`docs/POLICY_REFERENCE.md`](docs/POLICY_REFERENCE.md) |
+| HTTP API | [`docs/API.md`](docs/API.md) |
+| CLI reference | [`docs/CLI.md`](docs/CLI.md) |
+| Python SDK | [`docs/SDK_PYTHON.md`](docs/SDK_PYTHON.md) |
+| Framework adapters (LangChain, CrewAI, browser-use, MCP) | [`docs/ADAPTERS.md`](docs/ADAPTERS.md) |
+| Dashboard walkthrough | [`docs/DASHBOARD.md`](docs/DASHBOARD.md) |
+| Approval workflow end-to-end | [`docs/APPROVAL_WORKFLOW.md`](docs/APPROVAL_WORKFLOW.md) |
+| Deployment / TLS / CORS | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) |
+| Day-2 operations | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) |
+| Metrics + alerting | [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) |
+| Tunable knobs | [`docs/TUNING.md`](docs/TUNING.md) |
+| Troubleshooting | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) |
+| FAQ | [`docs/FAQ.md`](docs/FAQ.md) |
+| Config schema | [`docs/CONFIG.md`](docs/CONFIG.md) |
+| File formats + migrations | [`docs/FILE_FORMATS.md`](docs/FILE_FORMATS.md) |
+| Deprecations | [`docs/DEPRECATIONS.md`](docs/DEPRECATIONS.md) |
+| Contributing | [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) |
 
 ## Limitations & Threat Model
 

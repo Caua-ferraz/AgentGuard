@@ -1,5 +1,8 @@
 # AgentGuard Policy: Research Agent
 # Permissive read access, strict write controls.
+#
+# See docs/POLICY_REFERENCE.md for the full schema. Evaluation per scope
+# is: rate-limit → deny → require_approval → allow → default DENY.
 
 version: "1"
 name: "research-agent-policy"
@@ -7,6 +10,8 @@ description: "Policy for AI research agents — broad read access to the web, re
 
 rules:
   # --- Network: Broad read access, restricted APIs ---
+  # NOTE: `*.wikipedia.org` matches `en.wikipedia.org` but NOT the apex
+  # `wikipedia.org`. Add the apex explicitly if agents might hit it.
   - scope: network
     allow:
       - domain: "*.wikipedia.org"
@@ -20,23 +25,28 @@ rules:
     deny:
       - domain: "*.social-media.com"
         message: "Social media access blocked for research agents"
+    # Per-instance rate limit; scales with replica count.
     rate_limit:
       max_requests: 120
       window: "1m"
 
   # --- Browser: Open browsing with guardrails ---
+  # Denies run before `allow: "*"`. First-match-wins means a missed
+  # pattern in deny is an escape hatch — be conservative here.
   - scope: browser
     deny:
       - domain: "*.bank.*"
         message: "Financial sites are off-limits"
-      - domain: "mail.*"
+      - domain: "mail.*"     # mail.google.com ✓, mail.yahoo.co.jp ✓
         message: "Email access blocked"
       - domain: "*.admin.*"
         message: "Admin panels blocked"
     allow:
-      - domain: "*"
+      - domain: "*"          # Fallback allow — everything not denied above.
 
   # --- Shell: Data processing only ---
+  # `*` in shell patterns crosses spaces AND slashes. Keep patterns
+  # tight — e.g. `rm *` also matches `rm -rf /` because `*` greedy-matches.
   - scope: shell
     allow:
       - pattern: "python *"
@@ -57,6 +67,8 @@ rules:
         message: "Piped curl commands blocked — use Python requests instead"
 
   # --- Filesystem ---
+  # `paths` always uses forward slashes post-normalization (filepath.Clean
+  # + ToSlash). `..` segments are rejected at policy load.
   - scope: filesystem
     allow:
       - action: read
@@ -64,6 +76,9 @@ rules:
       - action: write
         paths: ["./research/**", "./output/**", "/tmp/**"]
     deny:
+      # `~/**` is matched literally — `~` is NOT expanded to the home dir
+      # by AgentGuard. Agents passing an expanded path like `/home/alice/foo`
+      # won't hit this rule; use `/home/**` or `/root/**` instead.
       - action: write
         paths: ["/etc/**", "~/**"]
       - action: delete
@@ -71,6 +86,10 @@ rules:
         message: "Research agents cannot delete files"
 
   # --- Cost ---
+  # Session totals are accumulated in-memory per `session_id`, per-instance
+  # only. Restart loses totals. `alert_threshold` promotes a single action
+  # above that amount to REQUIRE_APPROVAL without reserving the cost;
+  # `max_per_*` enforce hard DENY.
   - scope: cost
     limits:
       max_per_action: "$0.25"

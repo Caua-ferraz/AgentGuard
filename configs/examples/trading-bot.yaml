@@ -1,5 +1,15 @@
 # AgentGuard Policy: Trading Bot
 # Strict guardrails for AI agents interacting with financial APIs.
+#
+# See docs/POLICY_REFERENCE.md. Evaluation inside a scope is:
+#   deny → require_approval → allow → default DENY (first match wins).
+#
+# WARNING about the `domain: "*"` deny below: because deny runs BEFORE
+# allow, a catch-all `"*"` in DENY would block the whitelisted domains
+# above too. This example works only if requests for whitelisted APIs
+# omit the `domain` field (and rely on a different matcher). If your
+# agents send `domain`, prefer relying on the implicit default-deny at
+# the end of the scope instead of an explicit `domain: "*"` deny.
 
 version: "1"
 name: "trading-bot-policy"
@@ -14,8 +24,10 @@ rules:
       - domain: "api.binance.com"
       - domain: "api.coingecko.com"
     deny:
+      # Redundant with default-deny; kept for explicit audit messages.
       - domain: "*"
         message: "Trading bots may only access whitelisted financial APIs"
+    # Per-instance rate limit. Divide by replica count for a global cap.
     rate_limit:
       max_requests: 30
       window: "1m"

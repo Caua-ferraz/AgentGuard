@@ -1,5 +1,19 @@
 # AgentGuard Default Policy
 # Safe defaults for development and testing.
+#
+# Evaluation order (see docs/POLICY_REFERENCE.md):
+#   rate-limit → deny → require_approval → allow → default DENY.
+# The FIRST match in deny/require_approval/allow wins. Put broad denies
+# BEFORE narrow allows — a narrow allow earlier won't save you from a
+# later deny, but a later allow won't override an earlier deny.
+#
+# Pattern semantics (docs/POLICY_REFERENCE.md#wildcards):
+#   *   matches any characters INCLUDING "/"  (surprising for paths!)
+#   ?   matches one character
+#   **  matches zero or more path segments (only meaningful split on "/")
+#   *.foo.com matches api.foo.com but NOT foo.com itself.
+# Paths are pre-processed with filepath.Clean + ToSlash before matching;
+# ".." segments are rejected at policy-load AND at request time.
 
 version: "1"
 name: "default-sandbox"
@@ -7,6 +21,9 @@ description: "Restrictive defaults suitable for development agents"
 
 rules:
   # --- File System ---
+  # Path rules always use `paths:` (a list) + `action:` (read|write|delete).
+  # Use `**` for multi-segment globs — `*` alone crosses "/" but also
+  # matches arbitrary chars, which is rarely what you want for a path.
   - scope: filesystem
     allow:
       - action: read
@@ -14,17 +31,27 @@ rules:
       - action: write
         paths: ["./workspace/**", "/tmp/**"]
     deny:
+      # `paths: ["**"]` is the canonical "every path" wildcard.
       - action: delete
         paths: ["**"]
         message: "File deletion is not permitted by default policy"
       - action: write
         paths: ["/etc/**", "/usr/**", "/var/**"]
         message: "Writing to system directories is blocked"
+      # `/home/**/.ssh/**` matches /home/alice/.ssh/id_rsa and
+      # /home/alice/work/.ssh/config. It does NOT match /home/alice/.ssh
+      # (no trailing segment) — add an explicit "/home/**/.ssh" entry if
+      # you need to block the directory itself.
       - action: write
         paths: ["/home/**/.ssh/**", "/root/.ssh/**", "/home/**/.aws/**", "/root/.aws/**"]
         message: "Writing to credential directories is blocked"
 
   # --- Shell Commands ---
+  # Shell rules use `pattern:` matched against the incoming `command`
+  # string. `*` here happily crosses spaces AND slashes — that's usually
+  # what you want for shell. The anchored match covers the whole command,
+  # so `rm -rf *` matches `rm -rf /home/user` but not `sudo rm -rf /`.
+  # Order matters: deny is checked before require_approval before allow.
   - scope: shell
     require_approval:
       - pattern: "sudo *"
@@ -32,6 +59,7 @@ rules:
       - pattern: "curl * | bash"
       - pattern: "wget * | sh"
       - pattern: "chmod 777 *"
+      # inline-eval flags — classic exfiltration / arbitrary-code vectors.
       - pattern: "python -c *"
       - pattern: "python -m *"
       - pattern: "python3 -c *"
@@ -51,6 +79,8 @@ rules:
       - pattern: "grep *"
       - pattern: "find *"
       - pattern: "echo *"
+      # `python *.py` matches `python foo.py` but also `python path/to/foo.py`
+      # because `*` crosses `/`. That's intentional here.
       - pattern: "python *.py"
       - pattern: "python3 *.py"
       - pattern: "node *.js"
@@ -61,15 +91,20 @@ rules:
       - pattern: "git *"
 
   # --- Network / API Calls ---
+  # Wildcard gotcha: `*.foo.com` matches `api.foo.com` but NOT `foo.com`.
+  # To cover both, list the apex domain explicitly alongside the wildcard.
   - scope: network
     allow:
       - domain: "api.openai.com"
       - domain: "api.anthropic.com"
       - domain: "api.github.com"
-      - domain: "*.googleapis.com"
+      - domain: "*.googleapis.com"    # api.googleapis.com ✓, googleapis.com ✗
     deny:
       - domain: "*.production.internal"
         message: "Production access requires an elevated policy"
+    # rate_limit is PER-INSTANCE — the bucket key is "<scope>:<agent_id>".
+    # Multi-replica deployments multiply the effective cap. See
+    # docs/OPERATIONS.md#multi-instance-deployments for mitigations.
     rate_limit:
       max_requests: 60
       window: "1m"
@@ -77,6 +112,9 @@ rules:
   # --- Browser Automation ---
   - scope: browser
     deny:
+      # `*.bank.*` matches `www.bank.com` and `banking.bank.co.uk` but
+      # NOT the bare `bank.com` — add `"bank.com"` if you need to block
+      # the apex. Also won't match `mybank.com` (only `*.mybank.*`).
       - domain: "*.bank.*"
         message: "Banking sites are blocked"
       - domain: "mail.google.com"
@@ -86,6 +124,11 @@ rules:
       - domain: "*.stackoverflow.com"
       - domain: "*.github.com"
 
+# Notifier filters (see docs/OBSERVABILITY.md):
+#   `approval_required` only fires on REQUIRE_APPROVAL decisions.
+#   `on_deny`           only fires on DENY decisions (including rate-limit denies).
+# Drops on slow notifiers are counted in
+# `agentguard_notify_events_dropped_total{notifier,reason="queue_full"}`.
 notifications:
   approval_required:
     - type: console
