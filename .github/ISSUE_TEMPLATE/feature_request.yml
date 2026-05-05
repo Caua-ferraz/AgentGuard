@@ -1,0 +1,37 @@
+name: Feature request
+description: Propose a new capability or enhancement to AgentGuard.
+title: "[feat] "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing an enhancement. Please describe the **problem**
+        first; the proposed solution is much more valuable when grounded in
+        a concrete use case.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem are you trying to solve? Who is affected?
+      placeholder: |
+        I'm running AgentGuard in front of a CrewAI swarm and ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed solution
+      description: How would you like AgentGuard to behave? API shape, CLI flag, policy field, etc.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered (optional)
+      description: Other approaches you considered and why they were rejected.
+    validations:
+      required: false

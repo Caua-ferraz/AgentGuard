@@ -36,6 +36,12 @@ type RotationConfig struct {
 	// MaxFiles caps the number of archived files kept after pruning. Older
 	// archives (by timestamp suffix) are deleted first. 0 means keep all.
 	MaxFiles int
+	// MaxAge bounds the age of archived files. Archives older than this
+	// are deleted at rotation time. Zero disables age-based pruning. Age
+	// is computed against the timestamp suffix on the archive name, not
+	// against filesystem mtime, so an out-of-band rsync of archives does
+	// not silently invalidate retention.
+	MaxAge time.Duration
 	// Compress, when true, gzips the archive file after rename and removes
 	// the uncompressed copy. A gzip failure leaves the uncompressed archive
 	// in place — pruning still counts it.
@@ -119,8 +125,8 @@ func (l *FileLogger) rotateLocked() error {
 		return fmt.Errorf("write post-rotate header: %w", err)
 	}
 
-	if l.rotCfg.MaxFiles > 0 {
-		if err := pruneArchives(path, l.rotCfg.MaxFiles); err != nil {
+	if l.rotCfg.MaxFiles > 0 || l.rotCfg.MaxAge > 0 {
+		if err := pruneArchivesWithAge(path, l.rotCfg.MaxFiles, l.rotCfg.MaxAge); err != nil {
 			log.Printf("WARN: audit archive prune failed: %v", err)
 		}
 	}
@@ -168,6 +174,25 @@ func gzipFile(src, dst string) error {
 // Both `<basePath>.<ts>` and `<basePath>.<ts>.gz` are considered archives.
 // The live `<basePath>` itself is never deleted.
 func pruneArchives(basePath string, keep int) error {
+	return pruneArchivesWithAge(basePath, keep, 0)
+}
+
+// pruneArchivesWithAge generalizes pruneArchives by also dropping archives
+// whose timestamp suffix is older than maxAge (relative to time.Now in UTC).
+// Either bound can be set independently; both bounds are unioned: an
+// archive is removed if it fails EITHER check.
+//
+//   - keep < 0 disables count-based pruning ("keep all").
+//   - keep == 0 retains the legacy `pruneArchives` semantics: "delete them
+//     all" (this is what existing tests document; the runtime caller
+//     in rotateLocked never passes 0 unless the operator literally wants
+//     no archives kept).
+//   - maxAge == 0 disables age-based pruning.
+//
+// Age is parsed from the archive's timestamp suffix (ArchiveTimestampFormat),
+// not from filesystem mtime, so an out-of-band rsync of archives onto a
+// different host preserves retention semantics.
+func pruneArchivesWithAge(basePath string, keep int, maxAge time.Duration) error {
 	dir := filepath.Dir(basePath)
 	base := filepath.Base(basePath)
 	entries, err := os.ReadDir(dir)
@@ -175,7 +200,13 @@ func pruneArchives(basePath string, keep int) error {
 		return err
 	}
 
-	var archives []string
+	type archive struct {
+		path string
+		// ts is parsed from the suffix; zero on parse failure (we still
+		// keep the file in the count-based set, but skip age pruning).
+		ts time.Time
+	}
+	var archives []archive
 	prefix := base + "."
 	for _, e := range entries {
 		if e.IsDir() {
@@ -190,19 +221,44 @@ func pruneArchives(basePath string, keep int) error {
 		if len(suffix) != len(ArchiveTimestampFormat) {
 			continue
 		}
-		archives = append(archives, filepath.Join(dir, name))
+		full := filepath.Join(dir, name)
+		ts, _ := time.Parse(ArchiveTimestampFormat, suffix)
+		archives = append(archives, archive{path: full, ts: ts})
 	}
 
-	if len(archives) <= keep {
+	if len(archives) == 0 {
 		return nil
 	}
 
-	sort.Strings(archives) // ascending → oldest first
-	excess := len(archives) - keep
-	for _, p := range archives[:excess] {
-		if err := os.Remove(p); err != nil {
-			// Surface the error but keep pruning the rest.
-			log.Printf("WARN: remove archive %s: %v", p, err)
+	// First pass: age-based pruning. We delete out-of-window archives
+	// before count-based pruning so the count check operates on the
+	// already-trimmed set (avoids double-counting).
+	if maxAge > 0 {
+		cutoff := time.Now().UTC().Add(-maxAge)
+		kept := archives[:0]
+		for _, a := range archives {
+			if !a.ts.IsZero() && a.ts.Before(cutoff) {
+				if err := os.Remove(a.path); err != nil {
+					log.Printf("WARN: remove archive %s: %v", a.path, err)
+				}
+				continue
+			}
+			kept = append(kept, a)
+		}
+		archives = kept
+	}
+
+	// Second pass: count-based pruning, oldest-first by name (which
+	// equals oldest-first by ts because ArchiveTimestampFormat is
+	// lex-sorted). keep<0 disables; keep==0 deletes everything (legacy
+	// test contract); keep>0 trims down to that many.
+	if keep >= 0 && len(archives) > keep {
+		sort.Slice(archives, func(i, j int) bool { return archives[i].path < archives[j].path })
+		excess := len(archives) - keep
+		for _, a := range archives[:excess] {
+			if err := os.Remove(a.path); err != nil {
+				log.Printf("WARN: remove archive %s: %v", a.path, err)
+			}
 		}
 	}
 	return nil

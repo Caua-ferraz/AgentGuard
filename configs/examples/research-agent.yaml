@@ -1,3 +1,8 @@
+# ============================================================
+# EXAMPLE POLICY — DO NOT DEPLOY UNMODIFIED.
+# Webhook URLs and secrets in this file are placeholders.
+# Replace any https://example.invalid/... URL before deploying.
+# ============================================================
 # AgentGuard Policy: Research Agent
 # Permissive read access, strict write controls.
 #

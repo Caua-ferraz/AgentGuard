@@ -1763,3 +1763,114 @@ func fileSize(path string) (int64, error) {
 	}
 	return info.Size(), nil
 }
+
+// TestRecoverMiddleware closes R3 #J. A handler panic must be caught so the
+// server returns 500 rather than tearing down the listener. The synthetic
+// handler is mounted via the same recoverPanic + withCORS + withLogging
+// chain that real handlers use.
+func TestRecoverMiddleware(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/boom", func(w http.ResponseWriter, r *http.Request) {
+		panic("synthetic")
+	})
+	mux.HandleFunc("/ok", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	h := recoverPanic(withCORS("")(withLogging(mux)))
+
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	// First request panics — must come back 500 (recover middleware did its job).
+	resp, err := http.Get(ts.URL + "/boom")
+	if err != nil {
+		t.Fatalf("GET /boom: %v", err)
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected 500 for panicking handler, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Second request must still be served — listener survived the panic.
+	resp, err = http.Get(ts.URL + "/ok")
+	if err != nil {
+		t.Fatalf("GET /ok after panic: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 from healthy handler after a prior panic, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// TestRateLimitDoubleCount closes R3 #21. A rate-limited request must
+// increment ChecksTotal and DeniedTotal exactly once each (not twice as
+// in v0.4.x where IncRateLimited and IncDecision both bumped them).
+//
+// We construct a proxy server with a 1-rps rate limit, fire two requests in
+// rapid succession (the second is rate-limited), and assert the metric
+// deltas are: checks +2, denied +1, rate_limited +1.
+func TestRateLimitDoubleCount(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	logger, err := audit.NewFileLogger(logPath)
+	if err != nil {
+		t.Fatalf("NewFileLogger: %v", err)
+	}
+	t.Cleanup(func() { logger.Close() })
+
+	// Policy: shell scope with rate limit of 1/min so a burst of 2 trips it
+	// reliably without sleeping in the test.
+	pol := &policy.Policy{
+		Version: "1",
+		Name:    "ratelimit-test",
+		Rules: []policy.RuleSet{
+			{
+				Scope:     "shell",
+				Allow:     []policy.Rule{{Pattern: "echo *"}},
+				RateLimit: &policy.RateLimitCfg{MaxRequests: 1, Window: "1m"},
+			},
+		},
+	}
+
+	srv := NewServer(Config{
+		Port:     0,
+		Engine:   policy.NewEngine(pol),
+		Logger:   logger,
+		Notifier: notify.NewDispatcher(policy.NotificationCfg{}),
+		APIKey:   "test-key",
+		BaseURL:  "http://localhost:0",
+		Version:  "test",
+	})
+
+	checksBefore := atomic.LoadUint64(&metrics.ChecksTotal)
+	deniedBefore := atomic.LoadUint64(&metrics.DeniedTotal)
+	rlBefore := atomic.LoadUint64(&metrics.RateLimitedTotal)
+
+	// First request: under the limit, expect ALLOW (or default-deny — but
+	// this command matches the allow rule, so ALLOW).
+	body := `{"scope":"shell","command":"echo hi","agent_id":"a1"}`
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.handleCheck(w, req)
+	}
+
+	checksAfter := atomic.LoadUint64(&metrics.ChecksTotal)
+	deniedAfter := atomic.LoadUint64(&metrics.DeniedTotal)
+	rlAfter := atomic.LoadUint64(&metrics.RateLimitedTotal)
+
+	// 2 total checks (one allowed, one rate-limited DENY).
+	if got := checksAfter - checksBefore; got != 2 {
+		t.Errorf("ChecksTotal delta: got %d, want 2 (one ALLOW + one rate-limit DENY)", got)
+	}
+	// 1 denied (only the rate-limited one).
+	if got := deniedAfter - deniedBefore; got != 1 {
+		t.Errorf("DeniedTotal delta: got %d, want 1 (rate-limit DENY counted exactly once, not twice)", got)
+	}
+	// 1 rate-limit specifically.
+	if got := rlAfter - rlBefore; got != 1 {
+		t.Errorf("RateLimitedTotal delta: got %d, want 1", got)
+	}
+}

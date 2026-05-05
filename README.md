@@ -4,17 +4,31 @@
 
 <p align="center">
   <strong>The firewall for AI agents.</strong><br/>
-  Policy enforcement, real-time oversight, and full audit logging for autonomous AI systems.
+  Every tool call, every API call — gated by policy, logged, and routed for human approval. No opt-out path.
+</p>
+
+<p align="center">
+  <a href="https://github.com/Caua-ferraz/AgentGuard/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Caua-ferraz/AgentGuard/ci.yml?branch=master&label=CI" alt="CI status" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Caua-ferraz/AgentGuard" alt="License" /></a>
+  <a href="https://github.com/Caua-ferraz/AgentGuard/releases"><img src="https://img.shields.io/github/v/release/Caua-ferraz/AgentGuard?include_prereleases&sort=semver" alt="Latest release" /></a>
+  <a href="https://pkg.go.dev/github.com/Caua-ferraz/AgentGuard"><img src="https://pkg.go.dev/badge/github.com/Caua-ferraz/AgentGuard.svg" alt="Go reference" /></a>
+  <a href="https://securityscorecards.dev/viewer/?uri=github.com/Caua-ferraz/AgentGuard"><img src="https://img.shields.io/ossf-scorecard/github.com/Caua-ferraz/AgentGuard?label=OpenSSF%20Scorecard" alt="OpenSSF Scorecard" /></a>
+  <a href="https://pypi.org/project/agentguardproxy/"><img src="https://img.shields.io/pypi/v/agentguardproxy?label=PyPI%20%28agentguardproxy%29" alt="PyPI version" /></a>
 </p>
 
 <p align="center">
   <a href="#quickstart">Quickstart</a> •
   <a href="#why-agentguard">Why AgentGuard</a> •
   <a href="#architecture">Architecture</a> •
+  <a href="#limitations--threat-model">Limitations &amp; Threat Model</a> •
   <a href="#production">Production</a> •
   <a href="#documentation">Docs</a> •
   <a href="docs/CONTRIBUTING.md">Contributing</a>
 </p>
+
+## AgentGuard Cloud (preview)
+
+AgentGuard Cloud is the hosted, multi-tenant version — same policy engine, same audit log, run for you. **Currently in design.** Join the waitlist at [https://agentguard.dev/cloud](https://agentguard.dev/cloud) (placeholder URL — sign-up form goes live alongside the v0.5 release). The self-hosted Apache-2.0 build in this repo will always remain fully featured.
 
 ## The Problem
 
@@ -24,17 +38,81 @@ Right now, most teams deploying AI agents are just... hoping they behave. **Agen
 
 ## Why AgentGuard
 
-| Without AgentGuard | With AgentGuard |
-|---|---|
-| Agent runs `rm -rf /` — you find out later | Policy blocks destructive commands before execution |
-| Agent calls production API with no oversight | Action paused, you get a Slack/webhook notification to approve |
-| No record of what the agent did or why | Full audit trail with timestamps, reasoning, and decisions |
-| "It worked on my machine" debugging | Query any agent session from the audit log |
-| One policy for all agents | Per-agent, per-environment, per-tool permission scoping |
+AgentGuard is the wire-level checkpoint that sits between your agent and everything it touches:
+
+- **Policy-gated tool calls.** Every shell command, file write, network call, browser action, or model spend evaluated against a YAML policy before it runs.
+- **Human-in-the-loop approvals.** Risky actions pause, ping Slack/webhooks, surface on a live dashboard, and resume only after a human says yes.
+- **Tamper-evident audit trail.** JSON-Lines log of every decision with agent ID, scope, command, timestamp, and reasoning — queryable by CLI, dashboard, or Prometheus metrics.
+- **Per-agent, per-environment, per-tool scoping.** One policy file, finely overridable for each agent identity.
 
 ## Quickstart
 
-### Install
+AgentGuard ships in v0.5 with **three integration paths**, listed from "no code change" to "deepest control":
+
+### 1. MCP Gateway *(v0.5 — coming)*
+
+For Claude Desktop and any MCP-aware client, point your `claude_desktop_config.json` at the AgentGuard MCP gateway and every tool call from the model is policy-checked before reaching the real MCP server:
+
+```jsonc
+// ~/.config/claude/claude_desktop_config.json
+{
+  "mcpServers": {
+    "everything": {
+      "command": "agentguard-mcp-gateway",
+      "args": ["--upstream", "npx -y @modelcontextprotocol/server-everything"]
+    }
+  }
+}
+```
+
+> Status: ships as part of the v0.5 release. The gateway binary is being built in the v0.5 cycle and is not yet merged on `master` as of this commit.
+
+### 2. LLM API Proxy *(v0.5 — coming)*
+
+For any code that already uses the OpenAI / Anthropic SDKs, set one environment variable and your existing client flows through AgentGuard:
+
+```bash
+export OPENAI_BASE_URL=http://localhost:8081/v1
+# Anthropic SDK: ANTHROPIC_BASE_URL=http://localhost:8081
+```
+
+Your `openai.ChatCompletion.create(...)` calls now go through the AgentGuard proxy — no SDK changes, no new imports. Tool calls inside the response stream are intercepted and policy-checked.
+
+> Status: ships as part of the v0.5 release. Like the MCP gateway, the proxy binary is in active development for v0.5 and is not yet on `master` as of this commit.
+
+### 3. SDK (compatibility tier)
+
+The Python and TypeScript SDKs remain fully supported for direct callers and for code paths where the proxy isn't practical (offline tools, embedded scripts, custom transports). They opt in via an explicit `Guard.check(...)` call:
+
+```bash
+pip install agentguardproxy
+```
+
+```python
+from agentguard import Guard
+
+guard = Guard("http://localhost:8080", agent_id="my-bot")
+
+result = guard.check("shell", command="rm -rf ./old_data")
+# result.decision = "REQUIRE_APPROVAL"
+# result.approval_url = "http://localhost:8080/v1/approve/ap_..."
+
+if result.allowed:
+    execute(command)
+```
+
+TypeScript/Node.js:
+
+```typescript
+import { AgentGuard } from '@agentguard/sdk';
+
+const guard = new AgentGuard({ baseUrl: 'http://localhost:8080', agentId: 'my-bot' });
+const result = await guard.check('network', { url: 'https://api.production.internal/deploy' });
+```
+
+The SDKs are not deprecated. They are the right answer when you control the agent's source and want explicit, scope-tagged check points. Polling for approval, decorators/HOFs, cost guardrails, framework adapters (LangChain, CrewAI, browser-use, MCP): [`docs/SDK_PYTHON.md`](docs/SDK_PYTHON.md) • [`docs/ADAPTERS.md`](docs/ADAPTERS.md).
+
+### Install the server
 
 ```bash
 # From source
@@ -83,36 +161,6 @@ agentguard serve --policy configs/default.yaml --dashboard --watch
 
 CLI flags and subcommands: [`docs/CLI.md`](docs/CLI.md).
 
-### Connect your agent
-
-```bash
-pip install agentguardproxy
-```
-
-```python
-from agentguard import Guard
-
-guard = Guard("http://localhost:8080", agent_id="my-bot")
-
-result = guard.check("shell", command="rm -rf ./old_data")
-# result.decision = "REQUIRE_APPROVAL"
-# result.approval_url = "http://localhost:8080/v1/approve/ap_..."
-
-if result.allowed:
-    execute(command)
-```
-
-TypeScript/Node.js:
-
-```typescript
-import { AgentGuard } from '@agentguard/sdk';
-
-const guard = new AgentGuard({ baseUrl: 'http://localhost:8080', agentId: 'my-bot' });
-const result = await guard.check('network', { url: 'https://api.production.internal/deploy' });
-```
-
-Polling for approval, decorators/HOFs, cost guardrails, framework adapters (LangChain, CrewAI, browser-use, MCP): [`docs/SDK_PYTHON.md`](docs/SDK_PYTHON.md) • [`docs/ADAPTERS.md`](docs/ADAPTERS.md).
-
 ## Architecture
 
 ```
@@ -136,6 +184,16 @@ Polling for approval, decorators/HOFs, cost guardrails, framework adapters (Lang
 
 Rule precedence: `deny → require_approval → allow → default deny`. Scopes: `filesystem`, `shell`, `network`, `browser`, `cost`. See [`docs/POLICY_REFERENCE.md`](docs/POLICY_REFERENCE.md).
 
+## Limitations & Threat Model
+
+AgentGuard is a policy enforcement and audit layer. It is **not** an OS sandbox. Read this before you trust it as your last line of defense.
+
+- **v0.5 makes the firewall wire-level.** The MCP Gateway and LLM API Proxy (above) become the primary integration path: the agent reaches its tools or its model only through AgentGuard, so there is no opt-out short of bypassing the configured base URL or gateway entirely. Operators who control the agent's environment (env vars, network egress) get an enforcement boundary, not just an advisory one.
+- **The SDK is a compatibility tier.** It remains supported and tested for direct callers — but it is opt-in by design: the agent must call `guard.check(...)`. That makes it an *advisory* gate. Use it when the proxy is impractical (offline scripts, custom transports), and pair it with the proxy whenever both are available.
+- **AgentGuard does not sandbox the host or intercept syscalls.** A determined agent that controls its own runtime can bypass the proxy by ignoring `OPENAI_BASE_URL`, talking to a different MCP server, or shelling out directly. Combine AgentGuard with OS-level isolation (containers, seccomp, AppArmor, network egress rules) when the threat model includes a hostile agent.
+- **Pattern matching is string-glob, not semantic.** A deny rule for `rm -rf *` matches literal strings; an agent (or a creative human) can substitute equivalents (`find / -delete`, base64 payloads, etc.). Treat policies as a high-signal first filter, not a complete authorization model.
+- **Approval queue and rate-limiter state are in-memory.** Both reset on restart and are not shared across instances. Run `replicas: 1` until persistent state lands.
+
 ## Dashboard
 
 <p align="center">
@@ -146,26 +204,16 @@ Live SSE action feed, one-click approve/deny, running totals, agent context. Sta
 
 ## Production
 
-> **Running AgentGuard in production?** The four most common misconfigurations — no API key (→ localhost-only bind), missing `--tls-terminated-upstream` behind an HTTPS proxy, wrong `--base-url`, and unrotated audit log — all have one-line fixes. Work through the checklist below before exposing AgentGuard beyond localhost.
+> **Running AgentGuard in production?** The four most common misconfigurations — no API key (→ localhost-only bind), missing `--tls-terminated-upstream` behind an HTTPS proxy, wrong `--base-url`, and unmounted audit volume — all have one-line fixes. Work through the checklist below before exposing AgentGuard beyond localhost.
 
 - [ ] **Set `--api-key`** (or `AGENTGUARD_API_KEY`). Without it, AgentGuard binds to `127.0.0.1` only.
 - [ ] **Set `--base-url`** to the public URL. Otherwise Slack/webhook approval links point at `http://localhost:8080`.
 - [ ] **Pass `--tls-terminated-upstream`** if TLS is terminated upstream, or the dashboard login loops.
 - [ ] **Set `--allowed-origin`** to your frontend's exact origin.
 - [ ] **Mount a writable volume** for the audit log — no mount, log lost on restart.
-- [ ] **Plan audit log rotation** externally (AgentGuard does not rotate `audit.jsonl`).
 - [ ] **Stay on `replicas: 1`** — rate-limit buckets and session-cost accumulators are per-instance.
 
 Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS details, and day-2 operations: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) • [`docs/OPERATIONS.md`](docs/OPERATIONS.md) • [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
-
-## Limitations & Threat Model
-
-AgentGuard is a policy enforcement layer, not a sandbox.
-
-- **Shell scope uses string-glob matching, not semantic analysis.** A deny rule for `rm -rf *` matches literal strings; determined agents can bypass with equivalents (`find / -delete`, base64 payloads, etc.). Combine with OS-level sandboxing (containers, seccomp, AppArmor) for strong isolation.
-- **AgentGuard is opt-in, not a transparent proxy.** The agent must call `/v1/check` before acting. It is an advisory gate, not an enforcement boundary.
-- **Audit log is append-only JSON lines.** No built-in rotation, retention, or tamper detection.
-- **Approval queue and rate-limiter state are in-memory.** Both reset on restart and are not shared across instances.
 
 ## Documentation
 
@@ -187,6 +235,7 @@ AgentGuard is a policy enforcement layer, not a sandbox.
 | FAQ | [`docs/FAQ.md`](docs/FAQ.md) |
 | Config schema | [`docs/CONFIG.md`](docs/CONFIG.md) |
 | File formats + migrations | [`docs/FILE_FORMATS.md`](docs/FILE_FORMATS.md) |
+| Migration guide | [`docs/MIGRATION.md`](docs/MIGRATION.md) |
 | Deprecations | [`docs/DEPRECATIONS.md`](docs/DEPRECATIONS.md) |
 | Contributing | [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) |
 
@@ -209,6 +258,9 @@ AgentGuard is a policy enforcement layer, not a sandbox.
 - [x] Policy hot-reload via `--watch`
 
 ### Planned
+- [ ] **MCP Gateway** — wire-level Model Context Protocol proxy *(v0.5)*
+- [ ] **LLM API Proxy** — drop-in OpenAI/Anthropic-compatible base URL *(v0.5)*
+- [ ] Audit-log rotation wired by default *(v0.5)*
 - [ ] Data exfiltration detection / `data` scope (PII scanning)
 - [ ] SQLite/PostgreSQL audit backend
 - [ ] Persistent approval queue

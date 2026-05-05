@@ -1,3 +1,8 @@
+# ============================================================
+# EXAMPLE POLICY — DO NOT DEPLOY UNMODIFIED.
+# Webhook URLs and secrets in this file are placeholders.
+# Replace any https://example.invalid/... URL before deploying.
+# ============================================================
 # AgentGuard Policy: Trading Bot
 # Strict guardrails for AI agents interacting with financial APIs.
 #
@@ -70,10 +75,10 @@ rules:
 notifications:
   approval_required:
     - type: webhook
-      url: "https://hooks.slack.com/services/YOUR/TRADING/WEBHOOK"
+      url: "https://example.invalid/REPLACE_ME_BEFORE_DEPLOY"
     - type: console
   on_deny:
     - type: webhook
-      url: "https://hooks.slack.com/services/YOUR/ALERTS/WEBHOOK"
+      url: "https://example.invalid/REPLACE_ME_BEFORE_DEPLOY"
     - type: log
       level: error

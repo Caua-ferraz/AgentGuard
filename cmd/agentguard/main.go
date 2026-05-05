@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	_ "net/http/pprof" // pprof handlers register on http.DefaultServeMux when --debug-pprof is set
 	"net/url"
 	"os"
 	"os/signal"
@@ -43,6 +44,24 @@ func main() {
 	tlsTerminated := serveCmd.Bool("tls-terminated-upstream", false, "Issue session cookies with Secure regardless of r.TLS — set when behind a TLS-terminating reverse proxy that does not forward X-Forwarded-Proto")
 	sessionCostTTL := serveCmd.Duration("session-cost-ttl", 0, "If > 0, evict session-cost accumulator entries idle longer than this duration (e.g. 24h). Zero preserves v0.4.0 behavior (entries never expire).")
 	sessionCostSweep := serveCmd.Duration("session-cost-sweep-interval", 0, "How often to run the session-cost sweeper. Defaults to max(session-cost-ttl/4, 1m).")
+	// Audit log rotation. Defaults aim at production-friendly bounds:
+	// 100 MiB live-file ceiling, 30-day retention, 5 archives kept (older
+	// archives pruned by oldest-first lex order on the timestamp suffix),
+	// gzip on. Set --audit-max-size-mb=0 to disable rotation entirely (matches
+	// v0.4.x behavior — unbounded growth). See pkg/audit/rotation.go for
+	// the rotation contract.
+	auditMaxSizeMB := serveCmd.Int("audit-max-size-mb", 100, "Maximum size of the live audit log in MiB before rotation. 0 disables rotation (v0.4.x behavior).")
+	auditMaxBackups := serveCmd.Int("audit-max-backups", 5, "Maximum number of rotated archives to keep. 0 keeps all archives indefinitely.")
+	auditMaxAgeDays := serveCmd.Int("audit-max-age-days", 30, "Maximum age (in days) of archived audit files. Archives older than this are pruned at rotation time. 0 disables age-based pruning.")
+	auditCompress := serveCmd.Bool("audit-compress", true, "Gzip rotated archives. Disable to keep them as plain JSONL for grep tooling.")
+	// Debug pprof. Off by default; when on, the runtime profiler endpoints
+	// register under http.DefaultServeMux via the blank import above and we
+	// expose them on a second listener bound to 127.0.0.1 only. Operators
+	// who want pprof reachable beyond localhost MUST tunnel it explicitly
+	// (e.g. `kubectl port-forward`, `ssh -L`) — this is a security floor we
+	// will not lower behind a flag.
+	debugPprof := serveCmd.Bool("debug-pprof", false, "Expose Go pprof handlers on a separate localhost-only listener (--debug-pprof-port). Off by default; enable for performance investigations only.")
+	debugPprofPort := serveCmd.Int("debug-pprof-port", 6060, "Port for the localhost-only pprof listener. Ignored unless --debug-pprof is set.")
 
 	validateCmd := flag.NewFlagSet("validate", flag.ExitOnError)
 	validateFile := validateCmd.String("policy", "configs/default.yaml", "Policy file to validate")
@@ -85,7 +104,15 @@ func main() {
 	case "serve":
 		_ = serveCmd.Parse(os.Args[2:]) // flag.ExitOnError handles errors
 		// Fall back to AGENTGUARD_API_KEY env if --api-key not supplied.
-		runServe(*policyFile, *port, *dashboard, *watch, *auditPath, resolveAPIKey(*apiKey), *baseURL, *allowedOrigin, *tlsTerminated, *sessionCostTTL, *sessionCostSweep)
+		runServe(*policyFile, *port, *dashboard, *watch, *auditPath, resolveAPIKey(*apiKey), *baseURL, *allowedOrigin, *tlsTerminated, *sessionCostTTL, *sessionCostSweep, auditRotationOpts{
+			MaxSizeMB:  *auditMaxSizeMB,
+			MaxBackups: *auditMaxBackups,
+			MaxAgeDays: *auditMaxAgeDays,
+			Compress:   *auditCompress,
+		}, pprofOpts{
+			Enabled: *debugPprof,
+			Port:    *debugPprofPort,
+		})
 
 	case "validate":
 		_ = validateCmd.Parse(os.Args[2:])
@@ -150,9 +177,52 @@ Run 'agentguard <command> -h' for details on each command.
 `)
 }
 
-func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration) {
+// auditRotationOpts mirrors the --audit-* CLI flags. Held in a struct so
+// runServe's signature does not balloon further; the struct itself is
+// translated into a pkg/audit RotationConfig inside runServe.
+type auditRotationOpts struct {
+	MaxSizeMB  int
+	MaxBackups int
+	MaxAgeDays int
+	Compress   bool
+}
+
+// pprofOpts mirrors the --debug-pprof* CLI flags. Held in a struct so
+// runServe's signature stays bounded; the listener is started in runServe
+// only when Enabled is true and is always bound to 127.0.0.1 (no flag to
+// loosen this — operators who need pprof reachable beyond localhost must
+// tunnel through SSH or a kube port-forward).
+type pprofOpts struct {
+	Enabled bool
+	Port    int
+}
+
+func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, rotOpts auditRotationOpts, pprofCfg pprofOpts) {
 	if baseURL == "" {
 		baseURL = fmt.Sprintf("http://localhost:%d", port)
+	}
+
+	// Spec R4 F1: warn the operator when session-cost TTL is disabled. The
+	// engine accumulator grows one entry per distinct session_id forever
+	// when the sweeper is off, and operators who never set --session-cost-ttl
+	// usually do not realise it. Behavior matches v0.4.0 (no eviction); we
+	// only complain so the surprise is documented in stderr.
+	if sessionCostTTL <= 0 {
+		log.Println("WARNING: --session-cost-ttl is 0; session-cost accumulator will grow unbounded. Set e.g. --session-cost-ttl 24h to bound memory.")
+	}
+
+	// Optional pprof debug listener. Bound to 127.0.0.1 only — never
+	// 0.0.0.0 — because pprof exposes goroutine stacks and live memory
+	// shapes that should not leak to the network. Operators who want to
+	// reach it remotely must tunnel (`ssh -L`, `kubectl port-forward`).
+	// Closes R4 S2.
+	pprofSrv := startPprofServer(pprofCfg)
+	if pprofSrv != nil {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = pprofSrv.Shutdown(ctx)
+		}()
 	}
 	// Load policy
 	pol, err := policy.LoadFromFile(policyFile)
@@ -173,8 +243,28 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		log.Fatalf("Startup migration failed: %v", err)
 	}
 
-	// Initialize audit logger
-	logger, err := audit.NewFileLogger(auditPath)
+	// Initialize audit logger.
+	//
+	// Rotation is on by default (100 MiB live cap, 30-day retention,
+	// 5 archives, gzip). Setting --audit-max-size-mb=0 disables rotation
+	// entirely and matches v0.4.x behavior (unbounded growth). Closes
+	// R7 E1 / T1 (audit log has no rotation).
+	rotCfg := audit.RotationConfig{
+		MaxFiles: rotOpts.MaxBackups,
+		Compress: rotOpts.Compress,
+	}
+	if rotOpts.MaxSizeMB > 0 {
+		rotCfg.MaxSize = int64(rotOpts.MaxSizeMB) * 1024 * 1024
+	}
+	if rotOpts.MaxAgeDays > 0 {
+		rotCfg.MaxAge = time.Duration(rotOpts.MaxAgeDays) * 24 * time.Hour
+	}
+	var logger *audit.FileLogger
+	if rotCfg.MaxSize > 0 || rotCfg.MaxFiles > 0 || rotCfg.MaxAge > 0 {
+		logger, err = audit.NewFileLoggerWithRotation(auditPath, rotCfg)
+	} else {
+		logger, err = audit.NewFileLogger(auditPath)
+	}
 	if err != nil {
 		log.Fatalf("Failed to initialize audit log: %v", err)
 	}
@@ -241,6 +331,35 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 	<-stop
 	log.Println("Shutting down...")
 	srv.Shutdown()
+}
+
+// startPprofServer boots a localhost-bound HTTP listener that serves the
+// pprof handlers registered by the blank import of net/http/pprof at the
+// top of this file. Returns the server (so callers can Shutdown it) when
+// enabled; returns nil when --debug-pprof is unset.
+//
+// Security: addr is hard-coded to 127.0.0.1 — there is no flag to widen
+// the bind. Pprof leaks goroutine stacks, heap shapes, and CPU samples
+// that an attacker can use to fingerprint the binary or extract secrets
+// from in-flight strings, so the only correct default is "loopback only,
+// no override". Operators who need remote access must tunnel.
+func startPprofServer(opts pprofOpts) *http.Server {
+	if !opts.Enabled {
+		return nil
+	}
+	addr := fmt.Sprintf("127.0.0.1:%d", opts.Port)
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           http.DefaultServeMux, // pprof handlers register here via net/http/pprof init()
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		log.Printf("pprof debug server listening on http://%s/debug/pprof/", addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("pprof server error: %v", err)
+		}
+	}()
+	return srv
 }
 
 func runValidate(policyFile string) {

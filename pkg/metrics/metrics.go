@@ -404,10 +404,18 @@ func IncDecision(decision string) {
 	}
 }
 
-// IncRateLimited increments the rate-limit deny counter.
+// IncRateLimited increments the rate-limit-specific counter.
+//
+// It used to also bump ChecksTotal/DeniedTotal, which double-counted
+// rate-limited requests because logAndRespond unconditionally calls
+// IncDecision("DENY") for the synthetic rate-limit DENY result. As of v0.5
+// the unified logAndRespond path owns ChecksTotal/DeniedTotal for every
+// decision (including the synthetic rate-limit DENY); IncRateLimited only
+// touches the rate-limit-specific series.
+//
+// Closes R3 #21 (audit finding "rate-limited requests double-count
+// ChecksTotal and DeniedTotal").
 func IncRateLimited() {
-	atomic.AddUint64(&ChecksTotal, 1)
-	atomic.AddUint64(&DeniedTotal, 1)
 	atomic.AddUint64(&RateLimitedTotal, 1)
 }
 

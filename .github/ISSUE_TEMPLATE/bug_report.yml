@@ -1,0 +1,72 @@
+name: Bug report
+description: Report a defect in the AgentGuard proxy, SDKs, or adapters.
+title: "[bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Please fill out
+        the fields below so we can reproduce the issue. **Do not include
+        secrets, real API keys, or production audit-log lines** in this
+        report; redact them first.
+
+        For security vulnerabilities, please follow
+        [SECURITY.md](../../SECURITY.md) instead of filing a public issue.
+
+  - type: input
+    id: version
+    attributes:
+      label: AgentGuard version
+      description: Output of `agentguard version`. SDK version too if relevant.
+      placeholder: "agentguard 0.5.0 (commit abc1234)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: |
+        Minimal steps that reproduce the issue. Include the exact CLI
+        flags, policy snippet, and request body where applicable.
+      placeholder: |
+        1. `agentguard serve --policy ./policy.yaml`
+        2. `curl -X POST http://localhost:8080/v1/check -d '...'`
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected AgentGuard to do.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What AgentGuard actually did. Paste the response body / error / stack trace.
+    validations:
+      required: true
+
+  - type: textarea
+    id: policy
+    attributes:
+      label: Policy YAML (optional)
+      description: Relevant policy snippet, redacted of any sensitive paths or domains.
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: Relevant lines from stdout / audit log. Redact secrets.
+      render: shell
+    validations:
+      required: false

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -289,8 +290,14 @@ func NewServer(cfg Config) *Server {
 	}
 
 	s.http = &http.Server{
-		Addr:              addr,
-		Handler:           withCORS(cfg.AllowedOrigin)(withLogging(mux)),
+		Addr: addr,
+		// Middleware order (outermost first): recoverPanic catches handler
+		// panics so a single bad request never tears the server down;
+		// withCORS runs next so a panicking handler still returns a CORS
+		// header pair via the recovered 500; withLogging is innermost so
+		// the recovered duration includes the panic path.
+		// Closes R3 #J.
+		Handler:           recoverPanic(withCORS(cfg.AllowedOrigin)(withLogging(mux))),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
@@ -307,7 +314,12 @@ func NewServer(cfg Config) *Server {
 			}
 		}
 		s.sweeperDone = make(chan struct{})
-		go s.runSessionCostSweeper(interval, cfg.SessionCostTTL)
+		// goRecover guarantees a panic inside SweepSessionCosts (or any
+		// future code reachable from the sweeper) logs and dies in
+		// isolation rather than tearing the whole process down.
+		goRecover("session-cost-sweeper", func() {
+			s.runSessionCostSweeper(interval, cfg.SessionCostTTL)
+		})
 	}
 
 	return s
@@ -978,6 +990,46 @@ func withLogging(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 		log.Printf("%s %s %v", r.Method, r.URL.Path, time.Since(start))
 	})
+}
+
+// recoverPanic is the outermost HTTP middleware. It catches any panic
+// raised by a downstream handler, logs the stack trace, and returns a
+// generic 500 to the client. Without it, a panic inside Engine.Check or a
+// notifier callback would tear down the request goroutine but leave the
+// connection in an indeterminate state — and goroutines spawned by
+// AgentGuard itself (sweeper, dispatcher workers) had no recover at all.
+//
+// Closes R3 #J.
+func recoverPanic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("PANIC %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
+				// Best-effort 500. If the handler already wrote headers,
+				// http stdlib swallows the WriteHeader and we just log.
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"internal server error"}`))
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// goRecover runs fn in a fresh goroutine wrapped with a recover that logs
+// the panic stack and a caller-supplied label. Used for AgentGuard's own
+// background workers — the session-cost sweeper, dispatcher workers, and
+// any future periodic goroutine — so a panic in one of them does not take
+// the whole process down.
+func goRecover(label string, fn func()) {
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("PANIC goroutine %s: %v\n%s", label, rec, debug.Stack())
+			}
+		}()
+		fn()
+	}()
 }
 
 // Embedded dashboard HTML

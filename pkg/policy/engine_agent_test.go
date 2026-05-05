@@ -173,6 +173,114 @@ func TestEngineCheck_CostNoEstimate(t *testing.T) {
 	}
 }
 
+// TestOverrideDenyInheritance closes R2 E5 / T11. The default override mode
+// ("merge") inherits Deny rules from the base policy, so an agent override
+// that only widens the Allow list cannot accidentally bypass a base deny
+// such as `rm -rf *`. The "replace" mode opts out of inheritance and
+// reproduces the v0.4.x behavior — required for narrowly-scoped privileged
+// agents.
+func TestOverrideDenyInheritance(t *testing.T) {
+	build := func(mode string) *Policy {
+		return &Policy{
+			Version: "1",
+			Name:    "override-deny-inherit",
+			Rules: []RuleSet{
+				{
+					Scope: "shell",
+					Deny: []Rule{
+						{Pattern: "rm -rf *", Message: "base deny"},
+					},
+					Allow: []Rule{{Pattern: "ls *"}},
+				},
+			},
+			Agents: map[string]AgentCfg{
+				"bot1": {
+					OverrideMode: mode,
+					Override: []RuleSet{
+						{
+							Scope: "shell",
+							Allow: []Rule{{Pattern: "echo *"}},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	// Default mode (empty string → merge): the base deny must still fire
+	// for bot1, and bot1's narrowed Allow list takes effect.
+	t.Run("merge_default_inherits_deny", func(t *testing.T) {
+		eng := NewEngine(build("")) // empty == merge
+		got := eng.Check(ActionRequest{
+			Scope: "shell", Command: "rm -rf /", AgentID: "bot1",
+		})
+		if got.Decision != Deny {
+			t.Errorf("merge default: expected DENY (inherited base deny), got %s: %s", got.Decision, got.Reason)
+		}
+
+		// bot1's override should ALSO grant `echo *` even though base
+		// only had `ls *` — the override Allow narrows to its own list.
+		got = eng.Check(ActionRequest{
+			Scope: "shell", Command: "echo hi", AgentID: "bot1",
+		})
+		if got.Decision != Allow {
+			t.Errorf("merge default: expected ALLOW for echo hi, got %s: %s", got.Decision, got.Reason)
+		}
+
+		// And `ls -la` (only in base allow, NOT in override allow) must
+		// fall through to default-deny because merge intentionally does
+		// not inherit base allows.
+		got = eng.Check(ActionRequest{
+			Scope: "shell", Command: "ls -la", AgentID: "bot1",
+		})
+		if got.Decision != Deny {
+			t.Errorf("merge default: expected DENY for ls -la (override does not inherit base allow), got %s", got.Decision)
+		}
+	})
+
+	t.Run("explicit_merge_inherits_deny", func(t *testing.T) {
+		eng := NewEngine(build(OverrideModeMerge))
+		got := eng.Check(ActionRequest{
+			Scope: "shell", Command: "rm -rf /", AgentID: "bot1",
+		})
+		if got.Decision != Deny {
+			t.Errorf("explicit merge: expected DENY (inherited base deny), got %s", got.Decision)
+		}
+	})
+
+	t.Run("replace_drops_base_deny", func(t *testing.T) {
+		eng := NewEngine(build(OverrideModeReplace))
+		// echo allowed because override declares it.
+		got := eng.Check(ActionRequest{
+			Scope: "shell", Command: "echo hi", AgentID: "bot1",
+		})
+		if got.Decision != Allow {
+			t.Errorf("replace: expected ALLOW for echo, got %s", got.Decision)
+		}
+		// rm -rf — base deny is GONE. The override has no allow that
+		// matches "rm -rf /", so the result is default-deny (not the
+		// `base deny` message). The point of this assertion is that the
+		// matched Rule is no longer the inherited deny.
+		got = eng.Check(ActionRequest{
+			Scope: "shell", Command: "rm -rf /", AgentID: "bot1",
+		})
+		if got.Reason == "base deny" {
+			t.Errorf("replace mode: expected base deny NOT to fire, but it did: %s", got.Reason)
+		}
+	})
+
+	t.Run("no_agent_id_uses_base_deny", func(t *testing.T) {
+		eng := NewEngine(build(""))
+		// No AgentID: base policy applies and the deny fires.
+		got := eng.Check(ActionRequest{
+			Scope: "shell", Command: "rm -rf /",
+		})
+		if got.Decision != Deny || got.Reason != "base deny" {
+			t.Errorf("no agent: expected base DENY, got %s: %s", got.Decision, got.Reason)
+		}
+	})
+}
+
 func TestEngineRateLimitConfig(t *testing.T) {
 	pol := &Policy{
 		Version: "1",

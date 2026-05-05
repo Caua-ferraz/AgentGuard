@@ -2,7 +2,6 @@ package policy
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,8 +11,6 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
-
-	"github.com/Caua-ferraz/AgentGuard/pkg/deprecation"
 )
 
 // Decision represents the outcome of a policy check.
@@ -132,10 +129,27 @@ type CostLimits struct {
 }
 
 // AgentCfg defines per-agent policy overrides.
+//
+// OverrideMode controls how a per-scope override RuleSet combines with its
+// base counterpart. The default ("merge") inherits Deny and RequireApproval
+// rules from base while letting the override's Allow list narrow the scope.
+// Setting "replace" reproduces the v0.4.x behavior where the override
+// fully supplants the base RuleSet for that scope.
+//
+// Closes R2 E5 / T11 (audit finding "per-agent override silently widens
+// scope by dropping base deny rules").
 type AgentCfg struct {
-	Extends  string    `yaml:"extends"`
-	Override []RuleSet `yaml:"override,omitempty"`
+	Extends      string    `yaml:"extends"`
+	Override     []RuleSet `yaml:"override,omitempty"`
+	OverrideMode string    `yaml:"override_mode,omitempty"`
 }
+
+// Override-mode constants. We accept the literal strings in YAML; an unknown
+// value falls back to the merge default with a warning at load time.
+const (
+	OverrideModeMerge   = "merge"
+	OverrideModeReplace = "replace"
+)
 
 // NotificationCfg defines where to send alerts.
 type NotificationCfg struct {
@@ -224,34 +238,93 @@ func LoadFromFile(path string) (*Policy, error) {
 		return nil, err
 	}
 
-	// Warn (but don't fail) on conditions with time_window and no require_prior.
-	// These are effectively no-ops at runtime — TimeWindow has nothing to
-	// time-bound. We keep v0.4.0 pass-through behavior here for backward
-	// compat and let the operator know about the mistake.
-	warnTimeWindowOnlyConditions(&pol)
+	// Validate every rule-level rate_limit and condition.time_window
+	// duration. v0.4.x parsed these lazily at first request and silently
+	// fell through on parse error, so a typo like `window: "1minute"`
+	// produced a no-op rule. Closes R3 #5 / R3 #15 (window=0 panic in
+	// the limiter is also rejected here).
+	if err := validateRuleDurationsAndCounts(&pol); err != nil {
+		return nil, err
+	}
+
+	// Reject conditions with time_window but no require_prior. The
+	// v0.4.x build only WARNed and let the load succeed (the rule was a
+	// no-op at runtime). v0.5 hard-fails: leaving an inert condition in
+	// production is a footgun, and the deprecation warning has been live
+	// since v0.4.1. Closes R2 S11.
+	if err := errorTimeWindowOnlyConditions(&pol); err != nil {
+		return nil, err
+	}
 
 	return &pol, nil
 }
 
-// warnTimeWindowOnlyConditions scans every rule for conditions that set
-// TimeWindow but not RequirePrior and emits a log line naming each offender.
-// It does NOT fail the load.
-//
-// As of v0.4.1 this pattern is a deprecation: v0.5.0 will reject such
-// policies at load time. We fire deprecation.Warn once per policy load
-// that contains any orphan rule — that increments
-// agentguard_deprecations_used_total{feature="policy.time_window_without_require_prior"}
-// once per load, which is the right cardinality for "is this still in use"
-// (a policy with 3 orphan rules reloaded once is one usage event, not three).
-//
-// See docs/DEPRECATIONS.md for removal target and migration path.
-func warnTimeWindowOnlyConditions(pol *Policy) {
-	hasOrphan := false
-	check := func(scope, kind string, rules []Rule) {
-		for _, r := range rules {
-			for _, c := range r.Conditions {
+// validateRuleDurationsAndCounts walks every RuleSet's rate_limit and every
+// rule-level condition.time_window, requiring durations to parse cleanly
+// and integer thresholds to be strictly positive. Both base rules and
+// per-agent overrides are checked. Closes R3 #5 / #15.
+func validateRuleDurationsAndCounts(pol *Policy) error {
+	check := func(loc string, rs RuleSet) error {
+		if rs.RateLimit != nil {
+			if rs.RateLimit.MaxRequests <= 0 {
+				return fmt.Errorf("%s.rate_limit.max_requests: must be > 0, got %d", loc, rs.RateLimit.MaxRequests)
+			}
+			d, err := time.ParseDuration(rs.RateLimit.Window)
+			if err != nil {
+				return fmt.Errorf("%s.rate_limit.window: %w", loc, err)
+			}
+			if d <= 0 {
+				return fmt.Errorf("%s.rate_limit.window: must be > 0, got %q", loc, rs.RateLimit.Window)
+			}
+		}
+		// Walk every condition.time_window across allow/deny/require_approval.
+		for kind, rules := range map[string][]Rule{
+			"allow":            rs.Allow,
+			"deny":             rs.Deny,
+			"require_approval": rs.RequireApproval,
+		} {
+			for i, r := range rules {
+				for j, c := range r.Conditions {
+					if c.TimeWindow == "" {
+						continue
+					}
+					d, err := time.ParseDuration(c.TimeWindow)
+					if err != nil {
+						return fmt.Errorf("%s.%s[%d].conditions[%d].time_window: %w", loc, kind, i, j, err)
+					}
+					if d <= 0 {
+						return fmt.Errorf("%s.%s[%d].conditions[%d].time_window: must be > 0, got %q", loc, kind, i, j, c.TimeWindow)
+					}
+				}
+			}
+		}
+		return nil
+	}
+
+	for i, rs := range pol.Rules {
+		if err := check(fmt.Sprintf("rules[%d](%s)", i, rs.Scope), rs); err != nil {
+			return err
+		}
+	}
+	for agentID, cfg := range pol.Agents {
+		for i, rs := range cfg.Override {
+			if err := check(fmt.Sprintf("agents.%s.override[%d](%s)", agentID, i, rs.Scope), rs); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// errorTimeWindowOnlyConditions returns an error for any rule whose
+// conditions include a time_window without a require_prior. In v0.4.x this
+// was a WARN (and the rule became a runtime no-op). The deprecation has
+// been live for one release; v0.5 promotes it to an error.
+func errorTimeWindowOnlyConditions(pol *Policy) error {
+	check := func(loc string, rules []Rule) error {
+		for i, r := range rules {
+			for j, c := range r.Conditions {
 				if c.RequirePrior == "" && c.TimeWindow != "" {
-					hasOrphan = true
 					id := r.Pattern
 					if id == "" {
 						id = r.Action
@@ -259,31 +332,44 @@ func warnTimeWindowOnlyConditions(pol *Policy) {
 					if id == "" {
 						id = r.Domain
 					}
-					log.Printf("WARNING: policy condition with time_window=%q but no require_prior in %s:%s rule %q — condition will be ignored at runtime", c.TimeWindow, scope, kind, id)
+					return fmt.Errorf("%s[%d](%q).conditions[%d]: time_window without require_prior is rejected as of v0.5; pair time_window with require_prior or remove it", loc, i, id, j)
 				}
 			}
 		}
+		return nil
 	}
-	for _, rs := range pol.Rules {
-		check(rs.Scope, "allow", rs.Allow)
-		check(rs.Scope, "deny", rs.Deny)
-		check(rs.Scope, "require_approval", rs.RequireApproval)
-	}
-	for agentID, cfg := range pol.Agents {
-		for _, rs := range cfg.Override {
-			check("agents."+agentID+"/"+rs.Scope, "allow", rs.Allow)
-			check("agents."+agentID+"/"+rs.Scope, "deny", rs.Deny)
-			check("agents."+agentID+"/"+rs.Scope, "require_approval", rs.RequireApproval)
+	for i, rs := range pol.Rules {
+		base := fmt.Sprintf("rules[%d](%s)", i, rs.Scope)
+		if err := check(base+".allow", rs.Allow); err != nil {
+			return err
+		}
+		if err := check(base+".deny", rs.Deny); err != nil {
+			return err
+		}
+		if err := check(base+".require_approval", rs.RequireApproval); err != nil {
+			return err
 		}
 	}
-
-	if hasOrphan {
-		deprecation.Warn(
-			"policy.time_window_without_require_prior",
-			"deprecated in v0.4.1, will error in v0.5.0; pair time_window with require_prior or remove it. See docs/DEPRECATIONS.md.",
-		)
+	for agentID, cfg := range pol.Agents {
+		for i, rs := range cfg.Override {
+			base := fmt.Sprintf("agents.%s.override[%d](%s)", agentID, i, rs.Scope)
+			if err := check(base+".allow", rs.Allow); err != nil {
+				return err
+			}
+			if err := check(base+".deny", rs.Deny); err != nil {
+				return err
+			}
+			if err := check(base+".require_approval", rs.RequireApproval); err != nil {
+				return err
+			}
+		}
 	}
+	return nil
 }
+
+// (warnTimeWindowOnlyConditions was removed in v0.5: the deprecated
+// pattern is now an error at load time via errorTimeWindowOnlyConditions.
+// See docs/DEPRECATIONS.md for the migration path.)
 
 // validateTunables bounds-checks every Phase-4 config key. Durations must
 // parse with time.ParseDuration and be strictly positive when present; byte
@@ -708,8 +794,26 @@ func (e *Engine) RateLimitConfig(scope, agentID string) *RateLimitCfg {
 }
 
 // resolveRules returns the effective rule list for a given agent.
-// If the agent has overrides in the policy, scope-level overrides replace
-// the base rules for those scopes; non-overridden scopes use the base rules.
+//
+// Combine semantics depend on AgentCfg.OverrideMode:
+//
+//   - "merge" (default, v0.5+): the effective RuleSet for an overridden
+//     scope is base.Deny ∪ override.Deny, base.RequireApproval ∪
+//     override.RequireApproval, and override.Allow alone (so the agent can
+//     narrow the allow list without inheriting base allows it does not
+//     want). The override's RateLimit and Limits, when set, replace the
+//     base values; when unset, base wins. This preserves base safety
+//     guarantees (e.g. `deny: rm -rf *`) under per-agent customisation.
+//
+//   - "replace" (legacy, v0.4.x): the override RuleSet fully supplants the
+//     base RuleSet for that scope. Use only when the agent must not
+//     inherit anything — typically a privileged agent with its own
+//     hand-vetted policy.
+//
+// Scopes present only in the override are appended to the result regardless
+// of mode. Scopes present only in the base are passed through unchanged.
+//
+// Closes R2 E5 / T11.
 func (e *Engine) resolveRules(agentID string) []RuleSet {
 	if agentID == "" || e.policy.Agents == nil {
 		return e.policy.Rules
@@ -726,13 +830,22 @@ func (e *Engine) resolveRules(agentID string) []RuleSet {
 		overridden[rs.Scope] = rs
 	}
 
-	// Merge: use override for scopes that have one, base for the rest
+	mode := agentCfg.OverrideMode
+	if mode == "" {
+		mode = OverrideModeMerge
+	}
+
+	// Merge: combine overrides with base per the resolved mode.
 	var merged []RuleSet
 	seen := make(map[string]bool)
 
 	for _, rs := range e.policy.Rules {
 		if override, ok := overridden[rs.Scope]; ok {
-			merged = append(merged, override)
+			if mode == OverrideModeReplace {
+				merged = append(merged, override)
+			} else {
+				merged = append(merged, mergeRuleSet(rs, override))
+			}
 			seen[rs.Scope] = true
 		} else {
 			merged = append(merged, rs)
@@ -748,6 +861,49 @@ func (e *Engine) resolveRules(agentID string) []RuleSet {
 	}
 
 	return merged
+}
+
+// mergeRuleSet folds an override RuleSet onto a base RuleSet for the
+// agent-merge case. New slices are allocated for Deny and RequireApproval
+// so the caller cannot mutate the base policy by appending into the
+// returned RuleSet's slice fields. Allow is taken verbatim from the
+// override so per-agent allowlists can narrow without inheriting base
+// allows the agent shouldn't have.
+func mergeRuleSet(base, override RuleSet) RuleSet {
+	out := RuleSet{
+		Scope: override.Scope,
+		// Allow is override-only by design — the merge default is
+		// "agents may NARROW what's allowed but never WIDEN what's
+		// denied"; widening allow would defeat the safety guarantee.
+		Allow:           override.Allow,
+		Deny:            mergeRules(base.Deny, override.Deny),
+		RequireApproval: mergeRules(base.RequireApproval, override.RequireApproval),
+		RateLimit:       override.RateLimit,
+		Limits:          override.Limits,
+	}
+	if out.RateLimit == nil {
+		out.RateLimit = base.RateLimit
+	}
+	if out.Limits == nil {
+		out.Limits = base.Limits
+	}
+	return out
+}
+
+// mergeRules concatenates base and over into a fresh slice. The order is
+// "base first, then override" so a base deny still fires even if an agent
+// override appends a deny that would never match.
+func mergeRules(base, over []Rule) []Rule {
+	if len(base) == 0 {
+		return over
+	}
+	if len(over) == 0 {
+		return base
+	}
+	out := make([]Rule, 0, len(base)+len(over))
+	out = append(out, base...)
+	out = append(out, over...)
+	return out
 }
 
 // checkCost evaluates cost limits for a request. MUST be called with e.mu
@@ -784,7 +940,16 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 		}
 	}
 
-	// Session-level cost enforcement
+	// Session-level cost enforcement.
+	//
+	// Closes R3 #4 (audit finding "est_cost == 0 cumulative bypass"). The
+	// v0.4.x guard `req.EstCost > 0` here meant an agent could submit
+	// est_cost=0 forever after blowing past max_per_session and always get
+	// ALLOW back. We now compare `cumulative + est_cost > max_per_session`
+	// regardless of est_cost: when est_cost==0, that simplifies to
+	// "cumulative > max", which correctly denies a session already over
+	// the cap while still allowing exactly-at-cap (the literal cap value
+	// itself stays a valid post-state).
 	maxPerSession, err := parseDollar(rs.Limits.MaxPerSession)
 	if err != nil {
 		return CheckResult{
@@ -793,7 +958,7 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 			Rule:     "deny:cost:invalid_config",
 		}
 	}
-	if req.SessionID != "" && maxPerSession > 0 && req.EstCost > 0 {
+	if req.SessionID != "" && maxPerSession > 0 {
 		cumulative := e.sessionCosts[req.SessionID].cost
 		if cumulative+req.EstCost > maxPerSession {
 			return CheckResult{
@@ -1008,19 +1173,42 @@ func matchRule(rule Rule, req ActionRequest) bool {
 
 // globMatch performs glob pattern matching supporting * and **.
 //
-// Semantics:
-//   - A literal segment (between `/` separators) is matched with wildcardMatch,
-//     so `*` matches any character including `/` within a shell-command pattern
-//     like "rm -rf *".
-//   - `**` matches zero or more whole path segments.
+// Pattern semantics — STABLE CONTRACT (closes R3 #11 by documenting the
+// asymmetry; see .audit/v05_decisions.md "Glob ** semantics for paths vs
+// domains" for the choice):
 //
-// For non-path patterns that have no `/` separators (e.g., shell command
-// patterns, domain globs), globMatch falls through to wildcardMatch so `*`
-// still matches any run of characters including spaces or dots.
+//  1. Path patterns (contain `/`):
+//     - Split on `/`. Each segment except `**` is matched with wildcardMatch.
+//     - `**` matches zero or more whole `/`-delimited segments.
+//     - Therefore `/etc/**` matches both `/etc/passwd` AND `/etc` itself
+//       (the `**` consumes zero segments). Operators who want "at least
+//       one segment under /etc" must spell it `/etc/*/**` or list `/etc`
+//       explicitly in a separate rule.
+//     - The security guarantee: `**/secret/**` does NOT match
+//       `/notsecret/x`. `**` always lands on segment boundaries; it never
+//       substring-matches.
 //
-// The important security property: when `**` appears in a pattern, it only
-// matches at path-component boundaries — "**/secret/**" does NOT match
-// "/notsecret/x". The old implementation substring-matched and over-reported.
+//  2. Domain patterns (no `/`):
+//     - Matched with wildcardMatch. `*` matches any chars including `.`.
+//     - Therefore `*.foo.com` matches `api.foo.com` but does NOT match
+//       `foo.com` (the `*` requires at least one character before `.foo.com`).
+//     - To match `foo.com` itself, list it as a separate rule or use the
+//       literal pattern `foo.com`.
+//
+//  3. Shell-command patterns (no `/`, no `**`):
+//     - Same as domain: wildcardMatch. `*` is greedy across `/`, spaces,
+//       and dots.
+//
+// The asymmetry between (1) and (2) is intentional and documented:
+//   - Path `**` is segment-aware (designed for filesystem trees) and
+//     matches zero or more segments.
+//   - Domain `*` is character-aware (designed for hostname allowlists)
+//     and requires at least one char.
+//
+// If you find this asymmetry confusing, prefer explicit literals:
+//   - For "everything under /etc but not /etc itself": use both
+//     `/etc/**` and a separate explicit deny on `/etc`.
+//   - For "foo.com and any subdomain": list both `foo.com` and `*.foo.com`.
 func globMatch(pattern, value string) bool {
 	// Patterns without ** use simple wildcard matching (anchored both ends).
 	if !strings.Contains(pattern, "**") {

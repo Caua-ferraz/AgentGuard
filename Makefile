@@ -1,4 +1,4 @@
-.PHONY: build test lint run clean docker validate help
+.PHONY: build test lint run clean docker validate validate-examples bench help
 
 # Binary name
 BINARY=agentguard
@@ -30,6 +30,17 @@ validate: build
 	done
 	@echo "All policies valid."
 
+## ----- Validation -----
+
+## validate-examples: Validate every YAML in configs/ and configs/examples/
+validate-examples: build
+	@set -e; \
+	for f in configs/*.yaml configs/examples/*.yaml; do \
+		echo "Validating $$f"; \
+		./$(BINARY) validate --policy $$f; \
+	done
+	@echo "All example policies valid."
+
 ## docker: Build Docker image
 docker:
 	docker build -t $(BINARY):$(VERSION) -t $(BINARY):latest .
@@ -50,6 +61,12 @@ install-python-sdk:
 ## install-ts-sdk: Build the TypeScript SDK
 install-ts-sdk:
 	cd plugins/typescript && npm install && npm run build
+
+## ----- Benchmarks -----
+
+## bench: Run all Go benchmarks (no race; allocations reported)
+bench:
+	go test -bench=. -benchmem -run=^$$ ./...
 
 ## help: Show this help
 help:

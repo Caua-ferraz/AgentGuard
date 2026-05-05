@@ -1,0 +1,10 @@
+# Order matters - the last matching pattern wins. Owners review every PR
+# touching these paths.
+
+/pkg/proxy/auth.go        @Caua-ferraz
+/pkg/proxy/                @Caua-ferraz
+/pkg/policy/               @Caua-ferraz
+/cmd/                      @Caua-ferraz
+/.github/workflows/        @Caua-ferraz
+/.github/CODEOWNERS        @Caua-ferraz
+/SECURITY.md               @Caua-ferraz

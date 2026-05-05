@@ -368,6 +368,85 @@ func TestPruneArchives_StandaloneCall(t *testing.T) {
 	}
 }
 
+// TestAuditRotation closes R7 E1 / T1: the FileLogger constructed via
+// NewFileLoggerWithRotation must produce a .gz archive when MaxSize is
+// crossed and Compress=true. This is the regression coupon for the
+// main.go wiring of --audit-* flags; the helper functions
+// (TestRotation_SizeTriggered, TestRotation_Compression) cover the lower
+// layers, but the named test makes the rotation contract grep-able from
+// the audit-finding map.
+func TestAuditRotation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+
+	logger, err := NewFileLoggerWithRotation(path, RotationConfig{
+		MaxSize:  1024, // 1 KiB — small so a few logBlob writes trip it
+		MaxFiles: 3,
+		Compress: true,
+	})
+	if err != nil {
+		t.Fatalf("NewFileLoggerWithRotation: %v", err)
+	}
+	defer logger.Close()
+
+	// Each logBlob entry is ~250 bytes; 50 entries comfortably crosses
+	// the 1 KiB threshold multiple times.
+	for i := 0; i < 50; i++ {
+		if err := logger.Log(logBlob("bot")); err != nil {
+			t.Fatalf("Log %d: %v", i, err)
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawGz bool
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".gz") && strings.HasPrefix(e.Name(), "audit.jsonl.") {
+			sawGz = true
+			break
+		}
+	}
+	if !sawGz {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("expected at least one gz archive, got %v", names)
+	}
+}
+
+// TestRotation_AgeBasedPruning verifies that MaxAge deletes archives whose
+// timestamp suffix is older than the configured window, even when MaxFiles
+// would otherwise leave them in place.
+func TestRotation_AgeBasedPruning(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "audit.jsonl")
+
+	// One ancient archive (well older than MaxAge), one recent.
+	old := base + ".20200101T000000Z"
+	if err := os.WriteFile(old, []byte("stub"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	recentTs := time.Now().UTC().Add(-time.Minute).Format(ArchiveTimestampFormat)
+	recent := base + "." + recentTs
+	if err := os.WriteFile(recent, []byte("stub"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// keep=-1 disables count-based pruning; only MaxAge is in play.
+	if err := pruneArchivesWithAge(base, -1, time.Hour); err != nil {
+		t.Fatalf("pruneArchivesWithAge: %v", err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("expected old archive to be pruned by MaxAge, stat: %v", err)
+	}
+	if _, err := os.Stat(recent); err != nil {
+		t.Errorf("expected recent archive to survive, got: %v", err)
+	}
+}
+
 // TestPruneArchives_IgnoresUnrelatedFiles: a non-archive file in the same
 // directory (e.g. the checkpoint) must never be touched.
 func TestPruneArchives_IgnoresUnrelatedFiles(t *testing.T) {

@@ -46,7 +46,7 @@ v0.4.0 does not understand the schema-2 header and will refuse to read a migrate
 ### Behavioral changes worth knowing about
 
 - **Audit replay is checkpointed.** First start takes as long as it used to (one full replay). Subsequent starts are near-instant — the server resumes from `<audit-dir>/.replay-checkpoint`.
-- **Audit rotation is now built in.** Default threshold and file count are safe; tune via config if your retention policy requires it. Rotated files are gzipped and carry a `_meta.rotated_from` pointer so replay follows the chain.
+- **Audit rotation primitives ship in `pkg/audit` but are not wired by default in v0.4.1.** Continue to rotate `audit.jsonl` externally on this release. Rotation will be wired by default in v0.5; the rotator gzips rotated files and carries a `_meta.rotated_from` pointer so startup replay follows the chain.
 - **ApprovalQueue eviction is LRU**, not bulk-drop. Under extreme load with no resolved entries and a full queue, new approvals return `503` with `Retry-After`. The previous behavior was silent state loss. If you scrape `agentguard_approvals_evicted_total{reason}` you will see the events.
 - **Session store rejects new logins at the cap** instead of silently evicting the oldest session. If you routinely run with more than ~1000 concurrent dashboard sessions you will see `503` on new logins; sign out idle tabs to free slots.
 - **`/v1/audit?limit=` is honored** for the first time. The dashboard's existing `?limit=200` query now returns up to 200 entries (clamped to the new `proxy.audit.max_limit`, default `1000`). Scripts that relied on the hard-coded `100` will see up to the requested value.

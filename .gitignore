@@ -31,6 +31,10 @@ Thumbs.db
 # Docker
 docker-compose.override.yml
 
+# Audit working dir (multi-perspective audit artifacts)
+.audit/
+AUDIT_REPORT.md
+
 # Python SDK
 __pycache__/
 *.pyc
