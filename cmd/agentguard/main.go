@@ -54,6 +54,14 @@ func main() {
 	auditMaxBackups := serveCmd.Int("audit-max-backups", 5, "Maximum number of rotated archives to keep. 0 keeps all archives indefinitely.")
 	auditMaxAgeDays := serveCmd.Int("audit-max-age-days", 30, "Maximum age (in days) of archived audit files. Archives older than this are pruned at rotation time. 0 disables age-based pruning.")
 	auditCompress := serveCmd.Bool("audit-compress", true, "Gzip rotated archives. Disable to keep them as plain JSONL for grep tooling.")
+	// Buffered async audit logger (Phase 2 / v0.5). Wraps the FileLogger
+	// with a bounded queue + worker pool + disk-overflow durability so the
+	// /v1/check hot path no longer waits on the audit mutex. See
+	// pkg/audit/buffered.go for the contract. Closes R2 S5 / R2 S9 / R4 E3.
+	auditBuffered := serveCmd.Bool("audit-buffered", true, "Wrap the audit logger in a bounded async queue with disk-overflow durability. Disable to write straight to FileLogger (v0.4.x behavior).")
+	auditQueueSize := serveCmd.Int("audit-queue-size", 1024, "Bounded queue size for the buffered async logger. Ignored unless --audit-buffered is set.")
+	auditWorkers := serveCmd.Int("audit-workers", 4, "Worker goroutines draining the buffered audit queue. Ignored unless --audit-buffered is set.")
+	auditOverflowPath := serveCmd.String("audit-overflow-path", "", "Path to the disk-overflow spill file used when the buffered queue saturates. Defaults to <audit-log>.overflow.jsonl. Ignored unless --audit-buffered is set.")
 	// Debug pprof. Off by default; when on, the runtime profiler endpoints
 	// register under http.DefaultServeMux via the blank import above and we
 	// expose them on a second listener bound to 127.0.0.1 only. Operators
@@ -109,6 +117,11 @@ func main() {
 			MaxBackups: *auditMaxBackups,
 			MaxAgeDays: *auditMaxAgeDays,
 			Compress:   *auditCompress,
+		}, auditBufferedOpts{
+			Enabled:      *auditBuffered,
+			QueueSize:    *auditQueueSize,
+			Workers:      *auditWorkers,
+			OverflowPath: *auditOverflowPath,
 		}, pprofOpts{
 			Enabled: *debugPprof,
 			Port:    *debugPprofPort,
@@ -148,6 +161,13 @@ func main() {
 		_ = migrateCmd.Parse(os.Args[2:])
 		runMigrate(*migrateAuditPath, *migrateCheckpoint, *migrateBackupDir, *migrateDryRun, *migrateList, *migrateID, *migrateReset)
 
+	case "check":
+		// runCheck owns its own flag.FlagSet (with ContinueOnError so
+		// usage errors map to exit code 3 rather than the default
+		// ExitOnError = 2). Stdin/stdout/stderr are passed explicitly so
+		// the function is unit-testable from check_cmd_test.go.
+		os.Exit(runCheck(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+
 	case "version":
 		fmt.Printf("agentguard %s (%s)\n", version, commit)
 
@@ -166,6 +186,7 @@ Usage:
 Commands:
   serve       Start the AgentGuard proxy server
   validate    Validate a policy file
+  check       Run a one-shot policy check against a local policy file
   approve     Approve a pending action by ID
   deny        Deny a pending action by ID
   status      Show connected agents and pending actions
@@ -187,6 +208,21 @@ type auditRotationOpts struct {
 	Compress   bool
 }
 
+// auditBufferedOpts mirrors the --audit-buffered* CLI flags. Held in a
+// struct so runServe's signature stays bounded; the struct is translated
+// into a pkg/audit BufferedAsyncOpts inside runServe.
+//
+// Enabled=false reproduces v0.4.x behavior (writes go straight to the
+// FileLogger, /v1/check waits on the audit mutex). Enabled=true is the
+// v0.5 default and decouples the request path from audit I/O via a
+// bounded queue + worker pool + disk-overflow durability.
+type auditBufferedOpts struct {
+	Enabled      bool
+	QueueSize    int
+	Workers      int
+	OverflowPath string
+}
+
 // pprofOpts mirrors the --debug-pprof* CLI flags. Held in a struct so
 // runServe's signature stays bounded; the listener is started in runServe
 // only when Enabled is true and is always bound to 127.0.0.1 (no flag to
@@ -197,7 +233,7 @@ type pprofOpts struct {
 	Port    int
 }
 
-func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, rotOpts auditRotationOpts, pprofCfg pprofOpts) {
+func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts) {
 	if baseURL == "" {
 		baseURL = fmt.Sprintf("http://localhost:%d", port)
 	}
@@ -224,10 +260,19 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 			_ = pprofSrv.Shutdown(ctx)
 		}()
 	}
-	// Load policy
-	pol, err := policy.LoadFromFile(policyFile)
+	// Load policy through the provider abstraction. FilePolicyProvider
+	// wraps the existing single-file load + watch pattern; v0.6 swaps in
+	// a database-backed provider without changing engine or server code.
+	provider, err := policy.NewFilePolicyProvider(policyFile)
 	if err != nil {
 		log.Fatalf("Failed to load policy %s: %v", policyFile, err)
+	}
+	defer provider.Close()
+	pol, err := provider.Get(policy.LocalTenantID)
+	if err != nil {
+		// NewFilePolicyProvider already validated that the local policy
+		// loaded; this is a defensive read for the rule-count log line.
+		log.Fatalf("Failed to read policy from provider: %v", err)
 	}
 	log.Printf("Loaded policy: %s (%d rules across %d scopes)", pol.Name, pol.RuleCount(), pol.ScopeCount())
 
@@ -259,35 +304,77 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 	if rotOpts.MaxAgeDays > 0 {
 		rotCfg.MaxAge = time.Duration(rotOpts.MaxAgeDays) * 24 * time.Hour
 	}
-	var logger *audit.FileLogger
+	var fileLogger *audit.FileLogger
 	if rotCfg.MaxSize > 0 || rotCfg.MaxFiles > 0 || rotCfg.MaxAge > 0 {
-		logger, err = audit.NewFileLoggerWithRotation(auditPath, rotCfg)
+		fileLogger, err = audit.NewFileLoggerWithRotation(auditPath, rotCfg)
 	} else {
-		logger, err = audit.NewFileLogger(auditPath)
+		fileLogger, err = audit.NewFileLogger(auditPath)
 	}
 	if err != nil {
 		log.Fatalf("Failed to initialize audit log: %v", err)
 	}
-	defer logger.Close()
+	// Optionally wrap the FileLogger in a BufferedAsyncLogger so the
+	// /v1/check hot path no longer waits on the audit mutex. The wrapper
+	// owns its own goroutines (workers + recovery loop) and a bounded
+	// channel; on saturation, entries spill to a JSON-Lines overflow file
+	// (mode 0600) and a recovery goroutine drains them back into the queue
+	// when capacity returns. Closes R2 S5 / R2 S9 / R4 E3.
+	//
+	// The wrapper does NOT close the underlying FileLogger — the deferred
+	// FileLogger.Close below owns that lifecycle. We defer the wrapper's
+	// Close FIRST so it fires LAST during teardown, and FileLogger.Close
+	// runs on a fully drained underlying.
+	var auditLogger audit.Logger = fileLogger
+	if bufOpts.Enabled {
+		overflowPath := bufOpts.OverflowPath
+		if overflowPath == "" {
+			overflowPath = auditPath + ".overflow.jsonl"
+		}
+		bufLogger, err := audit.NewBufferedAsyncLogger(fileLogger, audit.BufferedAsyncOpts{
+			QueueSize:    bufOpts.QueueSize,
+			Workers:      bufOpts.Workers,
+			OverflowPath: overflowPath,
+		})
+		if err != nil {
+			log.Fatalf("Failed to initialize buffered audit logger: %v", err)
+		}
+		// Defer order matters: FileLogger first, BufferedAsyncLogger second
+		// — so on shutdown the buffered wrapper drains FIRST, then we close
+		// the file. Go runs deferred calls in LIFO order, so this lines up.
+		defer fileLogger.Close()
+		defer bufLogger.Close()
+		auditLogger = bufLogger
+	} else {
+		defer fileLogger.Close()
+	}
 
-	// Initialize policy engine
-	engine := policy.NewEngine(pol)
+	// Initialize policy engine. The engine subscribes to the provider's
+	// Watch stream so hot-reloads land automatically — no second watcher.
+	engine, err := policy.NewEngine(provider)
+	if err != nil {
+		log.Fatalf("Failed to initialize policy engine: %v", err)
+	}
+	defer engine.Close()
 
 	// Initialize notifier from policy config. The dispatcher owns background
 	// worker goroutines and MUST be Close()'d on shutdown to stop them.
 	notifier := notify.NewDispatcher(pol.Notifications)
 	defer notifier.Close()
 
-	// Enable file watching for hot reload
+	// Hot-reload: log every successful provider update. The engine's own
+	// Watch subscription already swaps the cached policy; this callback
+	// is for operator visibility (`Policy reloaded: ...`). The --watch
+	// flag is preserved for back-compat — the file watcher is always on
+	// inside the FilePolicyProvider, so the flag now only gates the log
+	// line, not the underlying behavior.
 	if watch {
-		watcher, err := policy.WatchFile(policyFile, func(updated *policy.Policy) {
-			engine.UpdatePolicy(updated)
+		stop, err := provider.Watch(policy.LocalTenantID, func(updated *policy.Policy) {
 			log.Printf("Policy reloaded: %s (%d rules)", updated.Name, updated.RuleCount())
 		})
 		if err != nil {
-			log.Fatalf("Failed to watch policy file: %v", err)
+			log.Fatalf("Failed to subscribe to policy reloads: %v", err)
 		}
-		defer watcher.Close()
+		defer stop()
 	}
 
 	// Build and start proxy server. Policy-driven tunables (session TTL,
@@ -297,7 +384,7 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 	srv := proxy.NewServer(proxy.Config{
 		Port:                     port,
 		Engine:                   engine,
-		Logger:                   logger,
+		Logger:                   auditLogger,
 		DashboardEnabled:         dashboardEnabled,
 		Notifier:                 notifier,
 		APIKey:                   apiKey,

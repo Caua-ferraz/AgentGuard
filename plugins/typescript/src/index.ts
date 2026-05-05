@@ -79,7 +79,28 @@ export interface AgentGuardOptions {
   timeout?: number;
   /** Behavior when AgentGuard is unreachable: 'deny' (default) or 'allow' */
   failMode?: "deny" | "allow";
+  /**
+   * Optional tenant identifier (v0.5+).
+   *
+   * When set to a non-empty value other than `"local"`, every HTTP call
+   * is routed through the tenant-aware `/v1/t/{tenantId}/...` URL family
+   * instead of the legacy `/v1/...` path. Empty string, `undefined`, or
+   * `"local"` selects the legacy URLs (wire-compatible with v0.4.x
+   * servers). Falls back to the `AGENTGUARD_TENANT_ID` env var when
+   * available (Node only).
+   *
+   * v0.5 servers only recognise the literal `"local"` tenant; v0.6
+   * will validate against a configured tenant registry.
+   */
+  tenantId?: string;
 }
+
+/**
+ * Sentinel tenant value treated as an alias for the legacy URL family.
+ * Exported so callers can build the same comparison the SDK does without
+ * hardcoding the string literal in user code.
+ */
+export const LOCAL_TENANT_ID = "local";
 
 /**
  * Read a process.env variable without assuming Node. Returns undefined if
@@ -202,14 +223,17 @@ export class AgentGuard {
   private apiKey: string;
   private timeout: number;
   private failMode: "deny" | "allow";
+  private tenantId: string;
 
   constructor(baseUrlOrOptions?: string | AgentGuardOptions) {
     // Environment fallbacks mirror the Python SDK: AGENTGUARD_URL supplies
     // baseUrl when the caller did not pass one; AGENTGUARD_API_KEY supplies
-    // apiKey. Explicit values in the options object override the env var
-    // so callers that genuinely want to disable auth can pass apiKey: "".
+    // apiKey; AGENTGUARD_TENANT_ID supplies tenantId. Explicit values in
+    // the options object override the env var so callers that genuinely
+    // want to disable a setting can pass an empty string.
     const envBaseUrl = readEnv("AGENTGUARD_URL");
     const envApiKey = readEnv("AGENTGUARD_API_KEY") ?? "";
+    const envTenantId = readEnv("AGENTGUARD_TENANT_ID") ?? "";
 
     if (typeof baseUrlOrOptions === "string") {
       this.baseUrl = baseUrlOrOptions.replace(/\/$/, "");
@@ -217,6 +241,7 @@ export class AgentGuard {
       this.apiKey = envApiKey;
       this.timeout = 5000;
       this.failMode = "deny";
+      this.tenantId = envTenantId;
     } else {
       const opts = baseUrlOrOptions ?? {};
       this.baseUrl = (opts.baseUrl ?? envBaseUrl ?? "http://localhost:8080").replace(
@@ -227,7 +252,28 @@ export class AgentGuard {
       this.apiKey = opts.apiKey ?? envApiKey;
       this.timeout = opts.timeout ?? 5000;
       this.failMode = opts.failMode ?? "deny";
+      // tenantId precedence: an explicit options field — including the
+      // empty string — wins over the env var. Passing tenantId: "" is
+      // the supported way to suppress an env-var-leaked tenant in a
+      // scoped test or a sub-process that should hit the legacy URLs.
+      this.tenantId = opts.tenantId !== undefined ? opts.tenantId : envTenantId;
     }
+  }
+
+  /**
+   * Build the absolute URL for the given /v1 suffix.
+   *
+   * `suffix` is the path *after* `/v1`, e.g. `"/check"`,
+   * `"/approve/ap_abc"`, `"/audit"`. When `tenantId` is set and not
+   * `"local"`, the URL becomes `{baseUrl}/v1/t/{tenantId}{suffix}` with
+   * `tenantId` URL-encoded via `encodeURIComponent` so reserved chars
+   * (`/`, spaces) cannot break the path layout.
+   */
+  private url(suffix: string): string {
+    if (this.tenantId && this.tenantId !== LOCAL_TENANT_ID) {
+      return `${this.baseUrl}/v1/t/${encodeURIComponent(this.tenantId)}${suffix}`;
+    }
+    return `${this.baseUrl}/v1${suffix}`;
   }
 
   private authHeaders(): Record<string, string> {
@@ -259,7 +305,7 @@ export class AgentGuard {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.timeout);
 
-      const response = await fetch(`${this.baseUrl}/v1/check`, {
+      const response = await fetch(this.url("/check"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -295,7 +341,7 @@ export class AgentGuard {
    */
   async approve(approvalId: string): Promise<boolean> {
     try {
-      const res = await fetch(`${this.baseUrl}/v1/approve/${approvalId}`, {
+      const res = await fetch(this.url(`/approve/${approvalId}`), {
         method: "POST",
         headers: this.authHeaders(),
       });
@@ -310,7 +356,7 @@ export class AgentGuard {
    */
   async deny(approvalId: string): Promise<boolean> {
     try {
-      const res = await fetch(`${this.baseUrl}/v1/deny/${approvalId}`, {
+      const res = await fetch(this.url(`/deny/${approvalId}`), {
         method: "POST",
         headers: this.authHeaders(),
       });
@@ -336,7 +382,7 @@ export class AgentGuard {
     while (Date.now() < deadline) {
       try {
         const res = await fetch(
-          `${this.baseUrl}/v1/status/${approvalId}`,
+          this.url(`/status/${approvalId}`),
           { headers: this.authHeaders() }
         );
         if (res.ok) {

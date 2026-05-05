@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -23,12 +25,20 @@ const (
 )
 
 // CheckResult is the response returned after evaluating an action against policy.
+//
+// SchemaVersion identifies the wire-format version. v0.5+ servers always
+// emit "v1"; clients may use it to negotiate forward-compatibility. The
+// `omitempty` tag preserves byte-for-byte compatibility with v0.4.x test
+// fixtures that decode the response and assert on the JSON shape — the
+// field is always populated by the proxy at response time. The full
+// schema is documented in pkg/proxy/schema/v1/schema.json.
 type CheckResult struct {
-	Decision    Decision `json:"decision"`
-	Reason      string   `json:"reason"`
-	Rule        string   `json:"matched_rule,omitempty"`
-	ApprovalID  string   `json:"approval_id,omitempty"`
-	ApprovalURL string   `json:"approval_url,omitempty"`
+	SchemaVersion string   `json:"schema_version,omitempty"`
+	Decision      Decision `json:"decision"`
+	Reason        string   `json:"reason"`
+	Rule          string   `json:"matched_rule,omitempty"`
+	ApprovalID    string   `json:"approval_id,omitempty"`
+	ApprovalURL   string   `json:"approval_url,omitempty"`
 }
 
 // Policy is the top-level policy document.
@@ -185,7 +195,11 @@ type NotifyTarget struct {
 	Timeout string `yaml:"timeout,omitempty"`
 }
 
-// LoadFromFile reads and parses a policy YAML file.
+// LoadFromFile reads and parses a policy YAML file. The file is read,
+// parsed, and validated by the same code path that PolicyProvider.Validate
+// invokes for raw bytes — only the os.ReadFile step is unique to this
+// function. Validation errors include the YAML path so operators can find
+// the failing field without grepping.
 func LoadFromFile(path string) (*Policy, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -204,31 +218,11 @@ func LoadFromFile(path string) (*Policy, error) {
 		return nil, fmt.Errorf("policy missing required 'name' field")
 	}
 
-	// Reject filesystem rule patterns containing ".." after normalization.
-	// This prevents policy authors from accidentally writing traversal-prone
-	// patterns like "./workspace/../../etc/**".
-	for _, rs := range pol.Rules {
-		if rs.Scope != "filesystem" {
-			continue
-		}
-		for _, rules := range [][]Rule{rs.Allow, rs.Deny, rs.RequireApproval} {
-			for _, rule := range rules {
-				for _, p := range rule.Paths {
-					cleaned := filepath.ToSlash(filepath.Clean(p))
-					if containsDotDot(cleaned) {
-						return nil, fmt.Errorf("filesystem rule pattern %q contains '..' after normalization — this is a path traversal risk", p)
-					}
-				}
-			}
-		}
+	if err := validateFilesystemPaths(&pol); err != nil {
+		return nil, err
 	}
-
-	// Validate notification redaction patterns compile as RE2 regexes.
-	// Fail fast at load rather than at first notification dispatch.
-	for i, p := range pol.Notifications.Redaction.ExtraPatterns {
-		if _, err := regexp.Compile(p); err != nil {
-			return nil, fmt.Errorf("notifications.redaction.extra_patterns[%d]: invalid regex %q: %w", i, p, err)
-		}
+	if err := validateRedactionPatterns(&pol); err != nil {
+		return nil, err
 	}
 
 	// Validate proxy and notification tunables: parse durations, bound-check
@@ -257,6 +251,42 @@ func LoadFromFile(path string) (*Policy, error) {
 	}
 
 	return &pol, nil
+}
+
+// validateFilesystemPaths rejects filesystem rule patterns containing ".."
+// after normalization. This prevents policy authors from accidentally
+// writing traversal-prone patterns like "./workspace/../../etc/**".
+// Factored out of LoadFromFile so PolicyProvider.Validate can reuse it.
+func validateFilesystemPaths(pol *Policy) error {
+	for _, rs := range pol.Rules {
+		if rs.Scope != "filesystem" {
+			continue
+		}
+		for _, rules := range [][]Rule{rs.Allow, rs.Deny, rs.RequireApproval} {
+			for _, rule := range rules {
+				for _, p := range rule.Paths {
+					cleaned := filepath.ToSlash(filepath.Clean(p))
+					if containsDotDot(cleaned) {
+						return fmt.Errorf("filesystem rule pattern %q contains '..' after normalization — this is a path traversal risk", p)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// validateRedactionPatterns checks that every notification redaction
+// extra_pattern compiles as an RE2 regex. Failing fast here means the
+// dispatcher does not have to recover from a bad pattern at first
+// dispatch.
+func validateRedactionPatterns(pol *Policy) error {
+	for i, p := range pol.Notifications.Redaction.ExtraPatterns {
+		if _, err := regexp.Compile(p); err != nil {
+			return fmt.Errorf("notifications.redaction.extra_patterns[%d]: invalid regex %q: %w", i, p, err)
+		}
+	}
+	return nil
 }
 
 // validateRuleDurationsAndCounts walks every RuleSet's rate_limit and every
@@ -557,20 +587,139 @@ type sessionCostEntry struct {
 	lastUpdated time.Time
 }
 
-// Engine evaluates actions against a policy.
+// Engine evaluates actions against a policy. The policy itself is owned
+// by a PolicyProvider (file-backed, static, or — in v0.6 — database-backed),
+// not by the Engine. Engine caches the latest *Policy for the local tenant
+// via a Watch subscription so that Check() does not pay a provider lookup
+// on every request.
+//
+// Caching strategy: the cached pointer is refreshed whenever the provider
+// fires its watch callback (for FilePolicyProvider, on every successful
+// reload; for StaticPolicyProvider, on every UpdatePolicy call). All
+// reads of the cache use Engine.mu so a concurrent reload cannot tear a
+// pointer swap. See .audit/v05_decisions.md ("PolicyProvider interface
+// design") for the rationale on choosing watch-cache over per-Check Get.
 type Engine struct {
 	mu           sync.RWMutex
-	policy       *Policy
+	provider     PolicyProvider
+	policy       *Policy // cached snapshot for LocalTenantID; refreshed by watchStop
+	watchStop    func()
 	history      HistoryQuerier
 	sessionCosts map[string]sessionCostEntry // session_id -> entry
+
+	// lastPolicyLoadAtNs records the unix-nanosecond timestamp of the most
+	// recent successful policy load (initial Get + each Watch callback fire).
+	// Stored as int64 and accessed via sync/atomic so health probes can read
+	// it without contending with Engine.mu on the hot path.
+	// See .audit/v05_decisions.md ("Health endpoint: lastPolicyLoadAt
+	// location") for why this lives on Engine rather than PolicyProvider.
+	lastPolicyLoadAtNs int64
 }
 
-// NewEngine creates a policy engine with the given policy.
-func NewEngine(pol *Policy) *Engine {
-	return &Engine{
+// NewEngine creates a policy engine that reads policies through the given
+// provider. The engine immediately calls provider.Get(LocalTenantID) to
+// populate its cached policy and registers a Watch callback so subsequent
+// changes are picked up automatically.
+//
+// A nil provider is rejected. A provider that returns ErrTenantNotFound
+// for the local tenant on initial Get is also rejected — this catches
+// configuration mistakes (an empty file provider, a database with no
+// tenant row) at boot rather than at the first Check call. Operators who
+// genuinely need a policy-less engine (e.g. tests that populate the
+// provider after construction) should use NewStaticPolicyProvider with a
+// non-nil placeholder *Policy and update it later.
+func NewEngine(provider PolicyProvider) (*Engine, error) {
+	if provider == nil {
+		return nil, fmt.Errorf("policy: NewEngine requires a non-nil PolicyProvider")
+	}
+	pol, err := provider.Get(LocalTenantID)
+	if err != nil {
+		return nil, fmt.Errorf("policy: provider has no policy for tenant %q: %w", LocalTenantID, err)
+	}
+	e := &Engine{
+		provider:     provider,
 		policy:       pol,
 		sessionCosts: make(map[string]sessionCostEntry),
 	}
+	// Stamp the load timestamp before Watch wires up so a probe that
+	// races with NewEngine never sees the zero value when a policy is in
+	// fact loaded. The watch callback re-stamps on every reload.
+	e.noteLoad()
+	stop, err := provider.Watch(LocalTenantID, e.onPolicyChange)
+	if err != nil {
+		return nil, fmt.Errorf("policy: provider Watch failed for tenant %q: %w", LocalTenantID, err)
+	}
+	e.watchStop = stop
+	return e, nil
+}
+
+// NewEngineFromPolicy is a convenience constructor that wraps pol in a
+// StaticPolicyProvider and hands the provider to NewEngine. Library
+// embedders who manage policy lifecycle out-of-band, plus the engine's
+// own test suite, use this to avoid the FilePolicyProvider boilerplate.
+//
+// The returned engine owns the StaticPolicyProvider — calling Engine.Close
+// stops the watch subscription but does not close the provider; callers
+// that need full teardown should construct the provider explicitly.
+func NewEngineFromPolicy(pol *Policy) *Engine {
+	prov := NewStaticPolicyProvider(pol)
+	e, err := NewEngine(prov)
+	if err != nil {
+		// The only failure mode of NewEngine on a StaticPolicyProvider is
+		// pol == nil. Surface a deterministic engine wrapping a sentinel
+		// policy so callers (mostly tests) get a useful default-deny
+		// engine rather than a nil pointer.
+		prov.UpdatePolicy(&Policy{Version: "1", Name: "empty"})
+		e2, _ := NewEngine(prov)
+		return e2
+	}
+	return e
+}
+
+// onPolicyChange refreshes the engine's cached policy when the provider
+// reports a change. Invoked from the provider's watcher goroutine; takes
+// the write lock briefly to avoid a torn read in Check.
+func (e *Engine) onPolicyChange(newPol *Policy) {
+	e.mu.Lock()
+	e.policy = newPol
+	e.mu.Unlock()
+	// Stamp the load timestamp outside the engine lock so a slow health
+	// probe never serializes against Check. The value is monotonic-ish
+	// (wall clock) — operators querying it get RFC 3339 timestamps for
+	// human display, not for distributed-systems ordering.
+	e.noteLoad()
+}
+
+// noteLoad stamps the timestamp of the most recent successful policy
+// load. Atomic write so LastPolicyLoadAt() can read without taking
+// Engine.mu — health probes must not block the hot path.
+func (e *Engine) noteLoad() {
+	atomic.StoreInt64(&e.lastPolicyLoadAtNs, time.Now().UnixNano())
+}
+
+// LastPolicyLoadAt returns the wall-clock time of the most recent
+// successful policy load. Returns the zero time if no policy has been
+// loaded yet (which should not occur at runtime: NewEngine refuses to
+// construct without a successful initial Get and stamps the timestamp
+// before returning).
+func (e *Engine) LastPolicyLoadAt() time.Time {
+	ns := atomic.LoadInt64(&e.lastPolicyLoadAtNs)
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
+}
+
+// Close releases the engine's Watch subscription. Safe to call multiple
+// times (the underlying stop function uses sync.Once). Engines that
+// outlive their server should call Close to avoid leaking the callback
+// registration on the provider.
+func (e *Engine) Close() error {
+	if e.watchStop != nil {
+		e.watchStop()
+		e.watchStop = nil
+	}
+	return nil
 }
 
 // SetHistoryQuerier sets the history querier for conditional rule evaluation.
@@ -653,43 +802,122 @@ func (e *Engine) SessionCostCount() int {
 	return len(e.sessionCosts)
 }
 
-// UpdatePolicy hot-swaps the active policy.
-func (e *Engine) UpdatePolicy(pol *Policy) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.policy = pol
-}
-
-// Policy returns the currently active policy (thread-safe).
+// Policy returns the currently active policy for the local tenant
+// (thread-safe). Returns nil only if the provider's most recent Get
+// surfaced ErrTenantNotFound for the local tenant; in v0.5 that should
+// not happen at runtime because NewEngine refuses to construct without a
+// policy.
 func (e *Engine) Policy() *Policy {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.policy
 }
 
-// ActionRequest represents an agent's intended action.
-type ActionRequest struct {
-	Scope     string            `json:"scope"`
-	Action    string            `json:"action,omitempty"`
-	Command   string            `json:"command,omitempty"`
-	Path      string            `json:"path,omitempty"`
-	Domain    string            `json:"domain,omitempty"`
-	URL       string            `json:"url,omitempty"`
-	AgentID   string            `json:"agent_id,omitempty"`
-	SessionID string            `json:"session_id,omitempty"`
-	EstCost   float64           `json:"est_cost,omitempty"`
-	Meta      map[string]string `json:"meta,omitempty"`
+// PolicyForTenant returns the policy for tenantID (or the cached local
+// policy when tenantID is "" or LocalTenantID). Forwards to the
+// underlying provider for any other tenantID so multi-tenant providers
+// (v0.6+) can resolve tenants the engine has not subscribed to. Returns
+// ErrTenantNotFound when the tenant is unknown.
+//
+// Used by /v1/health and the /v1/t/{tenant}/health endpoint to validate
+// the requested tenant before composing the response. Health is the
+// only caller in v0.5; the hot path (Engine.Check) goes through the
+// existing dispatch logic and remains unchanged.
+func (e *Engine) PolicyForTenant(tenantID string) (*Policy, error) {
+	if tenantID == "" || tenantID == LocalTenantID {
+		e.mu.RLock()
+		pol := e.policy
+		e.mu.RUnlock()
+		if pol == nil {
+			return nil, ErrTenantNotFound
+		}
+		return pol, nil
+	}
+	if e.provider == nil {
+		return nil, ErrTenantNotFound
+	}
+	return e.provider.Get(tenantID)
 }
 
-// Check evaluates an action request against the active policy.
-// Order: deny rules -> require_approval rules -> allow rules -> default deny.
-// Per-agent overrides are applied when AgentID matches a key in policy.Agents.
+// ActionRequest represents an agent's intended action.
+//
+// SchemaVersion identifies the wire-format version. Clients may omit
+// it (the proxy defaults missing values to "v1"); supplying any value
+// other than "v1" is rejected with HTTP 400. The full schema is
+// documented in pkg/proxy/schema/v1/schema.json.
+type ActionRequest struct {
+	SchemaVersion string            `json:"schema_version,omitempty"`
+	Scope         string            `json:"scope"`
+	Action        string            `json:"action,omitempty"`
+	Command       string            `json:"command,omitempty"`
+	Path          string            `json:"path,omitempty"`
+	Domain        string            `json:"domain,omitempty"`
+	URL           string            `json:"url,omitempty"`
+	AgentID       string            `json:"agent_id,omitempty"`
+	SessionID     string            `json:"session_id,omitempty"`
+	EstCost       float64           `json:"est_cost,omitempty"`
+	Meta          map[string]string `json:"meta,omitempty"`
+}
+
+// Check evaluates an action request against the active policy for the
+// given tenant. Order: deny rules -> require_approval rules -> allow
+// rules -> default deny. Per-agent overrides are applied when AgentID
+// matches a key in policy.Agents.
+//
+// tenantID selects which policy to evaluate against. v0.5 only supports
+// the local tenant ("" and "local" are accepted; everything else returns
+// a synthetic DENY with Rule="deny:tenant:not_found"). The proxy passes
+// "local" today; multi-tenant URL routing arrives with worker A7 in this
+// phase.
+//
+// Bad-tenant is surfaced as a CheckResult Deny rather than an error
+// because the existing handleCheck flow already routes Deny through the
+// audit + notify + response path; introducing a separate error channel
+// would force every caller to add bespoke fallback logic for a case the
+// CheckResult schema already covers. Future providers that need to
+// distinguish "tenant unknown" from "tenant denied" can do so via
+// Rule="deny:tenant:not_found" (the canonical sentinel). See
+// .audit/v05_decisions.md ("PolicyProvider interface design") for the
+// rationale.
 //
 // For cost-scoped requests that are ALLOWed, the session accumulator is
 // incremented atomically under the same write lock as the decision, so
 // concurrent checks on the same session_id cannot collectively exceed the
 // configured max_per_session limit (TOCTOU fix).
-func (e *Engine) Check(req ActionRequest) CheckResult {
+func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
+	// Reject any tenant the provider does not recognise. We consult the
+	// provider rather than just the cached policy because v0.6 multi-tenant
+	// providers will populate other tenant IDs that this engine has not
+	// yet observed; refusing on cache miss alone would cause a false 404
+	// in those topologies. In v0.5 the only valid tenant is "local", so
+	// the cache and the provider always agree.
+	if tenantID == "" {
+		tenantID = LocalTenantID
+	}
+	if tenantID != LocalTenantID {
+		// FilePolicyProvider rejects every non-local tenant with
+		// ErrTenantNotFound; future providers may accept others.
+		if _, err := e.provider.Get(tenantID); err != nil {
+			if errors.Is(err, ErrTenantNotFound) {
+				return CheckResult{
+					Decision: Deny,
+					Reason:   fmt.Sprintf("tenant %q has no policy", tenantID),
+					Rule:     "deny:tenant:not_found",
+				}
+			}
+			// A non-ErrTenantNotFound error from the provider is an
+			// internal infrastructure failure (DB down in v0.6); treat
+			// it as default-deny with a distinct sentinel rule so
+			// operators can alert on it without confusing it with a
+			// missing-tenant case.
+			return CheckResult{
+				Decision: Deny,
+				Reason:   fmt.Sprintf("policy provider lookup failed for tenant %q: %v", tenantID, err),
+				Rule:     "deny:tenant:provider_error",
+			}
+		}
+	}
+
 	// Normalize request inputs (Unicode, URL-encoding, null bytes) before
 	// matching. Callers should ideally do this at the proxy boundary, but we
 	// do it here as a belt-and-suspenders defense.
@@ -704,6 +932,16 @@ func (e *Engine) Check(req ActionRequest) CheckResult {
 	} else {
 		e.mu.RLock()
 		defer e.mu.RUnlock()
+	}
+
+	if e.policy == nil {
+		// Cache empty — the provider lost its policy between construction
+		// and now. Treat as default-deny rather than panicking.
+		return CheckResult{
+			Decision: Deny,
+			Reason:   fmt.Sprintf("tenant %q has no policy", tenantID),
+			Rule:     "deny:tenant:not_found",
+		}
 	}
 
 	rules := e.resolveRules(req.AgentID)

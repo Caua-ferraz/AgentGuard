@@ -100,8 +100,8 @@ func TestEngineCheck_CostInvalidConfig(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
-	result := engine.Check(ActionRequest{Scope: "cost", EstCost: 0.10})
+	engine := NewEngineFromPolicy(pol)
+	result := engine.Check(ActionRequest{Scope: "cost", EstCost: 0.10}, "local")
 	if result.Decision != Deny {
 		t.Errorf("expected DENY for invalid cost config, got %s: %s", result.Decision, result.Reason)
 	}
@@ -125,8 +125,8 @@ func TestEngineCheck_CostInvalidAlertThreshold(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
-	result := engine.Check(ActionRequest{Scope: "cost", EstCost: 0.10})
+	engine := NewEngineFromPolicy(pol)
+	result := engine.Check(ActionRequest{Scope: "cost", EstCost: 0.10}, "local")
 	if result.Decision != Deny {
 		t.Errorf("expected DENY for invalid alert_threshold, got %s: %s", result.Decision, result.Reason)
 	}
@@ -147,10 +147,10 @@ func TestEngineCheck_CostNegativeValue(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	// Negative cost should be denied
-	result := engine.Check(ActionRequest{Scope: "cost", EstCost: -5.00})
+	result := engine.Check(ActionRequest{Scope: "cost", EstCost: -5.00}, "local")
 	if result.Decision != Deny {
 		t.Errorf("expected DENY for negative cost, got %s: %s", result.Decision, result.Reason)
 	}
@@ -159,7 +159,7 @@ func TestEngineCheck_CostNegativeValue(t *testing.T) {
 	}
 
 	// Zero cost should be allowed (no bypass)
-	result = engine.Check(ActionRequest{Scope: "cost", EstCost: 0})
+	result = engine.Check(ActionRequest{Scope: "cost", EstCost: 0}, "local")
 	if result.Decision != Allow {
 		t.Errorf("expected ALLOW for zero cost, got %s: %s", result.Decision, result.Reason)
 	}
@@ -172,7 +172,7 @@ func TestDefaultPolicy_LoadAndBasicRules(t *testing.T) {
 		t.Fatalf("Failed to load default policy: %v", err)
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	tests := []struct {
 		name     string
@@ -233,7 +233,7 @@ func TestDefaultPolicy_LoadAndBasicRules(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := engine.Check(tt.req)
+			result := engine.Check(tt.req, "local")
 			if result.Decision != tt.expected {
 				t.Errorf("Check(%+v) = %s, want %s (reason: %s, rule: %s)",
 					tt.req, result.Decision, tt.expected, result.Reason, result.Rule)
@@ -260,7 +260,7 @@ func TestEngineCheck_ConcurrentSafety(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 	done := make(chan struct{})
 
 	// Run 100 concurrent checks
@@ -268,17 +268,17 @@ func TestEngineCheck_ConcurrentSafety(t *testing.T) {
 		go func(n int) {
 			defer func() { done <- struct{}{} }()
 			if n%3 == 0 {
-				r := engine.Check(ActionRequest{Scope: "shell", Command: "ls -la"})
+				r := engine.Check(ActionRequest{Scope: "shell", Command: "ls -la"}, "local")
 				if r.Decision != Allow {
 					t.Errorf("expected ALLOW for ls, got %s", r.Decision)
 				}
 			} else if n%3 == 1 {
-				r := engine.Check(ActionRequest{Scope: "shell", Command: "rm file"})
+				r := engine.Check(ActionRequest{Scope: "shell", Command: "rm file"}, "local")
 				if r.Decision != Deny {
 					t.Errorf("expected DENY for rm, got %s", r.Decision)
 				}
 			} else {
-				r := engine.Check(ActionRequest{Scope: "network", Domain: "api.openai.com"})
+				r := engine.Check(ActionRequest{Scope: "network", Domain: "api.openai.com"}, "local")
 				if r.Decision != Allow {
 					t.Errorf("expected ALLOW for openai, got %s", r.Decision)
 				}
@@ -322,7 +322,7 @@ func TestConditionalRule_RequirePrior_Met(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 	engine.SetHistoryQuerier(&mockHistory{
 		entries: []HistoryEntry{
 			{Command: "test all", Decision: Allow},
@@ -330,7 +330,7 @@ func TestConditionalRule_RequirePrior_Met(t *testing.T) {
 	})
 
 	// Deploy should be allowed because "test *" was recently allowed
-	result := engine.Check(ActionRequest{Scope: "shell", Command: "deploy prod", AgentID: "bot"})
+	result := engine.Check(ActionRequest{Scope: "shell", Command: "deploy prod", AgentID: "bot"}, "local")
 	if result.Decision != Allow {
 		t.Errorf("expected ALLOW (prior condition met), got %s: %s", result.Decision, result.Reason)
 	}
@@ -355,11 +355,11 @@ func TestConditionalRule_RequirePrior_NotMet(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 	engine.SetHistoryQuerier(&mockHistory{entries: nil}) // no prior actions
 
 	// Deploy should be denied because no prior "test *" action
-	result := engine.Check(ActionRequest{Scope: "shell", Command: "deploy prod", AgentID: "bot"})
+	result := engine.Check(ActionRequest{Scope: "shell", Command: "deploy prod", AgentID: "bot"}, "local")
 	if result.Decision != Deny {
 		t.Errorf("expected DENY (prior condition not met), got %s: %s", result.Decision, result.Reason)
 	}
@@ -384,14 +384,14 @@ func TestConditionalRule_RequirePrior_DeniedPriorDoesNotCount(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 	engine.SetHistoryQuerier(&mockHistory{
 		entries: []HistoryEntry{
 			{Command: "test all", Decision: Deny}, // was denied, doesn't count
 		},
 	})
 
-	result := engine.Check(ActionRequest{Scope: "shell", Command: "deploy prod", AgentID: "bot"})
+	result := engine.Check(ActionRequest{Scope: "shell", Command: "deploy prod", AgentID: "bot"}, "local")
 	if result.Decision != Deny {
 		t.Errorf("expected DENY (denied prior doesn't satisfy condition), got %s: %s", result.Decision, result.Reason)
 	}
@@ -416,10 +416,10 @@ func TestConditionalRule_NoHistoryQuerier(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol) // no history querier set
+	engine := NewEngineFromPolicy(pol) // no history querier set
 
 	// Without a querier, conditions can't be verified → rule doesn't match → default deny
-	result := engine.Check(ActionRequest{Scope: "shell", Command: "deploy prod"})
+	result := engine.Check(ActionRequest{Scope: "shell", Command: "deploy prod"}, "local")
 	if result.Decision != Deny {
 		t.Errorf("expected DENY when no history querier, got %s", result.Decision)
 	}
@@ -442,22 +442,22 @@ func TestSessionCost_EnforcesLimit(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	// Check now atomically reserves the cost on Allow — no manual RecordCost
 	// follow-up is needed (that would double-count).
-	r1 := engine.Check(ActionRequest{Scope: "cost", EstCost: 4.00, SessionID: "sess-1"})
+	r1 := engine.Check(ActionRequest{Scope: "cost", EstCost: 4.00, SessionID: "sess-1"}, "local")
 	if r1.Decision != Allow {
 		t.Fatalf("expected ALLOW for $4, got %s: %s", r1.Decision, r1.Reason)
 	}
 
-	r2 := engine.Check(ActionRequest{Scope: "cost", EstCost: 4.00, SessionID: "sess-1"})
+	r2 := engine.Check(ActionRequest{Scope: "cost", EstCost: 4.00, SessionID: "sess-1"}, "local")
 	if r2.Decision != Allow {
 		t.Fatalf("expected ALLOW for $4 (cumulative $8), got %s: %s", r2.Decision, r2.Reason)
 	}
 
 	// Third action: $3.00 — denied (cumulative $8 + $3 = $11 > $10)
-	r3 := engine.Check(ActionRequest{Scope: "cost", EstCost: 3.00, SessionID: "sess-1"})
+	r3 := engine.Check(ActionRequest{Scope: "cost", EstCost: 3.00, SessionID: "sess-1"}, "local")
 	if r3.Decision != Deny {
 		t.Fatalf("expected DENY for $3 (would exceed $10 session limit), got %s: %s", r3.Decision, r3.Reason)
 	}
@@ -485,19 +485,19 @@ func TestSessionCost_IndependentSessions(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	// Session A: reserve $9 up front (e.g. from prior session state restore).
 	engine.RecordCost("sess-a", 9.00)
 
 	// Session B: $4 should be allowed (independent).
-	r := engine.Check(ActionRequest{Scope: "cost", EstCost: 4.00, SessionID: "sess-b"})
+	r := engine.Check(ActionRequest{Scope: "cost", EstCost: 4.00, SessionID: "sess-b"}, "local")
 	if r.Decision != Allow {
 		t.Errorf("expected ALLOW for separate session, got %s: %s", r.Decision, r.Reason)
 	}
 
 	// Session A: $2 should be denied ($9 + $2 > $10).
-	r = engine.Check(ActionRequest{Scope: "cost", EstCost: 2.00, SessionID: "sess-a"})
+	r = engine.Check(ActionRequest{Scope: "cost", EstCost: 2.00, SessionID: "sess-a"}, "local")
 	if r.Decision != Deny {
 		t.Errorf("expected DENY for session A ($9 + $2 > $10), got %s: %s", r.Decision, r.Reason)
 	}
@@ -519,13 +519,13 @@ func TestSweepSessionCosts_EvictsStale(t *testing.T) {
 			},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	// Reserve cost for two sessions — both map entries are now fresh.
-	if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "old"}); r.Decision != Allow {
+	if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "old"}, "local"); r.Decision != Allow {
 		t.Fatalf("expected ALLOW for old, got %s: %s", r.Decision, r.Reason)
 	}
-	if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "fresh"}); r.Decision != Allow {
+	if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "fresh"}, "local"); r.Decision != Allow {
 		t.Fatalf("expected ALLOW for fresh, got %s: %s", r.Decision, r.Reason)
 	}
 
@@ -565,8 +565,8 @@ func TestSweepSessionCosts_ZeroOrNegativeIsNoop(t *testing.T) {
 			},
 		},
 	}
-	engine := NewEngine(pol)
-	engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "s"})
+	engine := NewEngineFromPolicy(pol)
+	engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "s"}, "local")
 
 	// Backdate so the entry would look stale under any positive TTL.
 	engine.mu.Lock()
@@ -602,8 +602,8 @@ func TestSweepSessionCosts_PreservesActiveReservation(t *testing.T) {
 			},
 		},
 	}
-	engine := NewEngine(pol)
-	engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "active"})
+	engine := NewEngineFromPolicy(pol)
+	engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "active"}, "local")
 
 	// A sweep with a very short TTL immediately after an update should NOT
 	// evict — the entry's lastUpdated is essentially time.Now().
@@ -627,10 +627,10 @@ func TestSessionCost_NoSessionID(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	// No session ID → session limit not enforced
-	r := engine.Check(ActionRequest{Scope: "cost", EstCost: 4.00})
+	r := engine.Check(ActionRequest{Scope: "cost", EstCost: 4.00}, "local")
 	if r.Decision != Allow {
 		t.Errorf("expected ALLOW without session ID, got %s: %s", r.Decision, r.Reason)
 	}

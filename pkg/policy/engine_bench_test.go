@@ -23,7 +23,7 @@ func BenchmarkEngineCheck_AllowFastPath(b *testing.B) {
 			},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 	req := ActionRequest{
 		Scope:   "shell",
 		Command: "ls -la /tmp",
@@ -33,7 +33,7 @@ func BenchmarkEngineCheck_AllowFastPath(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		r := engine.Check(req)
+		r := engine.Check(req, "local")
 		if r.Decision != Allow {
 			b.Fatalf("unexpected decision %s", r.Decision)
 		}
@@ -64,7 +64,7 @@ func BenchmarkEngineCheck_DenyDeepMatch(b *testing.B) {
 			},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 	req := ActionRequest{
 		Scope:   "shell",
 		Command: "rm -rf /tmp/data",
@@ -74,7 +74,7 @@ func BenchmarkEngineCheck_DenyDeepMatch(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		r := engine.Check(req)
+		r := engine.Check(req, "local")
 		if r.Decision != Deny {
 			b.Fatalf("unexpected decision %s", r.Decision)
 		}

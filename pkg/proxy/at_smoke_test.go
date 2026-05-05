@@ -64,7 +64,7 @@ func TestATSmoke_FullServerHappyPath(t *testing.T) {
 	t.Cleanup(disp.Close)
 
 	srv := newIntegrationServer(t, func(c *Config) {
-		c.Engine = policy.NewEngine(pol)
+		c.Engine = policy.NewEngineFromPolicy(pol)
 		c.Logger = logger
 		c.Notifier = disp
 		c.APIKey = "at-smoke-key"

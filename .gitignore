@@ -1,5 +1,5 @@
-# Binaries
-agentguard
+# Binaries (anchor root-only — the unanchored form matched cmd/agentguard/ as a path component)
+/agentguard
 *.exe
 *.dll
 *.so

@@ -29,14 +29,14 @@ func TestSessionCostTTLEviction(t *testing.T) {
 			},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	// Reserve $5 against session "to-evict".
 	r := engine.Check(ActionRequest{
 		Scope:     "cost",
 		EstCost:   5.00,
 		SessionID: "to-evict",
-	})
+	}, "local")
 	if r.Decision != Allow {
 		t.Fatalf("expected ALLOW, got %s: %s", r.Decision, r.Reason)
 	}

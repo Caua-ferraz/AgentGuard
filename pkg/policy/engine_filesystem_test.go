@@ -28,7 +28,7 @@ func TestFilesystemPathTraversal(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	tests := []struct {
 		name     string
@@ -93,7 +93,7 @@ func TestFilesystemPathTraversal(t *testing.T) {
 				Scope:  "filesystem",
 				Action: tt.action,
 				Path:   tt.path,
-			})
+			}, "local")
 			if result.Decision != tt.expected {
 				t.Errorf("Check(action=%s, path=%s) = %s, want %s (reason: %s, rule: %s)",
 					tt.action, tt.path, result.Decision, tt.expected, result.Reason, result.Rule)
@@ -121,7 +121,7 @@ func TestFilesystemTraversal_CleanedPathMatchesDenyRule(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	// After Clean, "./workspace/../etc/passwd" becomes "etc/passwd".
 	// This doesn't start with "/etc/" so the explicit deny wouldn't match
@@ -131,7 +131,7 @@ func TestFilesystemTraversal_CleanedPathMatchesDenyRule(t *testing.T) {
 		Scope:  "filesystem",
 		Action: "read",
 		Path:   "/etc/passwd",
-	})
+	}, "local")
 	if result.Decision != Deny {
 		t.Errorf("direct /etc/passwd: expected DENY, got %s (%s)", result.Decision, result.Reason)
 	}

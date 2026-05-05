@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 from urllib import request, error
+from urllib.parse import quote as urlquote
 
 # --- Defaults and constants ---
 DEFAULT_BASE_URL = "http://localhost:8080"
@@ -36,11 +37,20 @@ DECISION_ALLOW = "ALLOW"
 DECISION_DENY = "DENY"
 DECISION_REQUIRE_APPROVAL = "REQUIRE_APPROVAL"
 
-# API endpoint paths
-ENDPOINT_CHECK = "/v1/check"
-ENDPOINT_APPROVE = "/v1/approve/"
-ENDPOINT_DENY = "/v1/deny/"
-ENDPOINT_STATUS = "/v1/status/"
+# API endpoint paths. The leading "/v1" is added by Guard._url so a single
+# code path handles both the legacy /v1/<suffix> URLs and the tenant-aware
+# /v1/t/<tenant>/<suffix> form introduced in v0.5 (worker A7).
+ENDPOINT_CHECK = "/check"
+ENDPOINT_APPROVE = "/approve/"
+ENDPOINT_DENY = "/deny/"
+ENDPOINT_STATUS = "/status/"
+
+# Default tenant when the SDK caller did not pass tenant_id and
+# AGENTGUARD_TENANT_ID is unset. "local" is also the literal alias the Go
+# proxy maps onto its single-tenant code path; passing it explicitly is
+# equivalent to omitting the field. Any other value triggers the
+# /v1/t/{tenant_id}/... URL family.
+LOCAL_TENANT_ID = "local"
 
 # Fail-mode values for the Guard() constructor. "deny" fails closed when the
 # AgentGuard proxy is unreachable (the v0.4.0 default and current v0.4.1
@@ -142,6 +152,7 @@ class Guard:
         timeout: int = DEFAULT_TIMEOUT,
         api_key: str = "",
         fail_mode: str = FAIL_MODE_DENY,
+        tenant_id: Optional[str] = None,
     ):
         """Construct a Guard client.
 
@@ -159,6 +170,14 @@ class Guard:
                 as best-effort and the caller accepts the safety trade-off.
                 An invalid value raises ValueError at construction so the
                 bug surfaces at startup instead of mid-request.
+            tenant_id: Optional tenant identifier (v0.5+). When set to a
+                non-empty value other than ``"local"``, every HTTP call is
+                routed through the tenant-aware ``/v1/t/{tenant_id}/...``
+                URL family instead of the legacy ``/v1/...`` path. ``None``
+                or ``"local"`` selects the legacy URLs and is wire-compatible
+                with v0.4.x servers. Falls back to ``AGENTGUARD_TENANT_ID``.
+                v0.5 servers only recognise the literal ``"local"`` tenant;
+                v0.6 will validate against a configured tenant registry.
 
         v0.5.0 parity note: the TypeScript SDK already honors `failMode`,
         default `"deny"`. v0.5.0 will align both SDKs on explicit fail-mode
@@ -174,6 +193,30 @@ class Guard:
         self.timeout = timeout
         self.api_key = api_key or os.environ.get("AGENTGUARD_API_KEY", "")
         self.fail_mode = fail_mode
+        # tenant_id resolution priority: explicit kwarg → AGENTGUARD_TENANT_ID
+        # env → empty string. An explicit empty string from the caller is
+        # honored (env lookup is skipped) so callers can disable an
+        # accidentally-set environment variable in scoped tests.
+        if tenant_id is None:
+            tenant_id = os.environ.get("AGENTGUARD_TENANT_ID", "")
+        self.tenant_id = tenant_id
+
+    def _url(self, suffix: str) -> str:
+        """Build the absolute URL for the given /v1 suffix.
+
+        ``suffix`` is the path *after* ``/v1``, e.g. ``"/check"``,
+        ``"/approve/ap_abc"``, ``"/audit"``. Tenant resolution:
+
+        - tenant_id is unset, empty, or the literal ``"local"``:
+          legacy URL family ``{base_url}/v1{suffix}``.
+        - tenant_id is anything else: ``{base_url}/v1/t/{tenant_id}{suffix}``,
+          with ``tenant_id`` URL-quoted via ``urllib.parse.quote(safe="")``
+          so values containing ``/`` (or other reserved characters) are
+          escaped rather than allowed to break the path layout.
+        """
+        if self.tenant_id and self.tenant_id != LOCAL_TENANT_ID:
+            return f"{self.base_url}/v1/t/{urlquote(self.tenant_id, safe='')}{suffix}"
+        return f"{self.base_url}/v1{suffix}"
 
     def check(
         self,
@@ -227,7 +270,7 @@ class Guard:
 
         data = json.dumps(payload).encode("utf-8")
         req = request.Request(
-            f"{self.base_url}{ENDPOINT_CHECK}",
+            self._url(ENDPOINT_CHECK),
             data=data,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -275,7 +318,7 @@ class Guard:
     def approve(self, approval_id: str) -> bool:
         """Approve a pending action."""
         req = request.Request(
-            f"{self.base_url}{ENDPOINT_APPROVE}{approval_id}",
+            self._url(f"{ENDPOINT_APPROVE}{approval_id}"),
             headers=self._auth_headers(),
             method="POST",
         )
@@ -288,7 +331,7 @@ class Guard:
     def deny(self, approval_id: str) -> bool:
         """Deny a pending action."""
         req = request.Request(
-            f"{self.base_url}{ENDPOINT_DENY}{approval_id}",
+            self._url(f"{ENDPOINT_DENY}{approval_id}"),
             headers=self._auth_headers(),
             method="POST",
         )
@@ -313,7 +356,7 @@ class Guard:
         while time.time() < deadline:
             # Poll the status endpoint for resolution
             req = request.Request(
-                f"{self.base_url}{ENDPOINT_STATUS}{approval_id}",
+                self._url(f"{ENDPOINT_STATUS}{approval_id}"),
                 headers=self._auth_headers(),
                 method="GET",
             )

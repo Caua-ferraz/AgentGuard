@@ -63,7 +63,7 @@ func newTestServer(t *testing.T, opts ...func(*Config)) *Server {
 
 	cfg := Config{
 		Port:             0,
-		Engine:           policy.NewEngine(pol),
+		Engine:           policy.NewEngineFromPolicy(pol),
 		Logger:           logger,
 		DashboardEnabled: true,
 		Notifier:         notify.NewDispatcher(policy.NotificationCfg{}),
@@ -1521,7 +1521,7 @@ func TestNewServer_LocalhostBindingWithoutAPIKey(t *testing.T) {
 
 	srv := NewServer(Config{
 		Port:    8080,
-		Engine:  policy.NewEngine(pol),
+		Engine:  policy.NewEngineFromPolicy(pol),
 		Logger:  logger,
 		APIKey:  "", // No API key
 		Version: "test",
@@ -1549,7 +1549,7 @@ func TestSessionCostSweeper_Lifecycle(t *testing.T) {
 	// TTL=0 (default) must NOT start a sweeper goroutine.
 	srvNoTTL := NewServer(Config{
 		Port:    0,
-		Engine:  policy.NewEngine(pol),
+		Engine:  policy.NewEngineFromPolicy(pol),
 		Logger:  logger,
 		Version: "test",
 	})
@@ -1558,7 +1558,7 @@ func TestSessionCostSweeper_Lifecycle(t *testing.T) {
 	}
 
 	// TTL>0 starts the sweeper and Shutdown cleans it up.
-	engine := policy.NewEngine(pol)
+	engine := policy.NewEngineFromPolicy(pol)
 	srv := NewServer(Config{
 		Port:                     0,
 		Engine:                   engine,
@@ -1604,7 +1604,7 @@ func TestNewServer_AllInterfaceBindingWithAPIKey(t *testing.T) {
 
 	srv := NewServer(Config{
 		Port:    8080,
-		Engine:  policy.NewEngine(pol),
+		Engine:  policy.NewEngineFromPolicy(pol),
 		Logger:  logger,
 		APIKey:  "my-secret",
 		Version: "test",
@@ -1683,7 +1683,7 @@ func TestNewServer_WritesStartupCheckpoint(t *testing.T) {
 	t.Cleanup(func() { logger.Close() })
 
 	cfg := Config{
-		Engine:   policy.NewEngine(&policy.Policy{Version: "1", Name: "x"}),
+		Engine:   policy.NewEngineFromPolicy(&policy.Policy{Version: "1", Name: "x"}),
 		Logger:   logger,
 		Notifier: notify.NewDispatcher(policy.NotificationCfg{}),
 		Version:  "test",
@@ -1744,7 +1744,7 @@ func TestNewServer_ResumesFromCheckpoint(t *testing.T) {
 	t.Cleanup(func() { logger.Close() })
 
 	_ = NewServer(Config{
-		Engine:   policy.NewEngine(&policy.Policy{Version: "1", Name: "x"}),
+		Engine:   policy.NewEngineFromPolicy(&policy.Policy{Version: "1", Name: "x"}),
 		Logger:   logger,
 		Notifier: notify.NewDispatcher(policy.NotificationCfg{}),
 		Version:  "test",
@@ -1835,7 +1835,7 @@ func TestRateLimitDoubleCount(t *testing.T) {
 
 	srv := NewServer(Config{
 		Port:     0,
-		Engine:   policy.NewEngine(pol),
+		Engine:   policy.NewEngineFromPolicy(pol),
 		Logger:   logger,
 		Notifier: notify.NewDispatcher(policy.NotificationCfg{}),
 		APIKey:   "test-key",

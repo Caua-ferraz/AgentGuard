@@ -1,11 +1,35 @@
 # HTTP API Reference
 
-Every endpoint AgentGuard exposes, with auth requirements, request/response shapes, and status codes. Source: `pkg/proxy/server.go`, `pkg/proxy/auth.go`.
+Every endpoint AgentGuard exposes, with auth requirements, request/response shapes, and status codes. Source: `pkg/proxy/server.go`, `pkg/proxy/auth.go`, `pkg/proxy/tenant.go`.
 
 ```
 Base URL: http(s)://<host>:<port>
 Default:  http://localhost:8080
 ```
+
+---
+
+## URL families: legacy vs tenant-aware (v0.5+)
+
+Every operational endpoint is exposed at **both** of these paths:
+
+| Family | Pattern | Tenant resolution |
+|---|---|---|
+| Legacy | `/v1/<suffix>` | Always evaluates against tenant `local`. Wire-compatible with v0.4.x clients. |
+| Tenant-aware | `/v1/t/{tenant}/<suffix>` | `{tenant}` is extracted from the URL and validated by the engine's `PolicyProvider`. |
+
+In v0.5 the only valid `{tenant}` value is `local`; sending any other value returns `404` with body `{"error":"tenant not found"}`. Both `/v1/check` and `/v1/t/local/check` produce identical responses, identical audit-log entries, and identical wire-protocol headers — `/v1/t/local/...` exists in v0.5 so SDKs and CLIs can adopt the tenant-aware URL builder now and ride the same wire when v0.6 swaps in a database-backed multi-tenant `PolicyProvider`.
+
+**Tenant ID format constraints (v0.5):**
+- Non-empty after URL-decoding.
+- URL-safe characters only — SDKs `URL-encode` the value before building the path, so reserved characters (`/`, spaces, etc.) are escaped to `%XX`.
+- v0.5 only recognises `local`. v0.6 will validate `{tenant}` against a configured registry.
+
+**Approval queue, audit log, SSE bus, and rate limiter are NOT yet sharded by tenant in v0.5.** They are single-tenant data structures that the tenant ID is plumbed *toward*; v0.6 will partition them. Until then, the practical effect of `/v1/t/local/...` versus `/v1/...` is the URL string only.
+
+The wire format ([`docs/WIRE_PROTOCOL.md`](WIRE_PROTOCOL.md)) does **not** change between families: the same request body and response shape (`schema_version: "v1"`) flow through both.
+
+The legacy paths are not deprecated. v0.5 documents both as supported.
 
 ---
 
@@ -18,29 +42,32 @@ AgentGuard uses two orthogonal auth schemes:
 
 **When the server is started without `--api-key`**, auth middleware is a pass-through and the server binds to `127.0.0.1` only.
 
-| Endpoint | Auth | State-changing (CSRF)? |
-|---|---|---|
-| `POST /v1/check` | **open by design** | n/a |
-| `POST /v1/approve/{id}` | Bearer or session | yes |
-| `POST /v1/deny/{id}` | Bearer or session | yes |
-| `GET  /v1/status/{id}` | Bearer or session | no |
-| `GET  /v1/audit` | Bearer or session | no |
-| `POST /auth/login` | open (validates key) | no |
-| `POST /auth/logout` | open | no |
-| `GET  /health` | open | no |
-| `GET  /metrics` | open | no |
-| `GET  /dashboard` | open (HTML based on session) | no |
-| `GET  /api/pending` | Bearer or session | no |
-| `GET  /api/stream` | Bearer or session | no |
-| `GET  /api/stats` | Bearer or session | no |
+Auth posture is **identical** across both URL families — the middleware is URL-agnostic, so a token / session that works against `/v1/audit` works against `/v1/t/local/audit` and vice versa.
+
+| Endpoint (legacy) | Endpoint (tenant-aware) | Auth | State-changing (CSRF)? |
+|---|---|---|---|
+| `POST /v1/check` | `POST /v1/t/{tenant}/check` | **open by design** | n/a |
+| `POST /v1/approve/{id}` | `POST /v1/t/{tenant}/approve/{id}` | Bearer or session | yes |
+| `POST /v1/deny/{id}` | `POST /v1/t/{tenant}/deny/{id}` | Bearer or session | yes |
+| `GET  /v1/status/{id}` | `GET  /v1/t/{tenant}/status/{id}` | Bearer or session | no |
+| `GET  /v1/audit` | `GET  /v1/t/{tenant}/audit` | Bearer or session | no |
+| `GET  /api/pending` | `GET  /v1/t/{tenant}/api/pending` | Bearer or session | no |
+| `GET  /api/stream` | `GET  /v1/t/{tenant}/api/stream` | Bearer or session | no |
+| `GET  /api/stats` | `GET  /v1/t/{tenant}/api/stats` | Bearer or session | no |
+| `GET  /v1/health` | `GET  /v1/t/{tenant}/health` | open | no |
+| `POST /auth/login` | — | open (validates key) | no |
+| `POST /auth/logout` | — | open | no |
+| `GET  /health` | — | open | no |
+| `GET  /metrics` | — | open | no |
+| `GET  /dashboard` | — | open (HTML based on session) | no |
 
 `/v1/check` is intentionally unauthenticated so local agents can call it with zero setup. Gate it at the network layer (reverse proxy allowlist, firewall, service mesh) if your threat model requires.
 
 ---
 
-## `POST /v1/check`
+## `POST /v1/check` · `POST /v1/t/{tenant}/check`
 
-The core policy query. The SDKs wrap this.
+The core policy query. The SDKs wrap this. Both URL families produce identical responses; pick whichever matches your deployment topology.
 
 ### Request
 
@@ -49,6 +76,7 @@ POST /v1/check HTTP/1.1
 Content-Type: application/json
 
 {
+  "schema_version": "v1",
   "agent_id": "my-agent",
   "scope": "shell",
   "command": "rm -rf ./old_data",
@@ -57,6 +85,17 @@ Content-Type: application/json
   "meta": {"run_id": "123"}
 }
 ```
+
+The tenant-aware variant is exactly the same body sent to a different path:
+
+```http
+POST /v1/t/local/check HTTP/1.1
+Content-Type: application/json
+
+{ "schema_version": "v1", "scope": "shell", "command": "ls -la" }
+```
+
+`schema_version` may be omitted (the server defaults to `"v1"`); any other value is rejected with `400` and an error body `{"error":"unsupported schema_version; expected v1","received":"..."}`. See [`docs/WIRE_PROTOCOL.md`](WIRE_PROTOCOL.md) for the full versioning contract.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -113,7 +152,9 @@ Rate-limit denials return `200` with `decision: "DENY"` and `matched_rule: "deny
 
 ---
 
-## `POST /v1/approve/{id}` · `POST /v1/deny/{id}`
+## `POST /v1/approve/{id}` · `POST /v1/deny/{id}` · tenant-aware mirrors
+
+Tenant-aware mirrors live at `POST /v1/t/{tenant}/approve/{id}` and `POST /v1/t/{tenant}/deny/{id}`. Auth posture and request body are identical.
 
 Resolve a pending approval. Idempotent: resolving an already-resolved ID returns the existing state.
 
@@ -150,7 +191,9 @@ X-CSRF-Token: xyz…
 
 ---
 
-## `GET /v1/status/{id}`
+## `GET /v1/status/{id}` · tenant-aware mirror
+
+Tenant-aware mirror: `GET /v1/t/{tenant}/status/{id}`. Auth posture and response body are identical.
 
 Poll for approval resolution. This is what `guard.wait_for_approval` / `guard.waitForApproval` hits.
 
@@ -178,7 +221,9 @@ Poll for approval resolution. This is what `guard.wait_for_approval` / `guard.wa
 
 ---
 
-## `GET /v1/audit`
+## `GET /v1/audit` · tenant-aware mirror
+
+Tenant-aware mirror: `GET /v1/t/{tenant}/audit`. Auth posture and query parameters are identical. v0.5 returns the same audit entries from both URLs (single-tenant log); v0.6 will partition by tenant.
 
 Query the audit log.
 
@@ -278,7 +323,42 @@ Returns `200` with no body. Safe to call with no session (no-op).
 { "status": "ok", "version": "0.4.1" }
 ```
 
-Always `200` once the HTTP server is accepting connections. Use for liveness probes (see [`DEPLOYMENT.md`](DEPLOYMENT.md)).
+Always `200` once the HTTP server is accepting connections. Use for liveness probes (see [`DEPLOYMENT.md`](DEPLOYMENT.md)). The legacy `/health` body shape is unchanged in v0.5 — for the richer operator probe see `/v1/health` below.
+
+---
+
+## `GET /v1/health` · `GET /v1/t/{tenant}/health`
+
+Operator-grade health endpoint introduced in v0.5. Richer than `/health`: includes the resolved tenant, uptime, last-request and last-policy-load timestamps, and a warnings array.
+
+### Response
+
+```json
+{
+  "status": "ok",
+  "version": "0.5.0",
+  "tenant": "local",
+  "last_request_at": "2026-05-05T19:04:54.646Z",
+  "last_policy_load_at": "2026-05-05T19:04:53.549Z",
+  "uptime_seconds": 1,
+  "warnings": []
+}
+```
+
+| Field | Notes |
+|---|---|
+| `status` | Always `"ok"` in v0.5; v0.6 will flip to `"degraded"` for audit-write or notifier saturation. |
+| `tenant` | Echoes the resolved tenant — `"local"` on `/v1/health`, `{tenant}` from the path on the tenant-aware variant. |
+| `last_request_at` | RFC 3339 with millisecond precision; omitted (`undefined`) when no traffic since boot. |
+| `last_policy_load_at` | RFC 3339 with millisecond precision; stamped by the engine on every successful provider load. |
+| `warnings` | `"no traffic in 5m+"` and/or `"policy not reloaded in 24h+"` when the corresponding thresholds are exceeded. |
+
+### Status codes
+
+| Code | Meaning |
+|---|---|
+| `200` | Tenant resolved; body returned. |
+| `404` | Tenant unknown (only on the `/v1/t/{tenant}/health` variant; v0.5 only `local` is recognised). Body: `{"error":"tenant not found"}`. |
 
 ---
 
@@ -397,17 +477,75 @@ Safe because session cookies are `SameSite=Strict` and state-changing endpoints 
 
 ---
 
+## Error envelope
+
+Most error responses are `text/plain` from `http.Error` (e.g. `"Method not allowed\n"`). The structured JSON envelope is used by:
+
+- Tenant-routing 404 (`/v1/t/<unknown>/<any>`): `{"error":"tenant not found"}`
+- Tenant-routing 500 (provider infrastructure failure, v0.6+): `{"error":"policy provider error"}`
+- Health 404 (`/v1/t/<unknown>/health`): `{"error":"tenant not found"}`
+- Recovered panic 500: `{"error":"internal server error"}`
+- `/v1/check` schema mismatch 400: `{"error":"unsupported schema_version; expected v1","received":"v2"}`
+
+Other error responses (auth 401/403, `/v1/check` 400 for bad JSON, audit 400 for bad `?limit`) are plain-text and may differ between releases — programmatic clients should rely on the HTTP status code rather than message-text matching.
+
+---
+
 ## Common error patterns
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `401` on every gated endpoint | Server has `--api-key`; client sending none. | Set `Authorization: Bearer …` or log in. |
 | `403` on POST approve/deny from dashboard | Session valid, CSRF missing. | Echo `document.cookie['ag_csrf']` as `X-CSRF-Token`. |
+| `404` on every `/v1/t/<x>/...` | Tenant `<x>` not registered. v0.5 only allows `local`. | Use `/v1/...` (legacy) or `/v1/t/local/...`. |
 | `413` on `/v1/check` | Body > 1 MB. | Trim `meta` payloads or raise `proxy.request.max_body_bytes`. |
 | `503` on `/auth/login` | 1024 concurrent sessions. | Probing bot; firewall it. |
 | SSE connection drops every minute | Idle proxy timeout upstream. | Set `proxy_read_timeout 3600s` on reverse proxy. |
 
 See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for the full symptom-keyed catalog.
+
+---
+
+## SDK tenant_id (v0.5+)
+
+Both SDKs accept an optional tenant identifier that switches every HTTP call to the tenant-aware URL family.
+
+**Python:**
+
+```python
+from agentguard import Guard
+
+# Default — legacy /v1/... URLs.
+g = Guard("http://localhost:8080", agent_id="my-agent")
+
+# Tenant-aware — /v1/t/acme/... URLs.
+g = Guard("http://localhost:8080", agent_id="my-agent", tenant_id="acme")
+
+# Env var fallback. Empty string explicitly suppresses the env var.
+# Env: AGENTGUARD_TENANT_ID=acme
+g = Guard("http://localhost:8080", agent_id="my-agent")  # → /v1/t/acme/...
+g = Guard("http://localhost:8080", agent_id="my-agent", tenant_id="")  # → /v1/...
+```
+
+`tenant_id="local"` is treated as an alias for the legacy URL family.
+
+**TypeScript:**
+
+```typescript
+import { AgentGuard } from "@agentguard/sdk";
+
+// Default — legacy /v1/... URLs.
+const g = new AgentGuard({ baseUrl: "http://localhost:8080", agentId: "my-agent" });
+
+// Tenant-aware — /v1/t/acme/... URLs.
+const g = new AgentGuard({
+  baseUrl: "http://localhost:8080",
+  agentId: "my-agent",
+  tenantId: "acme",
+});
+```
+
+Same env-var fallback (`AGENTGUARD_TENANT_ID`) and same `"local"` alias semantics as Python.
 
 ---
 
@@ -417,3 +555,4 @@ See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for the full symptom-keyed catalo
 - [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) — reverse proxy / TLS / CORS.
 - [`docs/OBSERVABILITY.md`](OBSERVABILITY.md) — full `/metrics` reference.
 - [`docs/POLICY_REFERENCE.md`](POLICY_REFERENCE.md) — schema for policy evaluation behind `/v1/check`.
+- [`docs/WIRE_PROTOCOL.md`](WIRE_PROTOCOL.md) — `schema_version` contract and JSON-Schema source of truth.

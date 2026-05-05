@@ -112,7 +112,7 @@ func TestSessionCost_ConcurrentCheckAndReserve(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	const workers = 64
 	const costPerCheck = 1.00
@@ -127,7 +127,7 @@ func TestSessionCost_ConcurrentCheckAndReserve(t *testing.T) {
 				Scope:     "cost",
 				EstCost:   costPerCheck,
 				SessionID: "race-session",
-			})
+			}, "local")
 			switch r.Decision {
 			case Allow:
 				atomic.AddInt64(&allowed, 1)
@@ -163,7 +163,7 @@ func TestEstCostZeroBypass(t *testing.T) {
 			{Scope: "cost", Limits: &CostLimits{MaxPerSession: "$10.00"}},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	// 5 ALLOW reservations of $2 each → cumulative = $10 (exactly at cap).
 	for i := 0; i < 5; i++ {
@@ -171,7 +171,7 @@ func TestEstCostZeroBypass(t *testing.T) {
 			Scope:     "cost",
 			EstCost:   2.00,
 			SessionID: "s",
-		})
+		}, "local")
 		if r.Decision != Allow {
 			t.Fatalf("call %d expected ALLOW, got %s: %s", i, r.Decision, r.Reason)
 		}
@@ -181,13 +181,13 @@ func TestEstCostZeroBypass(t *testing.T) {
 	}
 
 	// est_cost=0 at exactly the cap is allowed: cumulative + 0 == cap, not >.
-	r := engine.Check(ActionRequest{Scope: "cost", EstCost: 0, SessionID: "s"})
+	r := engine.Check(ActionRequest{Scope: "cost", EstCost: 0, SessionID: "s"}, "local")
 	if r.Decision != Allow {
 		t.Errorf("est_cost=0 exactly at cap: expected ALLOW, got %s: %s", r.Decision, r.Reason)
 	}
 
 	// est_cost=0.01 over the cap must be denied (cumulative+0.01 > cap).
-	r = engine.Check(ActionRequest{Scope: "cost", EstCost: 0.01, SessionID: "s"})
+	r = engine.Check(ActionRequest{Scope: "cost", EstCost: 0.01, SessionID: "s"}, "local")
 	if r.Decision != Deny {
 		t.Errorf("est_cost=0.01 over cap: expected DENY, got %s: %s", r.Decision, r.Reason)
 	}
@@ -201,7 +201,7 @@ func TestEstCostZeroBypass(t *testing.T) {
 	if got := engine.SessionCost("s"); got <= 10.00 {
 		t.Fatalf("setup: expected cumulative > $10, got $%.2f", got)
 	}
-	r = engine.Check(ActionRequest{Scope: "cost", EstCost: 0, SessionID: "s"})
+	r = engine.Check(ActionRequest{Scope: "cost", EstCost: 0, SessionID: "s"}, "local")
 	if r.Decision != Deny {
 		t.Errorf("est_cost=0 with cumulative over cap: expected DENY, got %s: %s", r.Decision, r.Reason)
 	}
@@ -220,21 +220,21 @@ func TestRefundCost(t *testing.T) {
 			{Scope: "cost", Limits: &CostLimits{MaxPerSession: "$5.00"}},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	for i := 0; i < 5; i++ {
-		if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "s"}); r.Decision != Allow {
+		if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "s"}, "local"); r.Decision != Allow {
 			t.Fatalf("check %d should allow, got %s", i, r.Decision)
 		}
 	}
 	// At limit; next is denied.
-	if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "s"}); r.Decision != Deny {
+	if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "s"}, "local"); r.Decision != Deny {
 		t.Fatalf("expected DENY at limit, got %s", r.Decision)
 	}
 
 	// Refund $2 — should now allow at least one more $1 action.
 	engine.RefundCost("s", 2.00)
-	if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "s"}); r.Decision != Allow {
+	if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "s"}, "local"); r.Decision != Allow {
 		t.Fatalf("after refund, expected ALLOW, got %s: %s", r.Decision, r.Reason)
 	}
 
@@ -263,7 +263,7 @@ func TestNormalizeRequest_NullByte(t *testing.T) {
 			},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	// A naive agent sends a null-byte-laced path; after stripping control
 	// chars, the path is "/etc/passwd" — the deny rule fires.
@@ -271,7 +271,7 @@ func TestNormalizeRequest_NullByte(t *testing.T) {
 		Scope:  "filesystem",
 		Action: "read",
 		Path:   "/etc/passwd\x00/spoofed-allowed",
-	})
+	}, "local")
 	if r.Decision != Deny {
 		t.Errorf("null-byte path must be denied, got %s: %s", r.Decision, r.Reason)
 	}
@@ -292,7 +292,7 @@ func TestNormalizeRequest_URLEncoded(t *testing.T) {
 			},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	// %2E%2E == "..". After decode + Clean, this is outside workspace, so
 	// it should not match the allow rule, and therefore falls to default deny.
@@ -300,7 +300,7 @@ func TestNormalizeRequest_URLEncoded(t *testing.T) {
 		Scope:  "filesystem",
 		Action: "read",
 		Path:   "./workspace/%2E%2E/etc/passwd",
-	})
+	}, "local")
 	if r.Decision != Deny {
 		t.Errorf("URL-encoded traversal must be denied, got %s: %s", r.Decision, r.Reason)
 	}
@@ -443,10 +443,10 @@ func TestConditionalRule_TimeWindowOnly_BackwardCompat(t *testing.T) {
 			},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 	engine.SetHistoryQuerier(&mockHistory{entries: nil})
 
-	r := engine.Check(ActionRequest{Scope: "shell", Command: "deploy prod"})
+	r := engine.Check(ActionRequest{Scope: "shell", Command: "deploy prod"}, "local")
 	// No RequirePrior set — the condition is a no-op, rule matches, ALLOW.
 	if r.Decision != Allow {
 		t.Errorf("expected ALLOW for time_window-only condition (backward compat), got %s: %s", r.Decision, r.Reason)
@@ -463,26 +463,26 @@ func TestSessionCost_LargeSessionCountIsolation(t *testing.T) {
 			{Scope: "cost", Limits: &CostLimits{MaxPerSession: "$2.00"}},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	const n = 500
 	for i := 0; i < n; i++ {
 		sid := fmt.Sprintf("sess-%d", i)
-		if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: sid}); r.Decision != Allow {
+		if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: sid}, "local"); r.Decision != Allow {
 			t.Fatalf("sess-%d first check expected ALLOW, got %s", i, r.Decision)
 		}
 	}
 	// Second pass — all still under the $2 limit.
 	for i := 0; i < n; i++ {
 		sid := fmt.Sprintf("sess-%d", i)
-		if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: sid}); r.Decision != Allow {
+		if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: sid}, "local"); r.Decision != Allow {
 			t.Fatalf("sess-%d second check expected ALLOW, got %s", i, r.Decision)
 		}
 	}
 	// Third pass — each session is now at $2 and the next $0.01 must deny.
 	for i := 0; i < n; i++ {
 		sid := fmt.Sprintf("sess-%d", i)
-		if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 0.01, SessionID: sid}); r.Decision != Deny {
+		if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 0.01, SessionID: sid}, "local"); r.Decision != Deny {
 			t.Fatalf("sess-%d third check expected DENY, got %s", i, r.Decision)
 		}
 	}
@@ -520,10 +520,10 @@ func TestMultiAgent_ScopedOverridesDontLeak(t *testing.T) {
 			},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	check := func(agent, domain string) Decision {
-		return engine.Check(ActionRequest{Scope: "network", Domain: domain, AgentID: agent}).Decision
+		return engine.Check(ActionRequest{Scope: "network", Domain: domain, AgentID: agent}, "local").Decision
 	}
 
 	// Default agent unchanged.
@@ -574,7 +574,7 @@ func TestMultiAgent_ConcurrentChecks(t *testing.T) {
 			"c": {Override: []RuleSet{{Scope: "shell", Allow: []Rule{{Pattern: "grep *"}}}}},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	const goroutines = 64
 	const iterations = 200
@@ -588,7 +588,7 @@ func TestMultiAgent_ConcurrentChecks(t *testing.T) {
 			for i := 0; i < iterations; i++ {
 				agent := agents[(gi+i)%len(agents)]
 				cmd := []string{"ls -la", "echo hi", "cat x", "grep -r ."}[(gi+i)%4]
-				_ = engine.Check(ActionRequest{Scope: "shell", Command: cmd, AgentID: agent})
+				_ = engine.Check(ActionRequest{Scope: "shell", Command: cmd, AgentID: agent}, "local")
 			}
 		}(g)
 	}

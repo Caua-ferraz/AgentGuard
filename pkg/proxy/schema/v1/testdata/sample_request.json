@@ -1,0 +1,10 @@
+{
+  "schema_version": "v1",
+  "agent_id": "test-agent-001",
+  "session_id": "sess-abc",
+  "scope": "shell",
+  "command": "ls -la",
+  "meta": {
+    "source": "ci-fixture"
+  }
+}

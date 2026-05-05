@@ -49,6 +49,13 @@ const (
 	// to evict. Operators tune MaxPendingApprovals or drain pending items;
 	// clients should back off roughly this long before retrying.
 	ApprovalQueueFullRetryAfterSeconds = 30
+	// SchemaVersionV1 is the wire-protocol version emitted on every
+	// /v1/check response and accepted on every /v1/check request. Clients
+	// may omit the field on requests (defaults to v1); any other value is
+	// rejected with HTTP 400. The full schema lives in
+	// pkg/proxy/schema/v1/schema.json and is documented in
+	// docs/WIRE_PROTOCOL.md.
+	SchemaVersionV1 = "v1"
 )
 
 // ErrApprovalQueueFull is returned by ApprovalQueue.Add when the queue is at
@@ -127,6 +134,33 @@ type Server struct {
 	maxRequestBodyBytes int64
 	auditDefaultLimit   int
 	auditMaxLimit       int
+
+	// startedAt records process start time for the /v1/health
+	// uptime_seconds field. Set once in NewServer; never mutated.
+	startedAt time.Time
+	// lastRequestAtNs is the unix-nanosecond timestamp of the most recent
+	// HTTP request observed by withLogging. Atomic so /v1/health probes
+	// (and any future health-derived gauges) read it without taking a
+	// lock. Zero means "no traffic since boot".
+	lastRequestAtNs int64
+}
+
+// noteRequest stamps the timestamp of the most recent HTTP request.
+// Called from withLogging on every request, including health probes
+// themselves. The wall-clock skew between the probe call and the stamp
+// is sub-millisecond and irrelevant for the 5-minute staleness warning.
+func (s *Server) noteRequest() {
+	atomic.StoreInt64(&s.lastRequestAtNs, time.Now().UnixNano())
+}
+
+// LastRequestAt returns the wall-clock time of the most recent HTTP
+// request, or the zero time if no request has been observed yet.
+func (s *Server) LastRequestAt() time.Time {
+	ns := atomic.LoadInt64(&s.lastRequestAtNs)
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
 }
 
 // ApprovalQueue manages pending approval requests.
@@ -205,6 +239,7 @@ func NewServer(cfg Config) *Server {
 		maxRequestBodyBytes: resolveInt64(cfg.MaxRequestBodyBytes, MaxRequestBodySize),
 		auditDefaultLimit:   resolveInt(cfg.AuditDefaultLimit, DefaultAuditQueryLimit),
 		auditMaxLimit:       resolveInt(cfg.AuditMaxLimit, MaxAuditQueryLimit),
+		startedAt:           time.Now(),
 	}
 
 	// Wire up history querier for conditional rule evaluation
@@ -264,12 +299,47 @@ func NewServer(cfg Config) *Server {
 	mux.HandleFunc("/v1/status/", requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleStatus))
 	mux.HandleFunc("/v1/audit", requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleAuditQuery))
 
+	// -----------------------------------------------------------------
+	// Tenant-aware mirrors of every operational route.
+	//
+	// Layout: /v1/t/{tenant}/<suffix>. The withTenant middleware extracts
+	// {tenant}, validates it via Engine.PolicyForTenant (404 on
+	// ErrTenantNotFound), stamps it on the request context, then delegates
+	// to the same handler the legacy /v1/<suffix> route uses. v0.5 only
+	// recognises the "local" tenant; v0.6 will swap in a database-backed
+	// PolicyProvider that resolves arbitrary tenant IDs.
+	//
+	// Auth posture mirrors the legacy routes exactly: /v1/t/{tenant}/check
+	// is open (the policy query endpoint), every other tenant-aware route
+	// requires Bearer OR session, and the state-changing approve/deny
+	// routes additionally require CSRF when authenticated via session.
+	//
+	// Method-prefixed wildcard syntax is Go 1.22+; the Dockerfile pins
+	// golang:1.22-alpine so this is safe.
+	mux.HandleFunc("POST /v1/t/{tenant}/check", s.withTenant(s.handleCheck))
+	mux.HandleFunc("POST /v1/t/{tenant}/approve/{id}",
+		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, true, s.handleApprove)))
+	mux.HandleFunc("POST /v1/t/{tenant}/deny/{id}",
+		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, true, s.handleDeny)))
+	mux.HandleFunc("GET /v1/t/{tenant}/status/{id}",
+		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleStatus)))
+	mux.HandleFunc("GET /v1/t/{tenant}/audit",
+		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleAuditQuery)))
+
 	// Auth endpoints for dashboard login/logout.
 	mux.HandleFunc("/auth/login", s.handleLogin)
 	mux.HandleFunc("/auth/logout", s.handleLogout)
 
 	// Health + Metrics (unauthenticated — commonly scraped by monitoring).
 	mux.HandleFunc("/health", s.handleHealth)
+	// /v1/health is the operator-grade health endpoint (richer payload,
+	// includes last-request and last-policy-load timestamps + warnings).
+	// Anchored on a single tenant ("local") in v0.5; the tenant-aware
+	// route below anticipates A7's URL-routing scheme.
+	mux.HandleFunc("GET /v1/health", s.handleHealthV1Local)
+	// Tenant-aware variant. v0.6 will add real multi-tenant resolution;
+	// v0.5 only resolves "local" and returns 404 for any other tenant.
+	mux.HandleFunc("GET /v1/t/{tenant}/health", s.handleHealthV1Tenant)
 	mux.HandleFunc("/metrics", s.handleMetrics)
 
 	// Dashboard — /dashboard itself returns login page when unauthenticated;
@@ -279,6 +349,18 @@ func NewServer(cfg Config) *Server {
 		mux.HandleFunc("/api/pending", requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handlePendingList))
 		mux.HandleFunc("/api/stream", requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleEventStream))
 		mux.HandleFunc("/api/stats", requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleStats))
+
+		// Tenant-aware mirrors of the dashboard data endpoints. The
+		// dashboard HTML itself is intentionally NOT remapped to a
+		// tenant-aware URL — there is one operator UI per AgentGuard
+		// instance. SDK / CLI consumers that need per-tenant lists
+		// (for v0.6 multi-tenant) hit these JSON endpoints.
+		mux.HandleFunc("GET /v1/t/{tenant}/api/pending",
+			s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handlePendingList)))
+		mux.HandleFunc("GET /v1/t/{tenant}/api/stream",
+			s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleEventStream)))
+		mux.HandleFunc("GET /v1/t/{tenant}/api/stats",
+			s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleStats)))
 	}
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
@@ -294,10 +376,11 @@ func NewServer(cfg Config) *Server {
 		// Middleware order (outermost first): recoverPanic catches handler
 		// panics so a single bad request never tears the server down;
 		// withCORS runs next so a panicking handler still returns a CORS
-		// header pair via the recovered 500; withLogging is innermost so
-		// the recovered duration includes the panic path.
+		// header pair via the recovered 500; withTraffic stamps
+		// lastRequestAtNs (used by /v1/health); withLogging is innermost
+		// so the recovered duration includes the panic path.
 		// Closes R3 #J.
-		Handler:           recoverPanic(withCORS(cfg.AllowedOrigin)(withLogging(mux))),
+		Handler:           recoverPanic(withCORS(cfg.AllowedOrigin)(s.withTraffic(withLogging(mux)))),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
@@ -348,6 +431,15 @@ func (s *Server) Start() error {
 	return s.http.ListenAndServe()
 }
 
+// Handler returns the fully wired http.Handler (recoverPanic → withCORS →
+// withTraffic → withLogging → mux). Exposed for embedders and integration
+// tests that want to drive the server through httptest.NewServer rather
+// than binding a real port. Stable contract — callers should NOT inspect
+// or wrap individual middleware.
+func (s *Server) Handler() http.Handler {
+	return s.http.Handler
+}
+
 // Shutdown gracefully stops the server. Safe to call multiple times.
 func (s *Server) Shutdown() {
 	if s.sweeperDone != nil {
@@ -387,6 +479,22 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Wire-protocol version negotiation. Empty defaults to "v1" so v0.4.x
+	// clients continue to interoperate; any other value is rejected with
+	// 400 so a future "v2" client never silently misinterprets a v1 server.
+	// See pkg/proxy/schema/v1/schema.json and docs/WIRE_PROTOCOL.md.
+	if req.SchemaVersion == "" {
+		req.SchemaVersion = SchemaVersionV1
+	} else if req.SchemaVersion != SchemaVersionV1 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":    "unsupported schema_version; expected " + SchemaVersionV1,
+			"received": req.SchemaVersion,
+		})
+		return
+	}
+
 	start := time.Now()
 
 	// Rate limiting check (before policy evaluation)
@@ -418,7 +526,13 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	evalStart := time.Now()
-	result := s.cfg.Engine.Check(req)
+	// Tenant resolution: legacy /v1/check has no tenant in the path and
+	// TenantIDFromContext defaults to LocalTenantID; tenant-aware
+	// /v1/t/{tenant}/check has been validated and stamped by withTenant
+	// before this handler runs. A7 plumbed the tenant through here as the
+	// first stage of multi-tenant URL routing; v0.6 will shard the
+	// approval queue / audit query / rate limiter on the same value.
+	result := s.cfg.Engine.Check(req, TenantIDFromContext(r.Context()))
 	evalMs := float64(time.Since(evalStart).Microseconds()) / 1000.0
 	metrics.PolicyEvalDuration.Observe(evalMs)
 
@@ -474,6 +588,14 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, result policy.CheckResult, start time.Time) {
 	duration := time.Since(start)
 
+	// Stamp the wire-format version on the outgoing response so clients
+	// can verify they're talking to a compatible server. This is the
+	// single chokepoint for /v1/check responses, including synthetic
+	// rate-limit denies — every path lands here before encoding.
+	if result.SchemaVersion == "" {
+		result.SchemaVersion = SchemaVersionV1
+	}
+
 	entry := audit.Entry{
 		Timestamp:  time.Now().UTC(),
 		AgentID:    req.AgentID,
@@ -512,6 +634,29 @@ func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, 
 	}
 }
 
+// approvalIDFromRequest extracts the approval ID from either URL family:
+//
+//	/v1/approve/{id}            (legacy)
+//	/v1/deny/{id}               (legacy)
+//	/v1/status/{id}             (legacy)
+//	/v1/t/{tenant}/approve/{id} (tenant-aware; A7)
+//	/v1/t/{tenant}/deny/{id}
+//	/v1/t/{tenant}/status/{id}
+//
+// On the tenant-aware family the Go 1.22+ mux populates r.PathValue("id")
+// for free; on the legacy family we strip the known prefix. Returns the
+// empty string when the path does not contain an ID, so handlers can
+// surface a 400 / 404 uniformly.
+func approvalIDFromRequest(r *http.Request, legacyPrefix string) string {
+	if id := r.PathValue("id"); id != "" {
+		return id
+	}
+	if strings.HasPrefix(r.URL.Path, legacyPrefix) {
+		return r.URL.Path[len(legacyPrefix):]
+	}
+	return ""
+}
+
 // handleApprove approves a pending action.
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -519,7 +664,11 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.URL.Path[len("/v1/approve/"):]
+	id := approvalIDFromRequest(r, "/v1/approve/")
+	if id == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
 	if err := s.approval.Resolve(id, policy.Allow); err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -536,7 +685,11 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.URL.Path[len("/v1/deny/"):]
+	id := approvalIDFromRequest(r, "/v1/deny/")
+	if id == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
 	if err := s.approval.Resolve(id, policy.Deny); err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -638,6 +791,106 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "version": s.cfg.Version})
 }
 
+// healthResponse is the JSON shape returned by /v1/health and
+// /v1/t/{tenant}/health. Timestamp fields use *string so
+// `last_request_at: null` becomes `omitempty` on the wire when no
+// traffic has arrived yet, while still populating when set.
+type healthResponse struct {
+	Status           string   `json:"status"`
+	Version          string   `json:"version"`
+	Tenant           string   `json:"tenant"`
+	LastRequestAt    *string  `json:"last_request_at,omitempty"`
+	LastPolicyLoadAt *string  `json:"last_policy_load_at,omitempty"`
+	UptimeSeconds    int64    `json:"uptime_seconds"`
+	Warnings         []string `json:"warnings"`
+}
+
+// healthStaleTrafficWindow is the threshold above which /v1/health adds
+// "no traffic in 5m+" to the warnings array. Tuned for the v0.5
+// expected polling cadence (Prometheus + dashboard SSE keep traffic
+// constant in healthy deployments). var, not const, so tests can
+// override.
+var healthStaleTrafficWindow = 5 * time.Minute
+
+// healthStalePolicyWindow is the threshold above which /v1/health adds
+// "policy not reloaded in 24h+" to the warnings array. Hot-reload is
+// not required for a healthy system; this is meant to surface
+// configurations that were intended to be regenerated by a CI job that
+// silently stopped firing. var, not const, so tests can override.
+var healthStalePolicyWindow = 24 * time.Hour
+
+// handleHealthV1Local serves /v1/health (legacy single-tenant path).
+// Always resolves the "local" tenant.
+func (s *Server) handleHealthV1Local(w http.ResponseWriter, r *http.Request) {
+	s.handleHealthV1(w, r, policy.LocalTenantID)
+}
+
+// handleHealthV1Tenant serves /v1/t/{tenant}/health. Extracts the tenant
+// from the URL path (Go 1.22+ wildcard) and resolves it via the
+// engine's policy provider. v0.5 only configures the "local" tenant;
+// any other value yields 404 via policy.ErrTenantNotFound.
+func (s *Server) handleHealthV1Tenant(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	s.handleHealthV1(w, r, tenant)
+}
+
+// handleHealthV1 is the shared implementation for both /v1/health and
+// /v1/t/{tenant}/health. Returns 404 with a structured error body when
+// the tenant is unknown; otherwise 200 with the full healthResponse.
+//
+// TODO(v0.6, #N): integrate /v1/health with metrics-derived health
+//                 (audit failures, dispatcher saturation, etc.); for
+//                 now status is unconditionally "ok" and operators
+//                 alert on the warnings array.
+func (s *Server) handleHealthV1(w http.ResponseWriter, r *http.Request, tenant string) {
+	w.Header().Set("Content-Type", "application/json")
+
+	// Resolve the tenant via the engine's provider so v0.6 multi-tenant
+	// providers (which the engine has not subscribed to) still surface
+	// 404s correctly. We do not use the resolved *Policy here — the
+	// engine's last-load timestamp is already a function of the local
+	// tenant, and v0.5 has no per-tenant timestamp tracking. v0.6 will
+	// add a per-tenant timestamp map.
+	if _, err := s.cfg.Engine.PolicyForTenant(tenant); err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "tenant not found"})
+		return
+	}
+
+	now := time.Now()
+	resp := healthResponse{
+		Status:        "ok",
+		Version:       s.cfg.Version,
+		Tenant:        tenant,
+		UptimeSeconds: int64(now.Sub(s.startedAt).Seconds()),
+		Warnings:      []string{},
+	}
+
+	// last_request_at: omitted when never set (process just booted, no
+	// request yet). RFC 3339 with millisecond precision so probe output
+	// is comparable across machines without nanosecond noise.
+	if t := s.LastRequestAt(); !t.IsZero() {
+		v := t.UTC().Format("2006-01-02T15:04:05.000Z07:00")
+		resp.LastRequestAt = &v
+		if now.Sub(t) > healthStaleTrafficWindow {
+			resp.Warnings = append(resp.Warnings, "no traffic in 5m+")
+		}
+	}
+
+	// last_policy_load_at: same shape. NewEngine stamps this on initial
+	// Get success, so it should never be zero in practice; treat zero
+	// as "unknown" defensively.
+	if t := s.cfg.Engine.LastPolicyLoadAt(); !t.IsZero() {
+		v := t.UTC().Format("2006-01-02T15:04:05.000Z07:00")
+		resp.LastPolicyLoadAt = &v
+		if now.Sub(t) > healthStalePolicyWindow {
+			resp.Warnings = append(resp.Warnings, "policy not reloaded in 24h+")
+		}
+	}
+
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
 // handleMetrics serves Prometheus-compatible metrics in text format.
 // Scrape with: curl http://localhost:8080/metrics
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -732,7 +985,7 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 
 // handleStatus returns the current state of a pending approval request.
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	id := r.URL.Path[len("/v1/status/"):]
+	id := approvalIDFromRequest(r, "/v1/status/")
 	if id == "" {
 		http.Error(w, "missing id", http.StatusBadRequest)
 		return
@@ -989,6 +1242,19 @@ func withLogging(next http.Handler) http.Handler {
 		start := time.Now()
 		next.ServeHTTP(w, r)
 		log.Printf("%s %s %v", r.Method, r.URL.Path, time.Since(start))
+	})
+}
+
+// withTraffic stamps Server.lastRequestAtNs on every request before the
+// downstream handler runs. The stamp happens before the handler so a
+// long-running /v1/check still surfaces as recent traffic at the moment
+// it arrived, and a panic in the handler is still observed as activity.
+// Method receiver (rather than free function like withLogging) so the
+// closure can read the *Server identity for the atomic.
+func (s *Server) withTraffic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.noteRequest()
+		next.ServeHTTP(w, r)
 	})
 }
 

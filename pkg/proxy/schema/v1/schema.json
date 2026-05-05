@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://agentguard.dev/schema/v1.json",
+  "title": "AgentGuard /v1/check wire protocol",
+  "description": "Schema for the request and response bodies of POST /v1/check, plus shared enums. Frozen at v0.5; new optional fields may be added under v1, but no field is ever removed and no field's name or type ever changes. Breaking changes ship as a separate v2 schema.",
+  "$defs": {
+    "schemaVersion": {
+      "type": "string",
+      "description": "Wire-protocol version. Always 'v1' for this schema. Servers reject any other value with HTTP 400.",
+      "enum": ["v1"]
+    },
+    "decision": {
+      "type": "string",
+      "description": "Outcome of the policy evaluation.",
+      "enum": ["ALLOW", "DENY", "REQUIRE_APPROVAL"]
+    },
+    "scope": {
+      "type": "string",
+      "description": "Policy rule scope. Built-in scopes: filesystem, shell, network, browser, cost, data. Custom scopes may be defined in policy.",
+      "minLength": 1
+    },
+    "actionRequest": {
+      "type": "object",
+      "description": "Body of POST /v1/check.",
+      "properties": {
+        "schema_version": { "$ref": "#/$defs/schemaVersion" },
+        "scope":          { "$ref": "#/$defs/scope" },
+        "action":         { "type": "string", "description": "Action verb for action-style scopes (e.g. read, write, delete on filesystem)." },
+        "command":        { "type": "string", "description": "Shell command string for the shell scope." },
+        "path":           { "type": "string", "description": "Filesystem path for the filesystem scope. The server URL-decodes %HH once, then rejects any '..' segment after filepath.Clean." },
+        "domain":         { "type": "string", "description": "Hostname for the network/browser scope." },
+        "url":            { "type": "string", "description": "Full URL for the network scope." },
+        "agent_id":       { "type": "string", "description": "Stable agent identifier. Used as a per-agent override key and as a rate-limit key." },
+        "session_id":     { "type": "string", "description": "Session identifier; required to use cost.max_per_session accumulation." },
+        "est_cost":       { "type": "number", "description": "Estimated cost of this action in USD. Required for the cost scope.", "minimum": 0 },
+        "meta":           {
+          "type": "object",
+          "description": "Free-form string-keyed metadata. Forwarded to notifiers and the audit log.",
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "required": ["scope"],
+      "additionalProperties": false
+    },
+    "checkResult": {
+      "type": "object",
+      "description": "Body of the /v1/check response.",
+      "properties": {
+        "schema_version": { "$ref": "#/$defs/schemaVersion" },
+        "decision":       { "$ref": "#/$defs/decision" },
+        "reason":         { "type": "string", "description": "Human-readable explanation of the decision." },
+        "matched_rule":   { "type": "string", "description": "Identifier of the rule that produced the decision (e.g. 'allow:shell:ls', 'deny:filesystem:path_traversal')." },
+        "approval_id":    { "type": "string", "description": "Set only when decision is REQUIRE_APPROVAL. Format: 'ap_' followed by 32 hex chars." },
+        "approval_url":   { "type": "string", "description": "Set only when decision is REQUIRE_APPROVAL. Absolute URL clients can hit to approve.", "format": "uri" }
+      },
+      "required": ["decision", "reason"],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/actionRequest" },
+    { "$ref": "#/$defs/checkResult" }
+  ]
+}
