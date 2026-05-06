@@ -41,7 +41,7 @@ docs/               Documentation
 All version strings are kept in sync across 6 files. Use the bump script before tagging — never edit them by hand.
 
 ```bash
-./scripts/bump-version.sh 0.3.0
+./scripts/bump-version.sh 0.4.1
 ```
 
 This updates:
@@ -59,8 +59,8 @@ Then commit, tag, and push — the PyPI publish workflow triggers automatically 
 
 ```bash
 git add -p
-git commit -m "Bump version to 0.3.0"
-git tag v0.3.0
+git commit -m "Bump version to 0.4.1"
+git tag v0.4.1
 git push && git push --tags
 ```
 ### How to define your version
@@ -71,7 +71,7 @@ Version format: `MAJOR.MINOR.PATCH` → `0.0.0`
 - **MINOR** → new features (backward-compatible)
 - **PATCH** → bug fixes or small improvements
 
-> If the version starts with `0` (e.g. `0.3.0`), the project is still in development and may change at any time.
+> If the version starts with `0` (e.g. `0.4.1`), the project is still in development and may change at any time.
 
 > **PyPI note:** Never re-use a version number. PyPI permanently rejects duplicate uploads even after deletion. Always bump before publishing.
 

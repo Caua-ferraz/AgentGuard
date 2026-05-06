@@ -7,8 +7,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-
-	"github.com/Caua-ferraz/AgentGuard/pkg/deprecation"
 )
 
 // TestGlobMatch_SegmentBoundaries locks in the segment-matching semantics of
@@ -52,6 +50,50 @@ func TestGlobMatch_SegmentBoundaries(t *testing.T) {
 	}
 }
 
+// TestGlobSemantics locks in the v0.5 stable contract for `globMatch`
+// (closes R3 #11). It documents the asymmetry between path `**` and
+// domain `*` semantics so a future refactor that "fixes" one of them
+// breaks this test instead of silently breaking deployed policies.
+//
+// See the block comment at globMatch in engine.go for the full contract.
+func TestGlobSemantics(t *testing.T) {
+	cases := []struct {
+		name    string
+		pattern string
+		value   string
+		want    bool
+	}{
+		// --- Path patterns: ** matches zero or more whole segments. ---
+		{"path:/etc/** matches /etc/passwd", "/etc/**", "/etc/passwd", true},
+		// Documented asymmetry: `**` consumes zero segments, so
+		// `/etc/**` ALSO matches `/etc` itself. Operators who want
+		// "at least one segment under /etc" must list /etc separately.
+		{"path:/etc/** matches /etc itself (zero-segment case)", "/etc/**", "/etc", true},
+		{"path:/etc/** does not match /etcetera", "/etc/**", "/etcetera", false},
+		// Bare `**` matches anything.
+		{"path:** matches /a/b/c", "**", "/a/b/c", true},
+
+		// --- Domain patterns: *.host.com requires at least one segment. ---
+		{"domain:*.foo.com matches api.foo.com", "*.foo.com", "api.foo.com", true},
+		// Documented asymmetry: bare `*` is character-greedy and
+		// requires at least one character before the literal, so
+		// `*.foo.com` does NOT match `foo.com`.
+		{"domain:*.foo.com does NOT match foo.com (asymmetry)", "*.foo.com", "foo.com", false},
+		{"domain:*.foo.com matches deep.api.foo.com", "*.foo.com", "deep.api.foo.com", true},
+		{"domain:literal foo.com matches itself", "foo.com", "foo.com", true},
+
+		// --- Shell-command patterns: * is greedy across spaces. ---
+		{"shell:rm -rf * matches rm -rf /home/x", "rm -rf *", "rm -rf /home/x", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := globMatch(tc.pattern, tc.value); got != tc.want {
+				t.Errorf("globMatch(%q, %q) = %v, want %v", tc.pattern, tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSessionCost_ConcurrentCheckAndReserve verifies the atomic
 // check-and-reserve: N goroutines racing on the same session_id must
 // collectively stay at or under max_per_session.
@@ -70,7 +112,7 @@ func TestSessionCost_ConcurrentCheckAndReserve(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	const workers = 64
 	const costPerCheck = 1.00
@@ -85,7 +127,7 @@ func TestSessionCost_ConcurrentCheckAndReserve(t *testing.T) {
 				Scope:     "cost",
 				EstCost:   costPerCheck,
 				SessionID: "race-session",
-			})
+			}, "local")
 			switch r.Decision {
 			case Allow:
 				atomic.AddInt64(&allowed, 1)
@@ -107,6 +149,67 @@ func TestSessionCost_ConcurrentCheckAndReserve(t *testing.T) {
 	}
 }
 
+// TestEstCostZeroBypass closes R3 #4: an agent that always reports
+// est_cost=0 cannot escape max_per_session. Once a session has accumulated
+// real cost up to (or past) the limit, any subsequent check — including
+// est_cost=0 — must be denied. Exactly-at-cap is still allowed (the literal
+// limit value is a valid post-state); the bug only kicks in once cumulative
+// strictly exceeds the cap.
+func TestEstCostZeroBypass(t *testing.T) {
+	pol := &Policy{
+		Version: "1",
+		Name:    "est-cost-zero-bypass",
+		Rules: []RuleSet{
+			{Scope: "cost", Limits: &CostLimits{MaxPerSession: "$10.00"}},
+		},
+	}
+	engine := NewEngineFromPolicy(pol)
+
+	// 5 ALLOW reservations of $2 each → cumulative = $10 (exactly at cap).
+	for i := 0; i < 5; i++ {
+		r := engine.Check(ActionRequest{
+			Scope:     "cost",
+			EstCost:   2.00,
+			SessionID: "s",
+		}, "local")
+		if r.Decision != Allow {
+			t.Fatalf("call %d expected ALLOW, got %s: %s", i, r.Decision, r.Reason)
+		}
+	}
+	if got := engine.SessionCost("s"); got != 10.00 {
+		t.Fatalf("expected cumulative $10.00 after seeding, got $%.2f", got)
+	}
+
+	// est_cost=0 at exactly the cap is allowed: cumulative + 0 == cap, not >.
+	r := engine.Check(ActionRequest{Scope: "cost", EstCost: 0, SessionID: "s"}, "local")
+	if r.Decision != Allow {
+		t.Errorf("est_cost=0 exactly at cap: expected ALLOW, got %s: %s", r.Decision, r.Reason)
+	}
+
+	// est_cost=0.01 over the cap must be denied (cumulative+0.01 > cap).
+	r = engine.Check(ActionRequest{Scope: "cost", EstCost: 0.01, SessionID: "s"}, "local")
+	if r.Decision != Deny {
+		t.Errorf("est_cost=0.01 over cap: expected DENY, got %s: %s", r.Decision, r.Reason)
+	}
+	if r.Rule != "deny:cost:max_per_session" {
+		t.Errorf("expected deny:cost:max_per_session, got rule=%q", r.Rule)
+	}
+
+	// Now push cumulative past the cap manually (simulate out-of-band
+	// accounting via RecordCost) and verify est_cost=0 is denied.
+	engine.RecordCost("s", 1.00) // cumulative = $11.00 > $10
+	if got := engine.SessionCost("s"); got <= 10.00 {
+		t.Fatalf("setup: expected cumulative > $10, got $%.2f", got)
+	}
+	r = engine.Check(ActionRequest{Scope: "cost", EstCost: 0, SessionID: "s"}, "local")
+	if r.Decision != Deny {
+		t.Errorf("est_cost=0 with cumulative over cap: expected DENY, got %s: %s", r.Decision, r.Reason)
+	}
+	if r.Rule != "deny:cost:max_per_session" {
+		t.Errorf("expected deny:cost:max_per_session, got rule=%q", r.Rule)
+	}
+}
+
 // TestRefundCost lets callers roll back a reservation if a downstream action
 // failed after policy allowed it.
 func TestRefundCost(t *testing.T) {
@@ -117,21 +220,21 @@ func TestRefundCost(t *testing.T) {
 			{Scope: "cost", Limits: &CostLimits{MaxPerSession: "$5.00"}},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	for i := 0; i < 5; i++ {
-		if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "s"}); r.Decision != Allow {
+		if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "s"}, "local"); r.Decision != Allow {
 			t.Fatalf("check %d should allow, got %s", i, r.Decision)
 		}
 	}
 	// At limit; next is denied.
-	if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "s"}); r.Decision != Deny {
+	if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "s"}, "local"); r.Decision != Deny {
 		t.Fatalf("expected DENY at limit, got %s", r.Decision)
 	}
 
 	// Refund $2 — should now allow at least one more $1 action.
 	engine.RefundCost("s", 2.00)
-	if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "s"}); r.Decision != Allow {
+	if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "s"}, "local"); r.Decision != Allow {
 		t.Fatalf("after refund, expected ALLOW, got %s: %s", r.Decision, r.Reason)
 	}
 
@@ -160,7 +263,7 @@ func TestNormalizeRequest_NullByte(t *testing.T) {
 			},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	// A naive agent sends a null-byte-laced path; after stripping control
 	// chars, the path is "/etc/passwd" — the deny rule fires.
@@ -168,7 +271,7 @@ func TestNormalizeRequest_NullByte(t *testing.T) {
 		Scope:  "filesystem",
 		Action: "read",
 		Path:   "/etc/passwd\x00/spoofed-allowed",
-	})
+	}, "local")
 	if r.Decision != Deny {
 		t.Errorf("null-byte path must be denied, got %s: %s", r.Decision, r.Reason)
 	}
@@ -189,7 +292,7 @@ func TestNormalizeRequest_URLEncoded(t *testing.T) {
 			},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	// %2E%2E == "..". After decode + Clean, this is outside workspace, so
 	// it should not match the allow rule, and therefore falls to default deny.
@@ -197,30 +300,16 @@ func TestNormalizeRequest_URLEncoded(t *testing.T) {
 		Scope:  "filesystem",
 		Action: "read",
 		Path:   "./workspace/%2E%2E/etc/passwd",
-	})
+	}, "local")
 	if r.Decision != Deny {
 		t.Errorf("URL-encoded traversal must be denied, got %s: %s", r.Decision, r.Reason)
 	}
 }
 
-// TestConditionalRule_TimeWindowOnly_DeprecationCounter verifies that loading
-// a policy with an orphan time_window (no require_prior) bumps the
-// deprecation counter exposed by pkg/deprecation. This is the signal
-// operators scrape before upgrading to v0.5.0, which will turn the warning
-// into a load error.
-//
-// Contract under test:
-//   - Each LoadFromFile call that observes at least one orphan rule
-//     increments the counter by exactly 1 (not once per orphan rule — see
-//     the comment in warnTimeWindowOnlyConditions).
-//   - A policy with no orphan rules does NOT increment the counter.
-//   - Evaluation behavior is unchanged (covered by
-//     TestConditionalRule_TimeWindowOnly_BackwardCompat below).
-func TestConditionalRule_TimeWindowOnly_DeprecationCounter(t *testing.T) {
-	const featureKey = "policy.time_window_without_require_prior"
-	deprecation.Reset()
-
-	// Orphan policy: time_window present, require_prior absent.
+// TestPolicyLoadRejectsTimeWindowWithoutPrior closes R2 S11. v0.4.x WARNed
+// on a time_window without require_prior and let the load succeed; v0.5
+// hard-fails so silent no-op rules cannot ship to production.
+func TestPolicyLoadRejectsTimeWindowWithoutPrior(t *testing.T) {
 	orphan := `
 version: "1"
 name: "orphan-tw"
@@ -231,7 +320,6 @@ rules:
         conditions:
           - time_window: "1h"
 `
-	// Clean policy: no conditions.
 	clean := `
 version: "1"
 name: "clean"
@@ -251,25 +339,86 @@ rules:
 		t.Fatalf("write clean: %v", err)
 	}
 
-	if _, err := LoadFromFile(orphanPath); err != nil {
-		t.Fatalf("load orphan: %v", err)
+	if _, err := LoadFromFile(orphanPath); err == nil {
+		t.Fatal("LoadFromFile(orphan): expected error for time_window without require_prior, got nil")
 	}
-	if got := deprecation.Count(featureKey); got != 1 {
-		t.Errorf("after first orphan load: count = %d, want 1", got)
-	}
-
-	if _, err := LoadFromFile(orphanPath); err != nil {
-		t.Fatalf("reload orphan: %v", err)
-	}
-	if got := deprecation.Count(featureKey); got != 2 {
-		t.Errorf("after second orphan load: count = %d, want 2 (one increment per load)", got)
-	}
-
+	// Sanity: a policy with no orphan condition still loads cleanly.
 	if _, err := LoadFromFile(cleanPath); err != nil {
-		t.Fatalf("load clean: %v", err)
+		t.Fatalf("LoadFromFile(clean): %v", err)
 	}
-	if got := deprecation.Count(featureKey); got != 2 {
-		t.Errorf("clean load must not bump counter: count = %d, want 2", got)
+}
+
+// TestPolicyLoadValidatesDurations closes R3 #5 / R3 #15. Malformed durations
+// or non-positive counts in rate-limit and condition.time_window must be
+// rejected at load time so `agentguard validate` actually validates.
+func TestPolicyLoadValidatesDurations(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "garbage time_window with require_prior",
+			yaml: `
+version: "1"
+name: "bad-time-window"
+rules:
+  - scope: shell
+    allow:
+      - pattern: "deploy *"
+        conditions:
+          - require_prior: "test *"
+            time_window: "1minute"
+`,
+		},
+		{
+			name: "rate_limit window=0",
+			yaml: `
+version: "1"
+name: "bad-rl-window"
+rules:
+  - scope: shell
+    rate_limit:
+      max_requests: 100
+      window: "0s"
+`,
+		},
+		{
+			name: "rate_limit max_requests=0",
+			yaml: `
+version: "1"
+name: "bad-rl-max"
+rules:
+  - scope: shell
+    rate_limit:
+      max_requests: 0
+      window: "1m"
+`,
+		},
+		{
+			name: "rate_limit window unparseable",
+			yaml: `
+version: "1"
+name: "bad-rl-window2"
+rules:
+  - scope: shell
+    rate_limit:
+      max_requests: 10
+      window: "garbage"
+`,
+		},
+	}
+
+	dir := t.TempDir()
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(dir, fmt.Sprintf("c%d.yaml", i))
+			if err := os.WriteFile(p, []byte(tc.yaml), 0600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			if _, err := LoadFromFile(p); err == nil {
+				t.Fatalf("LoadFromFile(%q): expected error, got nil", tc.name)
+			}
+		})
 	}
 }
 
@@ -294,10 +443,10 @@ func TestConditionalRule_TimeWindowOnly_BackwardCompat(t *testing.T) {
 			},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 	engine.SetHistoryQuerier(&mockHistory{entries: nil})
 
-	r := engine.Check(ActionRequest{Scope: "shell", Command: "deploy prod"})
+	r := engine.Check(ActionRequest{Scope: "shell", Command: "deploy prod"}, "local")
 	// No RequirePrior set — the condition is a no-op, rule matches, ALLOW.
 	if r.Decision != Allow {
 		t.Errorf("expected ALLOW for time_window-only condition (backward compat), got %s: %s", r.Decision, r.Reason)
@@ -314,26 +463,26 @@ func TestSessionCost_LargeSessionCountIsolation(t *testing.T) {
 			{Scope: "cost", Limits: &CostLimits{MaxPerSession: "$2.00"}},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	const n = 500
 	for i := 0; i < n; i++ {
 		sid := fmt.Sprintf("sess-%d", i)
-		if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: sid}); r.Decision != Allow {
+		if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: sid}, "local"); r.Decision != Allow {
 			t.Fatalf("sess-%d first check expected ALLOW, got %s", i, r.Decision)
 		}
 	}
 	// Second pass — all still under the $2 limit.
 	for i := 0; i < n; i++ {
 		sid := fmt.Sprintf("sess-%d", i)
-		if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: sid}); r.Decision != Allow {
+		if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: sid}, "local"); r.Decision != Allow {
 			t.Fatalf("sess-%d second check expected ALLOW, got %s", i, r.Decision)
 		}
 	}
 	// Third pass — each session is now at $2 and the next $0.01 must deny.
 	for i := 0; i < n; i++ {
 		sid := fmt.Sprintf("sess-%d", i)
-		if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 0.01, SessionID: sid}); r.Decision != Deny {
+		if r := engine.Check(ActionRequest{Scope: "cost", EstCost: 0.01, SessionID: sid}, "local"); r.Decision != Deny {
 			t.Fatalf("sess-%d third check expected DENY, got %s", i, r.Decision)
 		}
 	}
@@ -371,10 +520,10 @@ func TestMultiAgent_ScopedOverridesDontLeak(t *testing.T) {
 			},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	check := func(agent, domain string) Decision {
-		return engine.Check(ActionRequest{Scope: "network", Domain: domain, AgentID: agent}).Decision
+		return engine.Check(ActionRequest{Scope: "network", Domain: domain, AgentID: agent}, "local").Decision
 	}
 
 	// Default agent unchanged.
@@ -425,7 +574,7 @@ func TestMultiAgent_ConcurrentChecks(t *testing.T) {
 			"c": {Override: []RuleSet{{Scope: "shell", Allow: []Rule{{Pattern: "grep *"}}}}},
 		},
 	}
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	const goroutines = 64
 	const iterations = 200
@@ -439,7 +588,7 @@ func TestMultiAgent_ConcurrentChecks(t *testing.T) {
 			for i := 0; i < iterations; i++ {
 				agent := agents[(gi+i)%len(agents)]
 				cmd := []string{"ls -la", "echo hi", "cat x", "grep -r ."}[(gi+i)%4]
-				_ = engine.Check(ActionRequest{Scope: "shell", Command: cmd, AgentID: agent})
+				_ = engine.Check(ActionRequest{Scope: "shell", Command: cmd, AgentID: agent}, "local")
 			}
 		}(g)
 	}

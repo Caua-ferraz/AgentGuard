@@ -196,9 +196,10 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 
 	var results []Entry
 	scanner := bufio.NewScanner(readFile)
-	// Default Scanner buffer is 64KB; bump so large entries don't break the
-	// scan. Audit entries normally well under 4KB.
-	scanner.Buffer(make([]byte, 64*1024), 1<<20)
+	// Default Scanner buffer is 64KB; bump to 4 MiB max so unusually large
+	// entries (base64 payloads, deeply nested meta blobs) don't silently
+	// truncate the scan. Audit entries normally sit well under 4KB.
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 
 	// skip counts remaining matches to discard before results are collected.
 	// A negative Offset is treated as zero (defensive: handler should clamp).
@@ -249,6 +250,19 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 		if filter.Limit > 0 && len(results) >= filter.Limit {
 			break
 		}
+	}
+
+	// Surface scanner errors. A silent EOF from bufio.Scanner.Scan can be
+	// caused by (a) a single line exceeding the max buffer
+	// (bufio.ErrTooLong), or (b) a transient I/O failure. Either way, the
+	// caller's result set is truncated and they have no way to know unless
+	// we return the error. We still return any partial results collected
+	// before the failure so downstream callers can degrade gracefully —
+	// matching the invariant that `Query` is best-effort filtered scan.
+	if err := scanner.Err(); err != nil {
+		metrics.IncAuditCorruptLine()
+		log.Printf("WARN audit: scanner error reading %s after %d matches (%v)", path, len(results), err)
+		return results, fmt.Errorf("audit scan: %w", err)
 	}
 
 	return results, nil

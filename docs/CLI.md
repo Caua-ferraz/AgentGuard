@@ -8,6 +8,7 @@ agentguard <command> [flags]
 Commands:
   serve       Start the AgentGuard proxy server
   validate    Validate a policy file
+  check       Run a one-shot policy check against a local policy file
   approve     Approve a pending action by ID
   deny        Deny a pending action by ID
   status      Show server health + pending approvals
@@ -95,6 +96,110 @@ for f in configs/*.yaml configs/examples/*.yaml; do
   agentguard validate --policy "$f" || exit 1
 done
 ```
+
+---
+
+## `agentguard check`
+
+Run a single policy check (or a batch from stdin) against a local policy file **without going through the HTTP server**. Useful in CI pipelines, pre-commit hooks, and one-shot scripts that want a deterministic verdict on a candidate action.
+
+### Synopsis
+
+```
+agentguard check [flags]
+```
+
+### Input modes (mutually exclusive)
+
+Exactly one of these selects how requests enter the subcommand. Specifying more than one returns exit code `3`.
+
+| Mode | How |
+|---|---|
+| Per-field flags (default) | `--scope`, `--command`, `--path`, `--domain`, `--url`, `--action`, `--agent-id`, `--session-id`, `--est-cost`, `--meta` |
+| `--request '<json>'` | One JSON object inline on the command line |
+| `--stdin` | One JSON object read from stdin |
+| `--batch` | JSON Lines (one request per line) read from stdin |
+
+### Flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--policy <path>` | *(required)* | Policy YAML to evaluate against. Validated at startup; missing or malformed → exit 3. |
+| `--tenant-id <id>` | `local` | Tenant identifier. v0.5 only recognises `local`; any other value resolves to a synthetic `DENY` with `matched_rule="deny:tenant:not_found"`. |
+| `--request <json>` | *(empty)* | Single check from a JSON string. Mutually exclusive with `--stdin`/`--batch`. |
+| `--stdin` | off | Read a single JSON request object from stdin. |
+| `--batch` | off | Read JSONL (one request per line) from stdin. |
+| `--output <fmt>` | `text` | Output format: `text` (human-friendly) or `json` (one JSON object per request, matching the `/v1/check` response shape). |
+| `--scope <name>` | *(empty)* | Required for the per-field flag mode. `shell`, `filesystem`, `network`, `cost`, `data`, etc. |
+| `--command <str>` | *(empty)* | Shell command to evaluate (shell scope). |
+| `--action <name>` | *(empty)* | Action name (`read`, `write`, `delete`, ...) — typically paired with `--path`. |
+| `--path <p>` | *(empty)* | Filesystem path. |
+| `--domain <d>` | *(empty)* | Network domain. |
+| `--url <u>` | *(empty)* | Request URL. |
+| `--agent-id <id>` | *(empty)* | Agent identifier (drives per-agent overrides in the policy). |
+| `--session-id <id>` | *(empty)* | Session identifier (cost accumulator key). |
+| `--est-cost <f>` | `0` | Estimated cost (cost scope). |
+| `--meta <pairs>` | *(empty)* | Comma-separated `k=v` pairs (e.g. `team=ml,prio=high`). For metadata containing commas/quotes, use `--request '{"meta":{}}'` instead. |
+
+### Exit codes
+
+The subcommand returns a structured exit code so shell pipelines can branch on the outcome.
+
+| Code | Meaning |
+|---|---|
+| `0` | ALLOW — single mode; or every entry ALLOW in batch mode. |
+| `1` | DENY — single mode; or any entry DENY in batch mode. |
+| `2` | REQUIRE_APPROVAL — single mode; or any approval and no deny in batch mode. |
+| `3` | Error — missing/invalid policy, malformed JSON, flag misuse, mutually exclusive modes. |
+
+Severity precedence in batch mode is **error > deny > approval > allow**, regardless of numeric exit-code ordering. (`exitDeny=1` numerically precedes `exitApproval=2`, but a deny still dominates because a deny is operationally more severe than an approval request.)
+
+### Examples
+
+```bash
+# Per-field flag mode — the simplest form.
+agentguard check --policy configs/default.yaml \
+  --scope shell --command "rm -rf ./old_data" --agent-id my-bot
+
+# Single check via inline JSON request.
+agentguard check --policy configs/default.yaml \
+  --request '{"scope":"shell","command":"ls","agent_id":"my-bot"}'
+
+# Single check via stdin.
+echo '{"scope":"shell","command":"ls","agent_id":"my-bot"}' | \
+  agentguard check --policy configs/default.yaml --stdin
+
+# Batch mode (JSONL via stdin).
+cat <<EOF | agentguard check --policy configs/default.yaml --batch
+{"scope":"shell","command":"ls","agent_id":"bot1"}
+{"scope":"shell","command":"rm -rf /","agent_id":"bot1"}
+{"scope":"network","domain":"api.openai.com","agent_id":"bot1"}
+EOF
+
+# JSON output for downstream tooling.
+agentguard check --policy configs/default.yaml \
+  --request '{"scope":"shell","command":"ls"}' --output json
+# {"schema_version":"v1","decision":"DENY","reason":"...","matched_rule":"..."}
+```
+
+### CI gate example
+
+Fail the pipeline if any deploy command would be denied:
+
+```bash
+# deploy_actions.jsonl contains one ActionRequest per line.
+if ! agentguard check --policy ci-policy.yaml --batch --output json \
+       < deploy_actions.jsonl > /tmp/check_out.jsonl; then
+  echo "Policy violation in deploy plan; see /tmp/check_out.jsonl"
+  exit 1
+fi
+```
+
+### Behavior notes
+
+- The subcommand is **one-shot** — no policy hot-reload. Each invocation reloads the policy. Long-running pipelines that re-invoke `check` per action pay the load cost each time. (`--watch <jsonl-file>` for streaming evaluation is tracked as a v0.6 follow-up.)
+- The decoder rejects unknown JSON fields. A typo like `"actions":"read"` (instead of `"action":"read"`) returns exit `3`, so silent default-deny on a malformed request is impossible.
+- Cost-scope evaluations DO reserve session cost into the in-memory accumulator for the lifetime of the process, but the accumulator is discarded on exit. Two consecutive `agentguard check` calls do not see each other's reservations — that's a server feature, not a CLI feature.
 
 ---
 

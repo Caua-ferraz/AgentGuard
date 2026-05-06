@@ -1,5 +1,5 @@
-# Binaries
-agentguard
+# Binaries (anchor root-only — the unanchored form matched cmd/agentguard/ as a path component)
+/agentguard
 *.exe
 *.dll
 *.so
@@ -8,6 +8,13 @@ agentguard
 # Test
 *.test
 coverage.out
+.coverage
+coverage/
+
+# Audit/migration runtime artifacts (live next to audit.jsonl on a running server)
+*.replay-checkpoint
+*.v040-backup
+*.overflow.jsonl
 
 # Build
 /dist/
@@ -30,6 +37,10 @@ Thumbs.db
 
 # Docker
 docker-compose.override.yml
+
+# Audit working dir (multi-perspective audit artifacts)
+.audit/
+AUDIT_REPORT.md
 
 # Python SDK
 __pycache__/

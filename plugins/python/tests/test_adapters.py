@@ -85,32 +85,44 @@ class TestLangChainAdapter:
 # ---------------------------------------------------------------------------
 
 class TestCrewAIAdapter:
+    """Smoke tests for the CrewAI adapter. The full hardening test
+    suite — including modern API gating (invoke/ainvoke/__call__),
+    strict allowlist enforcement, and real-CrewAI integration — lives
+    in tests/test_crewai.py. These tests are the legacy-API coupon.
+    """
+
     def test_guarded_crew_tool_delegates(self, mock_server):
         from agentguard.adapters.crewai import GuardedCrewTool
 
         MockAgentGuardHandler.check_response = {"decision": "ALLOW", "reason": "ok"}
         guard = Guard(mock_server)
 
-        mock_tool = MagicMock()
-        mock_tool.name = "search"
-        mock_tool.description = "search the web"
-        mock_tool._run.return_value = "results"
+        # Use a real class (not MagicMock) because the v0.5 wrapper has
+        # a strict attribute allowlist; MagicMock auto-generates random
+        # attributes which would either pass or fail the allowlist
+        # nondeterministically.
+        class _Tool:
+            name = "search"
+            description = "search the web"
 
-        gt = GuardedCrewTool(mock_tool, guard=guard, scope="network")
+            def _run(self, *args, **kwargs):
+                return "results"
+
+        gt = GuardedCrewTool(_Tool(), guard=guard, scope="network")
         result = gt.run("query")
 
         assert result == "results"
-        mock_tool._run.assert_called_once()
 
     def test_extract_check_params_dict(self, mock_server):
         from agentguard.adapters.crewai import GuardedCrewTool
 
         guard = Guard(mock_server)
-        mock_tool = MagicMock()
-        mock_tool.name = "tool"
-        mock_tool.description = ""
 
-        gt = GuardedCrewTool(mock_tool, guard=guard)
+        class _Tool:
+            name = "tool"
+            description = ""
+
+        gt = GuardedCrewTool(_Tool(), guard=guard)
         params = gt._extract_check_params({"command": "echo hi", "path": "/tmp/x"})
         assert params["command"] == "echo hi"
         assert params["path"] == "/tmp/x"
@@ -119,11 +131,12 @@ class TestCrewAIAdapter:
         from agentguard.adapters.crewai import GuardedCrewTool
 
         guard = Guard(mock_server)
-        mock_tool = MagicMock()
-        mock_tool.name = "tool"
-        mock_tool.description = ""
 
-        gt = GuardedCrewTool(mock_tool, guard=guard)
+        class _Tool:
+            name = "tool"
+            description = ""
+
+        gt = GuardedCrewTool(_Tool(), guard=guard)
         params = gt._extract_check_params("echo hello")
         assert params["command"] == "echo hello"
 

@@ -4,9 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-_Nothing yet._
+> Tracks work in flight on `release/v0.5`. Items here are *not* in any tagged release yet.
 
-## [0.4.1] — unreleased
+### Added
+
+- **MCP Gateway** — wire-level Model Context Protocol proxy that sits in front of any MCP server and policy-checks every `tools/call`. Targeted for v0.5.
+- **LLM API Proxy** — OpenAI/Anthropic-compatible base URL (`OPENAI_BASE_URL=http://…/v1`) so existing SDK clients flow through AgentGuard without code changes. Targeted for v0.5.
+
+### Changed
+
+- **Audit log rotation is wired by default.** Previously, the rotation primitives existed in `pkg/audit` but were not constructed by `runServe`; size-triggered rotation now runs out of the box. Rotated files are gzipped and carry a `_meta.rotated_from` pointer so startup replay walks the rotation chain. Operators who relied on external rotation can disable the built-in rotator via config.
+
+## [0.4.1] — 2026-04-22
 
 > This release focuses on behavioral fixes and observability. Server behavior changes are opt-in or clearly surfaced; SDK and audit-log contracts remain backward-compatible with v0.4.0.
 >
@@ -39,7 +48,7 @@ _Nothing yet._
 ### Changed
 
 - Audit log format bumped to `schema_version: 2`. A meta-record `{"_meta": {"schema_version": 2, ...}}` is now the first line of every audit file. Readers at v0.4.1+ accept v1 (headerless, written by v0.4.0) transparently — the `v040_to_v041` migration rewrites the file in place on first start and preserves a `.v040-backup` copy for downgrade. See `docs/MIGRATION.md`.
-- Audit log rotation is enabled by default, size-triggered. Rotated files are compressed and carry the same schema-2 header with `_meta.rotated_from` pointing at the previous file. The startup replay walks the rotation chain via that header.
+- Audit log rotation primitives landed in `pkg/audit` (size-triggered rotator, gzip + `_meta.rotated_from` chain). They are *not yet wired into the default `runServe` path* — the v0.5 release wires them by default. Operators on v0.4.1 should continue to rotate `audit.jsonl` externally.
 - Audit replay is now checkpointed at `<audit-log-path>.replay-checkpoint`, so a restart no longer re-scans the whole history to seed counters. The checkpoint is written atomically (`write + rename`); a missing, corrupt, or stale (file-truncated) checkpoint silently triggers a full rescan on next boot. Run `agentguard migrate --reset-checkpoint` (or just delete the file) to force that explicitly.
 - `/v1/audit` now honors `?limit` (clamped to `[1, 1000]`, default `100`) and `?offset`. Previously, `?limit` was silently ignored and hard-coded to `100`.
 - `ApprovalQueue` eviction is LRU instead of "drop every resolved entry at once". When the queue is at capacity, the oldest resolved entry is evicted first; if none are resolved, new approvals are rejected with `503 Service Unavailable` and a `Retry-After` header rather than silently dropped.

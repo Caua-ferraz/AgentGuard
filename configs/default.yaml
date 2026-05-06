@@ -124,11 +124,43 @@ rules:
       - domain: "*.stackoverflow.com"
       - domain: "*.github.com"
 
+  # --- Data (form inputs, browser data submissions) ---
+  # Gates form-field values and similar "value-bearing" actions for PII
+  # / credential exfiltration. The browser-use adapter sends scope=data
+  # whenever GuardedPage.fill / .type / GuardedBrowser.check_form_input
+  # fires; the Command field carries the (redacted) value, and meta.field
+  # carries the field name. See docs/POLICY_REFERENCE.md#data-scope.
+  #
+  # By default we DO NOT enable any data rules, because every workflow
+  # needs at least one allow rule to make progress and there is no
+  # universal answer. Uncomment and tune for your deployment:
+  #
+  # - scope: data
+  #   deny:
+  #     - pattern: "*ssn:*"                       # explicit SSN markers
+  #     - pattern: "*[0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9]*"  # SSN format
+  #   allow:
+  #     - domain: "*.internal.local"              # form submissions to internal sites only
+
 # Notifier filters (see docs/OBSERVABILITY.md):
 #   `approval_required` only fires on REQUIRE_APPROVAL decisions.
 #   `on_deny`           only fires on DENY decisions (including rate-limit denies).
 # Drops on slow notifiers are counted in
 # `agentguard_notify_events_dropped_total{notifier,reason="queue_full"}`.
+#
+# Example webhook stanza — uncomment and replace the example.invalid URLs
+# with real endpoints before deploying. The .invalid TLD (RFC 6761) is
+# guaranteed never to resolve, so a forgotten placeholder fails loudly
+# instead of silently sinking events.
+#
+# notifications:
+#   approval_required:
+#     - type: webhook
+#       url: https://example.invalid/REPLACE_ME_BEFORE_DEPLOY
+#     - type: slack
+#       url: https://example.invalid/REPLACE_ME_BEFORE_DEPLOY
+#   on_deny:
+#     - type: console
 notifications:
   approval_required:
     - type: console

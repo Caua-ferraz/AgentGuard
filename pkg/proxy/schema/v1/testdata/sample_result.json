@@ -1,0 +1,6 @@
+{
+  "schema_version": "v1",
+  "decision": "ALLOW",
+  "reason": "matched allow rule",
+  "matched_rule": "allow:shell:ls"
+}

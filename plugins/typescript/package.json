@@ -22,8 +22,14 @@
     "safety",
     "agentguard"
   ],
-  "author": "AgentGuard Contributors",
+  "author": {
+    "name": "Cauã Ferraz",
+    "email": "cauaferrazp@gmail.com"
+  },
   "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/Caua-ferraz/AgentGuard.git",

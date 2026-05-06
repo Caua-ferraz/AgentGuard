@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
+
+	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 )
 
 // CheckpointSuffix is appended to an audit log path to produce the companion
@@ -104,7 +107,10 @@ func ReplayFrom(auditPath string, cp *Checkpoint, fn func(Entry)) (int64, error)
 	}
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 1<<20)
+	// 4 MiB max line — match Query()'s headroom so a single oversize entry
+	// does not silently abort the replay (bufio.ErrTooLong otherwise stops
+	// the scan with no signal to the caller).
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -119,6 +125,16 @@ func ReplayFrom(auditPath string, cp *Checkpoint, fn func(Entry)) (int64, error)
 			continue
 		}
 		fn(entry)
+	}
+
+	if err := scanner.Err(); err != nil {
+		// Replay is best-effort at startup — counters being off after a
+		// truncated replay is preferable to refusing to start. We surface
+		// the error so the caller (NewServer) can log it, and we bump the
+		// audit-corrupt-lines counter so /metrics shows the degradation.
+		metrics.IncAuditCorruptLine()
+		log.Printf("WARN audit: replay scanner error on %s (%v) — counters may be under-seeded", auditPath, err)
+		return info.Size(), fmt.Errorf("replay scan: %w", err)
 	}
 
 	return info.Size(), nil

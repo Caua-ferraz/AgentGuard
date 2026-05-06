@@ -3,6 +3,7 @@ package notify
 import (
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -508,6 +509,61 @@ func TestDispatcher_MultiAgentFanout(t *testing.T) {
 	}
 	if c.Count() != 30 {
 		t.Errorf("expected 30 deliveries across agents, got %d", c.Count())
+	}
+}
+
+// TestDispatcherCloseDoubleCall closes R3 #6: Close must be idempotent.
+// A second Close call used to panic on close-of-closed-channel; the
+// sync.Once guard makes repeat calls a no-op.
+func TestDispatcherCloseDoubleCall(t *testing.T) {
+	d := NewDispatcherWithOpts(policy.NotificationCfg{}, 1, 4)
+	d.Close()
+	// Second call must not panic.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("second Close panicked: %v", r)
+		}
+	}()
+	d.Close()
+}
+
+// TestDispatcherCloseCancelsInflight closes R3 #7: an in-flight webhook
+// roundtrip must be cancelled when the dispatcher Closes, so graceful
+// shutdown is bounded by ctx-observation latency rather than the per-call
+// HTTP timeout. The test fixture is a webhook target that hangs for 10
+// seconds; a correctly wired Dispatcher.Close cancels the request and
+// returns within ~250ms.
+func TestDispatcherCloseCancelsInflight(t *testing.T) {
+	// Slow server: blocks until the request context is cancelled OR 10s
+	// elapses. With the v0.4.x build (no context plumbing) Close would
+	// have to wait the full 10s; with the fix it returns immediately.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+	}))
+	defer srv.Close()
+
+	d := NewDispatcherWithOpts(policy.NotificationCfg{
+		OnDeny: []policy.NotifyTarget{
+			{Type: "webhook", URL: srv.URL},
+		},
+	}, 1, 4)
+
+	// Kick off a denied event that the worker will pick up immediately.
+	d.Send(Event{Type: "denied"})
+
+	// Give the worker a moment to actually start the HTTP roundtrip.
+	time.Sleep(50 * time.Millisecond)
+
+	// Close should return promptly because the in-flight HTTP request
+	// is cancelled by ctx, not bound to the http.Client.Timeout.
+	closeStart := time.Now()
+	d.Close()
+	elapsed := time.Since(closeStart)
+	if elapsed > 2*time.Second {
+		t.Errorf("Close took %v; expected <2s with ctx cancellation (was the request not aborted?)", elapsed)
 	}
 }
 

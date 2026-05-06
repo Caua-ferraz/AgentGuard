@@ -3,12 +3,19 @@ name: CI
 # Triggers:
 #   - push to any branch (so feature-branch commits get CI feedback).
 #   - pull_request targeting any branch (catches forks + branch-to-branch PRs).
+#   - schedule (Monday 06:00 UTC) so the integration-tests job runs against
+#     fresh upstream framework releases at least once a week, even if no
+#     PRs land.
 # Explicit "**" branch glob keeps any future branch-protection rules working.
 on:
   push:
     branches: ['**']
   pull_request:
     branches: ['**']
+  schedule:
+    # Monday 06:00 UTC. Catches new framework majors that broke our pinned
+    # adapters before a customer files an issue.
+    - cron: '0 6 * * 1'
 
 jobs:
   test:
@@ -55,15 +62,18 @@ jobs:
           go-version: '1.22'
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v4
+        uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v1.61.0
 
   python-test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.9', '3.12']
+        # 3.9 is the floor (pyproject.toml requires-python = ">=3.9"); 3.10 and
+        # 3.11 cover the LTS-ish middle versions; 3.12 is current. v0.5 R1 E1
+        # closed.
+        python-version: ['3.9', '3.10', '3.11', '3.12']
     steps:
       - uses: actions/checkout@v4
 
@@ -94,8 +104,13 @@ jobs:
         # the binary isn't discoverable it silently skips, which masks real
         # regressions. We run those tests with --runxfail and a non-skipped
         # assertion below.
+        #
+        # `-m "not integration"` deselects the real-framework integration
+        # suite (plugins/python/tests/integration/), which has its own job
+        # (`integration-tests`) below. The integration job installs the
+        # framework extras; this job stays lean.
         run: |
-          pytest -v --tb=short --cov=agentguard --cov-report=term-missing -p no:cacheprovider
+          pytest -v --tb=short -m "not integration" --cov=agentguard --cov-report=term-missing -p no:cacheprovider
 
       - name: Assert E2E tests actually ran (no silent skip)
         working-directory: plugins/python
@@ -110,15 +125,87 @@ jobs:
             exit 1
           fi
 
-  typescript-build:
+  # Real-framework integration tests. Each matrix entry installs ONE
+  # framework extra and runs only its targeted integration test file —
+  # keeps install time bounded and isolates per-framework breakage.
+  #
+  # Non-blocking on PRs (`continue-on-error: true`) for the v0.5 cycle.
+  # Decision recorded in .audit/v05_decisions.md under "Integration-tests
+  # CI job non-blocking". v0.6 follow-up issue title:
+  #   "ci: make integration-tests job a required check after one full
+  #    week of green"
+  #
+  # The browser-use leg additionally requires Chromium binaries via
+  # `playwright install`; if that step fails (network flake, missing
+  # libs), only that matrix row goes red.
+  integration-tests:
     runs-on: ubuntu-latest
+    # Non-blocking for v0.5; weekly cron + manual review surface failures.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [langchain, crewai, browser-use]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Node
+      - name: Set up Go (build agentguard binary)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build agentguard binary
+        run: go build -o agentguard ./cmd/agentguard
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install AgentGuard SDK + framework extra (${{ matrix.framework }})
+        working-directory: plugins/python
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[${{ matrix.framework }},dev]"
+
+      - name: Install Playwright browsers (browser-use only)
+        if: matrix.framework == 'browser-use'
+        working-directory: plugins/python
+        run: |
+          # Heavyweight: downloads ~200MB of Chromium. Marked
+          # `continue-on-error: true` at the job level so a transient
+          # CDN failure here does not block PRs.
+          python -m playwright install --with-deps chromium
+
+      - name: Run integration tests (${{ matrix.framework }})
+        working-directory: plugins/python
+        env:
+          # The integration tests assume the SDK can find the AgentGuard
+          # mock URL via the per-test fixture — but a few helpers fall
+          # back to AGENTGUARD_URL. Pin it so a leaked env var from the
+          # runner image doesn't smuggle in a real proxy.
+          AGENTGUARD_URL: http://127.0.0.1:0
+        run: |
+          # Each framework's integration file is run in isolation — this
+          # makes the matrix output cleaner and surfaces a per-framework
+          # break without burying it under the others' output.
+          fname=test_real_${{ matrix.framework == 'browser-use' && 'browseruse' || matrix.framework }}.py
+          pytest -v -m integration "tests/integration/${fname}"
+
+  typescript-build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # 18 is the floor (package.json engines.node = ">=18.0.0"); 20 is
+        # current LTS; 22 is the upcoming LTS. v0.5 R1 E2 closed.
+        node-version: ['18', '20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node ${{ matrix.node-version }}
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ matrix.node-version }}
 
       - name: Install TS SDK deps
         working-directory: plugins/typescript

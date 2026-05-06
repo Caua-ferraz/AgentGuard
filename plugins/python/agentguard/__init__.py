@@ -19,11 +19,20 @@ Usage:
 
 import functools
 import json
+import logging
 import os
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 from urllib import request, error
+from urllib.parse import quote as urlquote
+
+# Module-level logger. Used for non-fatal warnings (HTTP shape mismatches,
+# unexpected content types) where the SDK still returns a CheckResult per
+# the configured fail-mode but operators want visibility into the underlying
+# transport oddity. Callers who want quiet behavior add a NullHandler.
+log = logging.getLogger("agentguard")
 
 # --- Defaults and constants ---
 DEFAULT_BASE_URL = "http://localhost:8080"
@@ -36,11 +45,20 @@ DECISION_ALLOW = "ALLOW"
 DECISION_DENY = "DENY"
 DECISION_REQUIRE_APPROVAL = "REQUIRE_APPROVAL"
 
-# API endpoint paths
-ENDPOINT_CHECK = "/v1/check"
-ENDPOINT_APPROVE = "/v1/approve/"
-ENDPOINT_DENY = "/v1/deny/"
-ENDPOINT_STATUS = "/v1/status/"
+# API endpoint paths. The leading "/v1" is added by Guard._url so a single
+# code path handles both the legacy /v1/<suffix> URLs and the tenant-aware
+# /v1/t/<tenant>/<suffix> form introduced in v0.5 (worker A7).
+ENDPOINT_CHECK = "/check"
+ENDPOINT_APPROVE = "/approve/"
+ENDPOINT_DENY = "/deny/"
+ENDPOINT_STATUS = "/status/"
+
+# Default tenant when the SDK caller did not pass tenant_id and
+# AGENTGUARD_TENANT_ID is unset. "local" is also the literal alias the Go
+# proxy maps onto its single-tenant code path; passing it explicitly is
+# equivalent to omitting the field. Any other value triggers the
+# /v1/t/{tenant_id}/... URL family.
+LOCAL_TENANT_ID = "local"
 
 # Fail-mode values for the Guard() constructor. "deny" fails closed when the
 # AgentGuard proxy is unreachable (the v0.4.0 default and current v0.4.1
@@ -132,6 +150,34 @@ class AgentGuardApprovalTimeout(AgentGuardError):
         self.approval_id = approval_id
 
 
+class AgentGuardAuthError(AgentGuardError):
+    """Raised when the AgentGuard server returned 401 or 403 from an
+    auth-gated endpoint (``/v1/approve``, ``/v1/deny``, ``/v1/status``,
+    ``/v1/audit``).
+
+    Distinguishes "API key wrong / expired" from "approval poll timed
+    out" so callers can surface the right operator-facing error. v0.5
+    addition (R5 P9). Extends :class:`AgentGuardError` so existing
+    ``except PermissionError:`` handlers still catch it.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        status: int = 0,
+        result: Optional[CheckResult] = None,
+    ):
+        super().__init__(message, result)
+        self.status = status
+
+
+# AgentGuardTimeoutError is an alias for AgentGuardApprovalTimeout — the
+# v0.5 plan referred to it by that name, but the v0.4.1 SDK already shipped
+# AgentGuardApprovalTimeout. The alias gives the new name without breaking
+# downstream `except AgentGuardApprovalTimeout:` handlers.
+AgentGuardTimeoutError = AgentGuardApprovalTimeout
+
+
 class Guard:
     """Client for the AgentGuard proxy."""
 
@@ -142,6 +188,7 @@ class Guard:
         timeout: int = DEFAULT_TIMEOUT,
         api_key: str = "",
         fail_mode: str = FAIL_MODE_DENY,
+        tenant_id: Optional[str] = None,
     ):
         """Construct a Guard client.
 
@@ -159,6 +206,14 @@ class Guard:
                 as best-effort and the caller accepts the safety trade-off.
                 An invalid value raises ValueError at construction so the
                 bug surfaces at startup instead of mid-request.
+            tenant_id: Optional tenant identifier (v0.5+). When set to a
+                non-empty value other than ``"local"``, every HTTP call is
+                routed through the tenant-aware ``/v1/t/{tenant_id}/...``
+                URL family instead of the legacy ``/v1/...`` path. ``None``
+                or ``"local"`` selects the legacy URLs and is wire-compatible
+                with v0.4.x servers. Falls back to ``AGENTGUARD_TENANT_ID``.
+                v0.5 servers only recognise the literal ``"local"`` tenant;
+                v0.6 will validate against a configured tenant registry.
 
         v0.5.0 parity note: the TypeScript SDK already honors `failMode`,
         default `"deny"`. v0.5.0 will align both SDKs on explicit fail-mode
@@ -174,6 +229,30 @@ class Guard:
         self.timeout = timeout
         self.api_key = api_key or os.environ.get("AGENTGUARD_API_KEY", "")
         self.fail_mode = fail_mode
+        # tenant_id resolution priority: explicit kwarg → AGENTGUARD_TENANT_ID
+        # env → empty string. An explicit empty string from the caller is
+        # honored (env lookup is skipped) so callers can disable an
+        # accidentally-set environment variable in scoped tests.
+        if tenant_id is None:
+            tenant_id = os.environ.get("AGENTGUARD_TENANT_ID", "")
+        self.tenant_id = tenant_id
+
+    def _url(self, suffix: str) -> str:
+        """Build the absolute URL for the given /v1 suffix.
+
+        ``suffix`` is the path *after* ``/v1``, e.g. ``"/check"``,
+        ``"/approve/ap_abc"``, ``"/audit"``. Tenant resolution:
+
+        - tenant_id is unset, empty, or the literal ``"local"``:
+          legacy URL family ``{base_url}/v1{suffix}``.
+        - tenant_id is anything else: ``{base_url}/v1/t/{tenant_id}{suffix}``,
+          with ``tenant_id`` URL-quoted via ``urllib.parse.quote(safe="")``
+          so values containing ``/`` (or other reserved characters) are
+          escaped rather than allowed to break the path layout.
+        """
+        if self.tenant_id and self.tenant_id != LOCAL_TENANT_ID:
+            return f"{self.base_url}/v1/t/{urlquote(self.tenant_id, safe='')}{suffix}"
+        return f"{self.base_url}/v1{suffix}"
 
     def check(
         self,
@@ -227,7 +306,7 @@ class Guard:
 
         data = json.dumps(payload).encode("utf-8")
         req = request.Request(
-            f"{self.base_url}{ENDPOINT_CHECK}",
+            self._url(ENDPOINT_CHECK),
             data=data,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -235,7 +314,70 @@ class Guard:
 
         try:
             with request.urlopen(req, timeout=self.timeout) as resp:
+                # --- Honest response validation (R5 E8 / S13) ---
+                # The previous implementation decoded whatever the proxy
+                # returned. A misconfigured reverse proxy serving an HTML
+                # error page or a chunked plaintext body would silently
+                # produce a JSONDecodeError that we *did* catch — but
+                # 200-OK plus a non-JSON body that happened to start with
+                # `{` would slip through. We now positively assert:
+                #   1. status in 2xx
+                #   2. Content-Type is application/json (charset suffix ok)
+                #   3. body is a dict carrying a `decision` field
+                # Any failure logs at WARNING and falls through to
+                # _failmode_result so we surface a CheckResult consistent
+                # with fail_mode rather than raising into the caller.
+                #
+                # Implementation note: ``urllib`` responses expose status
+                # via either ``.status`` (3.9+) or ``.getcode()`` (older);
+                # tests sometimes use minimal fakes that lack both. We
+                # treat "no status attribute" as "trust the response"
+                # for back-compat with legacy test fakes, and only enforce
+                # status/header checks when the attributes are present.
+                status_attr = getattr(resp, "status", None)
+                if status_attr is None and hasattr(resp, "getcode"):
+                    try:
+                        status_attr = resp.getcode()
+                    except Exception:  # noqa: BLE001
+                        status_attr = None
+                if status_attr is not None and (status_attr < 200 or status_attr >= 300):
+                    log.warning(
+                        "agentguard: /v1/check returned non-2xx status=%s; "
+                        "applying fail_mode=%s", status_attr, self.fail_mode,
+                    )
+                    return self._failmode_result(
+                        f"AgentGuard returned status {status_attr}"
+                    )
+
+                hdrs = getattr(resp, "headers", None)
+                if hdrs is not None:
+                    try:
+                        ctype = (hdrs.get("Content-Type") or "").lower()
+                    except Exception:  # noqa: BLE001
+                        ctype = ""
+                    # Accept "application/json" and "application/json; charset=...".
+                    # A response object with headers must announce JSON; an
+                    # object without headers is presumed to be a test fake
+                    # and not subject to this check.
+                    if ctype and not ctype.startswith("application/json"):
+                        log.warning(
+                            "agentguard: /v1/check returned unexpected Content-Type "
+                            "%r; applying fail_mode=%s", ctype, self.fail_mode,
+                        )
+                        return self._failmode_result(
+                            f"AgentGuard returned unexpected content-type {ctype!r}"
+                        )
+
                 body = json.loads(resp.read())
+                if not isinstance(body, dict) or "decision" not in body:
+                    log.warning(
+                        "agentguard: /v1/check returned malformed body "
+                        "(missing 'decision'); applying fail_mode=%s",
+                        self.fail_mode,
+                    )
+                    return self._failmode_result(
+                        "AgentGuard returned malformed response body"
+                    )
                 return CheckResult(
                     decision=body.get("decision", DECISION_DENY),
                     reason=body.get("reason", ""),
@@ -260,11 +402,19 @@ class Guard:
             #   - JSONDecodeError: a truncated/garbage response body is
             #     an unreachable-proxy symptom from the caller's point
             #     of view; fail_mode is the right knob.
-            decision = DECISION_ALLOW if self.fail_mode == FAIL_MODE_ALLOW else DECISION_DENY
-            return CheckResult(
-                decision=decision,
-                reason=f"AgentGuard unreachable ({self.fail_mode}): {e}",
+            return self._failmode_result(
+                f"AgentGuard unreachable ({self.fail_mode}): {e}"
             )
+
+    def _failmode_result(self, reason: str) -> CheckResult:
+        """Build a CheckResult honoring ``self.fail_mode``.
+
+        Centralizes the fail-mode dispatch so transport failures and HTTP
+        contract violations (bad status, wrong content type, malformed
+        body) all flow through one decision point. v0.5 addition (R5 E8).
+        """
+        decision = DECISION_ALLOW if self.fail_mode == FAIL_MODE_ALLOW else DECISION_DENY
+        return CheckResult(decision=decision, reason=reason)
 
     def _auth_headers(self) -> dict:
         """Return Authorization header if api_key is set."""
@@ -275,7 +425,7 @@ class Guard:
     def approve(self, approval_id: str) -> bool:
         """Approve a pending action."""
         req = request.Request(
-            f"{self.base_url}{ENDPOINT_APPROVE}{approval_id}",
+            self._url(f"{ENDPOINT_APPROVE}{approval_id}"),
             headers=self._auth_headers(),
             method="POST",
         )
@@ -288,7 +438,7 @@ class Guard:
     def deny(self, approval_id: str) -> bool:
         """Deny a pending action."""
         req = request.Request(
-            f"{self.base_url}{ENDPOINT_DENY}{approval_id}",
+            self._url(f"{ENDPOINT_DENY}{approval_id}"),
             headers=self._auth_headers(),
             method="POST",
         )
@@ -308,12 +458,26 @@ class Guard:
 
         Sends the API key on every poll because /v1/status is now auth-gated
         on servers configured with --api-key.
+
+        v0.5 changes (R5 E14, P9):
+        - Polling is jittered to ``[0.8, 1.2] * poll_interval`` to avoid
+          synchronized retries from many clients waiting on the same
+          approval bursting the proxy at exact ``poll_interval`` boundaries.
+          ``time.sleep`` is retained — it is the documented pattern for
+          this kind of polling loop and consistent with the v0.4.x SDK.
+        - HTTP 401 / 403 from the status endpoint raise
+          :class:`AgentGuardAuthError` immediately. Continuing to poll
+          would just spin until ``timeout`` elapsed and return a
+          synthetic "Approval timed out" DENY, masking the real cause
+          (wrong/expired API key). Other HTTPErrors and URLErrors keep
+          the v0.4.x behavior of swallowing-and-retrying so transient
+          network blips do not abort a long-running approval wait.
         """
         deadline = time.time() + timeout
         while time.time() < deadline:
             # Poll the status endpoint for resolution
             req = request.Request(
-                f"{self.base_url}{ENDPOINT_STATUS}{approval_id}",
+                self._url(f"{ENDPOINT_STATUS}{approval_id}"),
                 headers=self._auth_headers(),
                 method="GET",
             )
@@ -328,11 +492,46 @@ class Guard:
                             decision=body["decision"],
                             reason=body.get("reason", "resolved"),
                         )
+            except error.HTTPError as e:
+                # 401/403: auth is broken. Fail fast — looping until
+                # `timeout` would just hide the real error from the operator.
+                if e.code in (401, 403):
+                    raise AgentGuardAuthError(
+                        f"AgentGuard rejected status poll for "
+                        f"{approval_id!r} with HTTP {e.code} "
+                        f"(check api_key)",
+                        status=e.code,
+                    )
+                # Other HTTPErrors (5xx, transient): keep polling.
             except error.URLError:
+                # Connection-level error (DNS, connection refused, TLS).
+                # Keep polling — the proxy may come back up before the deadline.
                 pass
-            time.sleep(poll_interval)
+            # Jittered sleep: 80%..120% of poll_interval. random.random() is
+            # OK for jitter — non-cryptographic, just spreading retries.
+            actual_sleep = poll_interval * (0.8 + 0.4 * random.random())
+            time.sleep(actual_sleep)
 
         return CheckResult(decision=DECISION_DENY, reason="Approval timed out")
+
+
+# Set of kwargs that ``guarded(**check_kwargs)`` is allowed to forward to
+# ``Guard.check``. Anything outside this set is almost always a typo
+# (e.g. ``agent="x"`` instead of ``meta={"agent":"x"}``) — and silently
+# forwarding it to ``Guard.check`` would either be dropped on the floor
+# (``check`` only inspects keyword args it knows about) or raise a confusing
+# TypeError much later in the call chain. v0.5 R5 E15 closes this footgun
+# at the decorator boundary.
+_GUARDED_VALID_CHECK_KWARGS = frozenset({
+    "action",
+    "command",
+    "path",
+    "domain",
+    "url",
+    "session_id",
+    "est_cost",
+    "meta",
+})
 
 
 # Convenience decorator for guarding functions
@@ -376,7 +575,21 @@ def guarded(
 
     All raised exceptions extend :class:`PermissionError`, so existing
     ``except PermissionError:`` handlers continue to work unchanged.
+
+    v0.5 (R5 E15): unknown ``**check_kwargs`` raise ``TypeError`` at
+    decoration time. Only the keyword arguments :meth:`Guard.check`
+    understands (``action``, ``command``, ``path``, ``domain``, ``url``,
+    ``session_id``, ``est_cost``, ``meta``) are accepted; a typo like
+    ``agent="x"`` no longer silently disappears.
     """
+    unknown = set(check_kwargs) - _GUARDED_VALID_CHECK_KWARGS
+    if unknown:
+        raise TypeError(
+            f"@guarded got unexpected keyword arguments: "
+            f"{sorted(unknown)!r}. Valid options: "
+            f"{sorted(_GUARDED_VALID_CHECK_KWARGS)!r}"
+        )
+
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):

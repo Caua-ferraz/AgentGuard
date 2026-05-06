@@ -39,7 +39,7 @@ cd plugins/typescript && npm install && npm run build && npm test
 ./agentguard version
 ```
 
-No external Go deps beyond `gopkg.in/yaml.v3`. No Python runtime deps (stdlib `urllib`). No TypeScript runtime deps (native `fetch`).
+External Go deps: `gopkg.in/yaml.v3` and `github.com/fsnotify/fsnotify` (added in v0.4.1 for the policy watcher's atomic-replace detection — see `pkg/policy/watcher.go`). No Python runtime deps (stdlib `urllib`). No TypeScript runtime deps (native `fetch`).
 
 ## Request Lifecycle (`POST /v1/check`)
 

@@ -67,11 +67,11 @@ func TestEngineCheck_DenyFirst(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 	result := engine.Check(ActionRequest{
 		Scope:   "shell",
 		Command: "rm -rf /",
-	})
+	}, "local")
 
 	if result.Decision != Deny {
 		t.Errorf("expected DENY, got %s", result.Decision)
@@ -97,7 +97,7 @@ func TestEngineCheck_AllowRule(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	tests := []struct {
 		command  string
@@ -115,7 +115,7 @@ func TestEngineCheck_AllowRule(t *testing.T) {
 			result := engine.Check(ActionRequest{
 				Scope:   "shell",
 				Command: tt.command,
-			})
+			}, "local")
 			if result.Decision != tt.expected {
 				t.Errorf("Check(%q) = %s, want %s (reason: %s)",
 					tt.command, result.Decision, tt.expected, result.Reason)
@@ -141,11 +141,11 @@ func TestEngineCheck_RequireApproval(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 	result := engine.Check(ActionRequest{
 		Scope:   "shell",
 		Command: "sudo apt install vim",
-	})
+	}, "local")
 
 	if result.Decision != RequireApproval {
 		t.Errorf("expected REQUIRE_APPROVAL, got %s", result.Decision)
@@ -170,7 +170,7 @@ func TestEngineCheck_FilesystemScope(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	tests := []struct {
 		action   string
@@ -191,7 +191,7 @@ func TestEngineCheck_FilesystemScope(t *testing.T) {
 				Scope:  "filesystem",
 				Action: tt.action,
 				Path:   tt.path,
-			})
+			}, "local")
 			if result.Decision != tt.expected {
 				t.Errorf("Check(%s, %s) = %s, want %s (reason: %s)",
 					tt.action, tt.path, result.Decision, tt.expected, result.Reason)
@@ -218,7 +218,7 @@ func TestEngineCheck_NetworkScope(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	tests := []struct {
 		domain   string
@@ -236,7 +236,7 @@ func TestEngineCheck_NetworkScope(t *testing.T) {
 			result := engine.Check(ActionRequest{
 				Scope:  "network",
 				Domain: tt.domain,
-			})
+			}, "local")
 			if result.Decision != tt.expected {
 				t.Errorf("Check(domain=%s) = %s, want %s (reason: %s)",
 					tt.domain, result.Decision, tt.expected, result.Reason)
@@ -252,11 +252,11 @@ func TestEngineCheck_DefaultDeny(t *testing.T) {
 		Rules:   []RuleSet{}, // no rules at all
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 	result := engine.Check(ActionRequest{
 		Scope:   "shell",
 		Command: "echo hello",
-	})
+	}, "local")
 
 	if result.Decision != Deny {
 		t.Errorf("expected default DENY, got %s", result.Decision)
@@ -286,13 +286,13 @@ func TestEngineCheck_CrossScopeIsolation(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol)
+	engine := NewEngineFromPolicy(pol)
 
 	// Shell command should not match network rules
 	result := engine.Check(ActionRequest{
 		Scope:  "network",
 		Domain: "evil.com",
-	})
+	}, "local")
 	if result.Decision != Deny {
 		t.Errorf("expected DENY for unmatched network domain, got %s", result.Decision)
 	}
@@ -301,12 +301,15 @@ func TestEngineCheck_CrossScopeIsolation(t *testing.T) {
 	result = engine.Check(ActionRequest{
 		Scope:   "shell",
 		Command: "wget evil.com",
-	})
+	}, "local")
 	if result.Decision != Deny {
 		t.Errorf("expected DENY for unmatched shell command, got %s", result.Decision)
 	}
 }
 
+// TestEngineUpdatePolicy exercises the engine's reaction to a provider-driven
+// policy swap. Engine.UpdatePolicy was removed in v0.5 — the provider's
+// Watch callback is the only path for runtime policy updates.
 func TestEngineUpdatePolicy(t *testing.T) {
 	pol1 := &Policy{
 		Version: "1",
@@ -330,19 +333,25 @@ func TestEngineUpdatePolicy(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(pol1)
+	prov := NewStaticPolicyProvider(pol1)
+	engine, err := NewEngine(prov)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	defer engine.Close()
 
 	// Should be denied under v1
-	result := engine.Check(ActionRequest{Scope: "shell", Command: "rm file.txt"})
+	result := engine.Check(ActionRequest{Scope: "shell", Command: "rm file.txt"}, "local")
 	if result.Decision != Deny {
 		t.Errorf("v1: expected DENY, got %s", result.Decision)
 	}
 
-	// Hot-swap to v2
-	engine.UpdatePolicy(pol2)
+	// Hot-swap via the provider; the engine's Watch subscription refreshes
+	// the cached policy.
+	prov.UpdatePolicy(pol2)
 
 	// Should be allowed under v2
-	result = engine.Check(ActionRequest{Scope: "shell", Command: "rm file.txt"})
+	result = engine.Check(ActionRequest{Scope: "shell", Command: "rm file.txt"}, "local")
 	if result.Decision != Allow {
 		t.Errorf("v2: expected ALLOW, got %s", result.Decision)
 	}

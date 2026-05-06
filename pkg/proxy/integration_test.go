@@ -83,7 +83,7 @@ func newIntegrationServer(t *testing.T, cfgMutators ...func(*Config)) *integrati
 
 	cfg := Config{
 		Port:             0,
-		Engine:           policy.NewEngine(pol),
+		Engine:           policy.NewEngineFromPolicy(pol),
 		Logger:           logger,
 		DashboardEnabled: true,
 		Notifier:         notify.NewDispatcher(policy.NotificationCfg{}),

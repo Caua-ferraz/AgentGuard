@@ -1,9 +1,11 @@
 package audit
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
@@ -199,5 +201,75 @@ func TestFileLogger_LargeVolume(t *testing.T) {
 	}
 	if len(results) != 10 {
 		t.Errorf("expected 10 entries with limit, got %d", len(results))
+	}
+}
+
+// TestScannerErrChecked verifies that Query surfaces an error when the audit
+// log contains a single line that exceeds the scanner's max buffer
+// (bufio.ErrTooLong). v0.4.x silently truncated; v0.5 must return both the
+// successfully decoded prefix AND a non-nil error so callers know the result
+// set is incomplete.
+//
+// Closes R3 #1 (audit finding "bufio.Scanner.Err() is never checked").
+func TestScannerErrChecked(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+
+	// Step 1: write a valid entry through NewFileLogger (so the meta
+	// header is in place and a real Entry follows it).
+	logger, err := NewFileLogger(path)
+	if err != nil {
+		t.Fatalf("NewFileLogger: %v", err)
+	}
+	good := Entry{
+		AgentID: "bot-a",
+		Request: policy.ActionRequest{Scope: "shell", Command: "ls"},
+		Result:  policy.CheckResult{Decision: policy.Allow, Reason: "ok"},
+	}
+	if err := logger.Log(good); err != nil {
+		t.Fatalf("Log good: %v", err)
+	}
+	logger.Close()
+
+	// Step 2: append a 5 MiB line directly to the file. We construct a
+	// JSON object whose `request.command` field is one giant string. This
+	// line is well past the 4 MiB scanner buffer so Scan() halts with
+	// bufio.ErrTooLong before consuming the trailing newline.
+	huge := strings.Repeat("A", 5*1024*1024)
+	bad := Entry{
+		AgentID: "bot-bad",
+		Request: policy.ActionRequest{Scope: "shell", Command: huge},
+		Result:  policy.CheckResult{Decision: policy.Allow, Reason: "huge"},
+	}
+	encoded, err := json.Marshal(bad)
+	if err != nil {
+		t.Fatalf("marshal bad: %v", err)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatalf("open for append: %v", err)
+	}
+	if _, err := f.Write(append(encoded, '\n')); err != nil {
+		t.Fatalf("write huge: %v", err)
+	}
+	f.Close()
+
+	// Step 3: Query — must return an error AND the valid entry collected
+	// before the scanner halted.
+	logger2, err := NewFileLogger(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer logger2.Close()
+
+	results, err := logger2.Query(QueryFilter{})
+	if err == nil {
+		t.Fatal("Query: expected scanner error for oversize line, got nil")
+	}
+	if len(results) != 1 {
+		t.Fatalf("Query: expected 1 valid entry returned alongside error, got %d", len(results))
+	}
+	if results[0].AgentID != "bot-a" {
+		t.Errorf("Query: expected the small entry to come back, got AgentID=%q", results[0].AgentID)
 	}
 }

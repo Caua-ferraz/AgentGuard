@@ -2,11 +2,13 @@ package notify
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"regexp"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -45,11 +47,26 @@ type Notifier interface {
 }
 
 // Dispatcher fans out events to multiple notifiers using a bounded worker pool.
+//
+// Lifecycle: NewDispatcher* spawns N worker goroutines and creates a
+// cancellable context. Close cancels that context (so in-flight webhook /
+// Slack HTTP requests unblock immediately) and is guarded by sync.Once so
+// repeated calls — common in shutdown paths that defer Close from multiple
+// owners — do not panic on a re-closed channel.
+//
+// Closes R3 #6 (sync.Once) and R3 #7 (in-flight HTTP cancellation).
 type Dispatcher struct {
 	notifiers []Notifier
 	queue     chan dispatchJob
 	done      chan struct{}
 	redactor  *Redactor
+	// ctx is cancelled by Close; webhook/Slack notifiers attach it to their
+	// outbound HTTP requests so a graceful shutdown unblocks within
+	// milliseconds rather than waiting up to DefaultHTTPTimeout per
+	// in-flight call.
+	ctx       context.Context
+	cancelCtx context.CancelFunc
+	closeOnce sync.Once
 }
 
 type dispatchJob struct {
@@ -76,10 +93,13 @@ func NewDispatcherWithOpts(cfg policy.NotificationCfg, workers, queueSize int) *
 		log.Printf("notify: ignoring extra_patterns (%v) — redactor will use defaults only", err)
 		redactor = DefaultRedactor()
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	d := &Dispatcher{
-		queue:    make(chan dispatchJob, queueSize),
-		done:     make(chan struct{}),
-		redactor: redactor,
+		queue:     make(chan dispatchJob, queueSize),
+		done:      make(chan struct{}),
+		redactor:  redactor,
+		ctx:       ctx,
+		cancelCtx: cancel,
 	}
 
 	// Resolve the dispatch-level timeout once. Per-target overrides are
@@ -95,20 +115,37 @@ func NewDispatcherWithOpts(cfg policy.NotificationCfg, workers, queueSize int) *
 	}
 
 	for _, t := range cfg.ApprovalRequired {
-		d.notifiers = append(d.notifiers, targetToNotifier(t, "approval_required", dispatchTimeout))
+		d.notifiers = append(d.notifiers, targetToNotifier(t, "approval_required", dispatchTimeout, ctx))
 	}
 	for _, t := range cfg.OnDeny {
-		d.notifiers = append(d.notifiers, targetToNotifier(t, "denied", dispatchTimeout))
+		d.notifiers = append(d.notifiers, targetToNotifier(t, "denied", dispatchTimeout, ctx))
 	}
 
 	if workers < 1 {
 		workers = 1
 	}
 	for i := 0; i < workers; i++ {
-		go d.worker()
+		// Wrap each worker in a recover so a panic inside any custom
+		// notifier (or a stdlib http.Client.Do edge case) does not take
+		// the whole process down. Closes R3 #J for the dispatcher.
+		go workerWithRecover(d)
 	}
 
 	return d
+}
+
+// workerWithRecover runs the worker loop and recovers any panic. The
+// dispatcher does NOT respawn — a panic exits one of `workers` goroutines,
+// reducing throughput but not correctness; the dispatcher continues to
+// drain the queue with the remaining workers. Operators see the panic in
+// the log and can restart on the next deploy.
+func workerWithRecover(d *Dispatcher) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("PANIC notify dispatcher worker: %v", rec)
+		}
+	}()
+	d.worker()
 }
 
 func (d *Dispatcher) worker() {
@@ -134,20 +171,38 @@ func (d *Dispatcher) worker() {
 	}
 }
 
-// Close stops worker goroutines. Safe to call multiple times is NOT
-// guaranteed; callers should call once at shutdown.
+// Close stops worker goroutines and cancels in-flight HTTP notifications.
+//
+// Idempotent: guarded by sync.Once so a deferred shutdown that calls Close
+// twice (e.g. signal-handler + main return) does not panic on a re-closed
+// channel. The cancellation also unblocks any webhook/Slack request still
+// waiting on its remote, so graceful shutdown is bounded by the time a
+// single Notify() takes to observe the context (typically µs–ms) rather
+// than by DefaultHTTPTimeout per pending event.
+//
+// Closes R3 #6 and R3 #7.
 func (d *Dispatcher) Close() {
-	close(d.done)
+	d.closeOnce.Do(func() {
+		// Cancel first so workers and in-flight HTTP requests start
+		// unwinding immediately; only then close `done` so the worker
+		// loop's select fires on the same shutdown signal.
+		if d.cancelCtx != nil {
+			d.cancelCtx()
+		}
+		close(d.done)
+	})
 }
 
-func targetToNotifier(t policy.NotifyTarget, eventFilter string, dispatchTimeout time.Duration) Notifier {
+func targetToNotifier(t policy.NotifyTarget, eventFilter string, dispatchTimeout time.Duration, ctx context.Context) Notifier {
 	// Only webhook/slack honor timeout — console and log are synchronous
-	// and in-process, so a timeout has nothing to act on.
+	// and in-process, so a timeout has nothing to act on. Webhook and Slack
+	// also receive the dispatcher's context so Close() can interrupt their
+	// in-flight HTTP roundtrips.
 	switch t.Type {
 	case "webhook":
-		return &WebhookNotifier{URL: t.URL, Filter: eventFilter, client: &http.Client{Timeout: t.ResolvedTimeout(dispatchTimeout)}}
+		return &WebhookNotifier{URL: t.URL, Filter: eventFilter, client: &http.Client{Timeout: t.ResolvedTimeout(dispatchTimeout)}, ctx: ctx}
 	case "slack":
-		return &SlackNotifier{WebhookURL: t.URL, Filter: eventFilter, client: &http.Client{Timeout: t.ResolvedTimeout(dispatchTimeout)}}
+		return &SlackNotifier{WebhookURL: t.URL, Filter: eventFilter, client: &http.Client{Timeout: t.ResolvedTimeout(dispatchTimeout)}, ctx: ctx}
 	case "console":
 		return &ConsoleNotifier{Filter: eventFilter}
 	case "log":
@@ -208,10 +263,15 @@ func notifierType(n Notifier) string {
 // --- Webhook ---
 
 // WebhookNotifier posts JSON to an arbitrary URL.
+//
+// ctx is the dispatcher-scoped context. When the dispatcher is Closed, ctx
+// is cancelled and any in-flight HTTP roundtrip returns immediately so
+// graceful shutdown does not stall behind a slow webhook.
 type WebhookNotifier struct {
 	URL    string
 	Filter string // only fire for this event type ("" = all)
 	client *http.Client
+	ctx    context.Context
 }
 
 func (w *WebhookNotifier) Notify(event Event) error {
@@ -222,7 +282,14 @@ func (w *WebhookNotifier) Notify(event Event) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, w.URL, bytes.NewReader(body))
+	ctx := w.ctx
+	if ctx == nil {
+		// Defensive: a WebhookNotifier constructed by hand (in tests) has
+		// no dispatcher context. Fall back to Background so behavior
+		// matches the v0.4.x build.
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.URL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("webhook build request: %w", err)
 	}
@@ -243,10 +310,13 @@ func (w *WebhookNotifier) Notify(event Event) error {
 // --- Slack ---
 
 // SlackNotifier posts a formatted message to a Slack incoming webhook.
+//
+// ctx is the dispatcher-scoped context — see WebhookNotifier for details.
 type SlackNotifier struct {
 	WebhookURL string
 	Filter     string
 	client     *http.Client
+	ctx        context.Context
 }
 
 func (s *SlackNotifier) Notify(event Event) error {
@@ -293,7 +363,11 @@ func (s *SlackNotifier) Notify(event Event) error {
 	}
 
 	body, _ := json.Marshal(payload)
-	req, err := http.NewRequest(http.MethodPost, s.WebhookURL, bytes.NewReader(body))
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.WebhookURL, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

@@ -110,7 +110,16 @@ class TestLangChainExtended:
         assert body["path"] == "/tmp/x.txt"
         assert body["action"] == "write"
 
-    def test_attribute_proxy(self, mock_server):
+    def test_attribute_proxy_blocked(self, mock_server):
+        """v0.5: arbitrary attribute access is blocked (was a bypass vector).
+
+        Pre-v0.5, ``GuardedTool.__getattr__`` proxied every attribute through
+        to the wrapped tool, which let a caller fetch ``gt.func`` or any
+        other internal and call it directly to bypass the policy gate. v0.5
+        replaces that with a strict allowlist (R5 audit closure). Only
+        metadata attributes (name, description, args_schema, return_direct,
+        metadata, tags) pass through.
+        """
         from agentguard.adapters.langchain import GuardedTool
 
         guard = Guard(mock_server)
@@ -120,8 +129,14 @@ class TestLangChainExtended:
         tool.custom_attr = "proxied-value"
         gt = GuardedTool(tool, guard, scope="shell")
 
-        # Attributes not explicitly on GuardedTool pass through.
-        assert gt.custom_attr == "proxied-value"
+        # Allowlisted metadata is exposed:
+        assert gt.name == "t"
+        assert gt.description == "d"
+
+        # Arbitrary attributes are blocked with a security note:
+        with pytest.raises(AttributeError) as ei:
+            _ = gt.custom_attr
+        assert "bypass" in str(ei.value).lower()
 
     def test_malformed_url_does_not_crash(self, mock_server):
         from agentguard.adapters.langchain import GuardedTool
@@ -141,6 +156,29 @@ class TestLangChainExtended:
 # CrewAI
 # ---------------------------------------------------------------------------
 
+class _FakeCrewTool:
+    """Minimal CrewAI-tool-shaped stand-in used by the extended tests.
+
+    Real classes (not MagicMock) are required by the v0.5 wrapper,
+    which has a strict attribute allowlist — MagicMock auto-generates
+    arbitrary attributes that would interact unpredictably with the
+    allowlist's AttributeError contract.
+    """
+
+    def __init__(self, name="x", description=""):
+        self.name = name
+        self.description = description
+        self.calls: list = []
+
+    def _run(self, *args, **kwargs):
+        self.calls.append(("_run", args, kwargs))
+        return "done"
+
+    def run(self, *args, **kwargs):
+        self.calls.append(("run", args, kwargs))
+        return "ran"
+
+
 class TestCrewAIExtended:
     def test_run_method_alias_underscore(self, mock_server):
         """CrewAI calls _run internally; our wrapper routes both to the same
@@ -149,18 +187,18 @@ class TestCrewAIExtended:
 
         MockAgentGuardHandler.check_response = {"decision": "ALLOW"}
         guard = Guard(mock_server)
-        inner = MagicMock()
-        inner.name = "x"
-        inner.description = ""
-        inner._run.return_value = "done"
+        inner = _FakeCrewTool(name="x", description="")
 
         gt = GuardedCrewTool(inner, guard=guard, scope="shell")
         out = gt._run("hello")
         assert out == "done"
-        inner._run.assert_called_once()
+        # The wrapper's _run dispatched to the inner's _run.
+        assert any(c[0] == "_run" for c in inner.calls)
 
     def test_approval_response(self, mock_server):
+        """v0.5: REQUIRE_APPROVAL raises PermissionError (typed)."""
         from agentguard.adapters.crewai import GuardedCrewTool
+        from agentguard import AgentGuardApprovalRequired
 
         MockAgentGuardHandler.check_response = {
             "decision": "REQUIRE_APPROVAL",
@@ -168,22 +206,22 @@ class TestCrewAIExtended:
             "approval_url": "http://approve/x",
         }
         guard = Guard(mock_server)
-        inner = MagicMock()
-        inner.name = "x"
-        inner.description = ""
+        inner = _FakeCrewTool()
         gt = GuardedCrewTool(inner, guard=guard, scope="shell")
-        out = gt.run("sudo")
-        assert "approval" in out.lower()
-        assert "http://approve/x" in out
-        inner._run.assert_not_called()
+
+        with pytest.raises(PermissionError) as ei:
+            gt.run("sudo")
+        assert isinstance(ei.value, AgentGuardApprovalRequired)
+        assert "approval" in str(ei.value).lower()
+        assert "http://approve/x" in str(ei.value)
+        # Underlying never called.
+        assert inner.calls == []
 
     def test_extract_params_malformed_url_no_domain(self, mock_server):
         from agentguard.adapters.crewai import GuardedCrewTool
 
         guard = Guard(mock_server)
-        inner = MagicMock()
-        inner.name = "x"
-        inner.description = ""
+        inner = _FakeCrewTool()
         gt = GuardedCrewTool(inner, guard=guard)
         params = gt._extract_check_params({"url": "://bad"})
         # Should still include url, domain may be missing or empty.
@@ -200,9 +238,7 @@ class TestCrewAIExtended:
             ("navigates a browser page", "browser"),
             ("does something generic", "shell"),
         ]:
-            inner = MagicMock()
-            inner.name = "t"
-            inner.description = desc
+            inner = _FakeCrewTool(name="t", description=desc)
             gt = GuardedCrewTool(inner, guard=guard)
             assert gt._infer_scope(None) == expected
 
@@ -225,12 +261,7 @@ class TestCrewAIExtended:
     def test_guard_crew_tools_wraps_all(self, mock_server):
         from agentguard.adapters.crewai import guard_crew_tools, GuardedCrewTool
 
-        tools = []
-        for i in range(3):
-            m = MagicMock()
-            m.name = f"t{i}"
-            m.description = ""
-            tools.append(m)
+        tools = [_FakeCrewTool(name=f"t{i}") for i in range(3)]
 
         wrapped = guard_crew_tools(tools, guard_url=mock_server)
         assert len(wrapped) == 3
@@ -321,14 +352,28 @@ class TestBrowserUseExtended:
         assert "approval" in str(ei.value).lower()
         inner.goto.assert_not_called()
 
-    def test_guarded_page_attribute_proxy(self, mock_server):
+    def test_guarded_page_attribute_proxy_is_now_default_deny(self, mock_server):
+        # v0.5: GuardedPage no longer proxies arbitrary attributes — the
+        # v0.4.x __getattr__ fall-through was the bypass closed by audit
+        # finding R5 E4. Read-only properties on the allowlist still
+        # forward; everything else raises AttributeError. This test pins
+        # the new contract so a regression that re-introduces the proxy
+        # is caught.
         from agentguard.adapters.browseruse import GuardedBrowser
 
         browser = GuardedBrowser(guard_url=mock_server)
         inner = MagicMock()
         inner.custom_method = lambda: "proxied"
+        inner.url = "https://example.com"
         page = browser.wrap_page(inner)
-        assert page.custom_method() == "proxied"
+
+        # Allowlisted read-only property still forwards.
+        assert page.url == "https://example.com"
+
+        # Non-allowlisted attribute is rejected with a security message.
+        with pytest.raises(AttributeError) as ei:
+            page.custom_method
+        assert "AgentGuard" in str(ei.value) or "Guarded" in str(ei.value)
 
     def test_agent_id_propagation(self, mock_server):
         from agentguard.adapters.browseruse import GuardedBrowser
@@ -362,10 +407,7 @@ class TestMultiAgentAcrossAdapters:
         assert body_lc["agent_id"] == "langchain-agent"
 
         crew_guard = Guard(mock_server, agent_id="crew-agent")
-        crew_tool = MagicMock()
-        crew_tool.name = "t"
-        crew_tool.description = ""
-        crew_tool._run.return_value = "ok"
+        crew_tool = _FakeCrewTool(name="t", description="")
         crew = GuardedCrewTool(crew_tool, guard=crew_guard, scope="shell")
         crew.run("y")
         body_crew = json.loads(MockAgentGuardHandler.last_request_body)
