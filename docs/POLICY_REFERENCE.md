@@ -14,6 +14,7 @@ Source of truth: `pkg/policy/engine.go` (types) and `pkg/policy/engine.go:Engine
 - [Conditions](#conditions)
 - [Rate limits](#rate-limits)
 - [Cost guardrails](#cost-guardrails)
+- [Data scope](#data-scope)
 - [Per-agent overrides](#per-agent-overrides)
 - [Notifications](#notifications)
 - [Proxy tunables](#proxy-tunables)
@@ -61,7 +62,7 @@ rules:
 | `network` | none | `domain` or `pattern` |
 | `browser` | none | `domain` |
 | `cost` | dedicated `checkCost` evaluator; `limits` block | no rule fields — driven entirely by `limits` and `est_cost` on the request |
-| `data` | none | `pattern`, `action` (generic string match) |
+| `data` | none (generic) | `pattern`, `action` (`form_input`), `domain` — see [data scope](#data-scope) |
 | *any other string* | none | generic; `pattern`/`action`/`domain` all still work |
 
 ### Scope field reference
@@ -188,6 +189,58 @@ Applies only when `scope: cost`. The incoming request must carry a numeric `est_
 - `sessionCosts` is in-memory only. Restart loses all session totals.
 - `--session-cost-ttl` evicts idle sessions so the map does not grow forever. Default `0` = never.
 - `Engine.RecordCost` / `RefundCost` exist for out-of-band accounting but are **not** wired into the HTTP proxy in v0.4.1.
+
+---
+
+## Data scope
+
+The `data` scope gates **form inputs and browser data submissions** so operators can write rules against the value being submitted (PII, credentials, credit-card-shaped strings) and the destination URL — independently of the broader `browser` scope which only sees navigation and clicks. The browser-use adapter (`plugins/python/agentguard/adapters/browseruse.py`) routes every `GuardedPage.fill`, `GuardedPage.type`, `GuardedFrame.fill`, and `GuardedBrowser.check_form_input` call through `scope: data`; framework adapters that wrap form-completion tools should follow the same convention.
+
+### Request fields
+
+| Field | Source | Notes |
+|---|---|---|
+| `command` | the value being submitted | Redacted by the SDK before the wire — see below. |
+| `action` | always `"form_input"` | Use this in rules keyed on `action:` to gate the entire form-input surface. |
+| `url` | optional | Full URL of the page hosting the form. |
+| `domain` | optional | Hostname extracted from `url` (or sent directly). |
+| `meta.field` | the form field's name/selector | Pass-through, NOT redacted. Operators rely on it for "never submit a value to a field named 'password'" rules. |
+
+### Pattern matching
+
+Standard glob matching applies (see [pattern semantics](#pattern-matching-semantics-read-this)). Examples:
+
+```yaml
+- scope: data
+  deny:
+    # Explicit PII markers in the value
+    - pattern: "*ssn:*"
+      message: "SSN values must not leave this agent"
+    # Credit-card-shaped (13-19 digit groups). Loose heuristic.
+    - pattern: "*[0-9][0-9][0-9][0-9] *[0-9][0-9][0-9][0-9]*"
+    # Field-name based gate — the field name lands in command via the adapter
+    # when the form-input action is dispatched.
+  allow:
+    - domain: "*.internal.local"
+```
+
+### Domain matching
+
+Standard domain glob matching applies against `req.URL` / `req.Domain`. `*.foo.com` matches `api.foo.com` but not `foo.com` itself (same gotcha as `network` and `browser`).
+
+### Operator note: redaction is upstream of the audit log
+
+The Python SDK applies a redactor (mirrored from `pkg/notify.DefaultRedactor`) to the form value **before** it leaves the SDK process:
+
+- Empty / whitespace values pass through unchanged.
+- Values longer than **256 chars** are replaced with `<redacted; len=N>` so audit logs never carry paste-buffer-sized PII.
+- Shorter values run through the regex redactor (Bearer tokens, AWS `AKIA…`, `ghp_…`, `xox?-…`, `secret=…`).
+
+The field NAME (in `meta.field`) is NOT redacted — operators need it stable for rule authoring. Raw values do not land in the audit log unless they survive the redactor cleanly. Future deferred work (`v0.6, #data-pii`): regex / classifier-based PII detection baked into a built-in rule library so operators don't have to spell out SSN/CC formats themselves.
+
+### Default-deny still applies
+
+A `data`-scoped request that matches no allow rule receives `DENY "No matching allow rule (default deny)"` — same as every other scope. If you wire the browser-use adapter and forget to add `data` rules, every form submission will deny. This is intentional: a permissive default would silently leak PII the moment an agent encountered an unfamiliar page.
 
 ---
 

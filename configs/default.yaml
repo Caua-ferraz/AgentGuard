@@ -124,6 +124,24 @@ rules:
       - domain: "*.stackoverflow.com"
       - domain: "*.github.com"
 
+  # --- Data (form inputs, browser data submissions) ---
+  # Gates form-field values and similar "value-bearing" actions for PII
+  # / credential exfiltration. The browser-use adapter sends scope=data
+  # whenever GuardedPage.fill / .type / GuardedBrowser.check_form_input
+  # fires; the Command field carries the (redacted) value, and meta.field
+  # carries the field name. See docs/POLICY_REFERENCE.md#data-scope.
+  #
+  # By default we DO NOT enable any data rules, because every workflow
+  # needs at least one allow rule to make progress and there is no
+  # universal answer. Uncomment and tune for your deployment:
+  #
+  # - scope: data
+  #   deny:
+  #     - pattern: "*ssn:*"                       # explicit SSN markers
+  #     - pattern: "*[0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9]*"  # SSN format
+  #   allow:
+  #     - domain: "*.internal.local"              # form submissions to internal sites only
+
 # Notifier filters (see docs/OBSERVABILITY.md):
 #   `approval_required` only fires on REQUIRE_APPROVAL decisions.
 #   `on_deny`           only fires on DENY decisions (including rate-limit denies).

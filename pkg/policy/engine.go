@@ -956,10 +956,25 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 			return e.checkCost(rs, req)
 		}
 
-		// Filesystem scope: reject paths that still contain ".." after
-		// filepath.Clean. This catches traversal attempts that Clean
-		// cannot resolve (e.g. the path is already absolute-looking but
-		// crafted to escape an allowed directory).
+		// Data scope: gates form inputs, browser data exfiltration, and
+		// any other "value-bearing" action where the operator wants to
+		// apply PII / credential rules independently of the broader
+		// browser/network scopes. v0.5 has no scope-specific custom
+		// logic here — matching uses the standard Pattern (against
+		// req.Command, which carries the redacted form value), Domain
+		// (against req.URL/req.Domain), and Action (against
+		// req.Action — typically "form_input"). Default-deny applies
+		// when no rule matches, same as every other scope.
+		//
+		// Closes audit findings R5 E5 / R7 E3 ("data scope unhandled —
+		// silent default-deny without a clear sentinel"). The fall-
+		// through default-deny still fires when no data-scope rules
+		// exist, but it now has explicit tests and explicit
+		// documentation; operators who hit it find the right knob.
+		//
+		// TODO(v0.6, #data-pii): regex / classifier-based PII patterns
+		// (SSN, credit-card numbers, AWS keys) baked into a built-in
+		// rule library so operators don't have to spell them out.
 		if rs.Scope == "filesystem" && req.Path != "" {
 			cleaned := filepath.ToSlash(filepath.Clean(req.Path))
 			if containsDotDot(cleaned) {

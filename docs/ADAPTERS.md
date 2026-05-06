@@ -7,7 +7,43 @@ AgentGuard ships Python adapters that wrap popular agent frameworks so every too
 | LangChain | `agentguard.adapters.langchain` | `[langchain]` |
 | CrewAI | `agentguard.adapters.crewai` | `[crewai]` |
 | browser-use | `agentguard.adapters.browseruse` | `[browser-use]` |
-| MCP (Claude Desktop / Cursor / etc.) | `agentguard.adapters.mcp` | core — no extra |
+| MCP (Claude Desktop / Cursor / etc.) | `agentguard.adapters.mcp` | `[mcp]` (or core for legacy installs) |
+
+The adapters are AgentGuard's **compatibility tier** — each one gates the modern API of its target framework. The proxy is the hero; the adapters exist so a one-line `import` is enough to opt your agent into policy enforcement.
+
+## Compatibility Matrix
+
+The version pins live in [`plugins/python/pyproject.toml`](../plugins/python/pyproject.toml) under `[project.optional-dependencies]`. The CI `integration-tests` job runs every adapter against the pinned major on every PR and on a weekly cron (Monday 06:00 UTC) so a breaking upstream release surfaces before a customer hits it.
+
+| AgentGuard | LangChain | CrewAI | browser-use | MCP |
+|---|---|---|---|---|
+| 0.5.x | `langchain >=0.3,<2.0`, `langchain-core >=0.3,<2.0` | `crewai >=0.80,<2.0` | `browser-use >=0.4,<1.0`, `playwright >=1.40` | `mcp >=0.9,<2.0` |
+| 0.4.x | `>=0.1` (no upper bound — silent rot) | `>=0.1` | `>=0.1` (`goto` only) | wire protocol `2024-11-05` |
+
+The 0.5 floors cover the API surface AgentGuard's adapters were built and hardened against (LangChain 0.3+'s split `langchain-core` package, CrewAI 0.80+'s Runnable BaseTool, browser-use 0.4+'s stable Page surface). The ceilings cover the latest upstream majors verified against the integration suite.
+
+### Pinning rationale
+
+v0.5 introduces upper bounds because v0.4.x's "0.1+" floor allowed silent rot when frameworks renamed methods or added new bypass paths (audit findings R5 P1–P5, R1 F1). Specifically:
+
+- **LangChain** moved from a single `langchain` package on 0.1 to a split `langchain-core` (Runnable protocol) + `langchain` (agents / chains) on 0.3. The 0.4 line will introduce its own breaking changes; we re-verify before bumping.
+- **CrewAI** moved its `BaseTool` to inherit from `langchain_core.runnables.Runnable` around 0.80, exposing the modern `invoke` / `ainvoke` / `stream` / `batch` surface. Pre-0.80 tools have a different bypass surface; the v0.5 adapter is built and tested against 0.80–0.89.
+- **browser-use** 0.4 is the first release where the `Browser` / `Page` API stabilised enough that we could write a strict allowlist against it. Earlier versions reshape the page proxy across minor releases.
+- **MCP** Python SDK (`mcp` on PyPI) has not yet hit 1.0; the upper bound at `<2.0` covers the entire 0.x line. Once 1.0 ships and we re-verify, this widens.
+
+### Bumping the upper bound
+
+1. Locally: `pip install -e ".[<framework>,dev]"` against the new major.
+2. Run `pytest -m integration tests/integration/test_real_<framework>.py -v`. All tests must pass.
+3. Update the upper bound in `plugins/python/pyproject.toml`.
+4. Update this table.
+5. Check the framework's changelog for new method names — if the framework added a method that side-steps our gate (`Runnable.with_listeners` did this in `langchain-core` 0.3.x), extend the adapter's gated set BEFORE bumping the pin.
+
+### Why the integration-tests CI job is non-blocking on PRs (v0.5)
+
+The job runs against the real upstream framework. A transient PyPI / CDN failure during `pip install` or `playwright install` should not block a PR that didn't change any adapter code. The weekly cron run still surfaces those failures asynchronously, and a v0.6 issue (*"ci: make integration-tests job a required check after one full week of green"*) tracks promoting it to required once we have stability data.
+
+Authors of adapter changes are still expected to drive the integration job to green locally before merging — see `make integration-test` once it lands (v0.5.1).
 
 All adapters share the same philosophy: **decide via policy first, call the wrapped callable only if `ALLOW`**. On `DENY` or `REQUIRE_APPROVAL` the adapter either returns a marker string (for LangChain/CrewAI, whose tools must return text to the LLM) or raises `PermissionError` (for browser-use, whose async page methods have no other return channel). The MCP adapter returns a JSON-RPC result with `isError: true`.
 
@@ -248,8 +284,16 @@ This matters because the MCP client is arbitrary (Claude Desktop, Cursor, a scri
 
 ### Running as a standalone MCP server
 
+The module entry point has two modes — gateway and empty-server.
+
+#### Gateway mode (preferred, v0.5+)
+
+`--upstream "<command>"` spawns the given downstream MCP server, brokers JSON-RPC frames between the client (Claude Desktop, Cursor, …) and the upstream, and gates every `tools/call` through AgentGuard:
+
 ```bash
-python -m agentguard.adapters.mcp --guard-url http://localhost:8080 --agent-id mcp-agent
+python -m agentguard.adapters.mcp \
+  --guard-url http://localhost:8080 \
+  --upstream "npx -y @modelcontextprotocol/server-filesystem /tmp"
 ```
 
 Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
@@ -257,15 +301,35 @@ Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_conf
 ```json
 {
   "mcpServers": {
-    "agentguard": {
+    "agentguard-fs": {
       "command": "python",
-      "args": ["-m", "agentguard.adapters.mcp", "--guard-url", "http://localhost:8080"]
+      "args": [
+        "-m", "agentguard.adapters.mcp",
+        "--guard-url", "http://localhost:8080",
+        "--upstream", "npx -y @modelcontextprotocol/server-filesystem /tmp"
+      ]
     }
   }
 }
 ```
 
-The standalone form starts with **no tools registered**. It is meant for downstream composition — you either subclass `GuardedMCPServer` and call `add_tool` in `__init__`, or use it as a pass-through front-end for another MCP server (future work).
+The gateway is a v0.5 preview of Phase 4B's full Gateway. Limitations:
+
+- Single upstream only — no capability merging.
+- No tool-name namespacing / prefixing.
+- Server-initiated notifications (`notifications/tools/list_changed`) are not relayed.
+- Only `tools/*` is gated (prompts/resources land in v0.6).
+
+#### Empty-server mode (back-compat)
+
+Running the entry point without `--upstream` keeps the v0.4.x behaviour: a server that registers no tools. Useful for programmatic embedding via `GuardedMCPServer.add_tool(...)` in custom code; useless when wired to Claude Desktop verbatim. The adapter logs a stderr WARN at startup so an operator following the docs literally sees the misconfiguration immediately:
+
+```bash
+python -m agentguard.adapters.mcp --guard-url http://localhost:8080
+# WARN agentguard.mcp: starting with NO tools registered. Pass --upstream …
+```
+
+For programmatic use you typically don't invoke `python -m`; you import the class directly (see "Registering tools" above).
 
 ---
 

@@ -8,6 +8,13 @@
 # Test
 *.test
 coverage.out
+.coverage
+coverage/
+
+# Audit/migration runtime artifacts (live next to audit.jsonl on a running server)
+*.replay-checkpoint
+*.v040-backup
+*.overflow.jsonl
 
 # Build
 /dist/

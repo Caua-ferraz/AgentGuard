@@ -217,6 +217,55 @@ export class AgentGuardApprovalTimeoutError extends AgentGuardError {
   }
 }
 
+/**
+ * Thrown when an auth-gated AgentGuard endpoint (`/v1/approve`,
+ * `/v1/deny`, `/v1/status`, `/v1/audit`) returns 401 or 403.
+ *
+ * Lets callers tell apart "API key wrong / expired" from "approval poll
+ * timed out" so the operator-facing error surfaces the right cause.
+ * v0.5 addition (R5 P9).
+ */
+export class AgentGuardAuthError extends AgentGuardError {
+  readonly status: number;
+
+  constructor(message: string, status: number, result?: CheckResult) {
+    super(message, result);
+    this.name = "AgentGuardAuthError";
+    this.status = status;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Valid values for the `failMode` SDK option. Exported so callers can
+ * use the same allowlist when validating their own configuration.
+ */
+const VALID_FAIL_MODES = ["deny", "allow"] as const;
+
+/**
+ * Allowed keys on `AgentGuardOptions`. Used to reject unknown options at
+ * construction time instead of silently ignoring them — a common typo
+ * sink in v0.4.x. v0.5 R5 E15 closes this footgun.
+ */
+const VALID_AGENTGUARD_OPTION_KEYS: ReadonlySet<string> = new Set([
+  "baseUrl",
+  "agentId",
+  "apiKey",
+  "timeout",
+  "failMode",
+  "tenantId",
+]);
+
+/**
+ * Allowed keys on the {@link guarded} options object.
+ */
+const VALID_GUARDED_OPTION_KEYS: ReadonlySet<string> = new Set([
+  "getCheckOptions",
+  "waitForApproval",
+  "approvalTimeoutMs",
+  "approvalPollIntervalMs",
+]);
+
 export class AgentGuard {
   private baseUrl: string;
   private agentId: string;
@@ -244,6 +293,23 @@ export class AgentGuard {
       this.tenantId = envTenantId;
     } else {
       const opts = baseUrlOrOptions ?? {};
+
+      // v0.5 (R5 E15): reject unknown options so a typo like
+      // `agnetId: "x"` raises at construction instead of silently
+      // running with `agentId = ""` and surfacing as a confusing
+      // policy-decision mystery later.
+      const unknown = Object.keys(opts).filter(
+        (k) => !VALID_AGENTGUARD_OPTION_KEYS.has(k)
+      );
+      if (unknown.length > 0) {
+        throw new TypeError(
+          `AgentGuard: unknown options ${JSON.stringify(unknown)}. ` +
+            `Valid options: ${JSON.stringify(
+              Array.from(VALID_AGENTGUARD_OPTION_KEYS).sort()
+            )}.`
+        );
+      }
+
       this.baseUrl = (opts.baseUrl ?? envBaseUrl ?? "http://localhost:8080").replace(
         /\/$/,
         ""
@@ -257,6 +323,19 @@ export class AgentGuard {
       // the supported way to suppress an env-var-leaked tenant in a
       // scoped test or a sub-process that should hit the legacy URLs.
       this.tenantId = opts.tenantId !== undefined ? opts.tenantId : envTenantId;
+    }
+
+    // v0.5 (R5 E10/E11): validate failMode. "deny" and "allow" are the
+    // only meaningful values; anything else (typo, accidental boolean,
+    // user passing the Python convention "DENY") is a programming bug
+    // and must surface at startup, not at the first request.
+    if (
+      !(VALID_FAIL_MODES as readonly string[]).includes(this.failMode)
+    ) {
+      throw new TypeError(
+        `AgentGuard: invalid failMode ${JSON.stringify(this.failMode)}. ` +
+          `Expected one of ${JSON.stringify(VALID_FAIL_MODES)}.`
+      );
     }
   }
 
@@ -314,11 +393,48 @@ export class AgentGuard {
 
       clearTimeout(timer);
 
+      // v0.5 (R5 E8 / S13): honest response validation. The previous
+      // implementation called response.json() on whatever came back; a
+      // misconfigured reverse proxy returning HTML or a chunked text
+      // body would either explode or — worse — successfully decode a
+      // malformed JSON payload missing `decision` and we'd carry on
+      // with a CheckResult.decision of "DENY" (the default), masking
+      // the actual issue. Now we positively assert each layer.
       if (!response.ok) {
-        throw new Error(`AgentGuard returned ${response.status}`);
+        return this.failModeResult(
+          `AgentGuard returned status ${response.status}`
+        );
       }
 
-      const data = (await response.json()) as CheckResponseJSON;
+      const ctype = (response.headers.get("Content-Type") ?? "").toLowerCase();
+      if (!ctype.startsWith("application/json")) {
+        return this.failModeResult(
+          `AgentGuard returned unexpected content-type ${JSON.stringify(ctype)}`
+        );
+      }
+
+      let raw: unknown;
+      try {
+        raw = await response.json();
+      } catch (e) {
+        return this.failModeResult(
+          `AgentGuard returned non-JSON body: ${
+            e instanceof Error ? e.message : String(e)
+          }`
+        );
+      }
+
+      if (
+        raw === null ||
+        typeof raw !== "object" ||
+        typeof (raw as { decision?: unknown }).decision !== "string"
+      ) {
+        return this.failModeResult(
+          `AgentGuard returned malformed response body (missing 'decision')`
+        );
+      }
+
+      const data = raw as CheckResponseJSON;
       return new CheckResultImpl({
         decision: data.decision,
         reason: data.reason,
@@ -327,13 +443,29 @@ export class AgentGuard {
         approvalUrl: data.approval_url,
       });
     } catch (err) {
-      // Fail closed (deny) by default when AgentGuard is unreachable
-      const fallbackDecision = this.failMode === "allow" ? "ALLOW" : "DENY";
-      return new CheckResultImpl({
-        decision: fallbackDecision,
-        reason: `AgentGuard unreachable: ${err instanceof Error ? err.message : String(err)}`,
-      });
+      // Fail closed (deny) by default when AgentGuard is unreachable.
+      return this.failModeResult(
+        `AgentGuard unreachable: ${err instanceof Error ? err.message : String(err)}`
+      );
     }
+  }
+
+  /**
+   * Build a CheckResult honoring the configured `failMode`.
+   *
+   * Centralizes the fail-mode dispatch so transport failures and HTTP
+   * contract violations (bad status, wrong content-type, malformed
+   * body) all flow through one decision point. v0.5 R5 E8 closes a
+   * subtle bug where a 200-OK with the wrong Content-Type would still
+   * try to decode the body and surface as an opaque "AgentGuard
+   * unreachable" instead of a clean "wrong content-type" reason.
+   */
+  private failModeResult(reason: string): CheckResult {
+    const fallbackDecision = this.failMode === "allow" ? "ALLOW" : "DENY";
+    return new CheckResultImpl({
+      decision: fallbackDecision,
+      reason,
+    });
   }
 
   /**
@@ -385,6 +517,16 @@ export class AgentGuard {
           this.url(`/status/${approvalId}`),
           { headers: this.authHeaders() }
         );
+        // v0.5 (R5 P9): 401/403 means the API key is broken. Continuing
+        // to poll would just spin until the deadline elapses and return
+        // a synthetic "Approval timed out" DENY, hiding the real cause.
+        if (res.status === 401 || res.status === 403) {
+          throw new AgentGuardAuthError(
+            `AgentGuard rejected status poll for ${approvalId} ` +
+              `with HTTP ${res.status} (check apiKey)`,
+            res.status
+          );
+        }
         if (res.ok) {
           const data = (await res.json()) as StatusResponseJSON;
           if (data.status === "resolved" && (data.decision === "ALLOW" || data.decision === "DENY")) {
@@ -394,11 +536,19 @@ export class AgentGuard {
             });
           }
         }
-      } catch {
-        // Continue polling
+      } catch (e) {
+        // AgentGuardAuthError must propagate so the caller sees the auth
+        // failure immediately. Other transport errors (DNS, ECONNREFUSED,
+        // 5xx after readinng above) keep the v0.4.x semantics: swallow,
+        // retry until deadline.
+        if (e instanceof AgentGuardAuthError) throw e;
       }
 
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      // v0.5 (R5 E14): jittered sleep — 80%..120% of pollIntervalMs.
+      // Avoids a thundering-herd when many SDK clients wait on the same
+      // approval and would otherwise poll on identical period boundaries.
+      const jitter = pollIntervalMs * (0.8 + 0.4 * Math.random());
+      await new Promise((resolve) => setTimeout(resolve, jitter));
     }
 
     return new CheckResultImpl({
@@ -473,6 +623,22 @@ export function guarded<T extends (...args: unknown[]) => Promise<unknown>>(
     typeof optionsOrGetCheckOptions === "function"
       ? { getCheckOptions: optionsOrGetCheckOptions }
       : optionsOrGetCheckOptions ?? {};
+
+  // v0.5 (R5 E15): reject unknown option keys at decoration time.
+  // A typo such as `waitForApprovel: true` (notice the missing 'a')
+  // would otherwise be silently ignored and the wrapper would throw
+  // on REQUIRE_APPROVAL instead of waiting — surprising behavior.
+  const unknownGuardedKeys = Object.keys(opts).filter(
+    (k) => !VALID_GUARDED_OPTION_KEYS.has(k)
+  );
+  if (unknownGuardedKeys.length > 0) {
+    throw new TypeError(
+      `guarded(): unknown option ${JSON.stringify(unknownGuardedKeys)}. ` +
+        `Valid options: ${JSON.stringify(
+          Array.from(VALID_GUARDED_OPTION_KEYS).sort()
+        )}.`
+    );
+  }
 
   const waitForApproval = opts.waitForApproval ?? false;
   const approvalTimeoutMs = opts.approvalTimeoutMs ?? 300_000;

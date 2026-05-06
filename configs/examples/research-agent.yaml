@@ -90,6 +90,27 @@ rules:
         paths: ["**"]
         message: "Research agents cannot delete files"
 
+  # --- Data (form inputs, browser data submissions) ---
+  # Research agents browse a lot but should never submit credentials or
+  # financial details into web forms. Pattern matching runs against the
+  # (redacted) Command field — the browser-use adapter scrubs Bearer
+  # tokens, AWS/GCP keys, and the like before transmission, so these
+  # patterns target the residual structured PII shapes operators have
+  # historically seen leak. Domain matching gates by submission target.
+  - scope: data
+    deny:
+      - pattern: "*ssn:*"
+        message: "SSN values must not be submitted to web forms"
+      # Loose credit-card heuristic — 13-19 contiguous digits with optional separators.
+      - pattern: "*[0-9][0-9][0-9][0-9] *[0-9][0-9][0-9][0-9]*"
+        message: "Card-number-shaped value blocked"
+      - domain: "*.bank.*"
+        message: "Form submissions to banking sites are blocked"
+    allow:
+      - domain: "*.arxiv.org"
+      - domain: "scholar.google.com"
+      - domain: "*.wikipedia.org"
+
   # --- Cost ---
   # Session totals are accumulated in-memory per `session_id`, per-instance
   # only. Restart loses totals. `alert_threshold` promotes a single action
