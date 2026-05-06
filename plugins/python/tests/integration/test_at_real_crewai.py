@@ -31,7 +31,7 @@ import json
 import pytest
 
 
-crewai = pytest.importorskip("crewai", minversion="0.80")
+crewai = pytest.importorskip("crewai")  # floor enforced by pyproject extras
 try:
     from crewai import Agent, Task, Crew  # type: ignore[attr-defined]
     from crewai.tools import BaseTool  # type: ignore[attr-defined]

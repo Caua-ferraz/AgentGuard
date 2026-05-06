@@ -44,8 +44,12 @@ import json
 import pytest
 
 
-# Real LangChain stack — skip cleanly if unavailable.
-langchain_core = pytest.importorskip("langchain_core", minversion="0.3")
+# Real LangChain stack — skip cleanly if unavailable. minversion is dropped
+# because pyproject's [project.optional-dependencies] enforces the floor at
+# install time; pytest.importorskip's minversion check parses module
+# `__version__` via packaging and stumbled on langchain 1.x's version layout
+# in CI even with pip-installed 1.2.x.
+langchain_core = pytest.importorskip("langchain_core")
 langgraph = pytest.importorskip("langgraph")
 
 from langchain_core.language_models.chat_models import BaseChatModel  # noqa: E402

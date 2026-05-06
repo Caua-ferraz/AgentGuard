@@ -20,8 +20,8 @@ import json
 import pytest
 
 
-browser_use = pytest.importorskip("browser_use", minversion="0.4")
-playwright = pytest.importorskip("playwright", minversion="1.40")
+browser_use = pytest.importorskip("browser_use")  # floor enforced by pyproject extras
+playwright = pytest.importorskip("playwright")
 playwright_async_api = pytest.importorskip("playwright.async_api")
 
 from agentguard import Guard  # noqa: E402

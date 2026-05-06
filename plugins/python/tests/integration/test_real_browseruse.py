@@ -22,10 +22,10 @@ import json
 
 import pytest
 
-# browser-use 0.4 was the first release on the modern browser_use.Browser
-# API surface. Older versions are skipped rather than mis-tested.
-browser_use = pytest.importorskip("browser_use", minversion="0.4")
-playwright = pytest.importorskip("playwright", minversion="1.40")
+# pyproject extras enforce install-time floor (browser-use>=0.4,
+# playwright>=1.40). importorskip just gates on import success.
+browser_use = pytest.importorskip("browser_use")
+playwright = pytest.importorskip("playwright")
 playwright_async_api = pytest.importorskip("playwright.async_api")
 
 from agentguard import Guard  # noqa: E402

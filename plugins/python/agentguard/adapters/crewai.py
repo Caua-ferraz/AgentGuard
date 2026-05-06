@@ -69,6 +69,7 @@ Usage
     )
 """
 
+import asyncio
 from typing import Any, List, Optional
 
 from agentguard import (
@@ -342,23 +343,43 @@ class GuardedCrewTool:
     # ------------------------------------------------------------------
 
     async def arun(self, tool_input: Any = "", **kwargs) -> Any:
-        """Legacy async CrewAI entry point. Gated."""
+        """Legacy async CrewAI entry point. Gated.
+
+        Note on sync-only tools: CrewAI's BaseTool defines ``_arun`` as a
+        stub that raises ``NotImplementedError`` for tools that haven't
+        overridden it (the common case — most CrewAI tools are sync).
+        Catching the NotImplementedError per branch lets us fall through
+        cleanly to a thread-executor sync path.
+        """
         self._check_or_raise(tool_input)
-        if hasattr(self._tool, "_arun"):
-            return await self._tool._arun(tool_input, **kwargs)
-        if hasattr(self._tool, "arun"):
-            return await self._tool.arun(tool_input, **kwargs)
-        # Fall through to sync if no async path exists.
+        try:
+            if hasattr(self._tool, "_arun"):
+                return await self._tool._arun(tool_input, **kwargs)
+        except NotImplementedError:
+            pass
+        try:
+            if hasattr(self._tool, "arun"):
+                return await self._tool.arun(tool_input, **kwargs)
+        except NotImplementedError:
+            pass
+        # Sync fallback — run in a thread executor so the event loop is not blocked.
         if hasattr(self._tool, "_run"):
-            return self._tool._run(tool_input, **kwargs)
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None, lambda: self._tool._run(tool_input, **kwargs)
+            )
         if hasattr(self._tool, "run"):
-            return self._tool.run(tool_input, **kwargs)
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None, lambda: self._tool.run(tool_input, **kwargs)
+            )
         raise AttributeError(
             f"wrapped tool {type(self._tool).__name__!r} exposes no async path"
         )
 
     async def _arun(self, *args, **kwargs) -> Any:
-        """Internal async entry point. Gated."""
+        """Internal async entry point. Gated. See ``arun`` for the
+        NotImplementedError fallthrough rationale."""
         tool_input: Any
         if args:
             tool_input = args[0] if len(args) == 1 else args
@@ -367,14 +388,26 @@ class GuardedCrewTool:
         else:
             tool_input = ""
         self._check_or_raise(tool_input)
-        if hasattr(self._tool, "_arun"):
-            return await self._tool._arun(*args, **kwargs)
-        if hasattr(self._tool, "arun"):
-            return await self._tool.arun(*args, **kwargs)
+        try:
+            if hasattr(self._tool, "_arun"):
+                return await self._tool._arun(*args, **kwargs)
+        except NotImplementedError:
+            pass
+        try:
+            if hasattr(self._tool, "arun"):
+                return await self._tool.arun(*args, **kwargs)
+        except NotImplementedError:
+            pass
         if hasattr(self._tool, "_run"):
-            return self._tool._run(*args, **kwargs)
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None, lambda: self._tool._run(*args, **kwargs)
+            )
         if hasattr(self._tool, "run"):
-            return self._tool.run(*args, **kwargs)
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None, lambda: self._tool.run(*args, **kwargs)
+            )
         raise AttributeError(
             f"wrapped tool {type(self._tool).__name__!r} exposes no async path"
         )
@@ -384,21 +417,46 @@ class GuardedCrewTool:
 
         Closes R5 E3 (async leg): prior to v0.5, calling
         ``await tool.ainvoke({...})`` skipped the policy check.
+
+        Sync-only-tool fallthrough: CrewAI's BaseTool defines async stubs
+        (``_arun`` / ``ainvoke``) that raise ``NotImplementedError``
+        when the tool hasn't overridden them. Each branch catches that and
+        falls through to the next, ultimately running ``_run`` in a thread
+        executor so calling ``await tool.ainvoke(...)`` works against any
+        sync CrewAI tool.
         """
         self._check_or_raise(input)
-        if hasattr(self._tool, "ainvoke"):
-            return await self._tool.ainvoke(input, config=config, **kwargs)
-        if hasattr(self._tool, "_arun"):
-            return await self._tool._arun(input, **kwargs)
-        if hasattr(self._tool, "arun"):
-            return await self._tool.arun(input, **kwargs)
-        # Fall back to sync if no async path exists.
+        try:
+            if hasattr(self._tool, "ainvoke"):
+                return await self._tool.ainvoke(input, config=config, **kwargs)
+        except NotImplementedError:
+            pass
+        try:
+            if hasattr(self._tool, "_arun"):
+                return await self._tool._arun(input, **kwargs)
+        except NotImplementedError:
+            pass
+        try:
+            if hasattr(self._tool, "arun"):
+                return await self._tool.arun(input, **kwargs)
+        except NotImplementedError:
+            pass
+        # Sync fallback — execute in thread executor so the event loop is unblocked.
         if hasattr(self._tool, "invoke"):
-            return self._tool.invoke(input, config=config, **kwargs)
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None, lambda: self._tool.invoke(input, config=config, **kwargs)
+            )
         if hasattr(self._tool, "_run"):
-            return self._tool._run(input, **kwargs)
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None, lambda: self._tool._run(input, **kwargs)
+            )
         if hasattr(self._tool, "run"):
-            return self._tool.run(input, **kwargs)
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None, lambda: self._tool.run(input, **kwargs)
+            )
         raise AttributeError(
             f"wrapped tool {type(self._tool).__name__!r} exposes no callable path"
         )

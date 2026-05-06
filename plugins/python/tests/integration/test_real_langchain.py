@@ -21,11 +21,16 @@ import json
 
 import pytest
 
-# Pin floor matches pyproject.toml's [project.optional-dependencies]
-# langchain group floor. If the environment has an older release the
-# suite skips cleanly rather than generating misleading failures.
-langchain_core = pytest.importorskip("langchain_core", minversion="0.3")
-langchain = pytest.importorskip("langchain", minversion="0.3")
+# pyproject.toml's [project.optional-dependencies] langchain group enforces
+# the version floor at install time (langchain-core>=0.3,<2.0). At test
+# time we only need to verify the packages are importable — minversion=...
+# was previously checking again, but pytest.importorskip parses
+# `module.__version__` via packaging, and langchain 1.x's version-attribute
+# layout caused spurious skips on CI even with pip-installed 1.2.x. The
+# install-time floor is the source of truth; importorskip without
+# minversion just gates on the import succeeding.
+langchain_core = pytest.importorskip("langchain_core")
+langchain = pytest.importorskip("langchain")
 
 from langchain_core.tools import Tool  # noqa: E402
 

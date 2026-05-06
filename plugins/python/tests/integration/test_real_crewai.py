@@ -18,10 +18,11 @@ import json
 
 import pytest
 
-# Pin floor matches the upper bound documented in pyproject.toml's crewai
-# extra. CrewAI 0.80 was the first release on the modern Runnable API —
-# all of A12's hardening targets that surface.
-crewai = pytest.importorskip("crewai", minversion="0.80")
+# pyproject.toml's crewai extra enforces the install-time floor (>=0.80).
+# importorskip without minversion just confirms the package imports;
+# minversion was previously double-checking and tripped on CrewAI 1.x's
+# version-attribute layout in CI.
+crewai = pytest.importorskip("crewai")
 try:
     from crewai.tools import BaseTool  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - layout differs across versions
