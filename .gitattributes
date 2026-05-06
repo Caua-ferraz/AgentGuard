@@ -1,0 +1,8 @@
+# Force LF line endings for cross-language wire-format fixtures.
+# Python and TypeScript SDKs load these byte-for-byte; CRLF
+# conversion on Windows checkouts breaks TestFixturesAreCanonicalJSON
+# in pkg/proxy/schema/v1 and any contract test that compares bytes.
+pkg/proxy/schema/v1/testdata/*.json text eol=lf
+
+# JSON Schema spec — keep canonical too.
+pkg/proxy/schema/v1/schema.json text eol=lf
