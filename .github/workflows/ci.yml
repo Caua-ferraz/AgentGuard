@@ -21,7 +21,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -54,7 +54,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -75,7 +75,7 @@ jobs:
         # closed.
         python-version: ['3.9', '3.10', '3.11', '3.12']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # Go is needed so we can build the agentguard binary. The Python E2E
       # tests (tests/test_end_to_end_real_server.py) spawn the real binary
@@ -147,7 +147,7 @@ jobs:
       matrix:
         framework: [langchain, crewai, browser-use]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Go (build agentguard binary)
         uses: actions/setup-go@v5
@@ -200,7 +200,7 @@ jobs:
         # current LTS; 22 is the upcoming LTS. v0.5 R1 E2 closed.
         node-version: ['18', '20', '22']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Node ${{ matrix.node-version }}
         uses: actions/setup-node@v4
@@ -222,7 +222,7 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Build Docker image
         run: docker build -t agentguard:ci .
