@@ -229,4 +229,4 @@ docker run -d -p 8080:8080 \
 - Run `agentguard status` — shows `/health` reachability and the pending queue.
 - Check `/metrics` — counters, gauges, histograms, dispatch drops.
 - Response headers on `/v1/check`: `X-AgentGuard-Policy-Ms`, `X-AgentGuard-Audit-Ms`, `X-AgentGuard-Total-Ms` (timings in ms, 3 decimals).
-- Open an issue with: version (`agentguard version`), sanitized policy snippet, and the relevant log lines. Security-sensitive reports go to `security@agentguard.dev` — not the issue tracker.
+- Open an issue with: version (`agentguard version`), sanitized policy snippet, and the relevant log lines. Security-sensitive reports go to `cauaferraz@lictorate.com` — not the issue tracker.

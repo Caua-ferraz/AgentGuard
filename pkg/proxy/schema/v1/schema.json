@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://agentguard.dev/schema/v1.json",
+  "$id": "https://agentguard.lictorate.com/schema/v1.json",
   "title": "AgentGuard /v1/check wire protocol",
   "description": "Schema for the request and response bodies of POST /v1/check, plus shared enums. Frozen at v0.5; new optional fields may be added under v1, but no field is ever removed and no field's name or type ever changes. Breaking changes ship as a separate v2 schema.",
   "$defs": {

@@ -16,7 +16,7 @@ that is no longer supported, please upgrade to the latest 0.5.x release.
 
 ## Reporting a Vulnerability
 
-Please report suspected vulnerabilities by email to **security@agentguard.dev**.
+Please report suspected vulnerabilities by email to **cauaferraz@lictorate.com**.
 
 Do **not** open a public GitHub issue, pull request, or discussion thread for
 security reports. Public reports give attackers a head start before a fix is

@@ -279,4 +279,4 @@ Reads the current version from `cmd/agentguard/main.go` (`version = "..."`), val
 - TypeScript SDK must stay on native `fetch`/`AbortController` — no polyfills.
 - Standard Go conventions (`gofmt`, `go vet`, table-driven tests). Prefer explicit error returns over panics.
 - Keep `--api-key` handling in CLI subcommands consistent: explicit `--api-key` flag wins over `AGENTGUARD_API_KEY` env.
-- Security report contact: `security@agentguard.dev` (see `docs/CONTRIBUTING.md`). Do not open public issues for vulnerabilities.
+- Security report contact: `cauaferraz@lictorate.com` (see `docs/CONTRIBUTING.md`). Do not open public issues for vulnerabilities.

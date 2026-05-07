@@ -22,8 +22,8 @@ maintainers and the wider community.
 AgentGuard Cloud is a managed offering with commercial support. Pricing,
 SLAs, and regional availability are still being finalized.
 
-- **Waitlist / early access:** <https://agentguard.dev/cloud>
-- **Sales / procurement enquiries:** sales@agentguard.dev
+- **Waitlist / early access:** <https://agentguard.lictorate.com>
+- **Sales / procurement enquiries:** cauaferraz@lictorate.com
 - **SLA, pricing:** TBA. Cloud customers receive a dedicated response
   channel and an incident-response SLA defined in their order form.
 

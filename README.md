@@ -28,7 +28,7 @@
 
 ## AgentGuard Cloud (preview)
 
-AgentGuard Cloud is the hosted, multi-tenant version — same policy engine, same audit log, run for you. **Currently in design.** Join the waitlist at [https://agentguard.dev/cloud](https://agentguard.dev/cloud) (placeholder URL — sign-up form goes live alongside the v0.5 release). The self-hosted Apache-2.0 build in this repo will always remain fully featured.
+AgentGuard Cloud is the hosted, multi-tenant version — same policy engine, same audit log, run for you. **Currently in design.** Join the waitlist at [https://agentguard.lictorate.com](https://agentguard.lictorate.com). The self-hosted Apache-2.0 build in this repo will always remain fully featured.
 
 ## The Problem
 
