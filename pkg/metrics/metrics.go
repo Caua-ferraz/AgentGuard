@@ -103,6 +103,41 @@ func IncAuditCorruptLine() {
 	atomic.AddUint64(&AuditCorruptLinesTotal, 1)
 }
 
+// LLM-proxy streaming metrics. The proxy buffers streaming tool_call
+// deltas up to --max-buffer-bytes; if accumulated arguments exceed
+// that cap before finish_reason arrives, the call is denied as a
+// synthetic refusal (operators want this visible). Provider label is
+// bounded ("openai" | "anthropic"). See pkg/llmproxy/streaming.go for
+// the call sites.
+type llmProxyOverflowKey struct {
+	Provider string
+}
+
+var (
+	llmProxyBufferOverflowMu    sync.Mutex
+	llmProxyBufferOverflowCount = map[llmProxyOverflowKey]uint64{}
+)
+
+// IncLLMProxyBufferOverflow increments
+// agentguard_llmproxy_buffer_overflow_total{provider=...}. Provider
+// MUST be "openai" or "anthropic" — the LLM proxy enforces that
+// upstream so cardinality stays bounded.
+func IncLLMProxyBufferOverflow(provider string) {
+	if provider == "" {
+		provider = "unknown"
+	}
+	llmProxyBufferOverflowMu.Lock()
+	llmProxyBufferOverflowCount[llmProxyOverflowKey{Provider: provider}]++
+	llmProxyBufferOverflowMu.Unlock()
+}
+
+// LLMProxyBufferOverflowFor returns the current count (for tests).
+func LLMProxyBufferOverflowFor(provider string) uint64 {
+	llmProxyBufferOverflowMu.Lock()
+	defer llmProxyBufferOverflowMu.Unlock()
+	return llmProxyBufferOverflowCount[llmProxyOverflowKey{Provider: provider}]
+}
+
 // Audit replay + rotation counters. Replay happens once at startup (seeding
 // in-memory decision counters from the audit log); rotations happen inline
 // on FileLogger.Log when the size threshold is crossed.
@@ -563,7 +598,36 @@ func WritePrometheus(w io.Writer) {
 	writeRateLimitBucketEvicted(w)
 	writeSSEDropped(w)
 	writeMigrationStatus(w)
+	writeLLMProxyBufferOverflow(w)
 	writeDeprecations(w)
+}
+
+// writeLLMProxyBufferOverflow emits the LLM-proxy streaming buffer
+// overflow counter. Always emits HELP/TYPE so the series is visible
+// before the first overflow happens.
+func writeLLMProxyBufferOverflow(w io.Writer) {
+	const name = "agentguard_llmproxy_buffer_overflow_total"
+	const help = "LLM-proxy streaming tool_call accumulations that exceeded --max-buffer-bytes and were converted to synthetic refusals, by provider."
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+	llmProxyBufferOverflowMu.Lock()
+	snap := make(map[llmProxyOverflowKey]uint64, len(llmProxyBufferOverflowCount))
+	for k, v := range llmProxyBufferOverflowCount {
+		snap[k] = v
+	}
+	llmProxyBufferOverflowMu.Unlock()
+	if len(snap) == 0 {
+		return
+	}
+	keys := make([]llmProxyOverflowKey, 0, len(snap))
+	for k := range snap {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return keys[i].Provider < keys[j].Provider
+	})
+	for _, k := range keys {
+		fmt.Fprintf(w, "%s{provider=\"%s\"} %d\n", name, escapeLabel(k.Provider), snap[k])
+	}
 }
 
 // writeMigrationStatus emits agentguard_audit_migration_status{from,to,status}.

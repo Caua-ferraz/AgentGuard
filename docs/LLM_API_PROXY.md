@@ -659,18 +659,163 @@ stream. Operators can tune the limits in policy YAML
 
 ---
 
-## 11. References
+## 11. Client integration
 
-- OpenAI Chat Completions:
+Phase 4C ships working examples for the four most common ways agents
+talk to OpenAI / Anthropic in 2026: the raw OpenAI and Anthropic
+Python SDKs, LangChain (`langchain-openai`), and CrewAI (LiteLLM
+under the hood). Each example is a runnable Python script with a
+paired `.md` walkthrough. The fastest end-to-end is
+[`docs/QUICKSTART_LLM_PROXY.md`](./QUICKSTART_LLM_PROXY.md).
+
+| SDK | Example | Path convention |
+|---|---|---|
+| OpenAI Python | [`examples/openai-sdk-config.py`](../examples/openai-sdk-config.py) + [`openai-sdk-config.md`](../examples/openai-sdk-config.md) | `OPENAI_BASE_URL=http://127.0.0.1:8081/v1` (with `/v1` suffix) |
+| Anthropic Python | [`examples/anthropic-sdk-config.py`](../examples/anthropic-sdk-config.py) + [`anthropic-sdk-config.md`](../examples/anthropic-sdk-config.md) | `ANTHROPIC_BASE_URL=http://127.0.0.1:8081` (no `/v1` — the SDK appends it) |
+| LangChain | [`examples/langchain-agent-config.py`](../examples/langchain-agent-config.py) + [`langchain-agent-config.md`](../examples/langchain-agent-config.md) | `ChatOpenAI(base_url="http://127.0.0.1:8081/v1")` (1.x signature) |
+| CrewAI | [`examples/crewai-agent-config.py`](../examples/crewai-agent-config.py) + [`crewai-agent-config.md`](../examples/crewai-agent-config.md) | `LLM(base_url="http://127.0.0.1:8081/v1", model=..., api_key=...)` |
+
+### 11.1 Per-SDK base-URL summary
+
+| SDK | Constructor parameter | Env var | Path convention | Verified version |
+|---|---|---|---|---|
+| OpenAI Python | `base_url=` | `OPENAI_BASE_URL` | `/v1` suffix | openai==2.35.1 (2026-05-05) |
+| Anthropic Python | `base_url=` | `ANTHROPIC_BASE_URL` | no `/v1` | anthropic==0.100.0 (2026-05-05) |
+| LangChain `ChatOpenAI` | `base_url=` | (inherits OpenAI SDK) | `/v1` suffix | langchain-openai 1.x (2026-05-05) |
+| LangChain `ChatAnthropic` | `base_url=` | (inherits Anthropic SDK) | no `/v1` | langchain-anthropic 1.x (2026-05-05) |
+| CrewAI `LLM` | `base_url=` | `OPENAI_API_BASE` / `OPENAI_BASE_URL` | `/v1` suffix (OpenAI-shape) | crewai 1.14.x (2026-05-05) |
+
+### 11.2 Verifying the integration
+
+Once the proxy is running and your code points at it:
+
+1. **The proxy logs a startup line.** Stderr: `agentguard-llm-proxy
+   <version> listening on 127.0.0.1:8081 (...)`. If you don't see
+   this, the proxy didn't start — check `--listen` and policy paths.
+2. **The first SDK call appears on the dashboard.** Send any
+   tool-using prompt — within a second the dashboard at
+   <http://127.0.0.1:8080/dashboard> shows an event with
+   `transport=llm_api_proxy` (purple chip), the resolved scope, and
+   the tool name as `command`. If nothing appears, the proxy isn't
+   reaching the central server's `/v1/check` — check `--guard-url`
+   and `--api-key`.
+3. **An ALLOW rule round-trips.** With the bundled
+   `configs/default.yaml`, ask the model to `ls /tmp` via a
+   `bash`-named tool. The dashboard logs `ALLOW`; the SDK receives
+   the original streamed tool-call deltas byte-identically.
+4. **A DENY rule rewrites the stream.** Add a `deny` rule for
+   `rm -rf *` under `scope: shell` (or use the bundled one). Prompt
+   the model to `rm -rf /etc`. The dashboard logs `DENY`; your code
+   receives a synthetic assistant text starting with
+   `[AgentGuard] Tool call denied:` instead of any tool-call deltas.
+
+If actions never reach AgentGuard, the SDK is probably still talking
+to the real upstream — verify the env var is set for the process
+that runs your script (not just the parent shell), and that the SDK
+constructor isn't overriding `base_url` from elsewhere.
+
+### 11.3 Common gotchas
+
+**Both binaries must be running.** The proxy alone does not gate
+anything — every tool call triggers a callback to the central
+server's `/v1/check`. If the central server is down, the proxy's
+`--fail-mode` controls behaviour: `deny` (default), `allow`, or
+`fail-closed-with-audit`.
+
+**Two API keys, two purposes.** `OPENAI_API_KEY` /
+`ANTHROPIC_API_KEY` flows through the proxy verbatim to the upstream;
+the proxy never reads it. `AGENTGUARD_API_KEY` is the central
+server's bearer for `/v1/check` — the proxy uses it only on the
+side-channel call. The optional `--proxy-api-key` is a third,
+independent thing: a bearer the proxy itself enforces on inbound
+requests via the `X-AgentGuard-Proxy-Auth` header (separate from
+`Authorization` so the upstream's bearer can pass through
+unmodified). Don't confuse the three.
+
+**Anthropic's path convention.** `ANTHROPIC_BASE_URL` should be
+`http://127.0.0.1:8081` — no `/v1` suffix. The Anthropic SDK appends
+`/v1/messages` itself. Setting `http://127.0.0.1:8081/v1` produces
+double-prefixed paths and 404s. This is the most common
+configuration mistake; double-check the env var when debugging.
+
+**Approval-id round-trip is opt-in.** When AgentGuard returns
+`REQUIRE_APPROVAL`, the proxy emits a synthetic refusal with the
+approval ID embedded. The SDK or end user needs to:
+
+1. Click approve on the dashboard (or via `agentguard approve <id>`).
+2. Re-prompt the model with the same intent.
+3. Pass `meta.approval_id` to the proxy's `/v1/check` (handled
+   automatically when retrying through the proxy and your harness
+   sets `_meta.dev.agentguard/approval_id` — see Phase 4B's
+   approval-id round-trip in [`docs/APPROVAL_WORKFLOW.md`](./APPROVAL_WORKFLOW.md)).
+
+The OpenAI / Anthropic SDKs do **not** carry `_meta` round-trip
+state automatically; for one-shot CLI agents the typical flow is:
+operator clicks approve, user re-prompts, model emits the tool call
+again, AgentGuard sees the approved id and short-circuits to
+`ALLOW`.
+
+**Streaming vs non-streaming.** The proxy's pause/resume/rewrite
+mechanism (§ 5) runs on the streaming path (`stream=True` for
+OpenAI; `messages.stream(...)` for Anthropic). Non-streaming
+requests are buffered in full (capped by `--max-buffer-bytes`), and
+tool calls are gated before the response body is forwarded. Both
+work; streaming is the recommended path for interactive UIs (lower
+TTFT) and the default for most modern agent frameworks.
+
+**Concurrency safety.** Each request gets its own `streamGater`
+struct with isolated parser state. Concurrent SDK calls from a
+single process are safe — there is no shared mutable state across
+streams (§ 6). The upstream HTTP client is shared (per-host
+connection pool), but per-request response readers are independent.
+
+**Custom tool names need a `tool_scope_map:` entry.** AgentGuard
+ships a default mapping for ~17 common tool names (see
+[`pkg/llmproxy/scope_map.go`](../pkg/llmproxy/scope_map.go)).
+Anything else dispatches as `scope: unmapped`, which the engine
+treats as default-deny unless an `unmapped` rule exists. For custom
+tools, add an entry under your policy's `tool_scope_map:` section
+(see [`docs/POLICY_REFERENCE.md` § "LLM API Proxy tool scope mapping"](./POLICY_REFERENCE.md)) — the proxy hot-reloads via the same mechanism the central server uses.
+
+**Self-hosted OpenAI-compatible upstreams.** The proxy's
+`--upstream-openai` flag accepts any OpenAI-compatible base URL
+(LM Studio, vLLM, llama.cpp's `--api-key` server, Together AI,
+Anyscale, etc.). The streaming wire format is the same; the
+`/v1/chat/completions` parser handles them all. For Azure OpenAI,
+note the path convention is different (`/openai/v1/...` not
+`/v1/...`) — point `--upstream-openai` at the Azure base URL
+including the resource path.
+
+---
+
+## 12. References
+
+- OpenAI Python SDK (verified 2026-05-05):
+  - <https://github.com/openai/openai-python> — README documents
+    `base_url=` and `OPENAI_BASE_URL`. Latest release v2.35.1.
   - <https://platform.openai.com/docs/api-reference/chat/create>
   - **Unknown — verify against
     <https://platform.openai.com/docs/api-reference/chat/streaming>
     at implementation time.** Design-time WebFetch returned 403; the
     streaming wire shape in § 5.1 is reconstructed from canonical
-    knowledge and the OpenAI Python SDK source. Phase 4C must
-    cross-check before locking the parser.
-- Anthropic Messages API (verified 2026-05-06):
+    knowledge and the OpenAI Python SDK source. Phase 4C cross-checked
+    against the SDK source tree.
+- Anthropic Python SDK (verified 2026-05-05):
+  - <https://github.com/anthropics/anthropic-sdk-python> — README +
+    `src/anthropic/_client.py` document `base_url=` and
+    `ANTHROPIC_BASE_URL`. Default base URL is
+    `https://api.anthropic.com` with no `/v1` suffix; SDK appends
+    `/v1/messages` etc. itself.
+  - <https://platform.claude.com/docs/en/api/client-sdks>
   - <https://platform.claude.com/docs/en/api/messages>
+- LangChain (verified 2026-05-05):
+  - <https://docs.langchain.com/oss/python/integrations/chat/openai> —
+    `langchain_openai.ChatOpenAI` `base_url=` parameter.
+  - <https://reference.langchain.com/python/langchain-anthropic/chat_models/ChatAnthropic> —
+    `langchain_anthropic.ChatAnthropic` `base_url=` parameter.
+- CrewAI (verified 2026-05-05):
+  - <https://docs.crewai.com/en/learn/llm-connections> — `LLM(...)`
+    `base_url=` parameter; `OPENAI_API_BASE` env var honored.
 - Architectural reference (no feature copying):
   - go-mitmproxy stream addons: <https://github.com/lqqyt2423/go-mitmproxy>
   - LiteLLM proxy structure: <https://github.com/BerriAI/litellm>

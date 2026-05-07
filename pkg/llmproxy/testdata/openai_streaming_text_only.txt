@@ -1,0 +1,14 @@
+: Synthesized 2026-05-05 from docs/LLM_API_PROXY.md § 5.1; verify against
+: real OpenAI Chat Completions SSE at A22 implementation time per the
+: Phase 4A "OpenAI streaming format unverified" note. No tool_calls —
+: pure content deltas; every event passes through byte-identical.
+data: {"id":"chatcmpl-textonly","object":"chat.completion.chunk","created":1730000000,"model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-textonly","object":"chat.completion.chunk","created":1730000000,"model":"gpt-4","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-textonly","object":"chat.completion.chunk","created":1730000000,"model":"gpt-4","choices":[{"index":0,"delta":{"content":" there"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-textonly","object":"chat.completion.chunk","created":1730000000,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+

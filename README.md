@@ -80,18 +80,26 @@ Then add to `claude_desktop_config.json` (macOS path: `~/Library/Application Sup
 
 90-second walkthrough: [`docs/QUICKSTART_MCP.md`](docs/QUICKSTART_MCP.md). Wire-format design + client-integration gotchas: [`docs/MCP_GATEWAY.md`](docs/MCP_GATEWAY.md). Ready configs for Cursor, Cline, Continue, Zed: [`examples/`](examples/).
 
-### 2. LLM API Proxy *(v0.5 — coming)*
+### 2. LLM API Proxy
 
 For any code that already uses the OpenAI / Anthropic SDKs, set one environment variable and your existing client flows through AgentGuard:
 
 ```bash
-export OPENAI_BASE_URL=http://localhost:8081/v1
-# Anthropic SDK: ANTHROPIC_BASE_URL=http://localhost:8081
+go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@latest
+
+agentguard-llm-proxy \
+    --listen 127.0.0.1:8081 \
+    --policy configs/default.yaml \
+    --guard-url http://127.0.0.1:8080 \
+    --api-key "$AGENTGUARD_API_KEY" &
+
+export OPENAI_BASE_URL=http://127.0.0.1:8081/v1
+# Anthropic SDK: ANTHROPIC_BASE_URL=http://127.0.0.1:8081 (no /v1 suffix)
 ```
 
-Your `openai.ChatCompletion.create(...)` calls now go through the AgentGuard proxy — no SDK changes, no new imports. Tool calls inside the response stream are intercepted and policy-checked.
+Tool calls inside the response stream are intercepted, gated against your policy, and either flushed to your code byte-identically (ALLOW), rewritten as a synthetic refusal (DENY), or surfaced for human approval (REQUIRE_APPROVAL). The OpenAI / Anthropic SDKs do not need to know the proxy exists.
 
-> Status: ships as part of the v0.5 release. Like the MCP gateway, the proxy binary is in active development for v0.5 and is not yet on `master` as of this commit.
+90-second walkthrough: [`docs/QUICKSTART_LLM_PROXY.md`](docs/QUICKSTART_LLM_PROXY.md). Wire-format design + client-integration gotchas: [`docs/LLM_API_PROXY.md`](docs/LLM_API_PROXY.md). Ready scripts for the OpenAI SDK, Anthropic SDK, LangChain, and CrewAI: [`examples/`](examples/).
 
 ### 3. SDK (compatibility tier)
 
@@ -201,7 +209,7 @@ Rule precedence: `deny → require_approval → allow → default deny`. Scopes:
 
 AgentGuard is a policy enforcement and audit layer. It is **not** an OS sandbox. Read this before you trust it as your last line of defense.
 
-- **v0.5 makes the firewall wire-level.** The MCP Gateway is on `master` as of Phase 4B and is the primary integration path for MCP-aware clients (Claude Desktop, Cursor, Cline, Continue, Zed): the agent reaches its tools only through AgentGuard, so there is no opt-out short of pointing the client at a different MCP server. The LLM API Proxy lands in Phase 4C and extends the same boundary to OpenAI/Anthropic SDK calls. Operators who control the agent's environment (env vars, network egress, MCP client config) get an enforcement boundary, not just an advisory one.
+- **v0.5 makes the firewall wire-level.** Both proxy heroes are on `master`: the **MCP Gateway** (Phase 4B) is the primary integration path for MCP-aware clients (Claude Desktop, Cursor, Cline, Continue, Zed), and the **LLM API Proxy** (Phase 4C) extends the same boundary to OpenAI / Anthropic SDK calls (`OPENAI_BASE_URL=http://127.0.0.1:8081/v1` and the Anthropic equivalent). The agent reaches its tools only through AgentGuard, so there is no opt-out short of pointing the client at a different MCP server or ignoring the SDK's base-URL configuration. Operators who control the agent's environment (env vars, network egress, MCP client config) get an enforcement boundary, not just an advisory one.
 - **The SDK is a compatibility tier.** It remains supported and tested for direct callers — but it is opt-in by design: the agent must call `guard.check(...)`. That makes it an *advisory* gate. Use it when the proxy is impractical (offline scripts, custom transports), and pair it with the proxy whenever both are available.
 - **AgentGuard does not sandbox the host or intercept syscalls.** A determined agent that controls its own runtime can bypass the proxy by ignoring `OPENAI_BASE_URL`, talking to a different MCP server, or shelling out directly. Combine AgentGuard with OS-level isolation (containers, seccomp, AppArmor, network egress rules) when the threat model includes a hostile agent.
 - **Pattern matching is string-glob, not semantic.** A deny rule for `rm -rf *` matches literal strings; an agent (or a creative human) can substitute equivalents (`find / -delete`, base64 payloads, etc.). Treat policies as a high-signal first filter, not a complete authorization model.
@@ -270,9 +278,9 @@ Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS deta
 - [x] Docker support with multi-stage build
 - [x] Policy hot-reload via `--watch`
 - [x] **MCP Gateway** — wire-level Model Context Protocol proxy with multi-upstream namespacing, capability merging, reconnect-with-backoff, and approval `_meta` round-trip; ships as the `agentguard-mcp-gateway` binary with copy-paste configs for Claude Desktop, Cursor, Cline, Continue, and Zed *(v0.5)*
+- [x] **LLM API Proxy** — drop-in OpenAI / Anthropic-compatible base URL with streaming pause/resume/rewrite, tool-call gating, provider-aware synthetic refusals, and tool→scope mapping; ships as the `agentguard-llm-proxy` binary with copy-paste examples for the OpenAI SDK, Anthropic SDK, LangChain, and CrewAI *(v0.5)*
 
 ### Planned
-- [ ] **LLM API Proxy** — drop-in OpenAI/Anthropic-compatible base URL *(v0.5)*
 - [ ] Audit-log rotation wired by default *(v0.5)*
 - [ ] Data exfiltration detection / `data` scope (PII scanning)
 - [ ] SQLite/PostgreSQL audit backend

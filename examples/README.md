@@ -27,12 +27,36 @@ Each `<client>-config.json` has a sibling `<client>-config.md` with the
 authoritative file path, OS-specific gotchas, the source-doc URL +
 verification date, and concrete verification steps.
 
+## LLM API Proxy
+
+The proxy binary is `agentguard-llm-proxy` (Go 1.22+,
+`go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@latest`).
+It speaks the OpenAI Chat Completions and Anthropic Messages wire
+formats, forwards traffic to the real upstream, and gates tool calls
+inside the response stream against the central AgentGuard server's
+`/v1/check`. Existing code that already uses the OpenAI / Anthropic
+SDKs works unchanged after setting one environment variable. See
+[`docs/LLM_API_PROXY.md`](../docs/LLM_API_PROXY.md) for the wire-format
+design and [`docs/QUICKSTART_LLM_PROXY.md`](../docs/QUICKSTART_LLM_PROXY.md)
+for the 90-second walkthrough.
+
+| SDK | Example | Path convention |
+|---|---|---|
+| OpenAI Python | [`openai-sdk-config.py`](openai-sdk-config.py) + [`openai-sdk-config.md`](openai-sdk-config.md) | `OPENAI_BASE_URL=http://127.0.0.1:8081/v1` (with `/v1`) |
+| Anthropic Python | [`anthropic-sdk-config.py`](anthropic-sdk-config.py) + [`anthropic-sdk-config.md`](anthropic-sdk-config.md) | `ANTHROPIC_BASE_URL=http://127.0.0.1:8081` (no `/v1`) |
+| LangChain | [`langchain-agent-config.py`](langchain-agent-config.py) + [`langchain-agent-config.md`](langchain-agent-config.md) | `ChatOpenAI(base_url="http://127.0.0.1:8081/v1")` |
+| CrewAI | [`crewai-agent-config.py`](crewai-agent-config.py) + [`crewai-agent-config.md`](crewai-agent-config.md) | `LLM(base_url="http://127.0.0.1:8081/v1", ...)` |
+
+Each example is runnable end-to-end (`python <file>.py` after `pip
+install`). The paired `.md` walks through the two-binary setup,
+expected ALLOW / DENY / REQUIRE_APPROVAL behaviour with the bundled
+default policy, and SDK-specific gotchas. Quickstart:
+[`docs/QUICKSTART_LLM_PROXY.md`](../docs/QUICKSTART_LLM_PROXY.md).
+
 ## Other integration paths
 
 - **SDK (compatibility tier).** [`quickstart.py`](quickstart.py) — the
   Python SDK example: explicit `Guard.check(...)` calls in agent code.
   The SDK is documented in [`docs/SDK_PYTHON.md`](../docs/SDK_PYTHON.md).
-- **LLM API Proxy.** Coming in v0.5 (Phase 4C). The proxy binary will
-  ship alongside `agentguard-mcp-gateway` and add an OpenAI- /
-  Anthropic-compatible base URL that intercepts tool calls in completion
-  streams. Track progress in [`docs/LLM_API_PROXY.md`](../docs/LLM_API_PROXY.md).
+  Use it when the proxy isn't practical (offline scripts, custom
+  transports), and pair it with the proxy whenever both are available.

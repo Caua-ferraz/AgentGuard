@@ -1,8 +1,9 @@
-.PHONY: build build-mcp-gateway test lint run clean docker validate validate-examples bench help
+.PHONY: build build-mcp-gateway build-llm-proxy test lint run clean docker validate validate-examples bench help
 
 # Binary name
 BINARY=agentguard
 MCP_GATEWAY_BINARY=agentguard-mcp-gateway
+LLM_PROXY_BINARY=agentguard-llm-proxy
 VERSION=0.4.1
 COMMIT=$(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)"
@@ -14,6 +15,10 @@ build:
 ## build-mcp-gateway: Compile the AgentGuard MCP Gateway binary
 build-mcp-gateway:
 	go build $(LDFLAGS) -o $(MCP_GATEWAY_BINARY) ./cmd/agentguard-mcp-gateway
+
+## build-llm-proxy: Compile the AgentGuard LLM API Proxy binary
+build-llm-proxy:
+	go build $(LDFLAGS) -o $(LLM_PROXY_BINARY) ./cmd/agentguard-llm-proxy
 
 ## test: Run all tests with race detection
 test:
@@ -56,7 +61,7 @@ docker-run: docker
 
 ## clean: Remove build artifacts
 clean:
-	rm -f $(BINARY) coverage.out
+	rm -f $(BINARY) $(MCP_GATEWAY_BINARY) $(LLM_PROXY_BINARY) coverage.out
 	rm -rf dist/
 
 ## install-python-sdk: Install the Python SDK in development mode

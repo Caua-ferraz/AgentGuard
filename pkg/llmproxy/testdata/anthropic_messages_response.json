@@ -1,0 +1,23 @@
+{
+  "id": "msg_01ABCDEFG1234567",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-3-5-sonnet-20241022",
+  "content": [
+    {
+      "type": "text",
+      "text": "Hello! I can help with that."
+    },
+    {
+      "type": "tool_use",
+      "id": "toolu_01D7FLrfh4GYq7yT1ULFeyMV",
+      "name": "read_file",
+      "input": {"path": "/tmp/x"}
+    }
+  ],
+  "stop_reason": "tool_use",
+  "usage": {
+    "input_tokens": 25,
+    "output_tokens": 18
+  }
+}

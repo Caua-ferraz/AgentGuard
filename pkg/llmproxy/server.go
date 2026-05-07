@@ -1,0 +1,544 @@
+package llmproxy
+
+// server.go is the HTTP server skeleton for agentguard-llm-proxy.
+// Phase 4C A21 wires routes, the non-streaming forward path, and
+// nil-safe hooks that A22 (streaming), A23 (scope mapping), and A24
+// (policy gate + refusal construction) replace.
+//
+// The server is intentionally small: per-request goroutine isolation
+// (Go's default), shared http.Client per upstream provider for
+// connection pooling, and zero global mutable state. See
+// docs/LLM_API_PROXY.md § 6 for the concurrency contract.
+
+import (
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+)
+
+// BuildVersion is overridden via -ldflags by the binary entry point.
+// Defaults to "dev" for `go test` / `go run`.
+var BuildVersion = "dev"
+
+// ProxyAuthHeader is the inbound-auth header the proxy enforces when
+// --proxy-api-key is set. Distinct from the Authorization header so
+// the upstream's bearer token (which the proxy forwards verbatim) is
+// not aliased with the proxy's own credential.
+//
+// docs/LLM_API_PROXY.md § 8.1 originally proposed re-keying the
+// Authorization header; A21 chose a separate header to avoid having
+// the SDK send two `Authorization` values (which is not legal in
+// HTTP/1.1 anyway). SDK callers wishing to authenticate with the
+// proxy set this header in addition to (not instead of) the
+// upstream's Authorization.
+const ProxyAuthHeader = "X-AgentGuard-Proxy-Auth"
+
+// ----- Hook input/output types (consumed by A22/A23/A24) -----
+
+// ToolCallCheck is the bridge-internal shape passed to PolicyCheck.
+// A24 reads this, calls /v1/check, returns Decision. The shape
+// mirrors mcpgw.ToolsCallRequest deliberately — operators get a
+// uniform mental model across the two proxies.
+type ToolCallCheck struct {
+	// Provider is "openai" or "anthropic". A24 uses this to pick
+	// upstream-specific synthetic-refusal shapes.
+	Provider string
+
+	// ToolName is the function/tool name as the model emitted it
+	// (no namespace prefix for the LLM proxy — that's MCP's pattern).
+	ToolName string
+
+	// ToolCallID is the upstream-assigned id (OpenAI: call_xxx,
+	// Anthropic: toolu_xxx). Surfaced in audit meta so operators can
+	// correlate with provider-side logs.
+	ToolCallID string
+
+	// Arguments is the parsed tool-call arguments. For OpenAI, this
+	// is the result of json.Unmarshal on the
+	// tool_calls[*].function.arguments STRING (which holds JSON);
+	// for Anthropic, it's the parsed input object. May be nil if the
+	// model emitted invalid JSON — A24 decides how to handle that.
+	Arguments map[string]interface{}
+
+	// RawArguments is the unparsed arguments byte slice, in case
+	// A23/A24 want to inspect or redact before re-marshalling.
+	RawArguments json.RawMessage
+
+	// AgentID, SessionID, TenantID, ApprovalID are the
+	// /v1/check-side metadata. AgentID is synthesised from inbound
+	// headers (X-Agent-ID) or falls back to "llm-proxy". TenantID
+	// comes from cfg.TenantID. ApprovalID is set when the LLM SDK
+	// echoed a previously-issued approval id back via a meta
+	// channel (v0.6 wires the actual round-trip; A21 leaves the
+	// field plumbed-through so A24 doesn't have to add it later).
+	AgentID    string
+	SessionID  string
+	TenantID   string
+	ApprovalID string
+
+	// Model is the model name from the request body — surfaced in
+	// audit meta.
+	Model string
+
+	// Stream indicates whether the request was a streaming one.
+	// Surfaced in audit meta so operators can distinguish gating
+	// patterns.
+	Stream bool
+
+	// UpstreamStatus is the HTTP status code the upstream returned.
+	// 0 means "no upstream call yet" (shouldn't happen in the
+	// gating path; reserved for future failure-mode plumbing).
+	UpstreamStatus int
+}
+
+// Decision is the verdict returned by PolicyCheck. Mirrors
+// mcpgw.Decision so refusal-rewriting code (A24) can share helpers.
+type Decision struct {
+	Allow            bool
+	RequiresApproval bool
+	Reason           string
+	Rule             string
+	ApprovalID       string
+	ApprovalURL      string
+}
+
+// ----- Server -----
+
+// Server is the HTTP server. Constructed via NewServer, run via Run.
+// Hooks for A22 (streaming), A23 (scope mapping), and A24 (policy
+// gate + refusal) default to nil-safe pass-through; downstream
+// workers wire concrete implementations.
+//
+// Concurrency: Server itself is read-only after construction. Per-
+// request goroutines isolate state (no shared mutable map between
+// requests). The shared http.Client pools connections per host.
+type Server struct {
+	cfg *Config
+
+	// httpClient is the shared upstream client. Connection pooling
+	// is per-host so OpenAI and Anthropic keepalives don't compete.
+	httpClient *http.Client
+
+	// Upstream URLs parsed once at construction time. Stored as
+	// *url.URL so handlers don't re-parse on every request.
+	openaiURL    *url.URL
+	anthropicURL *url.URL
+
+	// PolicyCheck is the hook A24 wires. The default (nil) returns
+	// ALLOW — useful for early bring-up before the policy engine
+	// integration. A24 sets this to a function that:
+	//   1. Builds a policy.ActionRequest from the ToolCallCheck
+	//      (scope from ScopeMap, command = tool name + redacted args,
+	//      agent_id from auth/header).
+	//   2. POSTs to <guard-url>/v1/check with
+	//      meta["transport"] = "llm_api_proxy".
+	//   3. Returns a Decision struct.
+	//
+	// Audit + SSE flow: PolicyCheck POSTs to /v1/check, which already
+	// writes the audit entry with transport="llm_api_proxy" and
+	// broadcasts the SSE event with the llm_api_proxy chip (per
+	// Phase 4B A19's transport-tag plumbing). The proxy itself does
+	// NOT emit audit entries directly — single source of truth.
+	PolicyCheck func(ctx context.Context, req *ToolCallCheck) (Decision, error)
+
+	// ScopeMap is the hook A23 wires. The default (nil) returns
+	// "unmapped" — which the policy engine fails closed unless an
+	// "unmapped" scope rule is configured. A23 ships a default
+	// mapping (bash → shell, read_file → filesystem, etc.) plus
+	// optional policy-YAML overrides.
+	ScopeMap func(toolName string) string
+
+	// BuildRefusal is the hook A24 wires. Builds the synthetic-refusal
+	// SSE bytes for a denied tool_call. Default (nil) returns a basic
+	// generic refusal — useful for early bring-up. A24 sets this to a
+	// function that constructs the provider-specific refusal shape
+	// (OpenAI assistant-text + [DONE]; Anthropic text-block at the
+	// buffered tool_use's index + stop_reason rewrite).
+	//
+	// See pkg/llmproxy/streaming.go (defaultRefusalBytes) for the
+	// fallback implementation. Per Phase 4A the OpenAI shape is
+	// assistant-text + [DONE]; the rejected `role: "tool"` shape
+	// caused SDK hangs.
+	BuildRefusal func(provider string, decision Decision, ctx *RefusalContext) []byte
+
+	// running guards Run from being called concurrently for the
+	// same Server (defensive — one Run per process is the contract).
+	running   sync.Mutex
+	startTime time.Time
+}
+
+// NewServer constructs a Server from a parsed Config. URL validation
+// already happened in Config.Validate; we only re-parse here to
+// stash *url.URL pointers.
+func NewServer(cfg *Config) (*Server, error) {
+	if cfg == nil {
+		return nil, errors.New("nil config")
+	}
+	openai, err := url.Parse(cfg.UpstreamOpenAI)
+	if err != nil {
+		return nil, fmt.Errorf("parse upstream-openai: %w", err)
+	}
+	anthropic, err := url.Parse(cfg.UpstreamAnthropic)
+	if err != nil {
+		return nil, fmt.Errorf("parse upstream-anthropic: %w", err)
+	}
+
+	// Per-host connection pool defaults from net/http are fine;
+	// streaming responses hold one conn per active stream which is
+	// expected. We override Timeout=0 (no end-to-end timeout) so
+	// streaming responses are not artificially capped — the
+	// per-request context (driven by client disconnect) is
+	// authoritative.
+	client := &http.Client{
+		// Timeout intentionally zero: streaming responses must be
+		// allowed to last as long as the upstream and client agree.
+		// Cancellation rides through context.
+		Timeout: 0,
+	}
+
+	return &Server{
+		cfg:          cfg,
+		httpClient:   client,
+		openaiURL:    openai,
+		anthropicURL: anthropic,
+	}, nil
+}
+
+// Run starts the HTTP server. Blocks until ctx.Done() (graceful
+// shutdown) or ListenAndServe returns an error. http.ErrServerClosed
+// is mapped to nil because that's the expected shutdown path.
+func (s *Server) Run(ctx context.Context) error {
+	if !s.running.TryLock() {
+		return errors.New("server already running")
+	}
+	defer s.running.Unlock()
+
+	mux := s.routes()
+
+	srv := &http.Server{
+		Addr:    s.cfg.Listen,
+		Handler: mux,
+		// ReadHeaderTimeout protects against slowloris on the
+		// request-line + headers, but NOT on the body — the proxy
+		// must accept large request bodies without artificially
+		// timing them out (max-buffer-bytes is the real cap).
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	s.startTime = time.Now()
+
+	// Graceful shutdown on ctx cancel. Use a separate goroutine so
+	// ListenAndServe can return cleanly.
+	shutdownDone := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+		close(shutdownDone)
+	}()
+
+	err := srv.ListenAndServe()
+	<-shutdownDone
+
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+// routes builds the request multiplexer. Method-prefix patterns
+// require Go 1.22+ (project pins go 1.22 in go.mod, see CLAUDE.md
+// "Project Conventions").
+func (s *Server) routes() *http.ServeMux {
+	mux := http.NewServeMux()
+
+	// OpenAI-shape routes — non-streaming forwarding via A21. A22
+	// will inspect responses for tool_calls and route through
+	// PolicyCheck once that hook is wired.
+	mux.HandleFunc("POST /v1/chat/completions", s.authMiddleware(s.handleChatCompletions))
+	mux.HandleFunc("POST /v1/completions", s.authMiddleware(s.handleLegacyCompletions))
+
+	// Anthropic-shape route.
+	mux.HandleFunc("POST /v1/messages", s.authMiddleware(s.handleAnthropicMessages))
+
+	// Pass-through routes — no tool calls in these responses; one
+	// audit entry tag (A19/A24's job) but no policy gating.
+	mux.HandleFunc("POST /v1/embeddings", s.authMiddleware(s.handlePassThroughOpenAI))
+	mux.HandleFunc("GET /v1/models", s.authMiddleware(s.handlePassThroughOpenAI))
+
+	// Proxy-level liveness. NOT auth-gated so health checks work
+	// even when --proxy-api-key is set.
+	mux.HandleFunc("GET /healthz", s.handleHealth)
+
+	return mux
+}
+
+// handleHealth is the proxy's own liveness endpoint. Distinct from
+// the central server's /v1/health — this reflects the proxy
+// process, not the policy engine. v0.6 may extend with
+// guard_reachable bool (see docs/PROXY_ARCHITECTURE.md § 8).
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	resp := map[string]interface{}{
+		"status":    "ok",
+		"version":   BuildVersion,
+		"transport": "llm_api_proxy",
+		"uptime_s":  int(time.Since(s.startTime).Seconds()),
+	}
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// authMiddleware enforces the proxy's own bearer (X-AgentGuard-Proxy-Auth)
+// when --proxy-api-key is set. When unset (the default for
+// loopback-only deployments) it's a no-op.
+//
+// Constant-time compare to avoid trivial timing leakage on the key
+// (matches central server's auth path).
+func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	if s.cfg.ProxyAPIKey == "" {
+		return next
+	}
+	expected := []byte(s.cfg.ProxyAPIKey)
+	return func(w http.ResponseWriter, r *http.Request) {
+		got := r.Header.Get(ProxyAuthHeader)
+		// Bearer-prefix tolerated but optional. SDKs that prefer to
+		// reuse Authorization-shaped headers can send "Bearer <key>";
+		// the simpler "<key>" form also works.
+		got = strings.TrimSpace(strings.TrimPrefix(got, "Bearer "))
+		if got == "" || subtle.ConstantTimeCompare([]byte(got), expected) != 1 {
+			writeJSONError(w, http.StatusUnauthorized, fmt.Errorf("unauthorized: %s missing or invalid", ProxyAuthHeader))
+			return
+		}
+		next(w, r)
+	}
+}
+
+// ----- OpenAI handlers -----
+
+// handleChatCompletions routes /v1/chat/completions. Non-streaming
+// requests forward verbatim via forwardOpenAI; streaming requests
+// route to handleStreamingChatCompletion (A22's pause/resume/rewrite
+// pipeline in pkg/llmproxy/streaming.go).
+func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	body, err := readRequestBody(r, s.cfg.MaxBufferBytes)
+	if err != nil {
+		writeBodyReadError(w, err)
+		return
+	}
+
+	var req ChatCompletionRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
+		return
+	}
+
+	if isStreamingRequest(r, req.Stream) {
+		s.handleStreamingChatCompletion(w, r, body, &req)
+		return
+	}
+
+	if err := s.forwardOpenAI(r.Context(), w, r, body, "/v1/chat/completions"); err != nil {
+		writeJSONError(w, http.StatusBadGateway, fmt.Errorf("upstream error: %w", err))
+	}
+}
+
+// handleLegacyCompletions routes /v1/completions (the older
+// text-completion endpoint). Same forwarding shape as chat; legacy
+// completions don't carry tool calls, but we honour Stream-detection
+// for symmetry.
+func (s *Server) handleLegacyCompletions(w http.ResponseWriter, r *http.Request) {
+	body, err := readRequestBody(r, s.cfg.MaxBufferBytes)
+	if err != nil {
+		writeBodyReadError(w, err)
+		return
+	}
+
+	// Legacy /v1/completions has stream:bool too; reuse the same
+	// minimal shape inspection (any unknown fields round-trip via
+	// the byte body).
+	var probe struct {
+		Stream bool `json:"stream,omitempty"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
+		return
+	}
+
+	if isStreamingRequest(r, probe.Stream) {
+		// Legacy /v1/completions does not emit tool_calls, so the
+		// streaming pipeline degenerates to pure passthrough. We
+		// reuse the OpenAI streaming runner against the legacy path:
+		// the parser observes no tool_call deltas and every event is
+		// PassThrough.
+		s.handleStreamingLegacyCompletion(w, r, body)
+		return
+	}
+
+	if err := s.forwardOpenAI(r.Context(), w, r, body, "/v1/completions"); err != nil {
+		writeJSONError(w, http.StatusBadGateway, fmt.Errorf("upstream error: %w", err))
+	}
+}
+
+// handleStreamingLegacyCompletion is the streaming variant of the
+// /v1/completions handler. The legacy OpenAI completions endpoint
+// does not return tool_calls, so the runner degenerates to pure
+// passthrough — but we route through the same SSE machinery so
+// byte-identity and flush semantics match the chat-completions path.
+func (s *Server) handleStreamingLegacyCompletion(w http.ResponseWriter, r *http.Request, body []byte) {
+	upstreamResp, err := s.dispatchStreamingUpstream(r.Context(), s.openaiURL, "/v1/completions", r.Header, body)
+	if err != nil {
+		s.streamingForwardError(w, err)
+		return
+	}
+	defer upstreamResp.Body.Close()
+
+	if upstreamResp.StatusCode < 200 || upstreamResp.StatusCode >= 300 {
+		s.copyStreamingResponseHeaders(w, upstreamResp)
+		_, _ = io.Copy(w, upstreamResp.Body)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		s.streamingForwardError(w, errors.New("response writer does not support flushing"))
+		return
+	}
+	s.copyStreamingResponseHeaders(w, upstreamResp)
+	flusher.Flush()
+	s.runOpenAIStreamLoop(w, flusher, r, upstreamResp.Body)
+}
+
+// handlePassThroughOpenAI forwards /v1/embeddings and /v1/models to
+// the OpenAI upstream verbatim. These endpoints don't return tool
+// calls so no gating is needed — the proxy is a thin reverse-proxy
+// here. Body is bounded for embeddings (the request can be large
+// — but max-buffer-bytes is generous at 1 MiB).
+func (s *Server) handlePassThroughOpenAI(w http.ResponseWriter, r *http.Request) {
+	// /v1/models is GET (no body); /v1/embeddings is POST. We
+	// uniformly read+forward the body when present; for GET
+	// readRequestBody returns an empty slice cleanly.
+	body, err := readRequestBody(r, s.cfg.MaxBufferBytes)
+	if err != nil {
+		writeBodyReadError(w, err)
+		return
+	}
+
+	if err := s.forwardOpenAI(r.Context(), w, r, body, r.URL.Path); err != nil {
+		writeJSONError(w, http.StatusBadGateway, fmt.Errorf("upstream error: %w", err))
+	}
+}
+
+// ----- Anthropic handler -----
+
+// handleAnthropicMessages routes /v1/messages. Same A21/A22 split
+// as chat completions.
+func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
+	body, err := readRequestBody(r, s.cfg.MaxBufferBytes)
+	if err != nil {
+		writeBodyReadError(w, err)
+		return
+	}
+
+	var req AnthropicMessagesRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
+		return
+	}
+
+	if isStreamingRequest(r, req.Stream) {
+		s.handleStreamingAnthropicMessages(w, r, body, &req)
+		return
+	}
+
+	if err := s.forwardAnthropic(r.Context(), w, r, body, "/v1/messages"); err != nil {
+		writeJSONError(w, http.StatusBadGateway, fmt.Errorf("upstream error: %w", err))
+	}
+}
+
+// ----- Helpers -----
+
+// isStreamingRequest detects whether a request asks for SSE. Two
+// independent signals (per docs/LLM_API_PROXY.md § 3.2):
+//
+//  1. The body sets `stream: true`.
+//  2. The Accept header includes "text/event-stream".
+//
+// Both signals are honoured because some SDKs only set the body flag
+// and some only set the header; we err toward streaming if either
+// indicates it.
+func isStreamingRequest(r *http.Request, bodyStream bool) bool {
+	if bodyStream {
+		return true
+	}
+	accept := r.Header.Get("Accept")
+	return strings.Contains(strings.ToLower(accept), "text/event-stream")
+}
+
+// writeJSONError writes an error envelope shaped like
+// OpenAI/Anthropic's so SDK client error-handling code engages
+// normally. status is the HTTP status code; err's text becomes the
+// `message`.
+func writeJSONError(w http.ResponseWriter, status int, err error) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": map[string]interface{}{
+			"message": err.Error(),
+			"type":    "agentguard_error",
+		},
+	})
+}
+
+// writeBodyReadError translates readRequestBody errors into the
+// appropriate HTTP status — 413 for over-cap, 400 for malformed.
+func writeBodyReadError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errBodyTooLarge) {
+		writeJSONError(w, http.StatusRequestEntityTooLarge, err)
+		return
+	}
+	writeJSONError(w, http.StatusBadRequest, fmt.Errorf("read request body: %w", err))
+}
+
+// readRequestBody reads up to maxBytes+1 bytes from r.Body and
+// returns errBodyTooLarge when the body exceeds maxBytes. The +1
+// is critical: if we read exactly maxBytes we can't distinguish "fit
+// exactly" from "truncated"; reading one extra byte makes the
+// over-cap case unambiguous.
+//
+// Returns an empty (nil) slice for requests with no body (GET).
+func readRequestBody(r *http.Request, maxBytes int) ([]byte, error) {
+	if r.Body == nil || r.ContentLength == 0 {
+		return nil, nil
+	}
+	limited := io.LimitReader(r.Body, int64(maxBytes)+1)
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxBytes {
+		return nil, errBodyTooLarge
+	}
+	return body, nil
+}
+
+var errBodyTooLarge = errors.New("request body exceeds --max-buffer-bytes")
+
+// Run is the package-level convenience entry point invoked by
+// cmd/agentguard-llm-proxy/main.go. Mirrors mcpgw.Run.
+func Run(ctx context.Context, cfg *Config) error {
+	srv, err := NewServer(cfg)
+	if err != nil {
+		return err
+	}
+	return srv.Run(ctx)
+}

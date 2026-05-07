@@ -165,18 +165,37 @@ rules:
   #     - pattern: "fs:list_*"
   #     - pattern: "everything:*"       # MCP "everything" sample server
 
-# tool_scope_map declares the dual-check mapping the MCP Gateway uses
-# when --policy-mode strict is in effect. Patterns are glob-matched
-# against the namespaced tool name (`<ns>:<tool>`); first match wins.
-# Operators write more specific patterns first.
+# tool_scope_map declares the tool-name → existing-scope mapping used
+# by BOTH the MCP Gateway (--policy-mode strict dual-check) and the
+# LLM API Proxy (gates upstream tool_calls against operator policy).
+# Patterns are glob-matched; first match wins. Operators write more
+# specific patterns first.
 #
 # Allowed scope values: shell, filesystem, network, browser, data,
 # cost, mcp_tool. (mcp_tool here would re-run the same scope twice —
-# usually a typo.)
+# usually a typo for the MCP gateway, never useful for the LLM proxy.)
 #
-# Uncomment and tune for the upstream MCP servers you broker:
+# Two namespaces are addressed by this single section:
+#
+#   1. MCP Gateway tool names are namespaced as `<server>:<tool>`
+#      (e.g. `fs:read_file`, `github:create_issue`).
+#   2. LLM API Proxy tool names are bare (e.g. `bash`, `read_file`,
+#      `web_search`). The LLM proxy ships with a default map for
+#      common tool names baked into the binary
+#      (pkg/llmproxy/scope_map.go); operator entries below override
+#      or extend those defaults — see
+#      docs/POLICY_REFERENCE.md#llm-api-proxy-tool-scope-mapping.
+#
+# Tools not matched by any entry in either layer (operator + bundled
+# defaults) get scope=`unmapped` at gate time. The policy engine has
+# no built-in `unmapped` rules, so the gate fails closed (DENY).
+# Operators who want unknown LLM tools to flow through must write an
+# explicit `scope: unmapped` rule.
+#
+# Uncomment and tune as needed:
 #
 # tool_scope_map:
+#   # --- MCP Gateway entries (namespaced names) ---
 #   - pattern: "fs:read_file"
 #     scope: filesystem
 #   - pattern: "fs:write_file"
@@ -189,6 +208,16 @@ rules:
 #     scope: shell
 #   - pattern: "*:run_command"
 #     scope: shell
+#
+#   # --- LLM API Proxy entries (bare names; defaults live in the
+#   # binary, override here when needed) ---
+#   #
+#   # - pattern: "my_company_deploy"
+#   #   scope: shell
+#   # - pattern: "fill_form"
+#   #   scope: data            # PII gating against `data` scope rules
+#   # - pattern: "submit_form"
+#   #   scope: data
 
 # Notifier filters (see docs/OBSERVABILITY.md):
 #   `approval_required` only fires on REQUIRE_APPROVAL decisions.

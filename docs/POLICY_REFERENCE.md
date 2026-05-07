@@ -17,6 +17,7 @@ Source of truth: `pkg/policy/engine.go` (types) and `pkg/policy/engine.go:Engine
 - [Data scope](#data-scope)
 - [MCP tool scope (`mcp_tool`)](#mcp_tool-scope)
 - [`tool_scope_map`](#tool_scope_map)
+- [LLM API Proxy tool scope mapping](#llm-api-proxy-tool-scope-mapping)
 - [Per-agent overrides](#per-agent-overrides)
 - [Notifications](#notifications)
 - [Proxy tunables](#proxy-tunables)
@@ -347,6 +348,98 @@ A YAML map (`fs:read_file: filesystem`) would be more compact, but Go map iterat
 `--policy-mode fast` skips the second `Engine.Check` entirely and never consults `tool_scope_map`. The gateway still runs the `mcp_tool` check via the central server.
 
 See [`docs/MCP_GATEWAY.md`](./MCP_GATEWAY.md) for the gateway's full wire format, approval round-trip, and reconnect strategy.
+
+---
+
+## LLM API Proxy tool scope mapping
+
+The LLM API Proxy (`agentguard-llm-proxy`, Phase 4C) inspects upstream model responses for `tool_calls` and gates each call against operator policy **using the same `tool_scope_map:` section** the MCP Gateway uses. There is no separate `llm_tool_scope_map:` key — the bare tool names emitted by chat-style models (`bash`, `read_file`, `web_search`) and the namespaced names emitted by MCP servers (`fs:read_file`, `github:create_issue`) occupy disjoint regions of the pattern space, so a single mapping table covers both transports without ambiguity.
+
+### Bundled defaults
+
+The proxy binary ships with a built-in mapping for common tool names so operators do not have to enumerate every LangChain / CrewAI / browser-use tool by hand. Source of truth: `pkg/llmproxy/scope_map.go` (`DefaultLLMToolScopeMap`). Categories:
+
+| Scope | Default tool names |
+|---|---|
+| `shell` | `bash`, `sh`, `shell`, `run_command`, `execute_command`, `cmd`, `system`, `exec` |
+| `filesystem` | `read_file`, `write_file`, `list_directory`, `list_files`, `file_read`, `file_write`, `edit_file`, `delete_file`, `create_directory`, `ls`, `cat`, `find`, `glob` |
+| `network` | `web_search`, `fetch_url`, `http_request`, `http_get`, `http_post`, `search`, `fetch`, `url_request` |
+| `browser` | `playwright_*`, `browser_*`, `chrome_*`, `firefox_*`, `selenium_*`, `navigate`, `click`, `screenshot` |
+| `data` | (no defaults) — operators map `fill_form` / `submit_form` here for PII gating |
+| `cost` | (no defaults) — model-cost gating uses SDK `est_cost`, not tool-name mapping |
+
+Wildcard patterns (`playwright_*`, etc.) match the family conventions used by Anthropic's computer-use models and the popular browser-use / Playwright agents.
+
+### Operator overrides and extensions
+
+Entries declared in `tool_scope_map:` are merged with the bundled defaults so that **operator entries beat defaults on collision** (operator entries appear first in the merged list, and the matcher is first-match-wins). The merge does not mutate the policy snapshot — the live `Provider.Watch` callback can swap `Policy.ToolScopeMap` atomically without race-prone slice aliasing.
+
+```yaml
+tool_scope_map:
+  # Override a default: the LLM tool named `read_file` actually
+  # carries form data in this deployment, so route it to the `data`
+  # scope (where PII rules live) instead of `filesystem`.
+  - pattern: "read_file"
+    scope: data
+
+  # Add a tool not in the defaults.
+  - pattern: "deploy_to_prod"
+    scope: shell
+  - pattern: "send_email"
+    scope: network
+```
+
+### The `unmapped` sentinel
+
+Tools not matched by any entry — neither operator nor default — are routed to scope `unmapped` at gate time. The policy engine has **no built-in `unmapped` rules**, so the default behaviour is fail-closed (DENY: "No matching allow rule (default deny)"). Operators who want unknown LLM tools to pass through must write an explicit `scope: unmapped` rule. The recommended baseline is `require_approval: [{pattern: "*"}]` so a human inspects the tool name + arguments before the call runs.
+
+```yaml
+rules:
+  # Catch-all for tool names the proxy doesn't recognise. Without
+  # this section the proxy denies every unmapped tool — by design.
+  - scope: unmapped
+    require_approval:
+      - pattern: "*"
+```
+
+### End-to-end example
+
+```yaml
+version: "1"
+name: my-policy
+
+# Map tool names → scopes. Patterns merged with the bundled LLM
+# defaults; operator entries win on collision.
+tool_scope_map:
+  - pattern: "deploy_*"
+    scope: shell             # any LLM tool named deploy_<X>
+  - pattern: "send_email"
+    scope: network
+
+# Rules that apply to mapped scopes. The same rules apply to SDK
+# callers, MCP gateway traffic, and LLM API Proxy traffic.
+rules:
+  - scope: shell
+    deny:
+      - pattern: "rm -rf *"
+    require_approval:
+      - pattern: "deploy_*"  # all deploy_* tool calls need a human
+
+  - scope: network
+    allow:
+      - domain: "company-internal.com"
+    require_approval:
+      - pattern: "*"
+
+  # Catch-all for unknown tool names. Leave unwritten and unknown
+  # tools fail closed (DENY); write `require_approval` if you trust
+  # your LLM tools enough to let humans rubber-stamp them.
+  - scope: unmapped
+    require_approval:
+      - pattern: "*"
+```
+
+See [`docs/LLM_API_PROXY.md`](./LLM_API_PROXY.md) for the proxy's full wire format, request/response handling, and refusal-rewriting strategy.
 
 ---
 
