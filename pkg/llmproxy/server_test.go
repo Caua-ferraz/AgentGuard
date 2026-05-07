@@ -604,7 +604,7 @@ func TestServer_UpstreamWithPathPrefix(t *testing.T) {
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	httpSrv := &http.Server{Handler: srv.routes()}
 	go func() { _ = httpSrv.Serve(ln) }()
-	defer httpSrv.Shutdown(context.Background())
+	defer func() { _ = httpSrv.Shutdown(context.Background()) }()
 
 	resp, err := http.Post("http://"+ln.Addr().String()+"/v1/chat/completions", "application/json",
 		bytes.NewReader([]byte(`{"model":"gpt-4","messages":[]}`)))

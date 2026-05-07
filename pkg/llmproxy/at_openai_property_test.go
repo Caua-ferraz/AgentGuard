@@ -91,12 +91,11 @@ func TestAT_OpenAIParser_AssemblesArgsAcrossArbitraryChunkBoundaries(t *testing.
 			// Close cycle.
 			res, err = acc.FeedEvent([]byte(openAIFinishDelta()))
 		}
-		if err != nil {
-			// JSON unmarshal of args may fail when rawJSON contains
-			// quote chars that break the wrapper — accept that case
-			// (we still preserve RawArguments byte-for-byte). Property
-			// holds against RawArguments below.
-		}
+		// JSON unmarshal of args may fail when rawJSON contains quote
+		// chars that break the wrapper — accept that case (we still
+		// preserve RawArguments byte-for-byte; property holds against
+		// RawArguments below).
+		_ = err
 		if !res.Completed || len(res.CompletedToolCalls) != 1 {
 			t.Logf("seed=%d nSplits=%d bundleFinish=%v: completion missing; res=%+v", seed, nSplits, bundleFinish, res)
 			return false

@@ -86,13 +86,6 @@ func (s *Server) forwardOpenAI(ctx context.Context, w http.ResponseWriter, r *ht
 	return s.forwardTo(ctx, w, r, body, s.openaiURL, path)
 }
 
-// forwardAnthropic mirrors forwardOpenAI for the Anthropic upstream.
-// Pass-through only — used by routes that never emit tool_use. For
-// /v1/messages use forwardAnthropicMessages which gates tool_use blocks.
-func (s *Server) forwardAnthropic(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte, path string) error {
-	return s.forwardTo(ctx, w, r, body, s.anthropicURL, path)
-}
-
 // forwardChatCompletion is the non-streaming /v1/chat/completions
 // forwarder with tool_call gating. It POSTs the request to OpenAI,
 // reads the response into memory bounded by --max-buffer-bytes,
