@@ -52,3 +52,4 @@ build/
 # Node SDK
 node_modules/
 package-lock.json
+CLAUDE.md
