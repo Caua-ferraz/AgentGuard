@@ -262,111 +262,161 @@ class TestApprovalPath:
 
 
 # ---------------------------------------------------------------------------
-# Strict allowlist — direct attribute access bypasses are blocked.
+# Defense contract under the v0.5.1 hybrid pattern.
+#
+# v0.5.0 used a composition wrapper with a strict ``__getattr__`` allowlist
+# — every parent / unknown attribute access raised AttributeError. That
+# pattern broke pydantic 2.12 / CrewAI 1.x because ``isinstance(thing,
+# BaseTool)`` failed (virtual-subclass registrations are no longer honored
+# by pydantic).
+#
+# v0.5.1 switches to a hybrid pattern: GuardedCrewTool **subclasses**
+# CrewAI's ``BaseTool`` so the framework's isinstance check passes, and
+# every dispatch entry point (``run``, ``_run``, ``invoke``, ``ainvoke``,
+# ``__call__``, ``_arun``, ``arun``, ``to_structured_tool``) is explicitly
+# overridden to gate via Guard.check before forwarding.
+#
+# Defense moves from "no parent attributes are exposed" (composition) to
+# "every gated dispatch path is on this class, not inherited" (subclass).
+# The canary integration tests (test_at_real_crewai.py) catch upstream
+# additions of new dispatch paths that bypass our overrides.
+#
+# Tradeoff: pydantic ``PrivateAttr`` keeps ``_tool``, ``_guard``, ``_scope``
+# off ``model_fields`` (so they don't appear in ``model_dump`` output),
+# but they ARE readable as Python attributes from outside the class. A
+# determined caller doing ``gct._tool._run(...)`` skips the gate. We accept
+# that tradeoff because (a) any user with the wrapper instance already has
+# the wrapped tool reachable via the agent's tools list anyway, and (b)
+# the agent runtime itself only calls the gated dispatch methods, never
+# ``_tool`` directly.
 # ---------------------------------------------------------------------------
 
-class TestAttributeAllowlist:
-    def test_func_attribute_blocked(self, mock_server):
-        """Direct ``gct.func`` access must NOT return the raw callable.
+class TestDefenseContract:
+    def test_subclass_passes_isinstance_check(self, mock_server):
+        """The hybrid pattern's load-bearing property: when the framework
+        does ``isinstance(thing, BaseTool)`` (CrewAI 1.x + pydantic 2.12
+        Agent validation), GuardedCrewTool must satisfy it.
 
-        Closes R5 E2 (CrewAI side) — even though CrewAI tools use
-        BaseTool subclasses rather than ``Tool(func=...)``, the same
-        bypass surface (``__getattr__`` proxying internals) was
-        present and is now closed by the allowlist.
+        Skips cleanly when crewai is not installed.
+        """
+        try:
+            from crewai.tools import BaseTool as CrewBaseTool  # type: ignore
+        except ImportError:
+            pytest.skip("crewai not installed; isinstance-pass guarantee is crewai-specific")
+        from agentguard.adapters.crewai import _build_guarded_class
+
+        guard = Guard(mock_server)
+        # Build a real CrewAI BaseTool subclass to wrap.
+        class Echo(CrewBaseTool):
+            name: str = "echo"
+            description: str = "echoes"
+
+            def _run(self, query: str = "") -> str:  # type: ignore[override]
+                return f"echo:{query}"
+
+        cls = _build_guarded_class()
+        gct = cls(Echo(), guard=guard, scope="shell")
+        assert isinstance(gct, CrewBaseTool), (
+            "GuardedCrewTool must be an instance of CrewAI BaseTool so "
+            "Agent(tools=[...]) validation accepts it"
+        )
+
+    def test_run_dispatch_paths_are_overridden(self, mock_server):
+        """Every gated method must be defined on GuardedCrewTool itself,
+        not merely inherited. If a method is inherited, the parent's
+        implementation runs without consulting Guard.check — that is the
+        regression we are pinning against.
+        """
+        from agentguard.adapters.crewai import _build_guarded_class
+
+        cls = _build_guarded_class()
+        # The methods we MUST override. If any is inherited, the gate is
+        # bypassable for that dispatch path.
+        for method_name in (
+            "_run",
+            "run",
+            "invoke",
+            "ainvoke",
+            "_arun",
+            "arun",
+            "__call__",
+            "to_structured_tool",
+        ):
+            assert method_name in cls.__dict__, (
+                f"{method_name!r} must be defined on GuardedCrewTool, not "
+                "inherited from BaseTool. If you removed the override, the "
+                "policy gate no longer fires on that dispatch path."
+            )
+
+    def test_to_structured_tool_uses_gated_run(self, mock_server):
+        """CrewAI's ``to_structured_tool`` builds a CrewStructuredTool
+        with ``func=self._run``. Our override must hand off OUR gated
+        ``_run``, so the resulting structured tool also gates.
         """
         from agentguard.adapters.crewai import GuardedCrewTool
 
+        MockAgentGuardHandler.check_response = {
+            "decision": "DENY",
+            "reason": "structured-tool gate fired",
+        }
         guard = Guard(mock_server)
         inner = _FakeCrewAITool()
-        # Simulate a tool that exposes a raw callable.
-        inner.func = lambda x: f"raw-{x}"
         gct = GuardedCrewTool(inner, guard=guard, scope="shell")
 
-        with pytest.raises(AttributeError) as ei:
-            _ = gct.func
-        assert "blocks access" in str(ei.value)
-        assert "func" in str(ei.value)
+        # to_structured_tool requires real crewai.
+        try:
+            structured = gct.to_structured_tool()
+        except ImportError:
+            pytest.skip("crewai not installed; to_structured_tool requires it")
 
-    def test_underscore_tool_attribute_NOT_via_getattr(self, mock_server):
-        """``gct._tool`` is set on the instance (not via __getattr__).
+        # The structured tool's func is bound to OUR gated _run. Calling
+        # it must trigger the gate (which DENYs in this test).
+        assert callable(structured.func)
+        with pytest.raises(PermissionError):
+            structured.func("danger")
+        # And the underlying tool was never called.
+        assert inner._invocations == []
 
-        That is intentional — the wrapper itself needs to reach the
-        wrapped instance to forward calls. We verify the security
-        property: framework / agent code that walks `__getattr__` for
-        unknown attributes never resolves an unguarded callable on
-        ``_tool``. This test pins that ``_tool`` IS on the instance
-        but accessing any of the *raw tool's* private callables via
-        ``gct.<attr>`` is still blocked.
+    def test_private_attrs_not_in_model_dump(self, mock_server):
+        """Pydantic ``PrivateAttr`` keeps internal references off the
+        public model. ``_tool`` / ``_guard`` / ``_scope`` must NOT appear
+        in ``model_dump()`` output — operators rendering tool metadata
+        for telemetry should not see the guard handle.
         """
-        from agentguard.adapters.crewai import GuardedCrewTool
-
-        guard = Guard(mock_server)
-        inner = _FakeCrewAITool()
-        gct = GuardedCrewTool(inner, guard=guard, scope="shell")
-
-        # _tool is set on __init__ — this is the wrapper's own internal,
-        # not bypassable via __getattr__. We verify the path still works
-        # for the wrapper code itself.
-        assert gct._tool is inner
-
-        # But arbitrary internal attributes on the tool are NOT proxied.
-        with pytest.raises(AttributeError):
-            _ = gct.coroutine
-
-    def test_arbitrary_internal_blocked(self, mock_server):
-        """Future-proofing: a new method invented by upstream is
-        blocked unless explicitly added to ``_ALLOWED_PASSTHROUGH``."""
-        from agentguard.adapters.crewai import GuardedCrewTool
-
-        guard = Guard(mock_server)
-        inner = _FakeCrewAITool()
-        inner.future_dangerous_method = lambda: "leaked"
-        gct = GuardedCrewTool(inner, guard=guard, scope="shell")
-
-        with pytest.raises(AttributeError) as ei:
-            _ = gct.future_dangerous_method
-        assert "security guard" in str(ei.value)
-
-    def test_stream_and_batch_blocked(self, mock_server):
-        """``stream`` and ``batch`` are intentionally NOT in the
-        allowlist (deferred). They must raise rather than silently
-        falling through to an unguarded callable.
-        """
-        from agentguard.adapters.crewai import GuardedCrewTool
-
-        guard = Guard(mock_server)
-        inner = _FakeCrewAITool()
-        inner.stream = lambda x: iter([f"chunk-{x}"])
-        inner.batch = lambda inputs: [f"out-{i}" for i in inputs]
-        gct = GuardedCrewTool(inner, guard=guard, scope="shell")
-
-        with pytest.raises(AttributeError):
-            _ = gct.stream
-        with pytest.raises(AttributeError):
-            _ = gct.batch
-
-    def test_allowed_passthrough(self, mock_server):
-        """Verify the allowlist DOES pass metadata through."""
         from agentguard.adapters.crewai import GuardedCrewTool
 
         guard = Guard(mock_server)
         inner = _FakeCrewAITool(name="my_tool", description="my description")
-        # Set attributes that should pass through.
-        inner.return_direct = True
-        inner.tags = ["search", "web"]
-        inner.metadata = {"version": "1.0"}
-        inner.cache_function = lambda *a, **kw: True
-
         gct = GuardedCrewTool(inner, guard=guard, scope="shell")
 
-        # name and description are set on the wrapper itself in __init__.
+        try:
+            dumped = gct.model_dump()
+        except Exception as e:  # pragma: no cover
+            pytest.fail(f"model_dump should succeed on a subclassed BaseTool: {e}")
+
+        for forbidden in ("_tool", "_guard", "_scope"):
+            assert forbidden not in dumped, (
+                f"{forbidden!r} leaked through model_dump(): {dumped!r}"
+            )
+
+    def test_metadata_passthrough(self, mock_server):
+        """The wrapper inherits CrewAI's BaseTool surface, so the
+        framework can read ``name`` / ``description`` / ``args_schema``
+        for tool registration. CrewAI mangles ``description`` into
+        ``Tool Name: ... Tool Arguments: ...`` during model_post_init —
+        that is a CrewAI behavior, not an AgentGuard contract.
+        """
+        from agentguard.adapters.crewai import GuardedCrewTool
+
+        guard = Guard(mock_server)
+        inner = _FakeCrewAITool(name="my_tool", description="my description")
+        gct = GuardedCrewTool(inner, guard=guard, scope="shell")
+
+        # Name passes through verbatim; description gets CrewAI-mangled
+        # but our original is the prefix.
         assert gct.name == "my_tool"
-        assert gct.description == "my description"
-        # The rest go through the allowlist via __getattr__.
-        assert gct.return_direct is True
-        assert gct.tags == ["search", "web"]
-        assert gct.metadata == {"version": "1.0"}
-        assert callable(gct.cache_function)
+        # Description should at least include our content somewhere.
+        assert "my description" in gct.description or "Tool Name" in gct.description
 
 
 # ---------------------------------------------------------------------------

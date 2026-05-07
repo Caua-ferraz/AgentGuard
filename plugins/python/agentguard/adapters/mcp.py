@@ -40,7 +40,7 @@ from agentguard import Guard, CheckResult, DEFAULT_BASE_URL
 
 # MCP protocol constants
 MCP_PROTOCOL_VERSION = "2024-11-05"
-SDK_VERSION = "0.5.0"
+SDK_VERSION = "0.5.1"
 
 # Secret patterns mirrored from pkg/notify/notify.go's DefaultRedactor. The
 # MCP adapter forwards handler exception text back to the client as a

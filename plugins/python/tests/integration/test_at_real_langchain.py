@@ -12,26 +12,23 @@ model emits a pre-canned sequence of ``AIMessage`` objects (including
 ones carrying ``tool_calls``), the agent runtime invokes the tool, and
 the gate must fire on that invocation path.
 
-Important architectural note (verified by these tests):
+Important architectural note (updated for v0.5.1):
 -------------------------------------------------------
-``GuardedTool`` is a composition wrapper, not a ``BaseTool`` subclass
-(see A11 decision-log). LangChain's ``create_react_agent`` /
+v0.5.0 ``GuardedTool`` was a composition wrapper, not a ``BaseTool``
+subclass. langgraph's ``create_react_agent`` / langchain's
 ``create_agent`` runtime registers tools through pydantic's
-``coerce_to_runnable``, which calls ``isinstance(thing, Runnable)`` and
-will REJECT a ``GuardedTool`` with a ``ValueError``. The realistic
-integration pattern is therefore one of:
+``coerce_to_runnable``, which calls ``isinstance(thing, Runnable)`` —
+so the v0.5.0 wrapper was rejected with a ``ValueError`` and required
+a ``Tool.from_function(func=lambda x: gt.invoke(x))`` workaround.
 
-  1. Pass the underlying ``Tool`` to the agent runtime, but build that
-     tool's ``func`` to delegate to a ``GuardedTool``. Every agent-driven
-     tool dispatch then routes through the gate. (This is the test we
-     write below — it mirrors a real user wrapping their own tool entry.)
+v0.5.1 switches to a hybrid subclass + override pattern:
+``GuardedTool`` actually subclasses ``langchain_core.tools.BaseTool``,
+so isinstance checks succeed natively. The agent runtime now accepts
+``GuardedTool`` directly, and these tests register it that way.
 
-  2. Use ``GuardedTool.invoke(...)`` directly from imperative code
-     (covered by A14).
-
-This file's E2E tests pin pattern (1). If a future LangChain release
-allows registering ``GuardedTool`` directly, that's a strict
-improvement; the test still passes either way.
+If a future LangChain release breaks the subclass relationship, this
+test trips on the ``coerce_to_runnable`` ValueError before the gate is
+even checked — the canary contract is intentional.
 
 Closes the v0.5 plan AT brief item: "Run a turn that the model decides
 to call the tool. Assert the gate fires on the modern invoke() path."
@@ -104,11 +101,12 @@ pytestmark = pytest.mark.integration
 
 
 def _make_gated_tool(guard, name: str = "echo", scope: str = "shell"):
-    """Build the realistic agent-runtime registration pattern.
+    """Build a GuardedTool that the agent runtime registers DIRECTLY.
 
-    The agent-runtime accepts a ``langchain_core.tools.Tool``. We build a
-    ``Tool`` whose ``func`` dispatches into a ``GuardedTool``. Every
-    agent-driven invocation therefore routes through the gate.
+    v0.5.1 subclasses ``langchain_core.tools.BaseTool``, so the agent
+    runtime's ``isinstance(thing, Runnable)`` check accepts the wrapper
+    natively — no more ``Tool.from_function(func=lambda x: gt.invoke(x))``
+    workaround.
 
     Returns ``(agent_tool, calls)`` where ``calls`` is a list the
     underlying function appends to on each invocation.
@@ -120,23 +118,12 @@ def _make_gated_tool(guard, name: str = "echo", scope: str = "shell"):
         return f"echo:{text}"
 
     underlying = Tool.from_function(
-        name=f"_underlying_{name}", description="actual work", func=_underlying
+        name=name, description="echoes input through the AgentGuard gate",
+        func=_underlying,
     )
     gt = GuardedTool(underlying, guard, scope=scope)
-
-    # Public-facing Tool the agent registers. Each invocation dispatches
-    # to gt.invoke, which gates and forwards. This mirrors the realistic
-    # operator pattern and surfaces gate failures as Tool errors the
-    # agent runtime can route.
-    def _gated(text: str) -> str:
-        return gt.invoke(text)
-
-    public = Tool.from_function(
-        name=name,
-        description="echoes input through the AgentGuard gate",
-        func=_gated,
-    )
-    return public, calls
+    # Return the GuardedTool itself — the agent registers it directly.
+    return gt, calls
 
 
 # ---------------------------------------------------------------------------

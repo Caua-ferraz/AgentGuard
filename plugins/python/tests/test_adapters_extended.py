@@ -111,14 +111,14 @@ class TestLangChainExtended:
         assert body["action"] == "write"
 
     def test_attribute_proxy_blocked(self, mock_server):
-        """v0.5: arbitrary attribute access is blocked (was a bypass vector).
+        """v0.5.1: arbitrary attribute access is blocked.
 
-        Pre-v0.5, ``GuardedTool.__getattr__`` proxied every attribute through
-        to the wrapped tool, which let a caller fetch ``gt.func`` or any
-        other internal and call it directly to bypass the policy gate. v0.5
-        replaces that with a strict allowlist (R5 audit closure). Only
-        metadata attributes (name, description, args_schema, return_direct,
-        metadata, tags) pass through.
+        v0.5.0 used a composition wrapper with a custom ``__getattr__``
+        allowlist that raised AttributeError with a "bypass" message.
+        v0.5.1 switches to subclassing ``langchain_core.tools.BaseTool``,
+        so unknown attributes raise pydantic's standard "no such field"
+        AttributeError instead. The security property is unchanged: the
+        wrapper does not proxy arbitrary attributes to the wrapped tool.
         """
         from agentguard.adapters.langchain import GuardedTool
 
@@ -129,14 +129,13 @@ class TestLangChainExtended:
         tool.custom_attr = "proxied-value"
         gt = GuardedTool(tool, guard, scope="shell")
 
-        # Allowlisted metadata is exposed:
+        # Metadata is exposed:
         assert gt.name == "t"
         assert gt.description == "d"
 
-        # Arbitrary attributes are blocked with a security note:
-        with pytest.raises(AttributeError) as ei:
+        # Arbitrary attributes raise AttributeError (no bypass).
+        with pytest.raises(AttributeError):
             _ = gt.custom_attr
-        assert "bypass" in str(ei.value).lower()
 
     def test_malformed_url_does_not_crash(self, mock_server):
         from agentguard.adapters.langchain import GuardedTool

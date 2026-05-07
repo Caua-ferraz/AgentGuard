@@ -208,14 +208,22 @@ class TestRealLangChainAttributeIntrospection:
         assert gt.args_schema is None or hasattr(gt.args_schema, "__name__")
 
     def test_bypass_attribute_blocked(self, integration_mock):
+        """The wrapper does not expose an unguarded ``func`` callable.
+
+        v0.5.0 raised AttributeError with a "bypass" message; v0.5.1
+        switches to subclassing BaseTool, so the AttributeError now comes
+        from pydantic's normal "no such field" path rather than a custom
+        ``__getattr__`` allowlist. The contract that matters for security
+        is unchanged: ``gt.func`` does not return a callable that skips
+        the gate.
+        """
         integration_mock.set_default_check(allow())
         guard = Guard(integration_mock.base_url, agent_id="lc-int-meta")
         tool, _ = _make_real_tool()
         gt = GuardedTool(tool, guard, scope="shell")
 
-        with pytest.raises(AttributeError) as ei:
+        with pytest.raises(AttributeError):
             _ = gt.func
-        assert "bypass" in str(ei.value).lower()
 
 
 class TestRealLangChainToolkit:

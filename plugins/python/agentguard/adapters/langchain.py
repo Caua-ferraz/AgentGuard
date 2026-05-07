@@ -1,426 +1,590 @@
 """
-AgentGuard LangChain Adapter (v0.5 hardened)
+AgentGuard LangChain Adapter (v0.5.1 hybrid: subclass + override)
 
 Wraps LangChain tools so every invocation passes through AgentGuard policy
-checks. v0.4.x wrapped only the legacy ``run``/``arun`` entry points; modern
-LangChain (>= 0.1, the ``invoke``/``ainvoke``/``stream``/``batch`` API) called
-through ``__getattr__`` and bypassed the gate. v0.5 closes that gap by
-explicitly gating every Runnable entry point.
+checks.
 
-Gated methods (each calls ``Guard.check`` before forwarding to the wrapped
-tool):
+Why this file changed in v0.5.1
+-------------------------------
+v0.5.0 implemented ``GuardedTool`` as a *composition* wrapper (the wrapper
+held a wrapped LangChain tool via ``self.__tool`` and forbade attribute
+access through a strict ``__getattr__`` allowlist). That kept the gate
+tight but broke at framework boundaries:
 
-- ``invoke(input, config=None, **kwargs)`` — synchronous Runnable entry
-- ``ainvoke(input, config=None, **kwargs)`` — async Runnable entry
-- ``stream(input, config=None, **kwargs)`` — synchronous streaming Runnable
-- ``astream(input, config=None, **kwargs)`` — async streaming Runnable
-- ``batch(inputs, config=None, **kwargs)`` — synchronous batch (gates each
-  input independently; first DENY raises ``PermissionError`` for the batch)
-- ``abatch(inputs, config=None, **kwargs)`` — async batch, same semantics
-- ``run(*args, **kwargs)`` / ``arun(*args, **kwargs)`` — legacy entries
-- ``_run(*args, **kwargs)`` / ``_arun(*args, **kwargs)`` — legacy internal entries
+  * langgraph 1.0 + langchain_core 1.x's ``coerce_to_runnable`` runs
+    ``isinstance(thing, Runnable)`` and rejects composition wrappers.
+  * langchain 1.x's ``langchain.agents.create_agent`` (the successor to
+    the deprecated ``create_react_agent``) uses the same isinstance
+    check. The integration test had to wrap GuardedTool in a
+    ``Tool.from_function(func=lambda x: gt.invoke(x))`` to register it
+    with the agent — that workaround is no longer required after v0.5.1.
 
-On DENY or REQUIRE_APPROVAL the adapter raises ``PermissionError`` (matching
-the SDK's existing ``@guarded`` decorator and CrewAI/browser-use adapters).
-The legacy ``run``/``arun`` paths preserve their v0.4.x behaviour of returning
-a string message instead of raising — this kept them inert under naive
-LangChain agents that swallowed exceptions, and rewriting that today would
-break v0.4.x users. The modern paths (``invoke``/``ainvoke``/``stream``/
-``batch``) raise so callers using LCEL chains see the failure surface. This
-asymmetry is documented; v0.6 will harmonise once we're willing to break
-v0.4.x callers (issue title in ``.audit/v05_decisions.md``).
+The v0.5.1 fix: subclass ``langchain_core.tools.BaseTool`` so isinstance
+passes natively, and preserve the policy-enforcement contract by
+overriding **every** entry point the framework calls. The
+"every-method-is-on-this-class" property substitutes for the
+composition-era ``__getattr__`` allowlist.
 
-Attribute allowlist (R5 audit finding closure)
-==============================================
+Gated methods (each calls ``Guard.check`` before forwarding):
 
-In v0.4.x, ``GuardedTool.__getattr__`` proxied every attribute through to the
-wrapped tool. An adversarial agent could call ``gt.func(...)`` (the raw
-callable behind ``Tool.from_function``) or ``gt._tool.invoke(...)`` and
-sidestep the policy gate entirely.
+  - ``_run`` (abstract on the parent — required by the subclass) — the
+    canonical sync dispatch path; ``BaseTool.run`` calls into ``_run``
+    via ``self._run`` reflection, and ``BaseTool.invoke`` calls
+    ``self.run``. Gating ``_run`` covers every sync path.
+  - ``_arun`` — the async counterpart.
+  - ``invoke`` / ``ainvoke`` — overridden anyway so the gate fires
+    even if a future framework version short-circuits the parent's
+    invoke -> run -> _run chain.
+  - ``stream`` / ``astream`` — gated once at stream open; per-chunk
+    gating is a v0.6 issue.
+  - ``batch`` / ``abatch`` — gate each input independently; first DENY
+    raises for the whole batch (whole-batch-fails-on-first-deny).
+  - ``run`` / ``arun`` — legacy entries; preserve v0.4.x string-on-deny
+    semantics (kept for backward compat).
 
-v0.5 replaces ``__getattr__`` with a strict allowlist. Only metadata
-attributes (``name``, ``description``, ``args_schema``, ``return_direct``,
-``metadata``, ``tags``) pass through. Every other access raises
-``AttributeError`` with a security-explanatory message. ``func``, ``coroutine``,
-internal LangChain hooks, and ``_tool`` itself are all blocked.
+The new defense contract
+------------------------
+Composition v0.5.0: "no parent methods are exposed; ``__getattr__`` is
+the single chokepoint."
 
-Composition vs subclass
-=======================
+Subclass v0.5.1: "every gated method is explicitly overridden on this
+class. Pydantic ``PrivateAttr`` keeps internal references off
+``model_fields`` and out of ``model_dump`` payloads. The canary
+integration test (``test_at_real_langchain.py``) trips if upstream adds
+a new dispatch path that bypasses our overrides."
 
-We chose **composition**: ``GuardedTool`` *holds* a wrapped tool and is
-**not** a ``BaseTool`` subclass. Subclassing ``BaseTool`` would:
-
-  1. Force us to satisfy LangChain's pydantic validation (``BaseTool`` is a
-     pydantic ``BaseModel`` subclass), which complicates the constructor and
-     leaks fields we explicitly want to block.
-  2. Reintroduce the bypass: ``BaseTool``'s parent ``Runnable`` calls into
-     pydantic descriptors and field reflection, both of which expect
-     attribute access to be transparent. A blocking ``__getattr__`` fights
-     that machinery.
-
-LangChain runtime checks for the ``Runnable`` protocol (``invoke``/``stream``
-methods) more often than ``isinstance(BaseTool, ...)``. We implement those
-methods explicitly. For the rare code path that does an isinstance check, the
-caller can pass the wrapped tool to the agent constructor under a different
-name; we considered registering ``GuardedTool`` as a virtual subclass via
-``BaseTool.register(...)`` but rejected it as fragile (pydantic v2 rejects
-the registration in some configurations). The composition approach is
-documented and deliberate.
+Lazy framework import
+---------------------
+We never import ``langchain_core`` at module top level — the SDK must
+remain ``pip install agentguardproxy``-friendly without the framework
+extra. The class definition is wrapped in a builder that resolves
+``langchain_core.tools.BaseTool`` on first instantiation; before that
+the ``GuardedTool`` symbol is a callable factory that raises a clear
+``ImportError`` when constructed.
 
 Stream gating limitation
 ========================
 
-For ``stream``/``astream`` the gate fires **once** at stream open. Mid-stream
-tool calls (rare in v0.4 LangChain, increasingly common in agent loops with
-chunk-driven side-effects) bypass the gate. v0.6 issue title:
-*"langchain: per-chunk policy gating in stream()/astream()"* — see
-``.audit/v05_decisions.md``.
+For ``stream``/``astream`` the gate fires **once** at stream open.
+Mid-stream tool calls (rare in v0.4 LangChain, increasingly common in
+agent loops with chunk-driven side-effects) bypass the gate. v0.6 issue
+title: ``langchain: per-chunk policy gating in stream()/astream()``.
 """
+
+from __future__ import annotations
 
 from typing import Any, AsyncIterator, Iterator, List, Optional
 
 from agentguard import Guard, CheckResult, DEFAULT_BASE_URL
 
 
-# Attributes that may pass through to the wrapped tool. Anything outside this
-# set must raise AttributeError with a security explanation. The list is
-# deliberately conservative — adding a new entry should require explicit
-# review against the bypass-vector checklist. Adding ``func``, ``coroutine``,
-# ``_run``, ``_arun``, or ``_tool`` would defeat the gate; they are blocked
-# by omission.
-_ALLOWED_PASSTHROUGH = frozenset(
-    {
-        "name",
-        "description",
-        "args_schema",
-        "return_direct",
-        "metadata",
-        "tags",
-    }
-)
+# ---------------------------------------------------------------------------
+# Lazy langchain_core BaseTool resolution.
+# ---------------------------------------------------------------------------
+
+_LC_BASETOOL: Optional[type] = None
+_GUARDED_TOOL_CLASS: Optional[type] = None
 
 
-class GuardedTool:
-    """Compose-and-gate wrapper around a LangChain tool.
+def _is_valid_args_schema(value: Any) -> bool:
+    """Return True if ``value`` is a pydantic BaseModel subclass or a
+    JSON-schema-shaped dict.
 
-    Every Runnable entry point (``invoke``, ``ainvoke``, ``stream``,
-    ``astream``, ``batch``, ``abatch``) and every legacy entry point
-    (``run``, ``arun``, ``_run``, ``_arun``) is gated by AgentGuard before
-    forwarding to the wrapped tool. Direct attribute access falls through
-    only for the metadata listed in :data:`_ALLOWED_PASSTHROUGH`; every
-    other attribute raises ``AttributeError``.
-
-    The wrapped tool is held privately. ``GuardedTool._tool`` itself is
-    blocked from external readers — see ``__getattribute__``.
+    LangChain's ``BaseTool.__init__`` validates ``args_schema`` against
+    these two shapes; passing anything else (e.g. a ``MagicMock``)
+    raises ``TypeError``. We need to filter defensively because the
+    SDK's adapter is sometimes wrapped around mock tools in user tests.
     """
+    if isinstance(value, dict):
+        return True
+    try:
+        from pydantic import BaseModel  # type: ignore[import-not-found]
+        return isinstance(value, type) and issubclass(value, BaseModel)
+    except Exception:
+        return False
 
-    # Private slots are name-mangled (``__tool`` -> ``_GuardedTool__tool``)
-    # so external attribute access through ``gt._tool`` falls through to
-    # ``__getattr__`` (where it is blocked) instead of hitting the slot
-    # directly. The class reads them via ``self.__tool`` etc. from inside
-    # its own methods.
-    __slots__ = (
-        "_GuardedTool__tool",
-        "_GuardedTool__guard",
-        "_GuardedTool__scope",
-        "name",
-        "description",
-        "args_schema",
-        "return_direct",
-        "metadata",
-        "tags",
+
+def _resolve_lc_basetool() -> type:
+    """Return ``langchain_core.tools.BaseTool`` or raise ImportError."""
+    global _LC_BASETOOL
+    if _LC_BASETOOL is not None:
+        return _LC_BASETOOL
+    last_err: Optional[Exception] = None
+    for module_name, attr in (
+        ("langchain_core.tools", "BaseTool"),
+        ("langchain_core.tools.base", "BaseTool"),
+    ):
+        try:
+            module = __import__(module_name, fromlist=[attr])
+            base = getattr(module, attr, None)
+            if base is not None:
+                _LC_BASETOOL = base
+                return base
+        except ImportError as e:
+            last_err = e
+            continue
+    raise ImportError(
+        "agentguard LangChain adapter requires the `langchain_core` package. "
+        "Install it with `pip install 'agentguardproxy[langchain]'`. "
+        f"(underlying import error: {last_err!r})"
     )
 
-    def __init__(self, tool: Any, guard: Guard, scope: str = "shell"):
-        # Use object.__setattr__ for the private (mangled) slots. The
-        # mangling means ``self.__tool = tool`` inside __init__ writes the
-        # ``_GuardedTool__tool`` slot — but we use object.__setattr__
-        # explicitly to make the intent (and the slot name) obvious in
-        # any audit trail.
-        object.__setattr__(self, "_GuardedTool__tool", tool)
-        object.__setattr__(self, "_GuardedTool__guard", guard)
-        object.__setattr__(self, "_GuardedTool__scope", scope)
 
-        # Copy allowlisted metadata into our own slots so reads never reach
-        # into the wrapped tool. This means changes to the wrapped tool's metadata
-        # after construction don't propagate — acceptable for a security
-        # wrapper; the metadata is captured at wrap time.
-        object.__setattr__(self, "name", getattr(tool, "name", ""))
-        object.__setattr__(self, "description", getattr(tool, "description", ""))
-        object.__setattr__(self, "args_schema", getattr(tool, "args_schema", None))
-        object.__setattr__(self, "return_direct", getattr(tool, "return_direct", False))
-        object.__setattr__(self, "metadata", getattr(tool, "metadata", None))
-        object.__setattr__(self, "tags", getattr(tool, "tags", None))
+def _build_guarded_tool_class() -> type:
+    """Build the GuardedTool class that subclasses langchain_core BaseTool."""
+    global _GUARDED_TOOL_CLASS
+    if _GUARDED_TOOL_CLASS is not None:
+        return _GUARDED_TOOL_CLASS
 
-    # ------------------------------------------------------------------
-    # Policy gate helpers
-    # ------------------------------------------------------------------
+    BaseTool = _resolve_lc_basetool()
+    from pydantic import PrivateAttr  # type: ignore[import-not-found]
 
-    def _infer_check_params(self, tool_input: Any) -> dict:
-        """Extract meaningful parameters from tool input for policy checking."""
-        params: dict = {}
+    class GuardedTool(BaseTool):  # type: ignore[misc, valid-type]
+        """Hybrid subclass-and-override wrapper around a LangChain ``BaseTool``.
 
-        if isinstance(tool_input, str):
-            params["command"] = tool_input
-        elif isinstance(tool_input, dict):
-            if "command" in tool_input or "cmd" in tool_input:
-                params["command"] = tool_input.get("command", tool_input.get("cmd", ""))
-            if "url" in tool_input:
-                params["url"] = tool_input["url"]
-                # Extract domain from URL
-                try:
-                    from urllib.parse import urlparse
-                    parsed = urlparse(tool_input["url"])
-                    if parsed.hostname:
-                        params["domain"] = parsed.hostname
-                except Exception:
-                    pass
-            if "path" in tool_input or "file_path" in tool_input:
-                params["path"] = tool_input.get("path", tool_input.get("file_path", ""))
-                # Infer action from tool name
-                name_lower = self.name.lower() if isinstance(self.name, str) else ""
-                if "read" in name_lower or "get" in name_lower:
-                    params["action"] = "read"
-                elif "write" in name_lower or "save" in name_lower or "create" in name_lower:
-                    params["action"] = "write"
-                elif "delete" in name_lower or "remove" in name_lower:
-                    params["action"] = "delete"
-            # Forward session/cost hints so cost-scope guardrails work.
-            if "session_id" in tool_input:
-                params["session_id"] = tool_input["session_id"]
-            if "est_cost" in tool_input:
-                params["est_cost"] = tool_input["est_cost"]
-
-        return params
-
-    def _infer_scope(self, params: dict) -> str:
-        """Infer the appropriate policy scope from the parameters."""
-        if params.get("domain") or params.get("url"):
-            return "network"
-        if params.get("path"):
-            return "filesystem"
-        return self.__scope
-
-    def _gate(self, tool_input: Any) -> CheckResult:
-        """Run a single policy check for ``tool_input``.
-
-        Returns the :class:`CheckResult`; callers decide what to do based
-        on ``allowed`` / ``denied`` / ``needs_approval``.
+        Subclasses ``BaseTool`` so framework-side ``isinstance(thing,
+        Runnable)`` checks succeed natively (closes the v0.5.0 langgraph
+        1.0 / langchain_core 1.x regression). Every entry point the
+        framework calls is explicitly overridden to gate via Guard.check
+        before forwarding.
         """
-        params = self._infer_check_params(tool_input)
-        scope = self._infer_scope(params)
-        return self.__guard.check(scope, **params)
 
-    @staticmethod
-    def _format_denied_message(result: CheckResult) -> str:
-        return f"[AgentGuard] Action denied.\nReason: {result.reason}"
+        # Pydantic private attrs — held on the instance but not part of
+        # the public model. Set per-instance from __init__.
+        _tool: Any = PrivateAttr(default=None)
+        _guard: Any = PrivateAttr(default=None)
+        _scope: str = PrivateAttr(default="shell")
 
-    @staticmethod
-    def _format_approval_message(result: CheckResult) -> str:
-        return (
-            f"[AgentGuard] Action requires approval. "
-            f"Approve at: {result.approval_url}\n"
-            f"Reason: {result.reason}"
-        )
+        def __init__(self, tool: Any, guard: Guard, scope: str = "shell") -> None:
+            # Names / descriptions: pydantic's BaseTool requires strings.
+            # Defensive str() coercion handles mocks / objects in tests.
+            name_attr = getattr(tool, "name", type(tool).__name__)
+            desc_attr = getattr(tool, "description", "")
+            init_kwargs: dict = {
+                "name": str(name_attr) if not isinstance(name_attr, str) else name_attr,
+                "description": (
+                    str(desc_attr) if not isinstance(desc_attr, str) else desc_attr
+                ),
+            }
+            # args_schema must be a pydantic BaseModel subclass or a JSON
+            # schema dict (per langchain_core.tools.BaseTool validation).
+            # Only forward if we can verify the type — otherwise drop the
+            # attribute to avoid a hard pydantic ValidationError on mocks.
+            args_schema = getattr(tool, "args_schema", None)
+            if args_schema is not None and _is_valid_args_schema(args_schema):
+                init_kwargs["args_schema"] = args_schema
+            # Other metadata fields: forward only if they have a sane type.
+            return_direct = getattr(tool, "return_direct", None)
+            if isinstance(return_direct, bool):
+                init_kwargs["return_direct"] = return_direct
+            tags = getattr(tool, "tags", None)
+            if isinstance(tags, list) and all(isinstance(t, str) for t in tags):
+                init_kwargs["tags"] = tags
+            metadata = getattr(tool, "metadata", None)
+            if isinstance(metadata, dict):
+                init_kwargs["metadata"] = metadata
+            super().__init__(**init_kwargs)
+            object.__setattr__(self, "_tool", tool)
+            object.__setattr__(self, "_guard", guard)
+            object.__setattr__(self, "_scope", scope)
 
-    def _raise_for_modern_api(self, result: CheckResult, tool_input: Any) -> None:
-        """Raise PermissionError for DENY or REQUIRE_APPROVAL on modern entries.
+        # --------------------------------------------------------------
+        # Policy gate helpers
+        # --------------------------------------------------------------
 
-        The modern Runnable API (invoke/ainvoke/stream/batch) propagates
-        exceptions through LCEL chains, so we surface failures by raising
-        ``PermissionError``. Callers that want non-throwing behaviour can
-        wrap the call in a try/except.
-        """
-        if result.denied:
-            raise PermissionError(
-                f"[AgentGuard] Tool {self.name!r} denied: {result.reason}"
+        def _infer_check_params(self, tool_input: Any) -> dict:
+            """Extract meaningful parameters from tool input."""
+            params: dict = {}
+            if isinstance(tool_input, str):
+                params["command"] = tool_input
+            elif isinstance(tool_input, dict):
+                if "command" in tool_input or "cmd" in tool_input:
+                    params["command"] = tool_input.get(
+                        "command", tool_input.get("cmd", "")
+                    )
+                if "url" in tool_input:
+                    params["url"] = tool_input["url"]
+                    try:
+                        from urllib.parse import urlparse
+                        parsed = urlparse(tool_input["url"])
+                        if parsed.hostname:
+                            params["domain"] = parsed.hostname
+                    except Exception:
+                        pass
+                if "path" in tool_input or "file_path" in tool_input:
+                    params["path"] = tool_input.get(
+                        "path", tool_input.get("file_path", "")
+                    )
+                    name_lower = self.name.lower() if isinstance(self.name, str) else ""
+                    if "read" in name_lower or "get" in name_lower:
+                        params["action"] = "read"
+                    elif "write" in name_lower or "save" in name_lower or "create" in name_lower:
+                        params["action"] = "write"
+                    elif "delete" in name_lower or "remove" in name_lower:
+                        params["action"] = "delete"
+                if "session_id" in tool_input:
+                    params["session_id"] = tool_input["session_id"]
+                if "est_cost" in tool_input:
+                    params["est_cost"] = tool_input["est_cost"]
+            return params
+
+        def _infer_scope(self, params: dict) -> str:
+            if params.get("domain") or params.get("url"):
+                return "network"
+            if params.get("path"):
+                return "filesystem"
+            return self._scope
+
+        def _gate(self, tool_input: Any) -> CheckResult:
+            params = self._infer_check_params(tool_input)
+            scope = self._infer_scope(params)
+            return self._guard.check(scope, **params)
+
+        @staticmethod
+        def _format_denied_message(result: CheckResult) -> str:
+            return f"[AgentGuard] Action denied.\nReason: {result.reason}"
+
+        @staticmethod
+        def _format_approval_message(result: CheckResult) -> str:
+            return (
+                f"[AgentGuard] Action requires approval. "
+                f"Approve at: {result.approval_url}\n"
+                f"Reason: {result.reason}"
             )
-        if result.needs_approval:
-            raise PermissionError(
-                f"[AgentGuard] Tool {self.name!r} requires approval. "
-                f"Approve at: {result.approval_url}\nReason: {result.reason}"
-            )
 
-    # ------------------------------------------------------------------
-    # Modern Runnable API (invoke / ainvoke / stream / astream / batch / abatch)
-    # ------------------------------------------------------------------
-
-    def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
-        """Synchronous Runnable entry. Gates ``input`` then delegates."""
-        result = self._gate(input)
-        self._raise_for_modern_api(result, input)
-        return self.__tool.invoke(input, config=config, **kwargs)
-
-    async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
-        """Async Runnable entry. Gate is synchronous; delegate is async."""
-        result = self._gate(input)
-        self._raise_for_modern_api(result, input)
-        return await self.__tool.ainvoke(input, config=config, **kwargs)
-
-    def stream(self, input: Any, config: Any = None, **kwargs: Any) -> Iterator[Any]:
-        """Synchronous streaming Runnable entry.
-
-        The gate fires **once** at stream open. Mid-stream tool calls bypass
-        the gate — a v0.6 issue tracks per-chunk gating.
-        """
-        result = self._gate(input)
-        self._raise_for_modern_api(result, input)
-        # TODO(v0.6, #langchain-stream-gating): gate per-chunk events in
-        # stream()/astream() output. Today the gate fires once at
-        # stream-open; mid-stream tool calls (rare in v0.4 LangChain but
-        # increasingly common in agent loops) bypass the gate.
-        return self.__tool.stream(input, config=config, **kwargs)
-
-    async def astream(
-        self, input: Any, config: Any = None, **kwargs: Any
-    ) -> AsyncIterator[Any]:
-        """Async streaming Runnable entry. Same one-shot gate as stream()."""
-        result = self._gate(input)
-        self._raise_for_modern_api(result, input)
-        # TODO(v0.6, #langchain-stream-gating): see stream() above.
-        async for chunk in self.__tool.astream(input, config=config, **kwargs):
-            yield chunk
-
-    def batch(
-        self, inputs: List[Any], config: Any = None, **kwargs: Any
-    ) -> List[Any]:
-        """Synchronous batch entry. Gates each input independently.
-
-        First DENY (or REQUIRE_APPROVAL) raises ``PermissionError`` reporting
-        the failing index. The whole-batch-fails-on-first-deny semantics is
-        deliberate: collating per-entry results would force callers to
-        de-multiplex success/failure on every batch, which is more code
-        than v0.5 wants to ship. v0.6 may switch to per-entry collation
-        if customers ask for it.
-        """
-        for idx, item in enumerate(inputs):
-            result = self._gate(item)
+        def _raise_for_modern_api(self, result: CheckResult, tool_input: Any) -> None:
+            """Raise PermissionError on DENY / REQUIRE_APPROVAL."""
             if result.denied:
                 raise PermissionError(
-                    f"[AgentGuard] Tool {self.name!r} batch entry {idx} denied: "
-                    f"{result.reason}"
+                    f"[AgentGuard] Tool {self.name!r} denied: {result.reason}"
                 )
             if result.needs_approval:
                 raise PermissionError(
-                    f"[AgentGuard] Tool {self.name!r} batch entry {idx} requires "
-                    f"approval. Approve at: {result.approval_url}\n"
-                    f"Reason: {result.reason}"
+                    f"[AgentGuard] Tool {self.name!r} requires approval. "
+                    f"Approve at: {result.approval_url}\nReason: {result.reason}"
                 )
-        return self.__tool.batch(inputs, config=config, **kwargs)
 
-    async def abatch(
-        self, inputs: List[Any], config: Any = None, **kwargs: Any
-    ) -> List[Any]:
-        """Async batch entry. Same per-entry gating as batch()."""
-        for idx, item in enumerate(inputs):
-            result = self._gate(item)
-            if result.denied:
-                raise PermissionError(
-                    f"[AgentGuard] Tool {self.name!r} batch entry {idx} denied: "
-                    f"{result.reason}"
-                )
-            if result.needs_approval:
-                raise PermissionError(
-                    f"[AgentGuard] Tool {self.name!r} batch entry {idx} requires "
-                    f"approval. Approve at: {result.approval_url}\n"
-                    f"Reason: {result.reason}"
-                )
-        return await self.__tool.abatch(inputs, config=config, **kwargs)
+        # --------------------------------------------------------------
+        # Internal abstract entry: _run / _arun.
+        # ``BaseTool.run`` calls ``self._run(*tool_args, **tool_kwargs)``
+        # via ``context.run``. Gating here covers the canonical sync
+        # dispatch path.
+        # --------------------------------------------------------------
 
-    # ------------------------------------------------------------------
-    # Legacy API (run / arun / _run / _arun)
-    # ------------------------------------------------------------------
-
-    def run(self, tool_input: Any, **kwargs: Any) -> Any:
-        """Run the tool after checking with AgentGuard (legacy entry).
-
-        Returns a string message on DENY/REQUIRE_APPROVAL to preserve
-        v0.4.x behaviour; do **not** use this for new code — prefer
-        ``invoke()`` so failures surface as exceptions.
-        """
-        result = self._gate(tool_input)
-
-        if result.allowed:
-            return self.__tool.run(tool_input, **kwargs)
-        if result.needs_approval:
-            return self._format_approval_message(result)
-        return self._format_denied_message(result)
-
-    async def arun(self, tool_input: Any, **kwargs: Any) -> Any:
-        """Async legacy entry. Same string-on-deny shape as ``run()``."""
-        result = self._gate(tool_input)
-
-        if result.allowed:
-            return await self.__tool.arun(tool_input, **kwargs)
-        if result.needs_approval:
-            return self._format_approval_message(result)
-        return self._format_denied_message(result)
-
-    def _run(self, *args: Any, **kwargs: Any) -> Any:
-        """LangChain internal sync entry. Gates the first positional arg.
-
-        BaseTool.invoke ultimately calls ``_run`` on the underlying tool;
-        we override it here to gate that path too. The first positional
-        argument (or ``tool_input``/``input`` keyword) is treated as the
-        gate input — matching how LangChain's BaseTool dispatches.
-        """
-        tool_input = args[0] if args else kwargs.get("tool_input", kwargs.get("input"))
-        result = self._gate(tool_input)
-        self._raise_for_modern_api(result, tool_input)
-        # Use object.__getattribute__ on the wrapped tool to access its
-        # underscore-prefixed _run, bypassing our own __getattr__.
-        underlying = self.__tool
-        return underlying._run(*args, **kwargs)
-
-    async def _arun(self, *args: Any, **kwargs: Any) -> Any:
-        """LangChain internal async entry. Mirrors ``_run`` semantics."""
-        tool_input = args[0] if args else kwargs.get("tool_input", kwargs.get("input"))
-        result = self._gate(tool_input)
-        self._raise_for_modern_api(result, tool_input)
-        underlying = self.__tool
-        return await underlying._arun(*args, **kwargs)
-
-    # ------------------------------------------------------------------
-    # Attribute access — strict allowlist
-    # ------------------------------------------------------------------
-
-    def __getattr__(self, name: str) -> Any:
-        """Block every non-allowlisted attribute access.
-
-        Python only calls ``__getattr__`` after the normal attribute
-        lookup fails — i.e. the attribute is **not** in ``__slots__`` /
-        ``__dict__`` / class methods. By the time we get here the caller is
-        asking for something that is not part of the gated surface. We
-        block by default and raise ``AttributeError`` with a security note.
-
-        The allowlist is enforced this way (rather than at __getattribute__
-        time) so that explicitly-defined methods on this class (``invoke``,
-        ``stream``, etc.) and the slotted metadata attributes work
-        normally — only the proxy-fallback path is blocked.
-        """
-        # Explicit deny for known bypass vectors. ``_tool`` and ``func`` are
-        # the documented bypass attempts in the audit; we name them in the
-        # error message for clarity.
-        if name in ("_tool", "func", "coroutine"):
+        def _run(self, *args: Any, **kwargs: Any) -> Any:
+            tool_input = self._reduce_to_tool_input(args, kwargs)
+            result = self._gate(tool_input)
+            self._raise_for_modern_api(result, tool_input)
+            inner = self._tool
+            if hasattr(inner, "_run"):
+                return inner._run(*args, **kwargs)
+            if hasattr(inner, "run"):
+                return inner.run(*args, **kwargs)
             raise AttributeError(
-                f"Direct access to {name!r} would bypass the AgentGuard policy "
-                f"gate. Use tool.invoke(...) instead."
+                f"wrapped tool {type(inner).__name__!r} has no _run / run"
             )
-        if name in _ALLOWED_PASSTHROUGH:
-            # If a metadata attribute was not captured at __init__ time
-            # (e.g. the wrapped tool added it later), fetch it now via
-            # object.__getattribute__ on the wrapped tool's mangled slot —
-            # bypassing our own __getattr__ recursion. The slot name is
-            # ``_GuardedTool__tool`` (Python name mangling on ``__tool``).
-            tool = object.__getattribute__(self, "_GuardedTool__tool")
-            try:
-                return getattr(tool, name)
-            except AttributeError:
-                raise AttributeError(name)
-        raise AttributeError(
-            f"Direct access to {name!r} would bypass the AgentGuard policy "
-            f"gate. Use tool.invoke(...) instead."
-        )
+
+        async def _arun(self, *args: Any, **kwargs: Any) -> Any:
+            tool_input = self._reduce_to_tool_input(args, kwargs)
+            result = self._gate(tool_input)
+            self._raise_for_modern_api(result, tool_input)
+            inner = self._tool
+            if hasattr(inner, "_arun"):
+                try:
+                    return await inner._arun(*args, **kwargs)
+                except NotImplementedError:
+                    pass
+            if hasattr(inner, "arun"):
+                try:
+                    return await inner.arun(*args, **kwargs)
+                except NotImplementedError:
+                    pass
+            # Sync fallback in a thread executor.
+            import asyncio
+            loop = asyncio.get_running_loop()
+            if hasattr(inner, "_run"):
+                return await loop.run_in_executor(
+                    None, lambda: inner._run(*args, **kwargs)
+                )
+            if hasattr(inner, "run"):
+                return await loop.run_in_executor(
+                    None, lambda: inner.run(*args, **kwargs)
+                )
+            raise AttributeError(
+                f"wrapped tool {type(inner).__name__!r} has no async path"
+            )
+
+        @staticmethod
+        def _reduce_to_tool_input(args: tuple, kwargs: dict) -> Any:
+            """Map ``_run``'s *args/**kwargs onto a single tool_input.
+
+            Special cases for the policy gate:
+              * ``("hello",)`` → ``"hello"`` (string command form)
+              * ``{"command": "hi"}`` → dict (rule-keyed extraction)
+              * ``{"text": "hi"}`` (single-arg tool from
+                ``Tool.from_function``) → ``"hi"`` so the command field
+                is populated naturally — the agent runtime passes the
+                LLM's tool-call args in dict form, but for single-arg
+                tools the value is what operators write rules against.
+            """
+            # Strip LangChain runtime kwargs first so they never reach the
+            # gate input.
+            clean_kwargs = {
+                k: v for k, v in kwargs.items()
+                if k not in ("run_manager", "config", "callbacks")
+            }
+            if args and not clean_kwargs:
+                return args[0] if len(args) == 1 else list(args)
+            if not args and clean_kwargs:
+                # Promote single-key dicts whose key is unrecognised by
+                # _infer_check_params to a bare command string. The
+                # canonical keys (command/cmd/url/path/...) keep their
+                # dict form.
+                recognised = {"command", "cmd", "url", "path", "file_path",
+                              "domain", "session_id", "est_cost"}
+                if (
+                    len(clean_kwargs) == 1
+                    and next(iter(clean_kwargs)) not in recognised
+                ):
+                    return next(iter(clean_kwargs.values()))
+                return clean_kwargs
+            if args and clean_kwargs:
+                return {"args": list(args), **clean_kwargs}
+            return ""
+
+        # --------------------------------------------------------------
+        # Modern Runnable API (invoke / ainvoke / stream / astream / batch / abatch)
+        # --------------------------------------------------------------
+
+        def _gate_input_for_invoke(self, raw_input: Any) -> Any:
+            """Normalize an ``invoke``-style input for the policy gate.
+
+            Handled shapes:
+              * langchain_core ``ToolCall`` dict
+                ``{"name", "args", "id", "type": "tool_call"}`` — agent
+                runtime passes this to ``tool.invoke``. Unwrap to the
+                ``args`` payload before extraction.
+              * ``invoke({"text": "hello"})`` from a tool whose function
+                takes a single non-canonical kwarg — promote to bare
+                string "hello" so the command field populates.
+              * ``invoke({"command": "hi"})`` keeps its dict shape so
+                ``_infer_check_params``'s recognised-key extraction fires.
+            """
+            if isinstance(raw_input, dict):
+                # Unwrap a langchain_core ToolCall dict.
+                if (
+                    raw_input.get("type") == "tool_call"
+                    and "args" in raw_input
+                ):
+                    raw_input = raw_input["args"]
+            if isinstance(raw_input, dict):
+                recognised = {"command", "cmd", "url", "path", "file_path",
+                              "domain", "session_id", "est_cost"}
+                if (
+                    len(raw_input) == 1
+                    and next(iter(raw_input)) not in recognised
+                ):
+                    return next(iter(raw_input.values()))
+            return raw_input
+
+        def invoke(  # type: ignore[override]
+            self,
+            input: Any,  # noqa: A002
+            config: Any = None,
+            **kwargs: Any,
+        ) -> Any:
+            """Synchronous Runnable entry. Gates ``input`` then delegates
+            to the wrapped tool's invoke (so its callbacks / serialization
+            machinery runs)."""
+            gate_input = self._gate_input_for_invoke(input)
+            result = self._gate(gate_input)
+            self._raise_for_modern_api(result, gate_input)
+            inner = self._tool
+            if hasattr(inner, "invoke"):
+                return inner.invoke(input, config=config, **kwargs)
+            if hasattr(inner, "_run"):
+                return inner._run(input)
+            raise AttributeError(
+                f"wrapped tool {type(inner).__name__!r} has no invoke / _run"
+            )
+
+        async def ainvoke(  # type: ignore[override]
+            self,
+            input: Any,  # noqa: A002
+            config: Any = None,
+            **kwargs: Any,
+        ) -> Any:
+            """Async Runnable entry."""
+            gate_input = self._gate_input_for_invoke(input)
+            result = self._gate(gate_input)
+            self._raise_for_modern_api(result, gate_input)
+            inner = self._tool
+            if hasattr(inner, "ainvoke"):
+                return await inner.ainvoke(input, config=config, **kwargs)
+            # Sync fallback
+            import asyncio
+            loop = asyncio.get_running_loop()
+            if hasattr(inner, "invoke"):
+                return await loop.run_in_executor(
+                    None, lambda: inner.invoke(input, config=config, **kwargs)
+                )
+            raise AttributeError(
+                f"wrapped tool {type(inner).__name__!r} has no async path"
+            )
+
+        def stream(  # type: ignore[override]
+            self,
+            input: Any,  # noqa: A002
+            config: Any = None,
+            **kwargs: Any,
+        ) -> Iterator[Any]:
+            """Synchronous streaming Runnable entry. Gate fires once at
+            stream open. TODO(v0.6): gate per chunk."""
+            result = self._gate(input)
+            self._raise_for_modern_api(result, input)
+            inner = self._tool
+            return inner.stream(input, config=config, **kwargs)
+
+        async def astream(  # type: ignore[override]
+            self,
+            input: Any,  # noqa: A002
+            config: Any = None,
+            **kwargs: Any,
+        ) -> AsyncIterator[Any]:
+            """Async streaming Runnable entry. Same one-shot gate."""
+            result = self._gate(input)
+            self._raise_for_modern_api(result, input)
+            inner = self._tool
+            async for chunk in inner.astream(input, config=config, **kwargs):
+                yield chunk
+
+        def batch(  # type: ignore[override]
+            self,
+            inputs: List[Any],
+            config: Any = None,
+            **kwargs: Any,
+        ) -> List[Any]:
+            """Synchronous batch entry. Gates each input independently;
+            first DENY raises for the whole batch."""
+            for idx, item in enumerate(inputs):
+                result = self._gate(item)
+                if result.denied:
+                    raise PermissionError(
+                        f"[AgentGuard] Tool {self.name!r} batch entry {idx} denied: "
+                        f"{result.reason}"
+                    )
+                if result.needs_approval:
+                    raise PermissionError(
+                        f"[AgentGuard] Tool {self.name!r} batch entry {idx} requires "
+                        f"approval. Approve at: {result.approval_url}\n"
+                        f"Reason: {result.reason}"
+                    )
+            return self._tool.batch(inputs, config=config, **kwargs)
+
+        async def abatch(  # type: ignore[override]
+            self,
+            inputs: List[Any],
+            config: Any = None,
+            **kwargs: Any,
+        ) -> List[Any]:
+            """Async batch entry. Same per-entry gating as batch()."""
+            for idx, item in enumerate(inputs):
+                result = self._gate(item)
+                if result.denied:
+                    raise PermissionError(
+                        f"[AgentGuard] Tool {self.name!r} batch entry {idx} denied: "
+                        f"{result.reason}"
+                    )
+                if result.needs_approval:
+                    raise PermissionError(
+                        f"[AgentGuard] Tool {self.name!r} batch entry {idx} requires "
+                        f"approval. Approve at: {result.approval_url}\n"
+                        f"Reason: {result.reason}"
+                    )
+            return await self._tool.abatch(inputs, config=config, **kwargs)
+
+        # --------------------------------------------------------------
+        # Legacy API (run / arun) — string-on-deny preserved for v0.4.x
+        # --------------------------------------------------------------
+
+        def run(  # type: ignore[override]
+            self,
+            tool_input: Any,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
+            """Run the tool (legacy entry).
+
+            Returns a string message on DENY / REQUIRE_APPROVAL to preserve
+            v0.4.x behavior; new code should prefer ``invoke`` so failures
+            surface as exceptions.
+            """
+            result = self._gate(tool_input)
+            inner = self._tool
+            if result.allowed:
+                return inner.run(tool_input, *args, **kwargs)
+            if result.needs_approval:
+                return self._format_approval_message(result)
+            return self._format_denied_message(result)
+
+        async def arun(self, tool_input: Any, *args: Any, **kwargs: Any) -> Any:
+            """Async legacy entry. Same string-on-deny shape as ``run()``."""
+            result = self._gate(tool_input)
+            inner = self._tool
+            if result.allowed:
+                return await inner.arun(tool_input, *args, **kwargs)
+            if result.needs_approval:
+                return self._format_approval_message(result)
+            return self._format_denied_message(result)
+
+        # --------------------------------------------------------------
+        # Hide private gating fields from model_dump.
+        # --------------------------------------------------------------
+
+        def model_dump(self, *args: Any, **kwargs: Any) -> dict:  # type: ignore[override]
+            data = super().model_dump(*args, **kwargs)
+            for k in ("_tool", "_guard", "_scope"):
+                data.pop(k, None)
+            return data
+
+    _GUARDED_TOOL_CLASS = GuardedTool
+    return GuardedTool
+
+
+# ---------------------------------------------------------------------------
+# Public GuardedTool symbol — a factory that builds and instantiates the
+# real class lazily.
+# ---------------------------------------------------------------------------
+
+
+class _GuardedToolFactory:
+    """Factory whose ``__call__`` returns a GuardedTool instance.
+
+    Behaves like a class for ``isinstance`` checks once the underlying
+    class has been built.
+    """
+
+    def __call__(self, tool: Any, guard: Guard, scope: str = "shell") -> Any:
+        cls = _build_guarded_tool_class()
+        return cls(tool, guard, scope=scope)
+
+    def __instancecheck__(self, obj: Any) -> bool:  # pragma: no cover - delegated
+        cls = _GUARDED_TOOL_CLASS
+        if cls is None:
+            return False
+        return isinstance(obj, cls)
+
+    def __subclasscheck__(self, sub: Any) -> bool:  # pragma: no cover - delegated
+        cls = _GUARDED_TOOL_CLASS
+        if cls is None:
+            return False
+        return issubclass(sub, cls)
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return "<GuardedTool factory (lazy langchain_core.BaseTool subclass)>"
+
+
+GuardedTool = _GuardedToolFactory()
 
 
 class GuardedToolkit:
@@ -442,8 +606,9 @@ class GuardedToolkit:
     ):
         self._guard = Guard(guard_url, agent_id=agent_id)
         self._default_scope = default_scope
+        cls = _build_guarded_tool_class()
         self._tools = [
-            GuardedTool(tool, self._guard, scope=self._infer_scope(tool))
+            cls(tool, self._guard, scope=self._infer_scope(tool))
             for tool in tools
         ]
 
@@ -465,6 +630,6 @@ class GuardedToolkit:
         return self._default_scope
 
     @property
-    def tools(self) -> List[GuardedTool]:
+    def tools(self) -> List[Any]:
         """The guarded tool list — drop-in replacement for unguarded tools."""
         return self._tools

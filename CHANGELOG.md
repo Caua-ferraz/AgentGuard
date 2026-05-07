@@ -4,7 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-> Tracks work in flight on `master` post-v0.5.0. Items here are *not* in any tagged release yet.
+> Tracks work in flight on `master` post-v0.5.1. Items here are *not* in any tagged release yet.
+
+## [0.5.1] — 2026-05-05
+
+> Python SDK adapter hotfix. CrewAI 1.x + pydantic 2.12 and langgraph 1.0 + langchain_core 1.x both reject the v0.5.0 composition-wrapper adapters at framework boundaries (`isinstance(thing, BaseTool)` / `isinstance(thing, Runnable)` no longer honour `BaseTool.register()` virtual-subclass registrations). v0.5.1 ships hybrid subclass+override adapters that satisfy the framework's isinstance checks natively while preserving the policy-enforcement contract by overriding every dispatch entry point. Python-only release; the Go binaries, MCP Gateway, and LLM API Proxy stay at v0.5.0.
+
+### Fixed
+
+- **Python SDK CrewAI adapter** (`agentguard.adapters.crewai.GuardedCrewTool`) — now subclasses `crewai.tools.BaseTool` directly. `Agent(tools=[GuardedCrewTool(...)])` no longer raises `pydantic_core.ValidationError` on CrewAI 1.x. Every gated dispatch path (`_run`, `run`, `invoke`, `ainvoke`, `_arun`, `arun`, `__call__`, `to_structured_tool`) is explicitly overridden so future framework additions surface in the canary integration test rather than silently bypassing the gate.
+- **Python SDK LangChain adapter** (`agentguard.adapters.langchain.GuardedTool`) — now subclasses `langchain_core.tools.BaseTool`. `langgraph.prebuilt.create_react_agent(llm, tools=[GuardedTool(...)])` and `langchain.agents.create_agent(...)` both accept the wrapper directly; the v0.5.0 `Tool.from_function(func=lambda x: gt.invoke(x))` workaround is no longer required. ToolCall-shaped inputs (`{"name", "args", "id", "type": "tool_call"}`) are unwrapped to the underlying args dict before the gate runs.
+- Both adapters now use `pydantic.PrivateAttr` for internal references (`_tool`, `_guard`, `_scope`); these fields are excluded from `model_dump()` output and kept off `model_fields`.
+
+### Changed
+
+- The composition-era `__getattr__` allowlist (`_ALLOWED_PASSTHROUGH`) is removed from both adapters. Defense moves from "no parent attributes are exposed" to "every gated dispatch path is on this class, not inherited" — the canary integration tests (`tests/integration/test_at_real_crewai.py`, `tests/integration/test_at_real_langchain.py`) trip when upstream adds a new dispatch path that bypasses our overrides.
 
 ## [0.5.0] — 2026-05-05
 
