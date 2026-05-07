@@ -4,7 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-> Tracks work in flight on `release/v0.5`. Items here are *not* in any tagged release yet.
+> Tracks work in flight on `master` post-v0.5.0. Items here are *not* in any tagged release yet.
+
+## [0.5.0] — 2026-05-05
+
+> The proxy heroes release. Two new wire-level binaries (`agentguard-mcp-gateway`, `agentguard-llm-proxy`) make AgentGuard a wire-level firewall for MCP-aware clients and OpenAI/Anthropic SDK callers. The SDK becomes the compatibility tier — still fully supported and hardened, but no longer the only integration path. ~92 of the v0.4.1 audit's findings closed. See [`docs/releases/v0.5.0.md`](docs/releases/v0.5.0.md) for the operator-facing summary.
 
 ### Added
 
