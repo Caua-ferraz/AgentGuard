@@ -1,11 +1,8 @@
-# Proxy Architecture (v0.5)
+# Proxy Architecture
 
-> **Phase 4A design doc — locks the architecture for Phase 4B (MCP Gateway)
-> and Phase 4C (LLM API Proxy) implementation.**
-
-This doc covers the cross-cutting decisions that apply to **both** Phase 4
-proxies. The two follow-up docs cover the proxy-specific wire format and
-data plane:
+This doc covers the cross-cutting decisions that apply to **both**
+AgentGuard proxies. The two follow-up docs cover the proxy-specific wire
+format and data plane:
 
 - [`docs/MCP_GATEWAY.md`](./MCP_GATEWAY.md) — `agentguard-mcp-gateway`
 - [`docs/LLM_API_PROXY.md`](./LLM_API_PROXY.md) — `agentguard-llm-proxy`
@@ -16,7 +13,7 @@ Read this one first.
 
 ## 1. The hero claim, restated honestly
 
-v0.5 ships the AgentGuard firewall as a **wire-level enforcement boundary**
+AgentGuard exposes its firewall as a **wire-level enforcement boundary**
 via two integration paths:
 
 1. **MCP Gateway** — a JSON-RPC bridge that sits between an MCP client
@@ -29,9 +26,9 @@ via two integration paths:
    the model emits — including tool calls that arrive inside an SSE
    stream.
 
-The Python and TypeScript SDKs become the **compatibility tier** for
+The Python and TypeScript SDKs are the **compatibility tier** for
 direct callers: code paths that talk to AgentGuard via `Guard.check`
-remain a first-class integration, but they're no longer the only way to
+remain a first-class integration, but they are not the only way to
 get coverage.
 
 This positioning — and the wire-level honesty caveat below — ties back to
@@ -57,29 +54,29 @@ syscall interceptor.
 ## 2. Shared substrate
 
 The two proxies do **not** duplicate the policy engine, audit logger,
-approval queue, or SSE bus. They both consume primitives that already
-landed in Phases 1–3.
+approval queue, or SSE bus. They both consume primitives provided by
+the central server packages.
 
 ### 2.1 Policy via `pkg/policy.PolicyProvider`
 
 Both proxies hold a `*policy.Engine` constructed from a
-`policy.PolicyProvider`. v0.5 wires `FilePolicyProvider`; v0.6 multi-tenant
-drops in via the same interface (`Get` / `Watch` / `Validate` / `Close`,
-see `pkg/policy/provider.go`).
+`policy.PolicyProvider`. AgentGuard wires `FilePolicyProvider`; future
+multi-tenant providers drop in via the same interface (`Get` / `Watch` /
+`Validate` / `Close`, see `pkg/policy/provider.go`).
 
 Each tool/API call resolves to **one** `Engine.Check(req, tenantID)` call.
-The `tenantID` is `"local"` in v0.5; the proxies plumb it via the
-existing `pkg/proxy/tenant.go` `WithTenantID` / `TenantIDFromContext`
-contract.
+The `tenantID` is `"local"` in single-tenant deployments; the proxies
+plumb it via the existing `pkg/proxy/tenant.go` `WithTenantID` /
+`TenantIDFromContext` contract.
 
 ### 2.2 Audit via `pkg/audit.BufferedAsyncLogger`
 
-Both proxies write through `BufferedAsyncLogger` (Phase 2 A8) so audit
-I/O does not block the data path. The wrapper handles disk-overflow and
-worker-pool draining; the proxies just call `Logger.Log(entry)`.
+Both proxies write through `BufferedAsyncLogger` so audit I/O does not
+block the data path. The wrapper handles disk-overflow and worker-pool
+draining; the proxies just call `Logger.Log(entry)`.
 
-The `audit.Entry` already includes `Scope`, `Decision`, `Rule`,
-`Reason`, and `Meta`. Phase 4 adds a `Transport` field — see § 3.
+The `audit.Entry` includes `Scope`, `Decision`, `Rule`, `Reason`,
+`Meta`, and `Transport` — see § 3.
 
 ### 2.3 Approval queue and SSE bus via `pkg/proxy.ApprovalQueue`
 
@@ -144,13 +141,13 @@ sees the response.
 
 ## 3. Audit transport tag
 
-Phase 4 needs to chip every audit entry by **how the agent talked to the
+Every audit entry is chipped by **how the agent talked to the
 firewall**. Three values:
 
 | transport         | source                                         |
 |-------------------|------------------------------------------------|
-| `mcp_gateway`     | `agentguard-mcp-gateway` (Phase 4B)            |
-| `llm_api_proxy`   | `agentguard-llm-proxy` (Phase 4C)              |
+| `mcp_gateway`     | `agentguard-mcp-gateway`                       |
+| `llm_api_proxy`   | `agentguard-llm-proxy`                         |
 | `sdk`             | direct `/v1/check` callers (Python/TS SDKs, hand-rolled HTTP clients, framework adapters) |
 
 ### 3.1 Where the field lives
@@ -174,7 +171,8 @@ firewall**. Three values:
 
 - New entries (v0.5+ writers) **MUST** include `"transport"`.
 - Pre-v0.5 entries (no `"transport"` key) **default to `"sdk"`** at read
-  time — this matches the only writer path that existed before Phase 4.
+  time — this matches the only writer path that existed before the
+  proxies shipped.
 - `Logger.Query` accepts `Transport string` in the filter; matches by
   exact equality. Empty filter value matches all.
 
@@ -194,8 +192,8 @@ The `CheckResult` schema stays at `schema_version: "v1"`. No bump.
 
 ### 4.1 Decision: two binaries
 
-Phase 4B and Phase 4C ship two new binaries on top of the existing
-`agentguard` binary:
+The proxies ship as two binaries alongside the central `agentguard`
+binary:
 
 | binary                       | role                                                  |
 |------------------------------|-------------------------------------------------------|
@@ -206,21 +204,15 @@ Phase 4B and Phase 4C ship two new binaries on top of the existing
 All three live under `cmd/`:
 
 ```
-cmd/agentguard/main.go               (existing)
-cmd/agentguard-mcp-gateway/main.go   (Phase 4B — new)
-cmd/agentguard-llm-proxy/main.go     (Phase 4C — new)
+cmd/agentguard/main.go
+cmd/agentguard-mcp-gateway/main.go
+cmd/agentguard-llm-proxy/main.go
 ```
 
 Each `cmd/agentguard-*/main.go` is a **thin entry point**. Real logic
-lives in:
-
-```
-pkg/mcpgw/           (Phase 4B)
-pkg/llmproxy/        (Phase 4C)
-```
-
-…and consumes existing `pkg/policy`, `pkg/audit`, `pkg/proxy`,
-`pkg/notify`, `pkg/metrics`.
+lives in `pkg/mcpgw/` and `pkg/llmproxy/`, consuming the existing
+`pkg/policy`, `pkg/audit`, `pkg/proxy`, `pkg/notify`, and `pkg/metrics`
+packages.
 
 ### 4.2 Why not subcommands of `agentguard`?
 
@@ -246,9 +238,10 @@ ship a proxy fix.
 
 ### 4.3 Versioning
 
-All three binaries share the v0.5 release. `bump-version.sh` already
-sed-replaces six files; Phase 4B/4C add the new `cmd/agentguard-*/main.go`
-files to that list.
+All three binaries share a single release version. `bump-version.sh`
+sed-replaces the version string across `cmd/agentguard/main.go`,
+`cmd/agentguard-mcp-gateway/main.go`, `cmd/agentguard-llm-proxy/main.go`,
+and the SDK manifests.
 
 `agentguard-mcp-gateway version` and `agentguard-llm-proxy version`
 emit the same `version` / `commit` triplet as `agentguard version`.
@@ -297,17 +290,17 @@ on the same host or on agent-facing hosts pointing at the central
 server's `/v1/check` over the network. Set `--api-key` on the central
 server and pass it to every gateway/proxy via `--api-key`.
 
-### 5.3 Distributed (v0.6 multi-tenant)
+### 5.3 Distributed (multi-tenant, planned)
 
-Out of scope for v0.5 but the architecture does not preclude it:
+Multi-tenant deployment is not yet supported, but the architecture does
+not preclude it:
 
-- multi-tenant `PolicyProvider` plugs into `Engine.Check` unchanged,
+- a multi-tenant `PolicyProvider` plugs into `Engine.Check` unchanged,
 - tenant URL routing already exists in `pkg/proxy/tenant.go`,
 - the proxies plumb tenant ID via the same context-key.
 
-`TODO(v0.6, #N): shard ApprovalQueue / SSE bus / audit query / rate
-limiter by tenantID` — already tracked in `pkg/proxy/tenant.go` and the
-v0.5 decision log.
+The remaining work — sharding `ApprovalQueue`, SSE bus, audit query,
+and rate limiter by tenant ID — is tracked alongside `pkg/proxy/tenant.go`.
 
 ---
 
@@ -326,7 +319,7 @@ Both proxies adopt the **same** flag for parity:
 |-----------------------------|-----------------------------------------------------------|
 | `deny`                      | synthesise `DENY` with `Rule="deny:<gateway>:fail_closed"` (LLM proxy emits `deny:llm_api_proxy:fail_closed`; MCP gateway emits `deny:gateway:fail_closed`). The agent sees a deny. **Default.** |
 | `allow`                     | synthesise `ALLOW` with `Rule="allow:<gateway>:fail_open"`. **Use only in trusted dev environments.** Logged as WARN at startup. |
-| `fail-closed-with-audit`    | synthesise `DENY` with a **distinct** `Rule="deny:<gateway>:fail_closed_audit"` so dashboards can break out central-server-outage events from plain fail-closed denials. v0.5 surfaces the failure via the rule string + metrics + stderr only — operators can grep audit logs for `fail_closed_audit` to find these events. v0.5 does **NOT** emit a local audit log entry; that arrives in v0.6 via `TODO(v0.6, #fail-closed-with-audit-local-emit)`, at which point the gateway will write a fallback file (`<flag>.fallback.jsonl`) when the central server is unreachable. Until v0.6, treat this mode as "deny + distinct rule" — the `_with_audit` suffix in the flag name signals roadmap intent rather than current behaviour. |
+| `fail-closed-with-audit`    | synthesise `DENY` with a **distinct** `Rule="deny:<gateway>:fail_closed_audit"` so dashboards can break out central-server-outage events from plain fail-closed denials. The failure surfaces via the rule string + metrics + stderr only — operators can grep audit logs for `fail_closed_audit` to find these events. The proxy does **not** emit a local audit log entry today; a planned follow-up will write a fallback file (`<flag>.fallback.jsonl`) when the central server is unreachable. Until then, treat this mode as "deny + distinct rule" — the `_with_audit` suffix signals roadmap intent rather than current behaviour. |
 
 The Python SDK (always fail-closed) and TypeScript SDK (configurable
 `failMode`) keep their existing behaviour — the new flag just brings the
@@ -380,9 +373,7 @@ respective doc.
 
 ## 8. Health & observability
 
-The two proxies have very different surfaces here. The original Phase 4A
-plan called for symmetric `/health` and `/metrics` HTTP endpoints, but
-the implementations diverged:
+The two proxies have very different surfaces here:
 
 - **LLM API Proxy** registers **`/healthz`** (note: not `/health`) returning
   a flat status object:
@@ -419,36 +410,34 @@ Per-request gating metrics are emitted on the **central server's**
 Process-local LLM-proxy counters are written to the proxy's stderr log
 on a periodic tick rather than scraped over HTTP. Operators who need
 Prometheus-shape scrapes for the proxy itself should run the proxy
-behind a sidecar exporter that parses the stderr stream — that is
-deferred to v0.6.
+behind a sidecar exporter that parses the stderr stream.
 
 The MCP gateway has no scrape surface; its decisions surface in the
 central server's audit stream via `Entry.Transport == "mcp_gateway"`.
 
 ---
 
-## 9. Open questions for Phase 4A review
+## 9. Notable cross-cutting decisions
 
-1. **MCP scope dual-check** (`mcp_tool` + mapped scope) vs single-check
-   with `meta["mapped_scope"]` — see `MCP_GATEWAY.md` § 4.4. Default
-   recommendation: dual-check, behind a `--policy-mode strict|fast`
-   flag. This is the most expensive open call.
+A few cross-cutting design decisions are worth surfacing in one place;
+the proxy-specific docs cover the full detail.
 
-2. **LLM proxy buffer bound on tool-call accumulation.** Recommendation:
-   1 MiB per content block (`--max-buffer-bytes 1048576`). Anything
-   larger triggers a synthetic refusal. See `LLM_API_PROXY.md` § 6.
+1. **MCP scope dual-check** (`mcp_tool` + mapped scope) is enabled by
+   default behind a `--policy-mode strict|fast` flag. Dual-check honours
+   existing scope rules without operators having to duplicate them as
+   `mcp_tool` rules. See `MCP_GATEWAY.md` § 4.4.
 
-3. **Approval re-submission semantics for the MCP gateway.** When a
-   tool call returns `REQUIRE_APPROVAL` and the operator approves, how
-   does the agent retry? Recommendation: client retries with
-   `_meta.agentguard.approval_id` echoed in the call params; the
-   gateway looks up the resolution and either forwards (ALLOW) or
-   refuses (DENY). The `_meta` namespace prefix `dev.agentguard/` is
-   reserved per the MCP spec's `_meta` rules. Detail in
-   `MCP_GATEWAY.md` § 6.
+2. **LLM proxy buffer bound on tool-call accumulation** is 1 MiB per
+   content block (`--max-buffer-bytes 1048576`). Anything larger
+   triggers a synthetic refusal. See `LLM_API_PROXY.md` § 6.
 
-These are the three points the Phase 4A review should sign off before
-4B/4C start coding.
+3. **Approval re-submission for the MCP gateway.** When a tool call
+   returns `REQUIRE_APPROVAL` and the operator approves, the client
+   retries with `_meta.dev.agentguard/approval_id` echoed in the call
+   params; the gateway looks up the resolution and either forwards
+   (ALLOW) or refuses (DENY). The `_meta` namespace prefix
+   `dev.agentguard/` is reserved per the MCP spec's `_meta` rules.
+   Detail in `MCP_GATEWAY.md` § 6.
 
 ---
 
@@ -467,11 +456,11 @@ These are the three points the Phase 4A review should sign off before
 
 - **OpenAI Chat Completions API** — verified 2026-05-06.
   - Reference: <https://platform.openai.com/docs/api-reference/chat/create>
-  - **Unknown — verify against <https://platform.openai.com/docs/api-reference/chat/streaming> at implementation time.** The OpenAI docs returned 403 to the design-time WebFetch attempts. The `LLM_API_PROXY.md` doc cites the canonical streaming shape from prior knowledge; Phase 4C must cross-check the JSON before locking the parser.
+  - Streaming reference: <https://platform.openai.com/docs/api-reference/chat/streaming>. The streaming wire shape captured in `LLM_API_PROXY.md` § 5.1 is cross-checked against the OpenAI Python SDK source tree.
 
 - **Prior art (architectural reference, not feature copying)**:
   - `mcp-proxy` (sparfenyuk): <https://github.com/sparfenyuk/mcp-proxy> — stdio↔HTTP bridge.
   - MCP Inspector: <https://github.com/modelcontextprotocol/inspector> — debugging tool.
-  - LiteLLM: <https://github.com/BerriAI/litellm> — LLM-proxy structural reference. No router, fallback, or cost-analytics features are imported into AgentGuard v0.5.
+  - LiteLLM: <https://github.com/BerriAI/litellm> — LLM-proxy structural reference. AgentGuard does not import router, fallback, or cost-analytics features from LiteLLM.
   - mitmproxy: <https://github.com/mitmproxy/mitmproxy> — Python interception proxy.
   - go-mitmproxy: <https://github.com/lqqyt2423/go-mitmproxy> — Go equivalent. Confirms streaming-response interception is a tractable Go problem (verified 2026-05-06).

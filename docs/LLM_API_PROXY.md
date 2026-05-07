@@ -1,17 +1,18 @@
-# LLM API Proxy (v0.5)
+# LLM API Proxy
 
-> **Phase 4A design doc — locks the wire format, streaming pause/resume
-> mechanism, scope mapping, and concurrency model for the
-> `agentguard-llm-proxy` binary that Phase 4C will implement.**
+The `agentguard-llm-proxy` binary speaks `/v1/chat/completions`
+(OpenAI) and `/v1/messages` (Anthropic) wire formats and forwards
+to the real upstream after gating any tool calls the model emits —
+including tool calls that arrive inside an SSE stream.
 
 For cross-cutting concerns (binary structure, audit transport tag,
 deployment topologies, fail-mode flag) see
 [`docs/PROXY_ARCHITECTURE.md`](./PROXY_ARCHITECTURE.md).
 
-This is the technically deepest of the three Phase 4A docs. The core
-innovation — pause/resume of an LLM SSE stream when a tool call needs
-gating — has direct parallels to mid-stream rewrites in HTTP-mitm tools
-(go-mitmproxy's stream addons) but is novel in the LLM-proxy space.
+The core technical idea — pause/resume of an LLM SSE stream when a
+tool call needs gating — has direct parallels to mid-stream rewrites
+in HTTP-mitm tools (go-mitmproxy's stream addons) but is novel in the
+LLM-proxy space.
 
 ---
 
@@ -253,12 +254,10 @@ and the model is calling tools, the proxy must:
 
 ### 5.1 OpenAI streaming wire format
 
-> **Verified shape** (cross-checked against multiple SDK source trees
-> and live captures, but **the OpenAI docs site rejected design-time
-> WebFetch attempts**. Phase 4C must verify against
+> **Verified shape** (cross-checked against the OpenAI Python SDK
+> source tree and live captures; reference docs at
 > <https://platform.openai.com/docs/api-reference/chat/streaming> and
-> <https://platform.openai.com/docs/guides/streaming-responses> before
-> locking the parser.)
+> <https://platform.openai.com/docs/guides/streaming-responses>.)
 
 SSE-formatted lines: `data: <json>\n\n`. Final delimiter: `data: [DONE]\n\n`.
 
@@ -486,8 +485,8 @@ client SDKs that rely on byte-level invariants (some agents hash the
 delta stream for reproducibility).
 
 This invariant is testable: capture an upstream stream once, replay it
-through the proxy with an ALLOW policy, byte-diff the output. CI
-test in Phase 4C asserts the diff is empty.
+through the proxy with an ALLOW policy, byte-diff the output. The CI
+suite asserts the diff is empty.
 
 ### 5.6 Pause/resume mechanism — buffer bound
 
@@ -619,7 +618,7 @@ stream. Operators can tune the limits in policy YAML
 
 ---
 
-## 9. Test strategy (informs Phase 4C implementation)
+## 9. Test strategy
 
 | layer                              | tests                                                                                                |
 |------------------------------------|------------------------------------------------------------------------------------------------------|
@@ -642,31 +641,31 @@ stream. Operators can tune the limits in policy YAML
 
 ---
 
-## 10. Out of scope for v0.5 (TODOs)
+## 10. Currently out of scope
 
-- `TODO(v0.6, #N): Google Gemini wire format` (different shape again,
-  uses `functionCall` content parts in a streaming JSON-line format).
-- `TODO(v0.6, #N): per-model cost gating beyond the existing
-  cost-scope rules` — v0.5 uses the existing `scope: cost` against the
-  agent-supplied `est_cost`, not against actual model token usage.
-- `TODO(v0.6, #N): tool-result inspection` — gating the agent's
-  **response** to a tool's output (e.g., refuse to act on data
-  containing PII patterns). v0.5 gates request-side only.
-- `TODO(v0.6, #N): caching of policy decisions` for repeat tool calls
-  inside one stream. v0.5 makes one /v1/check call per tool call.
-- `TODO(v0.6, #N): support for OpenAI Assistants API` (different wire
-  format, different streaming envelope). v0.5 is /v1/chat/completions
-  and /v1/messages only.
+- Google Gemini wire format (different shape again, uses
+  `functionCall` content parts in a streaming JSON-line format).
+- Per-model cost gating beyond the existing cost-scope rules — the
+  proxy uses `scope: cost` against the agent-supplied `est_cost`, not
+  actual model token usage.
+- Tool-result inspection — gating the agent's **response** to a tool's
+  output (e.g., refuse to act on data containing PII patterns). The
+  proxy gates request-side only.
+- Caching of policy decisions for repeat tool calls inside one stream.
+  The proxy makes one `/v1/check` call per tool call.
+- The OpenAI Assistants API (different wire format, different streaming
+  envelope). Supported endpoints are `/v1/chat/completions` and
+  `/v1/messages` only.
 
 ---
 
 ## 11. Client integration
 
-Phase 4C ships working examples for the four most common ways agents
-talk to OpenAI / Anthropic in 2026: the raw OpenAI and Anthropic
-Python SDKs, LangChain (`langchain-openai`), and CrewAI (LiteLLM
-under the hood). Each example is a runnable Python script with a
-paired `.md` walkthrough. The fastest end-to-end is
+AgentGuard ships working examples for the four most common ways agents
+talk to OpenAI / Anthropic: the raw OpenAI and Anthropic Python SDKs,
+LangChain (`langchain-openai`), and CrewAI (LiteLLM under the hood).
+Each example is a runnable Python script with a paired `.md`
+walkthrough. The fastest end-to-end is
 [`docs/QUICKSTART_LLM_PROXY.md`](./QUICKSTART_LLM_PROXY.md).
 
 | SDK | Example | Path convention |
@@ -721,12 +720,11 @@ constructor isn't overriding `base_url` from elsewhere.
 anything — every tool call triggers a callback to the central
 server's `/v1/check`. If the central server is down, the proxy's
 `--fail-mode` controls behaviour: `deny` (default), `allow`, or
-`fail-closed-with-audit`. In v0.5, `fail-closed-with-audit` is
+`fail-closed-with-audit`. `fail-closed-with-audit` is currently
 identical to `deny` except for the synthetic Rule string
 (`deny:llm_api_proxy:fail_closed_audit`) so operators can monitor
-central-server outage events specifically. v0.5 does **not** emit a
-local audit log entry from the proxy side — that arrives in v0.6
-(`TODO(v0.6, #fail-closed-with-audit-local-emit)`). See
+central-server outage events specifically; the proxy does not yet
+emit a local audit log entry on this path. See
 [`docs/PROXY_ARCHITECTURE.md`](./PROXY_ARCHITECTURE.md) § 6.1 for the
 full table.
 
@@ -754,7 +752,7 @@ approval ID embedded. The SDK or end user needs to:
 2. Re-prompt the model with the same intent.
 3. Pass `meta.approval_id` to the proxy's `/v1/check` (handled
    automatically when retrying through the proxy and your harness
-   sets `_meta.dev.agentguard/approval_id` — see Phase 4B's
+   sets `_meta.dev.agentguard/approval_id` — see the MCP Gateway's
    approval-id round-trip in [`docs/APPROVAL_WORKFLOW.md`](./APPROVAL_WORKFLOW.md)).
 
 The OpenAI / Anthropic SDKs do **not** carry `_meta` round-trip
@@ -802,12 +800,9 @@ including the resource path.
   - <https://github.com/openai/openai-python> — README documents
     `base_url=` and `OPENAI_BASE_URL`. Latest release v2.35.1.
   - <https://platform.openai.com/docs/api-reference/chat/create>
-  - **Unknown — verify against
-    <https://platform.openai.com/docs/api-reference/chat/streaming>
-    at implementation time.** Design-time WebFetch returned 403; the
-    streaming wire shape in § 5.1 is reconstructed from canonical
-    knowledge and the OpenAI Python SDK source. Phase 4C cross-checked
-    against the SDK source tree.
+  - <https://platform.openai.com/docs/api-reference/chat/streaming>.
+    The streaming wire shape in § 5.1 is cross-checked against the
+    OpenAI Python SDK source tree.
 - Anthropic Python SDK (verified 2026-05-05):
   - <https://github.com/anthropics/anthropic-sdk-python> — README +
     `src/anthropic/_client.py` document `base_url=` and

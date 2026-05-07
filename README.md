@@ -47,7 +47,7 @@ AgentGuard is the wire-level checkpoint that sits between your agent and everyth
 
 ## Quickstart
 
-AgentGuard ships in v0.5 with **three integration paths**, listed from "no code change" to "deepest control":
+AgentGuard ships **three integration paths**, listed from "no code change" to "deepest control":
 
 ### 1. MCP Gateway
 
@@ -149,7 +149,7 @@ docker run -d -p 8080:8080 \
   agentguard:latest
 ```
 
-Prerequisites: Go 1.22+, Python 3.9+ (optional, for the SDK; v0.5 dropped 3.8 — upstream EOL October 2024). See [`docs/SETUP.md`](docs/SETUP.md) for details.
+Prerequisites: Go 1.22+, Python 3.9+ (optional, for the SDK; 3.8 is unsupported — upstream EOL October 2024). See [`docs/SETUP.md`](docs/SETUP.md) for details.
 
 ### Minimal policy
 
@@ -209,7 +209,7 @@ Rule precedence: `deny → require_approval → allow → default deny`. The sev
 
 AgentGuard is a policy enforcement and audit layer. It is **not** an OS sandbox. Read this before you trust it as your last line of defense.
 
-- **v0.5 makes the firewall wire-level.** Both proxy heroes are on `master`: the **MCP Gateway** (Phase 4B) is the primary integration path for MCP-aware clients (Claude Desktop, Cursor, Cline, Continue, Zed), and the **LLM API Proxy** (Phase 4C) extends the same boundary to OpenAI / Anthropic SDK calls (`OPENAI_BASE_URL=http://127.0.0.1:8081/v1` and the Anthropic equivalent). The agent reaches its tools only through AgentGuard, so there is no opt-out short of pointing the client at a different MCP server or ignoring the SDK's base-URL configuration. Operators who control the agent's environment (env vars, network egress, MCP client config) get an enforcement boundary, not just an advisory one.
+- **The firewall is wire-level via the MCP Gateway and LLM API Proxy.** The **MCP Gateway** is the primary integration path for MCP-aware clients (Claude Desktop, Cursor, Cline, Continue, Zed), and the **LLM API Proxy** extends the same boundary to OpenAI / Anthropic SDK calls (`OPENAI_BASE_URL=http://127.0.0.1:8081/v1` and the Anthropic equivalent). The agent reaches its tools only through AgentGuard, so there is no opt-out short of pointing the client at a different MCP server or ignoring the SDK's base-URL configuration. Operators who control the agent's environment (env vars, network egress, MCP client config) get an enforcement boundary, not just an advisory one.
 - **The SDK is a compatibility tier.** It remains supported and tested for direct callers — but it is opt-in by design: the agent must call `guard.check(...)`. That makes it an *advisory* gate. Use it when the proxy is impractical (offline scripts, custom transports), and pair it with the proxy whenever both are available.
 - **AgentGuard does not sandbox the host or intercept syscalls.** A determined agent that controls its own runtime can bypass the proxy by ignoring `OPENAI_BASE_URL`, talking to a different MCP server, or shelling out directly. Combine AgentGuard with OS-level isolation (containers, seccomp, AppArmor, network egress rules) when the threat model includes a hostile agent.
 - **Pattern matching is string-glob, not semantic.** A deny rule for `rm -rf *` matches literal strings; an agent (or a creative human) can substitute equivalents (`find / -delete`, base64 payloads, etc.). Treat policies as a high-signal first filter, not a complete authorization model.

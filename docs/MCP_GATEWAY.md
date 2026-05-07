@@ -1,18 +1,17 @@
-# MCP Gateway (v0.5)
+# MCP Gateway
 
-> **Phase 4A design doc — locks the wire format, capability-merging
-> rules, scope mapping, and approval flow for the `agentguard-mcp-gateway`
-> binary that Phase 4B will implement.**
+The `agentguard-mcp-gateway` binary brokers JSON-RPC between an MCP
+host (Claude Desktop, Cursor, Cline, Continue, Zed) and one or more
+downstream MCP servers, gating every `tools/call` through the policy
+engine. It supports multi-upstream configurations, capability merging,
+namespaced tools, reconnect with backoff, and typed JSON-RPC error
+responses.
 
 For cross-cutting concerns (binary structure, audit transport tag,
 deployment topologies, fail-mode flag) see
-[`docs/PROXY_ARCHITECTURE.md`](./PROXY_ARCHITECTURE.md).
-
-The Phase 3 A15 preview (`python -m agentguard.adapters.mcp --upstream
-"<cmd>"`, single upstream, no namespace prefixing) demonstrated the
-shape. v0.5's gateway productionises and extends it: multi-upstream,
-capability merging, namespaced tools, reconnect with backoff, and
-typed JSON-RPC error responses.
+[`docs/PROXY_ARCHITECTURE.md`](./PROXY_ARCHITECTURE.md). A Python
+preview shipped earlier in `plugins/python/agentguard/adapters/mcp.py`
+remains as a fallback for environments that cannot run a Go binary.
 
 ---
 
@@ -55,13 +54,12 @@ AgentGuard server's `/v1/check`.
 
 ### 1.1 Why Go (not Python)
 
-The Phase 3 A15 preview is in Python. Phase 4B reimplements in Go to
-match the rest of the daemon binaries and to share `pkg/policy`,
-`pkg/audit`, `pkg/proxy.ApprovalQueue`, and `pkg/notify` directly
-(no HTTP hop required when running in-process). The Python
-`GuardedMCPGateway` stays in `plugins/python/agentguard/adapters/mcp.py`
-as a fallback for environments that can't run a Go binary, but the docs
-default to the Go binary.
+The Go gateway shares `pkg/policy`, `pkg/audit`,
+`pkg/proxy.ApprovalQueue`, and `pkg/notify` with the rest of the
+AgentGuard daemons (no HTTP hop required when running in-process). The
+Python `GuardedMCPGateway` in `plugins/python/agentguard/adapters/mcp.py`
+remains as a fallback for environments that can't run a Go binary, but
+the docs default to the Go binary.
 
 ---
 
@@ -85,7 +83,7 @@ agentguard-mcp-gateway \
 | `--guard-url`       | no         | central server URL. Default `http://127.0.0.1:8080`. |
 | `--api-key`         | no         | bearer for `/v1/check`. Falls back to `AGENTGUARD_API_KEY` env. |
 | `--tenant-id`       | no         | default `local`.                                |
-| `--fail-mode`       | no         | `deny` / `allow` / `fail-closed-with-audit`. Default `deny`. In v0.5, `fail-closed-with-audit` is identical to `deny` except for the synthetic Rule string (`deny:gateway:fail_closed_audit`) so operators can monitor central-server outage events specifically. v0.5 does **not** emit a local audit log entry — that arrives in v0.6 (`TODO(v0.6, #fail-closed-with-audit-local-emit)`). See [`PROXY_ARCHITECTURE.md`](./PROXY_ARCHITECTURE.md) § 6.1. |
+| `--fail-mode`       | no         | `deny` / `allow` / `fail-closed-with-audit`. Default `deny`. `fail-closed-with-audit` is currently identical to `deny` except for the synthetic Rule string (`deny:gateway:fail_closed_audit`) so operators can monitor central-server outage events specifically. The proxy does **not** yet emit a local audit log entry on this path; that fallback file is planned. See [`PROXY_ARCHITECTURE.md`](./PROXY_ARCHITECTURE.md) § 6.1. |
 | `--policy`          | no         | Path to AgentGuard policy YAML. **Required** when `--policy-mode strict` (the default). Used to resolve `tool_scope_map` overrides for the dual-check (`mcp_tool` + mapped scope). |
 | `--policy-mode`     | no         | `strict` (default) or `fast`. `strict` requires `--policy` and fails closed if the file is missing/invalid; `fast` skips loading and uses only the gateway's built-in default mapping. |
 | `--log-level`       | no         | stderr verbosity. Default `info`.               |
@@ -176,16 +174,11 @@ itself can faithfully proxy.
 
 | capability       | gateway behaviour                                          |
 |------------------|------------------------------------------------------------|
-| `tools`          | always advertised. `listChanged: false` because the gateway does not subscribe to upstream `tools/list_changed` notifications in v0.5 — see TODO below. |
-| `resources`      | advertised iff at least one upstream advertises. v0.5 forwards `resources/list` and `resources/read` verbatim with namespace-prefixed URIs. (Out of scope for the MVP — listed here so the design doesn't preclude it.) |
-| `prompts`        | same as resources. Out of scope for v0.5 MVP. |
+| `tools`          | always advertised. `listChanged: false` — the gateway does not subscribe to upstream `tools/list_changed` notifications today; clients refresh by re-issuing `tools/list`. |
+| `resources`      | advertised iff at least one upstream advertises. `resources/list` and `resources/read` are forwarded verbatim with namespace-prefixed URIs. Test coverage for resources is light. |
+| `prompts`        | same as resources. Test coverage is light. |
 | `logging`        | always advertised; gateway forwards `logging/setLevel` to every upstream. |
-| `completions`    | not advertised. v0.6 follow-up. |
-
-`TODO(v0.6, #N): forward upstream notifications/tools/list_changed and
-flip our advertised capability to listChanged: true`. The notification
-needs reverse-direction (server→host) plumbing that v0.5 keeps simple
-by polling on `tools/list` calls.
+| `completions`    | not advertised. |
 
 ---
 
@@ -459,8 +452,7 @@ keys, GitHub PATs, Slack tokens, and `key=value` secret patterns are
 scrubbed.
 
 The dashboard renders the `transport: "mcp_gateway"` chip in the audit
-feed (color: blue, distinct from `sdk` green and `llm_api_proxy`
-purple — A18/A22 implementers pick the exact palette).
+feed (blue), distinct from `sdk` (green) and `llm_api_proxy` (purple).
 
 ---
 
@@ -616,8 +608,7 @@ JSON-RPC message. The gateway:
 
 ### 8.2 JSON parse errors
 
-A malformed frame on the host's stdin **does not crash the gateway**.
-Per the Phase 3 A15 pattern:
+A malformed frame on the host's stdin **does not crash the gateway**:
 
 ```go
 for scanner.Scan() {
@@ -637,7 +628,7 @@ if err := scanner.Err(); err != nil {
 
 Per the JSON-RPC 2.0 spec, we *could* emit a `-32700 Parse error`
 response — but the malformed frame may not even have a parseable id, so
-v0.5 silently drops as the SDK adapter does today.
+the gateway silently drops as the Python adapter does.
 
 ### 8.3 Concurrency model
 
@@ -662,7 +653,7 @@ result if it had landed before cancellation).
 
 ---
 
-## 9. Test strategy (informs Phase 4B implementation)
+## 9. Test strategy
 
 | layer                    | tests                                                                       |
 |--------------------------|-----------------------------------------------------------------------------|
@@ -678,30 +669,32 @@ result if it had landed before cancellation).
 | Real upstream            | spawn `npx -y @modelcontextprotocol/server-everything`, drive a full session|
 
 The "real upstream" test is the equivalent of the Python integration
-suite — it goes in a separate `integration-tests` job that's
-non-blocking on PR until we have one week of green data (mirrors the
-A14 decision).
+suite — it lives in a separate `integration-tests` CI job that runs
+against the real upstream framework (non-blocking on PRs to avoid
+upstream-flake failures; promoted to required once stability data
+accumulates).
 
 ---
 
-## 10. Out of scope for v0.5 (TODOs)
+## 10. Currently out of scope
 
-- `TODO(v0.6, #N): forward upstream notifications/tools/list_changed
-  and flip the gateway's advertised capability to listChanged: true`.
-- `TODO(v0.6, #N): full resources/* and prompts/* support, currently
-  forwarded verbatim with namespace-prefixed URIs but not test-covered`.
-- `TODO(v0.6, #N): Streamable HTTP transport on the host-facing side`
-  for non-stdio MCP hosts. v0.5 is stdio-only on both sides.
-- `TODO(v0.6, #N): per-upstream rate limiting`. The central server's
-  rate limiter applies, but a misbehaving downstream that floods on
-  tools/list will be felt.
+- Forwarding upstream `notifications/tools/list_changed` and flipping
+  the gateway's advertised capability to `listChanged: true`. Clients
+  refresh by re-issuing `tools/list`.
+- Full `resources/*` and `prompts/*` support is forwarded verbatim with
+  namespace-prefixed URIs but is not test-covered.
+- Streamable HTTP transport on the host-facing side. The gateway is
+  stdio-only on both sides.
+- Per-upstream rate limiting. The central server's rate limiter
+  applies, but a misbehaving downstream that floods on `tools/list`
+  will be felt.
 
 ---
 
 ## 11. Client integration
 
-Phase 4B ships working configs for the five MCP clients with the largest
-user bases as of 2026-05. Each `examples/<client>-config.json` is the
+AgentGuard ships working configs for the five MCP clients with the
+largest user bases. Each `examples/<client>-config.json` is the
 authoritative copy-paste, and each has a sibling `<client>-config.md`
 with the OS-specific config-file path, the source-doc URL, and a
 verification checklist. The fastest end-to-end is
@@ -830,6 +823,6 @@ its parent — there is no inbound HTTP for the gateway. The
   `-32700` for parse errors. AgentGuard does not introduce custom
   error codes — denial and approval-required are returned as **tool
   execution errors** (`isError: true`), not JSON-RPC protocol errors.
-- Phase 3 A15 preview: `plugins/python/agentguard/adapters/mcp.py`
+- Python preview: `plugins/python/agentguard/adapters/mcp.py`
   (`GuardedMCPGateway`).
 - Cross-cutting design: [`docs/PROXY_ARCHITECTURE.md`](./PROXY_ARCHITECTURE.md).

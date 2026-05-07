@@ -353,7 +353,7 @@ See [`docs/MCP_GATEWAY.md`](./MCP_GATEWAY.md) for the gateway's full wire format
 
 ## LLM API Proxy tool scope mapping
 
-The LLM API Proxy (`agentguard-llm-proxy`, Phase 4C) inspects upstream model responses for `tool_calls` and gates each call against operator policy **using the same `tool_scope_map:` section** the MCP Gateway uses. There is no separate `llm_tool_scope_map:` key — the bare tool names emitted by chat-style models (`bash`, `read_file`, `web_search`) and the namespaced names emitted by MCP servers (`fs:read_file`, `github:create_issue`) occupy disjoint regions of the pattern space, so a single mapping table covers both transports without ambiguity.
+The LLM API Proxy (`agentguard-llm-proxy`) inspects upstream model responses for `tool_calls` and gates each call against operator policy **using the same `tool_scope_map:` section** the MCP Gateway uses. There is no separate `llm_tool_scope_map:` key — the bare tool names emitted by chat-style models (`bash`, `read_file`, `web_search`) and the namespaced names emitted by MCP servers (`fs:read_file`, `github:create_issue`) occupy disjoint regions of the pattern space, so a single mapping table covers both transports without ambiguity.
 
 ### Bundled defaults
 

@@ -26,7 +26,7 @@ The 0.5 floors cover the API surface AgentGuard's adapters were built and harden
 
 ### Pinning rationale
 
-v0.5 introduces upper bounds because v0.4.x's "0.1+" floor allowed silent rot when frameworks renamed methods or added new bypass paths (audit findings R5 P1–P5, R1 F1). Specifically:
+The 0.5 line introduces upper bounds because the prior `>=0.1` floor allowed silent rot when frameworks renamed methods or added new bypass paths. Specifically:
 
 - **LangChain** moved from a single `langchain` package on 0.1 to a split `langchain-core` (Runnable protocol) + `langchain` (agents / chains) on 0.3. The 0.4 line will introduce its own breaking changes; we re-verify before bumping.
 - **CrewAI** moved its `BaseTool` to inherit from `langchain_core.runnables.Runnable` around 0.80, exposing the modern `invoke` / `ainvoke` / `stream` / `batch` surface. Pre-0.80 tools have a different bypass surface; the v0.5 adapter is built and tested against 0.80–0.89.
@@ -41,11 +41,11 @@ v0.5 introduces upper bounds because v0.4.x's "0.1+" floor allowed silent rot wh
 4. Update this table.
 5. Check the framework's changelog for new method names — if the framework added a method that side-steps our gate (`Runnable.with_listeners` did this in `langchain-core` 0.3.x), extend the adapter's gated set BEFORE bumping the pin.
 
-### Why the integration-tests CI job is non-blocking on PRs (v0.5)
+### Why the integration-tests CI job is non-blocking on PRs
 
-The job runs against the real upstream framework. A transient PyPI / CDN failure during `pip install` or `playwright install` should not block a PR that didn't change any adapter code. The weekly cron run still surfaces those failures asynchronously, and a v0.6 issue (*"ci: make integration-tests job a required check after one full week of green"*) tracks promoting it to required once we have stability data.
+The job runs against the real upstream framework. A transient PyPI / CDN failure during `pip install` or `playwright install` should not block a PR that didn't change any adapter code. The weekly cron run still surfaces those failures asynchronously; the job will be promoted to required once stability data accumulates.
 
-Authors of adapter changes are still expected to drive the integration job to green locally before merging — see `make integration-test` once it lands (v0.5.1).
+Authors of adapter changes are still expected to drive the integration job to green locally before merging — see `make integration-test`.
 
 All adapters share the same philosophy: **decide via policy first, call the wrapped callable only if `ALLOW`**. On `DENY` or `REQUIRE_APPROVAL` the adapter either returns a marker string (for LangChain/CrewAI, whose tools must return text to the LLM) or raises `PermissionError` (for browser-use, whose async page methods have no other return channel). The MCP adapter returns a JSON-RPC result with `isError: true`.
 
@@ -240,7 +240,7 @@ The [Model Context Protocol](https://modelcontextprotocol.io) is a JSON-RPC over
 
 `MCP_PROTOCOL_VERSION = "2024-11-05"`. If a client requests a different version in `initialize.params.protocolVersion`, the server **logs a WARN to stderr** and still responds with the pinned version. stdout is reserved for JSON-RPC on the stdio transport, so the warning must not go to stdout.
 
-This is intentional: v0.4.1 does not negotiate; v0.5.0 will. If you see the warn repeatedly, either update AgentGuard or downgrade the client.
+The Python adapter does not negotiate protocol versions — for full version negotiation, use the `agentguard-mcp-gateway` Go binary instead (see [`docs/MCP_GATEWAY.md`](MCP_GATEWAY.md)). If you see the warn repeatedly with the Python adapter, downgrade the client to `2024-11-05`.
 
 ### Registering tools
 
@@ -315,12 +315,15 @@ Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_conf
 }
 ```
 
-The gateway is a v0.5 preview of Phase 4B's full Gateway. Limitations:
+The Python gateway is a compatibility-tier alternative to the
+production `agentguard-mcp-gateway` Go binary (see
+[`docs/MCP_GATEWAY.md`](MCP_GATEWAY.md)). Limitations vs the Go
+binary:
 
 - Single upstream only — no capability merging.
 - No tool-name namespacing / prefixing.
 - Server-initiated notifications (`notifications/tools/list_changed`) are not relayed.
-- Only `tools/*` is gated (prompts/resources land in v0.6).
+- Only `tools/*` is gated; `prompts/*` and `resources/*` are not.
 
 #### Empty-server mode (back-compat)
 
