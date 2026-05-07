@@ -78,6 +78,9 @@ func validatePolicyBytes(data []byte) error {
 	if err := validateRedactionPatterns(&pol); err != nil {
 		return err
 	}
+	if err := validateToolScopeMap(&pol); err != nil {
+		return err
+	}
 	if err := validateTunables(&pol); err != nil {
 		return err
 	}

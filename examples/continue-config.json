@@ -1,0 +1,26 @@
+{
+  "_comment": "AgentGuard MCP Gateway config for Continue.dev. Source: https://docs.continue.dev/customize/deep-dives/mcp (verified 2026-05-05). Continue's preferred config format is YAML in newer releases; the JSON shape below works for the legacy ~/.continue/config.json file. See continue-config.md for both options.",
+
+  "mcpServers": {
+    "agentguard": {
+      "type": "stdio",
+      "command": "agentguard-mcp-gateway",
+      "args": [
+        "--upstream", "fs:npx -y @modelcontextprotocol/server-filesystem /tmp",
+        "--upstream", "fetch:npx -y @modelcontextprotocol/server-fetch",
+        "--upstream", "github:npx -y @modelcontextprotocol/server-github",
+        "--guard-url", "http://127.0.0.1:8080",
+        "--api-key", "$AGENTGUARD_API_KEY",
+        "--policy", "/etc/agentguard/policy.yaml",
+        "--tenant-id", "continue-local",
+        "--policy-mode", "strict",
+        "--fail-mode", "deny",
+        "--log-level", "info"
+      ],
+      "env": {
+        "AGENTGUARD_API_KEY": "set-from-shell-or-secret-store",
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "set-from-shell-or-secret-store"
+      }
+    }
+  }
+}

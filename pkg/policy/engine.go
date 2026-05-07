@@ -53,6 +53,41 @@ type Policy struct {
 	// audit query bounds). All subfields are optional; unset values fall
 	// back to the Default* constants below, which match v0.4.0 behavior.
 	Proxy ProxyCfg `yaml:"proxy,omitempty"`
+
+	// ToolScopeMap maps MCP tool names to existing policy scopes for the
+	// MCP Gateway's dual-check pattern. Patterns are glob-matched (same
+	// matcher as rule patterns); the gateway's --policy-mode strict
+	// (default) fires a second Engine.Check against the mapped scope per
+	// tool call so existing filesystem/network/shell rules apply to MCP
+	// traffic without duplication. See docs/MCP_GATEWAY.md § 4.4 and
+	// docs/POLICY_REFERENCE.md#mcp_tool-scope.
+	//
+	// Order matters: first match wins. Operators put more-specific
+	// patterns before broader ones.
+	//
+	// Example:
+	//
+	//   tool_scope_map:
+	//     - pattern: "fs:read_file"
+	//       scope: filesystem
+	//     - pattern: "fs:*"
+	//       scope: filesystem
+	//     - pattern: "github:*"
+	//       scope: network
+	//     - pattern: "*:execute_*"
+	//       scope: shell
+	ToolScopeMap []ToolScopeMapping `yaml:"tool_scope_map,omitempty" json:"tool_scope_map,omitempty"`
+}
+
+// ToolScopeMapping is one entry in Policy.ToolScopeMap. The list form
+// (rather than an inline map) is chosen so YAML iteration order is
+// deterministic — the gateway's first-match-wins resolution depends on
+// it. Operators write a few extra lines per entry; the gateway
+// guarantees the same scope for the same tool name on every host
+// regardless of YAML library quirks.
+type ToolScopeMapping struct {
+	Pattern string `yaml:"pattern" json:"pattern"`
+	Scope   string `yaml:"scope" json:"scope"`
 }
 
 // Defaults applied when the corresponding config key is unset. These
@@ -224,6 +259,9 @@ func LoadFromFile(path string) (*Policy, error) {
 	if err := validateRedactionPatterns(&pol); err != nil {
 		return nil, err
 	}
+	if err := validateToolScopeMap(&pol); err != nil {
+		return nil, err
+	}
 
 	// Validate proxy and notification tunables: parse durations, bound-check
 	// integers. Fail at load so an operator who types "1hr" instead of "1h"
@@ -274,6 +312,71 @@ func validateFilesystemPaths(pol *Policy) error {
 		}
 	}
 	return nil
+}
+
+// knownPolicyScopes is the set of scopes that AgentGuard recognises for
+// rule dispatch (engine.Check) and for tool_scope_map values. Rule
+// scopes outside this set still load (the engine's generic dispatch
+// matches any scope by Pattern/Action+Paths/Domain), but a
+// tool_scope_map entry pointing at an unknown scope is rejected at
+// load — it is almost certainly an operator typo and the gateway's
+// dual-check would silently skip the second Engine.Check otherwise.
+//
+// The "mcp_tool" scope is the MCP Gateway's primary scope for the
+// first half of the dual-check pattern; it is added here in v0.5
+// alongside the gateway. The gateway dispatches "mcp_tool" through
+// the engine's generic path (no scope-specific handling), like the
+// "data" scope added in Phase 3 A13.
+var knownPolicyScopes = map[string]struct{}{
+	"shell":      {},
+	"filesystem": {},
+	"network":    {},
+	"browser":    {},
+	"data":       {},
+	"cost":       {},
+	"mcp_tool":   {},
+}
+
+// validateToolScopeMap rejects a tool_scope_map whose entry has an
+// empty pattern, an empty scope, or a scope outside knownPolicyScopes.
+// Closes the silent-no-op footgun where a typo (`scope: filesytem`)
+// would cause the gateway's strict-mode dual-check to skip the second
+// Engine.Check entirely.
+func validateToolScopeMap(pol *Policy) error {
+	for i, m := range pol.ToolScopeMap {
+		if strings.TrimSpace(m.Pattern) == "" {
+			return fmt.Errorf("tool_scope_map[%d].pattern: must not be empty", i)
+		}
+		if strings.TrimSpace(m.Scope) == "" {
+			return fmt.Errorf("tool_scope_map[%d].scope: must not be empty (pattern=%q)", i, m.Pattern)
+		}
+		if _, ok := knownPolicyScopes[m.Scope]; !ok {
+			return fmt.Errorf("tool_scope_map[%d].scope: %q is not a known scope (allowed: shell, filesystem, network, browser, data, cost, mcp_tool); pattern=%q", i, m.Scope, m.Pattern)
+		}
+	}
+	return nil
+}
+
+// MapToolScope returns the existing-scope rule that applies to the
+// given namespaced MCP tool name (`<ns>:<tool>`), per the policy's
+// tool_scope_map. Returns ("", false) if no entry matches. First
+// match wins; operators control resolution order via the YAML list
+// order.
+//
+// Used by the MCP Gateway in --policy-mode strict to fire a second
+// Engine.Check against the mapped scope per tool call. Single-call
+// hot path; safe to invoke under any lock state because it does not
+// touch engine state.
+func (p *Policy) MapToolScope(toolName string) (string, bool) {
+	if p == nil || toolName == "" {
+		return "", false
+	}
+	for _, m := range p.ToolScopeMap {
+		if globMatch(m.Pattern, toolName) {
+			return m.Scope, true
+		}
+	}
+	return "", false
 }
 
 // validateRedactionPatterns checks that every notification redaction

@@ -675,7 +675,127 @@ A14 decision).
 
 ---
 
-## 11. References
+## 11. Client integration
+
+Phase 4B ships working configs for the five MCP clients with the largest
+user bases as of 2026-05. Each `examples/<client>-config.json` is the
+authoritative copy-paste, and each has a sibling `<client>-config.md`
+with the OS-specific config-file path, the source-doc URL, and a
+verification checklist. The fastest end-to-end is
+[`docs/QUICKSTART_MCP.md`](./QUICKSTART_MCP.md).
+
+| Client | Example | Config-file path |
+|---|---|---|
+| Claude Desktop | [`examples/claude-desktop-config.json`](../examples/claude-desktop-config.json) | macOS `~/Library/Application Support/Claude/claude_desktop_config.json` • Windows `%APPDATA%\Claude\claude_desktop_config.json` |
+| Cursor | [`examples/cursor-config.json`](../examples/cursor-config.json) | global `~/.cursor/mcp.json` or per-project `<workspace>/.cursor/mcp.json` |
+| Cline (VS Code) | [`examples/cline-config.json`](../examples/cline-config.json) | inside VS Code's `globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json` (use the in-app **Configure MCP Servers** button) |
+| Continue.dev | [`examples/continue-config.json`](../examples/continue-config.json) | `~/.continue/config.json` (legacy) or `<workspace>/.continue/mcpServers/*.yaml` |
+| Zed | [`examples/zed-config.json`](../examples/zed-config.json) | `~/.config/zed/settings.json` — top-level key is `context_servers`, NOT `mcpServers` |
+
+### 11.1 Minimal Claude Desktop config
+
+```jsonc
+{
+  "mcpServers": {
+    "agentguard": {
+      "command": "agentguard-mcp-gateway",
+      "args": [
+        "--upstream", "fs:npx -y @modelcontextprotocol/server-filesystem /tmp",
+        "--guard-url", "http://127.0.0.1:8080",
+        "--api-key", "$AGENTGUARD_API_KEY",
+        "--policy", "/etc/agentguard/policy.yaml",
+        "--policy-mode", "strict",
+        "--fail-mode", "deny"
+      ],
+      "env": { "AGENTGUARD_API_KEY": "<paste-or-source-from-secret-store>" }
+    }
+  }
+}
+```
+
+The gateway namespaces tools per upstream (`fs:read_text_file`,
+`github:create_issue`, …), so policies written against namespaced names
+work without changes. Strict policy mode (the default) requires
+`--policy <path>` because the gateway resolves the
+`tool_scope_map` locally to drive the dual-check (mcp_tool + mapped
+scope) — see § 4.4.3 above.
+
+### 11.2 Verifying the integration
+
+Once the config is saved and the client restarted (or, for Cline /
+Continue, reloaded — they pick up changes live):
+
+1. **The MCP indicator appears.** Claude Desktop shows a small slider in
+   the chat input; Cursor's MCP panel lists `agentguard`; Cline's
+   MCP-Servers tab shows green; Continue's tools list populates in agent
+   mode; Zed's Assistant shows the merged tools.
+2. **Tools/list aggregation works.** Ask the model "what tools do you
+   have?" — every tool from every upstream should be present, prefixed
+   with the namespace.
+3. **An ALLOW shows on the dashboard.** Ask the model to perform a
+   benign action (read a file from `/tmp`, fetch `https://example.com`).
+   The dashboard at <http://127.0.0.1:8080/dashboard> shows an `ALLOW`
+   event with `transport=mcp_gateway` and the namespaced tool name.
+4. **A DENY shows on the dashboard.** Ask the model to read
+   `/etc/passwd`. The dashboard shows a `DENY` event; the model reports
+   the tool errored with the policy reason embedded.
+
+If actions never reach AgentGuard, the gateway is probably failing to
+launch — see § 11.3 below. If actions reach the gateway but never reach
+AgentGuard's `/v1/check`, check that `--guard-url` is reachable from the
+gateway's process (loopback issues on Docker bridge networks bite here).
+
+### 11.3 Common gotchas
+
+**Binary not on PATH.** Claude Desktop / Cursor / Zed / Cline launched
+from the Finder (macOS) or the Start menu (Windows) inherit a sparse
+PATH that does not include `$(go env GOPATH)/bin`. If `which
+agentguard-mcp-gateway` works in your terminal but the MCP indicator
+never appears, replace `"command": "agentguard-mcp-gateway"` with the
+absolute path to the binary.
+
+**Shell-var expansion in flag strings.** None of the supported clients
+expand `$AGENTGUARD_API_KEY` or `$VAR` inside flag-string arguments.
+The recommended pattern is:
+
+- Set the variable in the `env` block of the server entry (which **is**
+  forwarded to the subprocess).
+- Reference it from your launcher script or secret manager — never paste
+  raw keys into the JSON.
+- Cursor additionally supports `${env:NAME}` interpolation in `args`
+  (verified against Cursor docs 2026-05-05); the other clients do not.
+
+**Stale tool list after policy edit.** Adding or removing tools from a
+policy does not require a gateway restart — the gateway re-checks every
+call against the central server, which hot-reloads via `--watch`. But
+adding a *new upstream* (a new `--upstream` flag) does require a
+gateway restart, which means restarting the MCP client.
+
+**Missing `npx`.** All bundled examples use `npx -y …` for upstreams.
+If `npx` isn't on PATH inside the MCP client's environment (a
+notoriously common Windows issue), the upstream subprocess fails to
+launch and the gateway logs a degraded-upstream WARN to stderr — visible
+in Claude Desktop's `mcp.log` and equivalents. Install Node 18+ and
+verify `npx --version` before debugging deeper.
+
+**Cookie-based auth on macOS.** AgentGuard's session cookies depend on
+the connection's TLS state. When the central server runs on plain HTTP
+on `127.0.0.1` (the dev default) and Claude Desktop talks to it from
+the gateway, the API key is sent as `Authorization: Bearer …` — no
+cookies are involved, so this is fine. The cookie path only matters if
+you log in to the dashboard from a browser, in which case use
+`--allowed-origin` and (behind a TLS-terminating proxy)
+`--tls-terminated-upstream`.
+
+**`--api-key` is auth for `/v1/check`, not for the gateway itself.**
+The gateway is launched as a subprocess by the MCP client and trusts
+its parent — there is no inbound HTTP for the gateway. The
+`--api-key` flag is only used for the gateway's outbound
+`/v1/check` calls to the central AgentGuard server.
+
+---
+
+## 12. References
 
 - MCP spec, current revision (verified 2026-05-06):
   - <https://modelcontextprotocol.io/specification/2025-11-25/basic>

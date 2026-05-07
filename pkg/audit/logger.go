@@ -42,6 +42,14 @@ type metaEnvelope struct {
 }
 
 // Entry represents a single audit log record.
+//
+// Transport identifies the integration path that produced this entry.
+// One of "sdk" (default; SDK call), "mcp_gateway" (MCP Gateway tool
+// call), "llm_api_proxy" (Phase 4C), or another gateway-defined value.
+// Empty on unmarshal of pre-v0.5 entries; readers MUST default to
+// EffectiveTransport() when consuming the field. The field is additive
+// and does NOT bump the audit schema_version (still 2). See
+// docs/PROXY_ARCHITECTURE.md § "Audit transport tag".
 type Entry struct {
 	Timestamp  time.Time           `json:"timestamp"`
 	SessionID  string              `json:"session_id"`
@@ -49,6 +57,31 @@ type Entry struct {
 	Request    policy.ActionRequest `json:"request"`
 	Result     policy.CheckResult  `json:"result"`
 	DurationMs int64               `json:"duration_ms"`
+	Transport  string              `json:"transport,omitempty"`
+}
+
+// TransportSDK is the canonical transport string for SDK callers
+// (Python / TypeScript) that do not stamp meta["transport"]. Pre-v0.5
+// audit entries also default to this value via EffectiveTransport.
+const TransportSDK = "sdk"
+
+// TransportMCPGateway is the canonical transport string for entries
+// produced via the MCP Gateway (cmd/agentguard-mcp-gateway).
+const TransportMCPGateway = "mcp_gateway"
+
+// TransportLLMAPIProxy is the canonical transport string reserved for
+// Phase 4C's LLM API Proxy. Stamped by future code; included here so
+// readers/dashboards can pre-recognise the value.
+const TransportLLMAPIProxy = "llm_api_proxy"
+
+// EffectiveTransport returns e.Transport if set, otherwise the SDK
+// default. Use when reading audit entries that may have been written
+// by a pre-v0.5 binary (no Transport field on disk).
+func (e Entry) EffectiveTransport() string {
+	if e.Transport == "" {
+		return TransportSDK
+	}
+	return e.Transport
 }
 
 // Logger is the interface for audit logging.
@@ -71,6 +104,11 @@ type QueryFilter struct {
 	Since     *time.Time `json:"since,omitempty"`
 	Limit     int        `json:"limit,omitempty"`
 	Offset    int        `json:"offset,omitempty"`
+	// Transport filters by the integration path that produced the
+	// entry ("sdk", "mcp_gateway", "llm_api_proxy"). Compared against
+	// Entry.EffectiveTransport so pre-v0.5 entries (no Transport on
+	// disk) match the "sdk" value. Empty disables the filter.
+	Transport string `json:"transport,omitempty"`
 }
 
 // DefaultFilePermissions is the Unix file mode for newly created audit log files.
@@ -282,6 +320,9 @@ func matchesFilter(entry Entry, filter QueryFilter) bool {
 		return false
 	}
 	if filter.Since != nil && entry.Timestamp.Before(*filter.Since) {
+		return false
+	}
+	if filter.Transport != "" && entry.EffectiveTransport() != filter.Transport {
 		return false
 	}
 	return true

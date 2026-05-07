@@ -1,0 +1,27 @@
+{
+  "_comment": "AgentGuard MCP Gateway config for Cline (VS Code extension). See cline-config.md for the file path inside VS Code's globalStorage and verification steps. Source: https://docs.cline.bot/mcp/configuring-mcp-servers (verified 2026-05-05). Cline reuses Claude Desktop's mcpServers schema and adds disabled / alwaysAllow.",
+
+  "mcpServers": {
+    "agentguard": {
+      "command": "agentguard-mcp-gateway",
+      "args": [
+        "--upstream", "fs:npx -y @modelcontextprotocol/server-filesystem /tmp",
+        "--upstream", "fetch:npx -y @modelcontextprotocol/server-fetch",
+        "--upstream", "github:npx -y @modelcontextprotocol/server-github",
+        "--guard-url", "http://127.0.0.1:8080",
+        "--api-key", "$AGENTGUARD_API_KEY",
+        "--policy", "/etc/agentguard/policy.yaml",
+        "--tenant-id", "cline-local",
+        "--policy-mode", "strict",
+        "--fail-mode", "deny",
+        "--log-level", "info"
+      ],
+      "env": {
+        "AGENTGUARD_API_KEY": "set-from-shell-or-VS-Code-settings",
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "set-from-shell-or-VS-Code-settings"
+      },
+      "disabled": false,
+      "alwaysAllow": []
+    }
+  }
+}

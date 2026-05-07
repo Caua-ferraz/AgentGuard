@@ -49,23 +49,36 @@ AgentGuard is the wire-level checkpoint that sits between your agent and everyth
 
 AgentGuard ships in v0.5 with **three integration paths**, listed from "no code change" to "deepest control":
 
-### 1. MCP Gateway *(v0.5 — coming)*
+### 1. MCP Gateway
 
-For Claude Desktop and any MCP-aware client, point your `claude_desktop_config.json` at the AgentGuard MCP gateway and every tool call from the model is policy-checked before reaching the real MCP server:
+For Claude Desktop and any MCP-aware client (Cursor, Cline, Continue, Zed), point your config at `agentguard-mcp-gateway` and every `tools/call` from the model is policy-checked before reaching the real MCP server:
+
+```bash
+go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-mcp-gateway@latest
+```
+
+Then add to `claude_desktop_config.json` (macOS path: `~/Library/Application Support/Claude/claude_desktop_config.json`):
 
 ```jsonc
-// ~/.config/claude/claude_desktop_config.json
 {
   "mcpServers": {
-    "everything": {
+    "agentguard": {
       "command": "agentguard-mcp-gateway",
-      "args": ["--upstream", "npx -y @modelcontextprotocol/server-everything"]
+      "args": [
+        "--upstream", "fs:npx -y @modelcontextprotocol/server-filesystem /tmp",
+        "--guard-url", "http://127.0.0.1:8080",
+        "--api-key", "$AGENTGUARD_API_KEY",
+        "--policy", "/etc/agentguard/policy.yaml",
+        "--policy-mode", "strict",
+        "--fail-mode", "deny"
+      ],
+      "env": { "AGENTGUARD_API_KEY": "<your-key-or-source-from-shell>" }
     }
   }
 }
 ```
 
-> Status: ships as part of the v0.5 release. The gateway binary is being built in the v0.5 cycle and is not yet merged on `master` as of this commit.
+90-second walkthrough: [`docs/QUICKSTART_MCP.md`](docs/QUICKSTART_MCP.md). Wire-format design + client-integration gotchas: [`docs/MCP_GATEWAY.md`](docs/MCP_GATEWAY.md). Ready configs for Cursor, Cline, Continue, Zed: [`examples/`](examples/).
 
 ### 2. LLM API Proxy *(v0.5 — coming)*
 
@@ -188,7 +201,7 @@ Rule precedence: `deny → require_approval → allow → default deny`. Scopes:
 
 AgentGuard is a policy enforcement and audit layer. It is **not** an OS sandbox. Read this before you trust it as your last line of defense.
 
-- **v0.5 makes the firewall wire-level.** The MCP Gateway and LLM API Proxy (above) become the primary integration path: the agent reaches its tools or its model only through AgentGuard, so there is no opt-out short of bypassing the configured base URL or gateway entirely. Operators who control the agent's environment (env vars, network egress) get an enforcement boundary, not just an advisory one.
+- **v0.5 makes the firewall wire-level.** The MCP Gateway is on `master` as of Phase 4B and is the primary integration path for MCP-aware clients (Claude Desktop, Cursor, Cline, Continue, Zed): the agent reaches its tools only through AgentGuard, so there is no opt-out short of pointing the client at a different MCP server. The LLM API Proxy lands in Phase 4C and extends the same boundary to OpenAI/Anthropic SDK calls. Operators who control the agent's environment (env vars, network egress, MCP client config) get an enforcement boundary, not just an advisory one.
 - **The SDK is a compatibility tier.** It remains supported and tested for direct callers — but it is opt-in by design: the agent must call `guard.check(...)`. That makes it an *advisory* gate. Use it when the proxy is impractical (offline scripts, custom transports), and pair it with the proxy whenever both are available.
 - **AgentGuard does not sandbox the host or intercept syscalls.** A determined agent that controls its own runtime can bypass the proxy by ignoring `OPENAI_BASE_URL`, talking to a different MCP server, or shelling out directly. Combine AgentGuard with OS-level isolation (containers, seccomp, AppArmor, network egress rules) when the threat model includes a hostile agent.
 - **Pattern matching is string-glob, not semantic.** A deny rule for `rm -rf *` matches literal strings; an agent (or a creative human) can substitute equivalents (`find / -delete`, base64 payloads, etc.). Treat policies as a high-signal first filter, not a complete authorization model.
@@ -256,9 +269,9 @@ Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS deta
 - [x] Full CLI: serve, validate, approve, deny, status, audit, version
 - [x] Docker support with multi-stage build
 - [x] Policy hot-reload via `--watch`
+- [x] **MCP Gateway** — wire-level Model Context Protocol proxy with multi-upstream namespacing, capability merging, reconnect-with-backoff, and approval `_meta` round-trip; ships as the `agentguard-mcp-gateway` binary with copy-paste configs for Claude Desktop, Cursor, Cline, Continue, and Zed *(v0.5)*
 
 ### Planned
-- [ ] **MCP Gateway** — wire-level Model Context Protocol proxy *(v0.5)*
 - [ ] **LLM API Proxy** — drop-in OpenAI/Anthropic-compatible base URL *(v0.5)*
 - [ ] Audit-log rotation wired by default *(v0.5)*
 - [ ] Data exfiltration detection / `data` scope (PII scanning)

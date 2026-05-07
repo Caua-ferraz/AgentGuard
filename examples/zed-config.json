@@ -1,0 +1,25 @@
+{
+  "_comment": "AgentGuard MCP Gateway config for Zed. Source: https://zed.dev/docs/ai/mcp.html (verified 2026-05-05). Zed calls MCP servers 'context servers' and stores them under the top-level context_servers key inside its main settings.json — NOT inside an mcpServers map. See zed-config.md for the settings.json file path.",
+
+  "context_servers": {
+    "agentguard": {
+      "command": "agentguard-mcp-gateway",
+      "args": [
+        "--upstream", "fs:npx -y @modelcontextprotocol/server-filesystem /tmp",
+        "--upstream", "fetch:npx -y @modelcontextprotocol/server-fetch",
+        "--upstream", "github:npx -y @modelcontextprotocol/server-github",
+        "--guard-url", "http://127.0.0.1:8080",
+        "--api-key", "$AGENTGUARD_API_KEY",
+        "--policy", "/etc/agentguard/policy.yaml",
+        "--tenant-id", "zed-local",
+        "--policy-mode", "strict",
+        "--fail-mode", "deny",
+        "--log-level", "info"
+      ],
+      "env": {
+        "AGENTGUARD_API_KEY": "set-from-shell-or-secret-store",
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "set-from-shell-or-secret-store"
+      }
+    }
+  }
+}

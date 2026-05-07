@@ -91,6 +91,7 @@ func main() {
 	auditAgent := auditCmd.String("agent", "", "Filter by agent ID")
 	auditDecision := auditCmd.String("decision", "", "Filter by decision (ALLOW, DENY, REQUIRE_APPROVAL)")
 	auditScope := auditCmd.String("scope", "", "Filter by scope")
+	auditTransport := auditCmd.String("transport", "", "Filter by integration path (sdk|mcp_gateway|llm_api_proxy)")
 	auditLimit := auditCmd.Int("limit", 50, "Max entries to return")
 	auditKey := auditCmd.String("api-key", "", "Bearer token (overrides AGENTGUARD_API_KEY)")
 
@@ -155,7 +156,7 @@ func main() {
 
 	case "audit":
 		_ = auditCmd.Parse(os.Args[2:])
-		runAuditQuery(*auditQueryURL, *auditAgent, *auditDecision, *auditScope, *auditLimit, resolveAPIKey(*auditKey))
+		runAuditQuery(*auditQueryURL, *auditAgent, *auditDecision, *auditScope, *auditTransport, *auditLimit, resolveAPIKey(*auditKey))
 
 	case "migrate":
 		_ = migrateCmd.Parse(os.Args[2:])
@@ -566,7 +567,7 @@ func runStatus(baseURL, apiKey string) {
 	}
 }
 
-func runAuditQuery(baseURL, agent, decision, scope string, limit int, apiKey string) {
+func runAuditQuery(baseURL, agent, decision, scope, transport string, limit int, apiKey string) {
 	params := url.Values{}
 	params.Set("limit", fmt.Sprintf("%d", limit))
 	if agent != "" {
@@ -577,6 +578,9 @@ func runAuditQuery(baseURL, agent, decision, scope string, limit int, apiKey str
 	}
 	if scope != "" {
 		params.Set("scope", scope)
+	}
+	if transport != "" {
+		params.Set("transport", transport)
 	}
 	queryURL := fmt.Sprintf("%s/v1/audit?%s", strings.TrimRight(baseURL, "/"), params.Encode())
 
@@ -618,6 +622,12 @@ func runAuditQuery(baseURL, agent, decision, scope string, limit int, apiKey str
 		reqScope, _ := req["scope"].(string)
 		dec, _ := result["decision"].(string)
 		reason, _ := result["reason"].(string)
+		// Transport is omitempty on the wire — pre-v0.5 entries lack
+		// the field. Fall back to "sdk" so columns stay aligned.
+		tport, _ := e["transport"].(string)
+		if tport == "" {
+			tport = "sdk"
+		}
 		cmd, _ := req["command"].(string)
 		if cmd == "" {
 			cmd, _ = req["domain"].(string)
@@ -625,7 +635,7 @@ func runAuditQuery(baseURL, agent, decision, scope string, limit int, apiKey str
 		if cmd == "" {
 			cmd, _ = req["path"].(string)
 		}
-		fmt.Printf("  %s  %-18s  scope=%-12s  agent=%-15s  %s\n", ts, dec, reqScope, agentID, cmd)
+		fmt.Printf("  %s  %-18s  transport=%-12s  scope=%-12s  agent=%-15s  %s\n", ts, dec, tport, reqScope, agentID, cmd)
 		if reason != "" {
 			fmt.Printf("    reason: %s\n", reason)
 		}

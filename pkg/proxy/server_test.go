@@ -1874,3 +1874,291 @@ func TestRateLimitDoubleCount(t *testing.T) {
 		t.Errorf("RateLimitedTotal delta: got %d, want 1", got)
 	}
 }
+
+// --- Transport tag (Phase 4B / A19) ---
+//
+// The MCP Gateway and (future) LLM API Proxy stamp
+// meta["transport"] on every /v1/check call. The server defaults
+// unset transport to "sdk" so existing SDK callers don't need to
+// change. The audit entry, the SSE event broadcast, and /v1/audit's
+// transport= filter all read from the same source.
+
+// readLatestAuditEntry returns the last decoded entry from the
+// FileLogger backing the test server. Useful for asserting on what
+// the server actually persisted, not just what the SDK saw on the
+// HTTP response.
+func readLatestAuditEntry(t *testing.T, srv *Server) audit.Entry {
+	t.Helper()
+	entries, err := srv.cfg.Logger.Query(audit.QueryFilter{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatalf("expected at least one audit entry")
+	}
+	return entries[len(entries)-1]
+}
+
+func TestHandleCheck_DefaultsTransportToSDK(t *testing.T) {
+	srv := newTestServer(t)
+
+	// SDK callers don't currently emit meta["transport"]; they
+	// implicitly identify as "sdk".
+	body := `{"scope":"shell","command":"ls -la","agent_id":"sdk-bot"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleCheck(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	entry := readLatestAuditEntry(t, srv)
+	if entry.Transport != audit.TransportSDK {
+		t.Errorf("Entry.Transport = %q; want %q (default)", entry.Transport, audit.TransportSDK)
+	}
+}
+
+func TestHandleCheck_HonorsTransportFromMeta(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Body shape mirrors what pkg/mcpgw/gate.go's HTTPPolicyClient
+	// stamps on every dual-check call.
+	body := `{
+		"scope": "shell",
+		"command": "ls -la",
+		"agent_id": "mcp-gateway:claude-desktop",
+		"meta": {"transport": "mcp_gateway"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleCheck(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	entry := readLatestAuditEntry(t, srv)
+	if entry.Transport != audit.TransportMCPGateway {
+		t.Errorf("Entry.Transport = %q; want %q (from meta)", entry.Transport, audit.TransportMCPGateway)
+	}
+}
+
+func TestSSEEvent_IncludesTransport(t *testing.T) {
+	srv := newTestServer(t)
+
+	ch := srv.approval.Subscribe()
+	defer srv.approval.Unsubscribe(ch)
+
+	body := `{
+		"scope": "shell",
+		"command": "ls -la",
+		"agent_id": "mcp-gateway:claude-desktop",
+		"meta": {"transport": "mcp_gateway"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleCheck(w, req)
+
+	select {
+	case ev := <-ch:
+		if ev.Type != "check" {
+			t.Errorf("event type = %q; want check", ev.Type)
+		}
+		if ev.Transport != audit.TransportMCPGateway {
+			t.Errorf("event.Transport = %q; want %q", ev.Transport, audit.TransportMCPGateway)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("did not receive SSE event within 1s")
+	}
+}
+
+func TestSSEEvent_ResolveCarriesTransport(t *testing.T) {
+	srv := newTestServer(t)
+
+	// 1. Submit a check that triggers REQUIRE_APPROVAL with
+	//    transport=mcp_gateway. Drain the "check" event.
+	ch := srv.approval.Subscribe()
+	defer srv.approval.Unsubscribe(ch)
+
+	body := `{
+		"scope": "shell",
+		"command": "sudo apt install vim",
+		"agent_id": "mcp-gateway:claude-desktop",
+		"meta": {"transport": "mcp_gateway"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleCheck(w, req)
+
+	var result policy.CheckResult
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Decision != policy.RequireApproval {
+		t.Fatalf("expected REQUIRE_APPROVAL, got %s", result.Decision)
+	}
+
+	// Drain the "check" event so the next receive is the "resolved" one.
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("missing initial check event")
+	}
+
+	// 2. Resolve the approval. The broadcast should preserve
+	//    transport=mcp_gateway.
+	if err := srv.approval.Resolve(result.ApprovalID, policy.Allow); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	select {
+	case ev := <-ch:
+		if ev.Type != "resolved" {
+			t.Errorf("event type = %q; want resolved", ev.Type)
+		}
+		if ev.Transport != audit.TransportMCPGateway {
+			t.Errorf("resolved event.Transport = %q; want %q", ev.Transport, audit.TransportMCPGateway)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("did not receive resolved SSE event within 1s")
+	}
+}
+
+// TestAuditFilter_Transport writes entries with mixed transports and
+// confirms that ?transport=mcp_gateway returns only MCP entries.
+func TestAuditFilter_Transport(t *testing.T) {
+	srv := newTestServer(t)
+
+	// SDK call (no transport meta).
+	srv.handleCheck(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/check",
+		strings.NewReader(`{"scope":"shell","command":"ls -la","agent_id":"sdk-bot"}`)))
+	// MCP call.
+	srv.handleCheck(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/check",
+		strings.NewReader(`{"scope":"shell","command":"echo mcp","agent_id":"mcp-gw","meta":{"transport":"mcp_gateway"}}`)))
+	// Another SDK call so the test can confirm the SDK filter excludes
+	// the MCP entry rather than vacuously matching only one.
+	srv.handleCheck(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/check",
+		strings.NewReader(`{"scope":"shell","command":"echo sdk","agent_id":"sdk-bot-2"}`)))
+
+	// Filter via the HTTP endpoint to also exercise the query-param
+	// plumbing.
+	apiReq := httptest.NewRequest(http.MethodGet, "/v1/audit?transport=mcp_gateway&limit=50", nil)
+	apiReq.Header.Set("Authorization", "Bearer test-secret")
+	apiW := httptest.NewRecorder()
+	srv.handleAuditQuery(apiW, apiReq)
+
+	if apiW.Code != http.StatusOK {
+		t.Fatalf("audit query status = %d; body = %s", apiW.Code, apiW.Body.String())
+	}
+
+	var entries []audit.Entry
+	if err := json.NewDecoder(apiW.Body).Decode(&entries); err != nil {
+		t.Fatalf("decode entries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 mcp_gateway entry, got %d", len(entries))
+	}
+	if entries[0].Transport != audit.TransportMCPGateway {
+		t.Errorf("Entry.Transport = %q; want %q", entries[0].Transport, audit.TransportMCPGateway)
+	}
+
+	// And the converse: ?transport=sdk returns the two SDK entries.
+	apiReq = httptest.NewRequest(http.MethodGet, "/v1/audit?transport=sdk&limit=50", nil)
+	apiReq.Header.Set("Authorization", "Bearer test-secret")
+	apiW = httptest.NewRecorder()
+	srv.handleAuditQuery(apiW, apiReq)
+	if apiW.Code != http.StatusOK {
+		t.Fatalf("audit query (sdk) status = %d; body = %s", apiW.Code, apiW.Body.String())
+	}
+	if err := json.NewDecoder(apiW.Body).Decode(&entries); err != nil {
+		t.Fatalf("decode entries (sdk): %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 sdk entries, got %d", len(entries))
+	}
+	for _, e := range entries {
+		if got := e.EffectiveTransport(); got != audit.TransportSDK {
+			t.Errorf("entry %q has EffectiveTransport %q; want %q", e.AgentID, got, audit.TransportSDK)
+		}
+	}
+}
+
+// TestDashboard_RenderTransportChip is a smoke check that the
+// embedded dashboard HTML carries the transport-chip CSS classes
+// and the JS code path that renders them. This is a string-level
+// assertion (we don't run a browser); regressions here mean the
+// chip stops rendering, which is operationally visible.
+func TestDashboard_RenderTransportChip(t *testing.T) {
+	required := []string{
+		// CSS class names for the three known transports + the
+		// neutral fallback.
+		".transport-chip.sdk",
+		".transport-chip.mcp_gateway",
+		".transport-chip.llm_api_proxy",
+		".transport-chip.unknown",
+		// Legend in the header.
+		"transport-legend",
+		// JS code path that constructs the chip element. We assert
+		// on the constant name rather than the chip-class string
+		// because the latter appears verbatim in CSS too.
+		"KNOWN_TRANSPORTS",
+		// The fallback that protects pre-v0.5 audit entries from
+		// rendering as the literal word "undefined".
+		"entry.transport || 'sdk'",
+	}
+	for _, marker := range required {
+		if !strings.Contains(dashboardHTML, marker) {
+			t.Errorf("dashboardHTML missing marker %q (transport-chip rendering broken)", marker)
+		}
+	}
+}
+
+// TestHandleCheck_TransportPassesThroughUnknownValues confirms a
+// caller stamping a value the server doesn't recognise (e.g. a
+// future "azure_ai_proxy") is preserved verbatim on the entry.
+// Validation is intentionally NOT done at the proxy layer — the
+// dashboard renders unknown values with a neutral chip class.
+func TestHandleCheck_TransportPassesThroughUnknownValues(t *testing.T) {
+	srv := newTestServer(t)
+
+	body := `{
+		"scope": "shell",
+		"command": "ls -la",
+		"agent_id": "future-bot",
+		"meta": {"transport": "azure_ai_proxy"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleCheck(w, req)
+
+	entry := readLatestAuditEntry(t, srv)
+	if entry.Transport != "azure_ai_proxy" {
+		t.Errorf("Entry.Transport = %q; want passthrough %q", entry.Transport, "azure_ai_proxy")
+	}
+}
+
+// TestTransportFromRequest_UnitTable covers the helper directly so
+// future refactors don't accidentally drop the SDK default.
+func TestTransportFromRequest_UnitTable(t *testing.T) {
+	cases := []struct {
+		name string
+		meta map[string]string
+		want string
+	}{
+		{"nil meta defaults sdk", nil, audit.TransportSDK},
+		{"empty meta defaults sdk", map[string]string{}, audit.TransportSDK},
+		{"empty value defaults sdk", map[string]string{"transport": ""}, audit.TransportSDK},
+		{"explicit mcp", map[string]string{"transport": "mcp_gateway"}, audit.TransportMCPGateway},
+		{"explicit llm", map[string]string{"transport": "llm_api_proxy"}, audit.TransportLLMAPIProxy},
+		{"unknown passthrough", map[string]string{"transport": "future"}, "future"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transportFromRequest(policy.ActionRequest{Meta: tc.meta})
+			if got != tc.want {
+				t.Errorf("transportFromRequest(meta=%v) = %q; want %q", tc.meta, got, tc.want)
+			}
+		})
+	}
+}

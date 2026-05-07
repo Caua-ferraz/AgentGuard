@@ -1,0 +1,25 @@
+{
+  "_comment": "AgentGuard MCP Gateway config for Cursor. See cursor-config.md for the file path (global vs project) and verification steps. Source: https://cursor.com/docs/context/mcp (verified 2026-05-05). Cursor supports ${env:VAR} interpolation, so AGENTGUARD_API_KEY is read from the parent shell's environment at launch.",
+
+  "mcpServers": {
+    "agentguard": {
+      "type": "stdio",
+      "command": "agentguard-mcp-gateway",
+      "args": [
+        "--upstream", "fs:npx -y @modelcontextprotocol/server-filesystem ${workspaceFolder}",
+        "--upstream", "fetch:npx -y @modelcontextprotocol/server-fetch",
+        "--upstream", "github:npx -y @modelcontextprotocol/server-github",
+        "--guard-url", "http://127.0.0.1:8080",
+        "--api-key", "${env:AGENTGUARD_API_KEY}",
+        "--policy", "${workspaceFolder}/.agentguard/policy.yaml",
+        "--tenant-id", "cursor-${env:USER}",
+        "--policy-mode", "strict",
+        "--fail-mode", "deny",
+        "--log-level", "info"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${env:GITHUB_PERSONAL_ACCESS_TOKEN}"
+      }
+    }
+  }
+}

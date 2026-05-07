@@ -142,6 +142,54 @@ rules:
   #   allow:
   #     - domain: "*.internal.local"              # form submissions to internal sites only
 
+  # --- MCP Gateway (tools/call gating) ---
+  # The MCP Gateway (agentguard-mcp-gateway) routes every host
+  # tools/call through Engine.Check with scope=mcp_tool. In
+  # --policy-mode strict (default) it ALSO fires a second Engine.Check
+  # against the mapped existing scope (filesystem, network, shell,
+  # browser, data) so existing rules apply to MCP traffic without
+  # duplication. See docs/MCP_GATEWAY.md and
+  # docs/POLICY_REFERENCE.md#mcp_tool-scope.
+  #
+  # Uncomment and tune for your deployment:
+  #
+  # - scope: mcp_tool
+  #   deny:
+  #     - pattern: "fs:write_file"      # block writes entirely
+  #     - pattern: "github:delete_*"    # never delete via MCP
+  #   require_approval:
+  #     - pattern: "github:*"           # all github tool calls need approval
+  #     - pattern: "*:execute_*"        # any execute_* tool, any namespace
+  #   allow:
+  #     - pattern: "fs:read_*"          # safe reads
+  #     - pattern: "fs:list_*"
+  #     - pattern: "everything:*"       # MCP "everything" sample server
+
+# tool_scope_map declares the dual-check mapping the MCP Gateway uses
+# when --policy-mode strict is in effect. Patterns are glob-matched
+# against the namespaced tool name (`<ns>:<tool>`); first match wins.
+# Operators write more specific patterns first.
+#
+# Allowed scope values: shell, filesystem, network, browser, data,
+# cost, mcp_tool. (mcp_tool here would re-run the same scope twice —
+# usually a typo.)
+#
+# Uncomment and tune for the upstream MCP servers you broker:
+#
+# tool_scope_map:
+#   - pattern: "fs:read_file"
+#     scope: filesystem
+#   - pattern: "fs:write_file"
+#     scope: filesystem
+#   - pattern: "fs:*"
+#     scope: filesystem
+#   - pattern: "github:*"
+#     scope: network
+#   - pattern: "*:execute_*"
+#     scope: shell
+#   - pattern: "*:run_command"
+#     scope: shell
+
 # Notifier filters (see docs/OBSERVABILITY.md):
 #   `approval_required` only fires on REQUIRE_APPROVAL decisions.
 #   `on_deny`           only fires on DENY decisions (including rate-limit denies).

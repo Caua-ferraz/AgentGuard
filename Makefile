@@ -1,7 +1,8 @@
-.PHONY: build test lint run clean docker validate validate-examples bench help
+.PHONY: build build-mcp-gateway test lint run clean docker validate validate-examples bench help
 
 # Binary name
 BINARY=agentguard
+MCP_GATEWAY_BINARY=agentguard-mcp-gateway
 VERSION=0.4.1
 COMMIT=$(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)"
@@ -9,6 +10,10 @@ LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)"
 ## build: Compile the binary
 build:
 	go build $(LDFLAGS) -o $(BINARY) ./cmd/agentguard
+
+## build-mcp-gateway: Compile the AgentGuard MCP Gateway binary
+build-mcp-gateway:
+	go build $(LDFLAGS) -o $(MCP_GATEWAY_BINARY) ./cmd/agentguard-mcp-gateway
 
 ## test: Run all tests with race detection
 test:

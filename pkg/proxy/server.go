@@ -188,9 +188,16 @@ type PendingAction struct {
 }
 
 // AuditEvent is sent over SSE to dashboard clients for any check result.
+//
+// Transport identifies the integration path that produced the event
+// ("sdk", "mcp_gateway", "llm_api_proxy"). Defaults to "sdk" on the
+// wire when unset so dashboard JS does not need a fallback. Added in
+// v0.5 (Phase 4B, A19); pre-v0.5 SSE consumers see the field as an
+// extra (ignored) JSON key.
 type AuditEvent struct {
 	Type      string               `json:"type"` // "check", "approval", "resolved"
 	Timestamp time.Time            `json:"timestamp"`
+	Transport string               `json:"transport,omitempty"`
 	Request   policy.ActionRequest `json:"request"`
 	Result    policy.CheckResult   `json:"result"`
 }
@@ -596,6 +603,14 @@ func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, 
 		result.SchemaVersion = SchemaVersionV1
 	}
 
+	// Determine the transport for this check. The MCP Gateway and
+	// (future) LLM API Proxy stamp meta["transport"] on every
+	// /v1/check call. SDK callers (Python/TS) don't currently emit
+	// the field; they implicitly identify as "sdk". Future SDK
+	// versions may set it explicitly; the server-side default
+	// (audit.TransportSDK) ensures back-compat either way.
+	transport := transportFromRequest(req)
+
 	entry := audit.Entry{
 		Timestamp:  time.Now().UTC(),
 		AgentID:    req.AgentID,
@@ -603,6 +618,7 @@ func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, 
 		Request:    req,
 		Result:     result,
 		DurationMs: duration.Milliseconds(),
+		Transport:  transport,
 	}
 	auditStart := time.Now()
 	if err := s.cfg.Logger.Log(entry); err != nil {
@@ -620,10 +636,12 @@ func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, 
 	w.Header().Set("X-AgentGuard-Audit-Ms", fmt.Sprintf("%.3f", auditMs))
 	w.Header().Set("X-AgentGuard-Total-Ms", fmt.Sprintf("%.3f", totalMs))
 
-	// Push to SSE watchers
+	// Push to SSE watchers. The transport is stamped on the event so
+	// dashboard JS can render the chip without re-deriving from meta.
 	s.approval.Broadcast(AuditEvent{
 		Type:      "check",
 		Timestamp: entry.Timestamp,
+		Transport: transport,
 		Request:   req,
 		Result:    result,
 	})
@@ -632,6 +650,21 @@ func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, 
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		log.Printf("Response encode error: %v", err)
 	}
+}
+
+// transportFromRequest extracts the integration-path tag the SDK or
+// gateway stamped on meta["transport"]. Empty / unset / non-string
+// values default to audit.TransportSDK so SDK callers (which don't
+// currently emit the field) are categorised correctly without code
+// changes on their side.
+func transportFromRequest(req policy.ActionRequest) string {
+	if req.Meta == nil {
+		return audit.TransportSDK
+	}
+	if t, ok := req.Meta["transport"]; ok && t != "" {
+		return t
+	}
+	return audit.TransportSDK
 }
 
 // approvalIDFromRequest extracts the approval ID from either URL family:
@@ -726,6 +759,7 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 		SessionID: r.URL.Query().Get("session_id"),
 		Decision:  r.URL.Query().Get("decision"),
 		Scope:     r.URL.Query().Get("scope"),
+		Transport: r.URL.Query().Get("transport"),
 		Limit:     limit,
 		Offset:    offset,
 	}
@@ -1094,10 +1128,13 @@ func (q *ApprovalQueue) Resolve(id string, decision policy.Decision) error {
 	pa.Resolved = true
 	pa.Decision = string(decision)
 
-	// Broadcast resolution to SSE clients
+	// Broadcast resolution to SSE clients. Carry the original
+	// transport so dashboard JS keeps the same chip on the
+	// "resolved" event as on the original "check" event.
 	q.broadcast(AuditEvent{
 		Type:      "resolved",
 		Timestamp: time.Now().UTC(),
+		Transport: transportFromRequest(pa.Request),
 		Request:   pa.Request,
 		Result:    policy.CheckResult{Decision: decision, Reason: "manually " + strings.ToLower(string(decision))},
 	})
@@ -1335,6 +1372,13 @@ var dashboardHTML = `<!DOCTYPE html>
     .pending-item { background: #1a1500; border: 1px solid #332800; border-radius: 8px; padding: 14px; margin-bottom: 10px; }
     .pending-item .info { font-size: 13px; margin-bottom: 8px; }
     .pending-item .scope-badge { background: #222; color: #fbbf24; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+    .transport-chip { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-family: 'SF Mono', monospace; color: white; margin-right: 8px; vertical-align: baseline; }
+    .transport-chip.sdk { background: #6c757d; }
+    .transport-chip.mcp_gateway { background: #0ea5e9; }
+    .transport-chip.llm_api_proxy { background: #a855f7; }
+    .transport-chip.unknown { background: #94a3b8; }
+    .transport-legend { font-size: 11px; color: #666; display: flex; gap: 8px; align-items: center; }
+    .transport-legend .transport-chip { font-size: 10px; padding: 1px 6px; }
     .pending-item .actions { display: flex; gap: 8px; margin-top: 10px; }
     .btn { padding: 6px 16px; border-radius: 6px; border: none; cursor: pointer; font-size: 12px; font-weight: 600; }
     .btn-approve { background: #166534; color: #4ade80; }
@@ -1348,6 +1392,12 @@ var dashboardHTML = `<!DOCTYPE html>
   <div class="header">
     <h1>AgentGuard</h1>
     <span class="badge" id="status-badge">● LIVE</span>
+    <span class="transport-legend" title="Integration path that produced each entry">
+      Transport:
+      <span class="transport-chip sdk">sdk</span>
+      <span class="transport-chip mcp_gateway">mcp_gateway</span>
+      <span class="transport-chip llm_api_proxy">llm_api_proxy</span>
+    </span>
   </div>
   <div class="stats">
     <div class="stat-card"><div class="label">Total Checks</div><div class="value" id="stat-total">0</div></div>
@@ -1384,18 +1434,39 @@ var dashboardHTML = `<!DOCTYPE html>
 
     // Shared entry renderer used by both history load and live SSE.
     // entry shape: { request, result, timestamp } — works for both audit entries and SSE events.
+    // Whitelist of known transport tags. Any other value renders with
+    // a neutral 'unknown' chip class so an unexpected gateway can't
+    // inject CSS class names through the SSE / audit-query path.
+    const KNOWN_TRANSPORTS = ['sdk', 'mcp_gateway', 'llm_api_proxy'];
+    function transportClass(t) {
+      return KNOWN_TRANSPORTS.indexOf(t) >= 0 ? t : 'unknown';
+    }
+
     function renderEntry(entry) {
       const result = entry.result || {};
       const decision = result.decision || 'UNKNOWN';
       const req = entry.request || {};
       const action = req.command || req.path || req.domain || 'unknown';
+      // Transport may sit at the top level (SSE event + v0.5+ audit
+      // entries) or be absent on pre-v0.5 audit entries; default 'sdk'.
+      const transport = entry.transport || 'sdk';
       const el = document.createElement('div');
       el.className = 'entry ' + esc(decision);
+
+      const headerRow = document.createElement('div');
+      headerRow.style.cssText = 'display:flex;align-items:center;gap:8px;';
+
+      const chip = document.createElement('span');
+      chip.className = 'transport-chip ' + transportClass(transport);
+      chip.textContent = transport;
+      chip.title = 'Transport: ' + transport;
+      headerRow.appendChild(chip);
 
       const decDiv = document.createElement('div');
       decDiv.className = 'decision ' + esc(decision);
       decDiv.textContent = decision;
-      el.appendChild(decDiv);
+      headerRow.appendChild(decDiv);
+      el.appendChild(headerRow);
 
       const actDiv = document.createElement('div');
       actDiv.className = 'action';

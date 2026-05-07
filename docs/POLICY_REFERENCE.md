@@ -15,6 +15,8 @@ Source of truth: `pkg/policy/engine.go` (types) and `pkg/policy/engine.go:Engine
 - [Rate limits](#rate-limits)
 - [Cost guardrails](#cost-guardrails)
 - [Data scope](#data-scope)
+- [MCP tool scope (`mcp_tool`)](#mcp_tool-scope)
+- [`tool_scope_map`](#tool_scope_map)
 - [Per-agent overrides](#per-agent-overrides)
 - [Notifications](#notifications)
 - [Proxy tunables](#proxy-tunables)
@@ -63,6 +65,7 @@ rules:
 | `browser` | none | `domain` |
 | `cost` | dedicated `checkCost` evaluator; `limits` block | no rule fields — driven entirely by `limits` and `est_cost` on the request |
 | `data` | none (generic) | `pattern`, `action` (`form_input`), `domain` — see [data scope](#data-scope) |
+| `mcp_tool` | none (generic) | `pattern` matched against `<namespace>:<tool>` — see [mcp_tool scope](#mcp_tool-scope) |
 | *any other string* | none | generic; `pattern`/`action`/`domain` all still work |
 
 ### Scope field reference
@@ -241,6 +244,109 @@ The field NAME (in `meta.field`) is NOT redacted — operators need it stable fo
 ### Default-deny still applies
 
 A `data`-scoped request that matches no allow rule receives `DENY "No matching allow rule (default deny)"` — same as every other scope. If you wire the browser-use adapter and forget to add `data` rules, every form submission will deny. This is intentional: a permissive default would silently leak PII the moment an agent encountered an unfamiliar page.
+
+---
+
+## `mcp_tool` scope
+
+The `mcp_tool` scope is the primary scope the [AgentGuard MCP Gateway](./MCP_GATEWAY.md) (`agentguard-mcp-gateway`) checks every host `tools/call` against. The gateway sits between an MCP host (Claude Desktop, Cursor, IDE plugins) and one or more downstream MCP servers; on every `tools/call` it runs `Engine.Check` with `scope: "mcp_tool"` and `command: "<namespace>:<tool>"`.
+
+In `--policy-mode strict` (the gateway's default) it also fires a **second** `Engine.Check` against the **mapped existing scope** (filesystem / network / shell / browser / data) per the [`tool_scope_map`](#tool_scope_map) — so existing rules apply to MCP traffic without duplication. Either DENY denies; either REQUIRE_APPROVAL requires approval.
+
+### Request fields
+
+The gateway populates an `ActionRequest` with:
+
+| Field | Source |
+|---|---|
+| `scope` | `"mcp_tool"` |
+| `command` | `"<namespace>:<tool>"`, e.g. `"fs:read_file"` |
+| `agent_id` | `"mcp-gateway:<clientName>"` from MCP `clientInfo.name` |
+| `session_id` | derived from clientInfo (one per host) |
+| `meta.namespace` | the configured upstream namespace |
+| `meta.tool_name` | un-prefixed tool name |
+| `meta.transport` | `"mcp_gateway"` |
+| `meta.arg_<key>` | best-effort serialised arguments |
+| `meta.approval_id` | echoed back from `_meta.dev.agentguard/approval_id` on retry |
+
+Rules match on `pattern` against the namespaced `command`:
+
+```yaml
+- scope: mcp_tool
+  deny:
+    - pattern: "github:delete_*"          # destructive github actions
+    - pattern: "fs:write_file"            # never write via MCP
+  require_approval:
+    - pattern: "*:execute_*"              # any execute_* tool, any namespace
+    - pattern: "github:*"                 # all github tool calls
+  allow:
+    - pattern: "fs:read_*"
+    - pattern: "fs:list_*"
+    - pattern: "everything:*"             # MCP "everything" sample server
+```
+
+### Cross-namespace patterns
+
+`*:execute_*` matches `shell:execute_command`, `runner:execute_script`, etc. — useful for blanket "any execute-style tool needs approval" rules without enumerating every namespace. Because `*` is character-greedy in command/pattern matching (it crosses `:`), be explicit when you want to scope to a single namespace (e.g., `"github:*"` not `"git*:*"`).
+
+### Default-deny still applies
+
+A `mcp_tool` request that matches no allow rule receives `DENY "No matching allow rule (default deny)"`. The gateway's default behaviour (no `mcp_tool` rules in policy) is therefore **deny everything** — operators must add at least one allow rule for the gateway to be useful. See `configs/default.yaml` for a commented template.
+
+---
+
+## `tool_scope_map`
+
+`tool_scope_map` declares the dual-check mapping the MCP Gateway uses when `--policy-mode strict` is in effect. It is a top-level YAML key at the same level as `rules:`, not a sub-key of any RuleSet.
+
+```yaml
+tool_scope_map:
+  - pattern: "fs:read_file"
+    scope: filesystem
+  - pattern: "fs:write_file"
+    scope: filesystem
+  - pattern: "fs:*"
+    scope: filesystem
+  - pattern: "github:*"
+    scope: network
+  - pattern: "*:execute_*"
+    scope: shell
+  - pattern: "*:run_command"
+    scope: shell
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `pattern` | string | Glob over `<namespace>:<tool>`. Same matcher as rule patterns (`*`, `?`, `**`). |
+| `scope` | string | One of `shell`, `filesystem`, `network`, `browser`, `data`, `cost`, `mcp_tool`. Other values are rejected at policy load. |
+
+**First match wins.** YAML list order is significant — operators put more specific patterns first. The gateway iterates the list in declared order and stops on the first glob match.
+
+### Field projection per mapped scope
+
+When the dual-check fires, the gateway projects the tool-call arguments into the right `ActionRequest` fields for the mapped scope:
+
+| Mapped scope | Argument projection |
+|---|---|
+| `filesystem` | `Path` ← first non-empty of `path`/`file_path`/`filepath`/`target_path`/`destination`/`src`/`dst`. `Action` ← inferred from tool-name verb (`read`/`write`/`delete`). |
+| `network` | `URL` ← `url` arg. `Domain` ← parsed from URL or from `domain`/`host`/`hostname` arg. |
+| `browser` | `URL` + `Domain` as for network; `Action` ← un-prefixed tool name. |
+| `shell` | `Command` ← first non-empty of `command`/`cmd`/`script`. Falls back to `<ns>:<tool>` + serialised `args`. |
+| `data` | `Command` ← first non-empty of `value`/`content`/`text`/`data`. `Action` ← `"form_input"`. `URL`/`Domain` projected as for network. |
+
+Rules in the mapped scope (`filesystem`, `network`, etc.) match on these fields exactly as they would for an SDK or proxy request — there is no MCP-specific matching path.
+
+### Why the list form, not an inline map
+
+A YAML map (`fs:read_file: filesystem`) would be more compact, but Go map iteration is non-deterministic and the dual-check is first-match-wins. Operators write a few extra lines per entry; the gateway guarantees the same scope for the same tool name on every host regardless of YAML library quirks.
+
+### Without a `tool_scope_map`
+
+`--policy-mode strict` requires the gateway to load a policy file via `--policy <path>`. If `tool_scope_map` is absent (or no entry matches the tool), the gateway runs only the `mcp_tool` check — equivalent to fast mode for that specific tool.
+
+`--policy-mode fast` skips the second `Engine.Check` entirely and never consults `tool_scope_map`. The gateway still runs the `mcp_tool` check via the central server.
+
+See [`docs/MCP_GATEWAY.md`](./MCP_GATEWAY.md) for the gateway's full wire format, approval round-trip, and reconnect strategy.
 
 ---
 
