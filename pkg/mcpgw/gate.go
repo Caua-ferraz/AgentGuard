@@ -22,8 +22,14 @@ package mcpgw
 //     mcp_tool rules that match on tool-name patterns.
 //
 // Fail-mode (docs/PROXY_ARCHITECTURE.md § 6.1):
-//   --fail-mode deny / fail-closed-with-audit (default): /v1/check
-//     unreachable → synthetic DENY with Rule="deny:gateway:fail_closed".
+//   --fail-mode deny (default): /v1/check unreachable → synthetic
+//     DENY with Rule="deny:gateway:fail_closed".
+//   --fail-mode fail-closed-with-audit: same DENY shape but the
+//     synthetic Rule is "deny:gateway:fail_closed_audit" so dashboards
+//     can break out the two failure modes. v0.5 surfaces the failure
+//     via metrics + stderr logs only; v0.6 will emit a local audit
+//     entry from the gateway side. See
+//     TODO(v0.6, #fail-closed-with-audit-local-emit) below.
 //   --fail-mode allow: /v1/check unreachable → synthetic ALLOW. Used
 //     in dev to keep the host responsive when the central server is
 //     down; should NOT be the production setting.
@@ -50,11 +56,21 @@ import (
 // docs/PROXY_ARCHITECTURE.md § 6.1.
 const DefaultGuardHTTPTimeout = 5 * time.Second
 
-// FailModeRuleClosed is the synthetic Rule string the gate stamps on
-// fail-closed denials so operators can alert on it without confusing
-// it with a real policy DENY. Stable string contract — referenced from
-// dashboard + tests.
-const FailModeRuleClosed = "deny:gateway:fail_closed"
+// FailModeRuleClosed and FailModeRuleClosedAudit are the synthetic Rule
+// strings the gate stamps on fail-closed denials so operators can alert
+// on them without confusing them with a real policy DENY. Stable string
+// contracts — referenced from dashboard + tests.
+//
+// FailModeRuleClosedAudit fires on `--fail-mode fail-closed-with-audit`
+// so dashboards can break out the two failure modes; v0.5 surfaces the
+// failure via metrics + stderr only. v0.6 will emit a local audit entry
+// from the gateway side. See
+// TODO(v0.6, #fail-closed-with-audit-local-emit) in failModeDecision.
+const (
+	FailModeRuleClosed      = "deny:gateway:fail_closed"
+	FailModeRuleClosedAudit = "deny:gateway:fail_closed_audit"
+	FailModeRuleOpen        = "allow:gateway:fail_open"
+)
 
 // HTTPPolicyClient calls the central AgentGuard server's /v1/check
 // endpoint and orchestrates the dual-check pattern. One client per
@@ -409,15 +425,28 @@ func decisionFromCheckResult(cr policy.CheckResult) Decision {
 
 // failModeDecision returns the synthetic Decision dictated by the
 // gate's --fail-mode when /v1/check is unreachable.
+//
+// TODO(v0.6, #fail-closed-with-audit-local-emit): the
+// "fail-closed-with-audit" branch currently surfaces only via the
+// distinct rule string + metrics + stderr; v0.6 will emit a local audit
+// entry from the gateway side (without round-tripping the central
+// server) so operators can reconstruct the deny chain when /v1/check is
+// offline. Mirrors pkg/llmproxy/gate.go.
 func (c *HTTPPolicyClient) failModeDecision(err error) Decision {
 	switch strings.ToLower(c.FailMode) {
 	case "allow":
 		return Decision{
 			Allow:  true,
 			Reason: "fail-mode allow: " + err.Error(),
-			Rule:   "allow:gateway:fail_open",
+			Rule:   FailModeRuleOpen,
 		}
-	default: // "deny", "fail-closed-with-audit", or anything unrecognised
+	case "fail-closed-with-audit":
+		return Decision{
+			Allow:  false,
+			Reason: "central server unreachable: " + err.Error(),
+			Rule:   FailModeRuleClosedAudit,
+		}
+	default: // "deny" or anything unrecognised
 		return Decision{
 			Allow:  false,
 			Reason: "central server unreachable: " + err.Error(),

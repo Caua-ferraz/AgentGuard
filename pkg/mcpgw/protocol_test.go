@@ -216,11 +216,14 @@ func TestContentBlockPreservesUnknownFields(t *testing.T) {
 }
 
 func TestMergeCapabilities(t *testing.T) {
+	// v0.5 masks `resources` and `prompts` regardless of what upstreams
+	// advertise (see MergeCapabilities doc-comment + B5 audit finding).
+	// These cases assert that masking holds across upstream shapes.
 	cases := []struct {
-		name       string
-		upstream   []map[string]interface{}
-		wantTools  bool
-		wantRes    bool
+		name        string
+		upstream    []map[string]interface{}
+		wantTools   bool
+		wantRes     bool
 		wantPrompts bool
 	}{
 		{
@@ -229,20 +232,20 @@ func TestMergeCapabilities(t *testing.T) {
 			wantTools: true,
 		},
 		{
-			name: "one upstream with resources -> resources advertised",
+			name: "one upstream with resources -> resources masked",
 			upstream: []map[string]interface{}{
 				{"resources": map[string]interface{}{}},
 			},
 			wantTools: true,
-			wantRes:   true,
+			wantRes:   false,
 		},
 		{
-			name: "one upstream with prompts -> prompts advertised",
+			name: "one upstream with prompts -> prompts masked",
 			upstream: []map[string]interface{}{
 				{"prompts": map[string]interface{}{}},
 			},
 			wantTools:   true,
-			wantPrompts: true,
+			wantPrompts: false,
 		},
 	}
 	for _, tc := range cases {
@@ -262,6 +265,43 @@ func TestMergeCapabilities(t *testing.T) {
 				t.Errorf("logging missing")
 			}
 		})
+	}
+}
+
+// TestMergeCapabilities_MasksResourcesAndPrompts is a regression test
+// for B5 (R-Stub C2): even when multiple upstreams advertise
+// `resources` / `prompts`, the gateway must NOT expose those
+// capabilities to the client because resources/* and prompts/* method
+// routing is deferred to v0.6. Advertising them would mislead the
+// client into showing resources that every read would reject with
+// MethodNotFound.
+func TestMergeCapabilities_MasksResourcesAndPrompts(t *testing.T) {
+	upstreams := []map[string]interface{}{
+		{
+			"tools":     map[string]interface{}{"listChanged": false},
+			"resources": map[string]interface{}{"subscribe": true, "listChanged": true},
+			"prompts":   map[string]interface{}{"listChanged": true},
+		},
+		{
+			"tools":     map[string]interface{}{},
+			"resources": map[string]interface{}{},
+			"prompts":   map[string]interface{}{},
+		},
+	}
+
+	merged := MergeCapabilities(upstreams)
+
+	if _, ok := merged["tools"]; !ok {
+		t.Errorf("tools must always be advertised; got merged=%v", merged)
+	}
+	if _, ok := merged["logging"]; !ok {
+		t.Errorf("logging must always be advertised; got merged=%v", merged)
+	}
+	if _, ok := merged["resources"]; ok {
+		t.Errorf("resources must be masked in v0.5 (B5); got merged=%v", merged)
+	}
+	if _, ok := merged["prompts"]; ok {
+		t.Errorf("prompts must be masked in v0.5 (B5); got merged=%v", merged)
 	}
 }
 

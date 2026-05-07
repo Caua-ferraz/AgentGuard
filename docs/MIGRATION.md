@@ -69,4 +69,69 @@ This deletes the checkpoint. The next server start performs a full replay (as wi
 
 ---
 
+## v0.4.1 → v0.5.0
+
+### What happens automatically
+
+- The audit-log binary format is unchanged from v0.4.1 (`schema_version: 2`). No file rewrite runs.
+- New audit entries written by v0.5+ binaries carry an additional top-level `transport` field (`"sdk"`, `"mcp_gateway"`, or `"llm_api_proxy"`). The field is purely additive — existing readers ignore unknown top-level keys, so the schema version does not bump.
+- `runServe` constructs the rotating logger by default (`--audit-max-size-mb 100`, `--audit-max-backups 5`, `--audit-max-age-days 30`, `--audit-compress true`). On first restart after upgrade, the live `audit.jsonl` keeps appending; once it crosses the size threshold, the rotator kicks in and rotated files start to appear as `audit-YYYYMMDDTHHMMSSZ.jsonl.gz` (or `.jsonl` with `--audit-compress=false`) alongside the active file.
+
+### What you should do
+
+1. **Audit the audit log rotation chain.** If you currently run `logrotate` (or any other external rotator) against `audit.jsonl`, do **one** of:
+   - **Recommended:** disable your external rotator. AgentGuard's built-in rotator handles size, age, and retention via flags.
+   - **Or** keep `logrotate` and pass `--audit-max-size-mb 0` to disable AgentGuard's rotator. Use `copytruncate` in your `logrotate` config (see [`OPERATIONS.md`](OPERATIONS.md#audit-log-rotation)).
+
+   **Do not run both at once** — the dual-rotator chain corrupts the `_meta.rotated_from` continuity and breaks startup replay's chain walk.
+
+2. **Sweep your policy YAML for `time_window` without `require_prior`.** v0.5.0 promotes this from a WARNING to a load error. Find any rule with `conditions.time_window` and no sibling `conditions.require_prior` and either pair them up or drop `time_window` from the rule. v0.4.1's `agentguard_deprecations_used_total{feature="policy.time_window_without_require_prior"}` counter tells you whether your runtime hit the warning. If the counter is zero and your policy parses cleanly under v0.4.1, v0.5 will load it cleanly too.
+
+3. **Decide on the new policy options:**
+   - **`mcp_tool` scope** — if you use the MCP Gateway, write at least one rule for `scope: mcp_tool` (`configs/default.yaml` ships an example; see [`POLICY_REFERENCE.md`](POLICY_REFERENCE.md#mcp_tool-scope)). The gateway dual-checks `mcp_tool` AND the mapped concrete scope (e.g., `shell` or `network`), so omitting `mcp_tool` rules causes default-deny on every tool call.
+   - **`tool_scope_map`** — operator override surface for the gateway and LLM proxy's tool→scope mapping. Optional; the bundled defaults work for most setups. Add overrides for tools your policy needs to gate at a different scope than the default.
+   - **`unmapped` sentinel** — if you run the LLM API Proxy, decide your default-deny posture: write a `scope: unmapped` rule (deny or require-approval) for tool calls the proxy can't classify. The proxy returns synthetic refusal on `unmapped` denials.
+
+4. **Deploy the new binaries** (optional but the headline feature):
+   - `go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-mcp-gateway@v0.5.0`
+   - `go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@v0.5.0`
+
+   Both share the central server's policy file (mount the same `policy.yaml` into all three processes; `--watch` on the central server still hot-reloads).
+
+5. **Update Python SDK installs** to Python 3.9+. v0.5 drops 3.8 (upstream EOL October 2024). The `pyproject.toml` floor is now `requires-python = ">=3.9"`.
+
+### New flags worth knowing about (`agentguard serve`)
+
+- `--audit-max-size-mb`, `--audit-max-backups`, `--audit-max-age-days`, `--audit-compress` — rotation knobs (see above).
+- `--audit-buffered` (default `true`), `--audit-queue-size`, `--audit-workers`, `--audit-overflow-path` — buffered async audit logger. The hot path no longer blocks on the audit mutex; disk-overflow durability spills to `<audit-log>.overflow.jsonl` when the queue saturates. `--audit-buffered=false` restores the v0.4.x synchronous path.
+- `--debug-pprof` and `--debug-pprof-port` (default `6060`) — localhost-only pprof listener. Off by default; tunnel via `kubectl port-forward` or `ssh -L` for remote profiling sessions.
+
+### New CLI subcommand
+
+- `agentguard check` — one-shot policy check (or batch from JSONL stdin) against a local policy file without going through the HTTP server. Useful for CI gates and pre-commit hooks. See [`CLI.md`](CLI.md#agentguard-check).
+
+### Behavioral changes worth knowing about
+
+- **The dashboard chips audit entries by `transport`.** SDK callers stay tagged `sdk`; MCP Gateway and LLM API Proxy entries carry `mcp_gateway` and `llm_api_proxy` respectively. Filter via `/v1/audit?transport=mcp_gateway` or `agentguard audit --transport mcp_gateway`.
+- **`/v1/check` accepts `schema_version: "v1"` in the request body.** Omitting it still defaults to v1; non-v1 values are rejected with `400`. SDK clients on v0.4.1 already match the wire (the field is opaque to them); custom clients hand-rolling JSON should add it.
+- **Histogram buckets for `agentguard_*_duration_ms` extend past 1 s** (new 2500 ms, 5000 ms, 10 000 ms buckets). Existing dashboards still work; histograms with new buckets coexist with old data points (Prometheus computes summaries across both).
+
+### Rollback to v0.4.1
+
+Supported with one caveat: audit entries written by v0.5 binaries carry a `transport` field that v0.4.1 readers ignore but the field is preserved on disk. Downgrading is therefore lossy only if you need the v0.5 binary to re-read those entries with the field intact (the v0.4.1 binary will emit them through `Logger.Query` with `Transport == ""`).
+
+Steps:
+
+1. Stop the v0.5 server, MCP gateway, and LLM API proxy.
+2. Replace the central-server binary with v0.4.1.
+3. If you turned on built-in rotation, delete or move any rotated `audit-*.jsonl[.gz]` files out of the audit directory before starting v0.4.1 — v0.4.1 does not know how to walk a rotation chain.
+4. Restore your previous external rotation configuration if you turned it off.
+5. Start the v0.4.1 server.
+
+### Corrupt-checkpoint recovery
+
+Same as v0.4.0 → v0.4.1: `agentguard migrate --reset-checkpoint --audit-log <path>` deletes the checkpoint. The next server start performs a full replay (now walking the rotation chain) and writes a fresh checkpoint.
+
+---
+
 _Migration guides for prior releases live in the git history of this file._

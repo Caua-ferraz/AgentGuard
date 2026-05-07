@@ -62,6 +62,22 @@ type RefusalContext struct {
 	// applicable (overflow before any content_block_start arrived,
 	// or OpenAI provider).
 	AnthropicToolUseIndex int
+
+	// NonStreaming flips the refusal builder from "SSE event bytes"
+	// (the streaming path's shape — assistant-text content delta +
+	// [DONE] for OpenAI; content_block_* events for Anthropic) to a
+	// single non-streaming JSON object the SDK decodes as a normal
+	// chat.completion / message response. F9 (B2) wires this for the
+	// non-streaming /v1/chat/completions and /v1/messages forwarders;
+	// the streaming orchestrator never sets it (zero-value preserves
+	// the SSE shape A22 wired).
+	//
+	// Model is the original request's model string, surfaced into the
+	// synthetic non-streaming response so SDKs that index by model
+	// don't see "" / unknown-model errors. Optional; empty falls back
+	// to "agentguard-refusal" in the builder.
+	NonStreaming bool
+	Model        string
 }
 
 // dispatchStreamingUpstream POSTs the request body to the upstream
@@ -194,12 +210,22 @@ func (s *Server) buildRefusal(provider string, decision Decision, ctx *RefusalCo
 // previously-considered `role: "tool"` shape was rejected at design
 // time (Phase 4A § 5.3) because the response schema only emits
 // assistant role and SDKs hang on missing `tool_call_id`.
+//
+// F9 (B2) extended this fallback to honour ctx.NonStreaming for the
+// non-streaming forwarders so the early-bring-up path also works on
+// non-streaming requests. Non-streaming refusals are single JSON
+// objects shaped like a normal upstream response — SDKs decode them
+// without going through SSE parsing.
 func defaultRefusalBytes(provider string, decision Decision, ctx *RefusalContext) []byte {
 	msg := decision.Reason
 	if msg == "" {
 		msg = "tool call denied by AgentGuard policy"
 	}
 	full := "AgentGuard denied this action: " + msg
+
+	if ctx != nil && ctx.NonStreaming {
+		return defaultRefusalNonStreamingBytes(provider, full, ctx.Model)
+	}
 
 	switch provider {
 	case "openai":
@@ -235,12 +261,83 @@ func defaultRefusalBytes(provider string, decision Decision, ctx *RefusalContext
 	}
 }
 
+// defaultRefusalNonStreamingBytes is the non-streaming sibling of
+// defaultRefusalBytes. F9 (B2) wires it for the early-bring-up path
+// when Server.BuildRefusal is nil and the non-streaming forwarder
+// needs to emit a refusal. Mirrors BuildRefusalRich's non-streaming
+// shape but with the bare reason — A24's BuildRefusalRich produces
+// the operator-grade copy with rule + approval URL.
+//
+// model carries the original request's model name when available;
+// empty falls back to "agentguard-refusal" so the JSON object remains
+// decodable by SDK clients without nil-model errors.
+func defaultRefusalNonStreamingBytes(provider, full, model string) []byte {
+	if model == "" {
+		model = "agentguard-refusal"
+	}
+	switch provider {
+	case "openai":
+		payload := map[string]interface{}{
+			"id":      "agentguard-refusal",
+			"object":  "chat.completion",
+			"created": 0,
+			"model":   model,
+			"choices": []map[string]interface{}{
+				{
+					"index": 0,
+					"message": map[string]interface{}{
+						"role":    "assistant",
+						"content": full,
+					},
+					"finish_reason": "stop",
+				},
+			},
+		}
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return []byte(`{"id":"agentguard-refusal","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"AgentGuard refusal"},"finish_reason":"stop"}]}`)
+		}
+		return b
+	case "anthropic":
+		payload := map[string]interface{}{
+			"id":    "agentguard-refusal",
+			"type":  "message",
+			"role":  "assistant",
+			"model": model,
+			"content": []map[string]interface{}{
+				{
+					"type": "text",
+					"text": full,
+				},
+			},
+			"stop_reason": "end_turn",
+		}
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return []byte(`{"id":"agentguard-refusal","type":"message","role":"assistant","content":[{"type":"text","text":"AgentGuard refusal"}],"stop_reason":"end_turn"}`)
+		}
+		return b
+	default:
+		return []byte(`{"error":{"message":"agentguard refusal","type":"agentguard_error"}}`)
+	}
+}
+
 // handleStreamingChatCompletion replaces A21's 501 short-circuit for
 // OpenAI streaming. Per the byte-identity invariant: bytes delivered
 // to the client MUST be byte-identical to upstream output on the
 // ALLOW path. No JSON re-encoding; no whitespace normalization; no
 // header rewriting beyond hop-by-hop filtering.
+//
+// Streaming admission control: admitStream gates entry against
+// cfg.MaxConcurrentStreams. Refused requests get 503 + Retry-After: 5
+// before any body bytes touch upstream — protects the proxy from
+// self-DoS via fan-out.
 func (s *Server) handleStreamingChatCompletion(w http.ResponseWriter, r *http.Request, body []byte, _ *ChatCompletionRequest) {
+	if !s.admitStream(w) {
+		return
+	}
+	defer s.releaseStream()
+
 	upstreamResp, err := s.dispatchStreamingUpstream(r.Context(), s.openaiURL, "/v1/chat/completions", r.Header, body)
 	if err != nil {
 		s.streamingForwardError(w, err)
@@ -270,8 +367,13 @@ func (s *Server) handleStreamingChatCompletion(w http.ResponseWriter, r *http.Re
 }
 
 // handleStreamingAnthropicMessages mirrors handleStreamingChatCompletion
-// for Anthropic Messages.
+// for Anthropic Messages. Same MaxConcurrentStreams admission gate.
 func (s *Server) handleStreamingAnthropicMessages(w http.ResponseWriter, r *http.Request, body []byte, _ *AnthropicMessagesRequest) {
+	if !s.admitStream(w) {
+		return
+	}
+	defer s.releaseStream()
+
 	upstreamResp, err := s.dispatchStreamingUpstream(r.Context(), s.anthropicURL, "/v1/messages", r.Header, body)
 	if err != nil {
 		s.streamingForwardError(w, err)
@@ -395,16 +497,31 @@ func (s *Server) gateAndFlushOpenAI(w http.ResponseWriter, flusher http.Flusher,
 		decision, err := s.runPolicyCheck(r.Context(), calls[i])
 		if err != nil {
 			// PolicyCheck failed (network error, malformed response).
-			// Honour fail-mode: deny is the safe default (matches
-			// Python SDK behavior).
+			// Honour fail-mode: when the gate (gate.go::failModeDecision)
+			// is wired (production), it returns a fully-shaped Decision
+			// alongside the err — `deny` → FailModeRuleClosed,
+			// `fail-closed-with-audit` → FailModeRuleClosedAudit,
+			// `allow` → FailModeRuleOpen. We propagate that Decision
+			// VERBATIM rather than synthesising a local one so the
+			// operator's chosen --fail-mode value reaches the
+			// client-visible refusal rule string. Tests that wire a
+			// PolicyCheck returning a bare error get the safe fallback.
 			if s.cfg.FailMode == "allow" {
 				continue
 			}
-			refusal := s.buildRefusal("openai", Decision{
-				Allow:  false,
-				Reason: fmt.Sprintf("policy check unavailable: %v", err),
-				Rule:   "deny:llm_api_proxy:policy_unreachable",
-			}, &RefusalContext{Provider: "openai", OriginalToolCall: calls[i], AnthropicToolUseIndex: -1})
+			refusalDecision := decision
+			if refusalDecision.Rule == "" {
+				// Test-shim or non-gate PolicyCheck returned a bare
+				// error without a fail-mode-shaped Decision. Synthesise
+				// a fallback that still distinguishes the two closed
+				// modes so the dashboard rule-string contract holds.
+				refusalDecision = Decision{
+					Allow:  false,
+					Reason: fmt.Sprintf("policy check unavailable: %v", err),
+					Rule:   fallbackFailModeRule(s.cfg.FailMode),
+				}
+			}
+			refusal := s.buildRefusal("openai", refusalDecision, &RefusalContext{Provider: "openai", OriginalToolCall: calls[i], AnthropicToolUseIndex: -1})
 			_, _ = w.Write(refusal)
 			flusher.Flush()
 			return false
@@ -428,6 +545,22 @@ func (s *Server) gateAndFlushOpenAI(w http.ResponseWriter, flusher http.Flusher,
 	flusher.Flush()
 	acc.Reset()
 	return true
+}
+
+// fallbackFailModeRule returns the rule string the streaming
+// orchestrator uses when the wired PolicyCheck returns an error WITHOUT
+// a populated Decision (e.g. test shims). Production code paths get
+// the Decision shaped by gate.go::failModeDecision and never hit this
+// fallback. Kept in sync with FailModeRule* constants in gate.go so
+// the dashboard rule-string contract is identical regardless of which
+// path constructed the refusal.
+func fallbackFailModeRule(failMode string) string {
+	switch strings.ToLower(failMode) {
+	case "fail-closed-with-audit":
+		return FailModeRuleClosedAudit
+	default:
+		return FailModeRuleClosed
+	}
 }
 
 // runAnthropicStreamLoop mirrors runOpenAIStreamLoop for Anthropic.
@@ -509,14 +642,22 @@ func (s *Server) gateAndFlushAnthropic(w http.ResponseWriter, flusher http.Flush
 		calls[i].Stream = true
 		decision, err := s.runPolicyCheck(r.Context(), calls[i])
 		if err != nil {
+			// See the OpenAI sibling above for the fail-mode propagation
+			// rationale; we propagate the gate's Decision verbatim and
+			// fall back to a synthesised one only when the test shim
+			// returned a bare error without a Rule-shaped Decision.
 			if s.cfg.FailMode == "allow" {
 				continue
 			}
-			refusal := s.buildRefusal("anthropic", Decision{
-				Allow:  false,
-				Reason: fmt.Sprintf("policy check unavailable: %v", err),
-				Rule:   "deny:llm_api_proxy:policy_unreachable",
-			}, &RefusalContext{Provider: "anthropic", OriginalToolCall: calls[i], AnthropicToolUseIndex: acc.ActiveToolUseIndex()})
+			refusalDecision := decision
+			if refusalDecision.Rule == "" {
+				refusalDecision = Decision{
+					Allow:  false,
+					Reason: fmt.Sprintf("policy check unavailable: %v", err),
+					Rule:   fallbackFailModeRule(s.cfg.FailMode),
+				}
+			}
+			refusal := s.buildRefusal("anthropic", refusalDecision, &RefusalContext{Provider: "anthropic", OriginalToolCall: calls[i], AnthropicToolUseIndex: acc.ActiveToolUseIndex()})
 			_, _ = w.Write(refusal)
 			flusher.Flush()
 			return false

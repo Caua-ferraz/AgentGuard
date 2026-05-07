@@ -106,6 +106,63 @@ func TestStreamingAllowPath_ByteIdentity(t *testing.T) {
 	}
 }
 
+// TestStreaming_ArgsAndFinishInSameEvent_GateRunsAndFlushes pins the
+// full-orchestrator behaviour for audit blocker B3. The fixture packs
+// the closing tool_call argument fragment and finish_reason: tool_calls
+// into a single SSE event. With PolicyCheck stubbed to ALLOW, the
+// orchestrator must:
+//   - Run the gate (observed via the policyHookSeen counter)
+//   - Receive the FULL assembled arguments {"cmd":"ls"} (not the
+//     truncated {"cmd":"l"} that the pre-fix parser would have produced)
+//   - Replay the upstream bytes byte-identical to the client.
+//
+// Without the fix the gate would never fire (Completed never returned)
+// and the buffered events would be silently dropped at EOF.
+func TestStreaming_ArgsAndFinishInSameEvent_GateRunsAndFlushes(t *testing.T) {
+	fixture := readFixture(t, "openai_streaming_args_and_finish_in_one_event.txt")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(fixture)
+	}))
+	defer upstream.Close()
+
+	var policyHookSeen atomic.Int64
+	var seenArgs atomic.Value // string
+	base, teardown := newStreamingTestServer(t, upstream, func(s *Server) {
+		s.PolicyCheck = func(ctx context.Context, tc *ToolCallCheck) (Decision, error) {
+			policyHookSeen.Add(1)
+			seenArgs.Store(strings.TrimSpace(string(tc.RawArguments)))
+			return Decision{Allow: true, Rule: "allow:test"}, nil
+		}
+	})
+	defer teardown()
+
+	body := `{"model":"gpt-4","messages":[],"stream":true}`
+	req, _ := http.NewRequest("POST", base+"/v1/chat/completions", strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	got, _ := io.ReadAll(resp.Body)
+
+	// 1. The gate must have fired (1 tool_call assembled).
+	if got := policyHookSeen.Load(); got != 1 {
+		t.Errorf("PolicyCheck called %d times, want 1 (B3 regression: gate did not fire)", got)
+	}
+	// 2. PolicyCheck must have seen the FULL args (closing fragment present).
+	if v := seenArgs.Load(); v == nil || v.(string) != `{"cmd":"ls"}` {
+		t.Errorf("PolicyCheck saw RawArguments=%v, want {\"cmd\":\"ls\"} (closing fragment dropped — B3 regression)", v)
+	}
+	// 3. ALLOW path must replay upstream bytes byte-identical.
+	if !bytes.Equal(got, fixture) {
+		t.Errorf("byte-identity violated on bundling fixture: client received %d bytes, upstream sent %d bytes\ngot=%q\nwant=%q",
+			len(got), len(fixture), string(got), string(fixture))
+	}
+}
+
 // TestStreamingDenyPath_RefusesAndCloses — when PolicyCheck DENYs the
 // tool_call, the client receives a synthetic refusal and the upstream
 // tool_call deltas never reach it.
@@ -446,4 +503,168 @@ func TestStreamingAnthropicDenyPath(t *testing.T) {
 	if !strings.Contains(gotStr, "stop_reason") {
 		t.Errorf("expected stop_reason rewrite in Anthropic refusal; got %q", gotStr)
 	}
+}
+
+// TestStreaming_FailMode_DenyVsClosedAudit_DistinctRules pins B4 closed.
+//
+// Drives a streaming OpenAI request twice with the central /v1/check
+// unreachable: once with --fail-mode deny, once with
+// --fail-mode fail-closed-with-audit. The two synthetic refusals MUST
+// emit distinct rule strings so operators who alert on
+// `deny:llm_api_proxy:fail_closed_audit` can differentiate central-server
+// outage events from plain fail-closed denials. The fix wires the gate's
+// failModeDecision Decision through the streaming orchestrator (or, when
+// the test shim returns a bare error without a Rule, falls back to the
+// per-fail-mode rule string via fallbackFailModeRule).
+//
+// Pre-fix: streaming.go hardcoded `deny:llm_api_proxy:policy_unreachable`
+// regardless of FailMode, making `fail-closed-with-audit` observationally
+// indistinguishable from `deny`.
+func TestStreaming_FailMode_DenyVsClosedAudit_DistinctRules(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		f, _ := w.(http.Flusher)
+		_, _ = fmt.Fprintf(w,
+			`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_fm","type":"function","function":{"name":"bash","arguments":"{}"}}]},"finish_reason":null}]}`+"\n\n")
+		_, _ = fmt.Fprintf(w,
+			`data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		if f != nil {
+			f.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	// Test runs against the production gate so the Rule string is
+	// constructed by HTTPPolicyClient.failModeDecision (not the streaming
+	// fallback). Use an unreachable guard URL so the gate's HTTP call
+	// fails and failModeDecision fires.
+	unreachableGuard := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, _ := w.(http.Hijacker)
+		conn, _, _ := hj.Hijack()
+		_ = conn.Close()
+	}))
+	defer unreachableGuard.Close()
+
+	driveOnce := func(t *testing.T, failMode string) string {
+		t.Helper()
+		base, teardown := newStreamingTestServer(t, upstream, func(s *Server) {
+			s.cfg.FailMode = failMode
+			// Wire the rich refusal builder so the rule string lands in
+			// the client-visible refusal payload. (The default refusal
+			// builder only renders Reason; only the rich builder
+			// includes Rule.)
+			s.BuildRefusal = BuildRefusalRich
+			// Wire the production HTTPPolicyClient against an
+			// unreachable guard so failModeDecision fires with the
+			// gate-shaped Decision (not a test-shim bare error).
+			gateCfg := &Config{
+				GuardURL: unreachableGuard.URL,
+				TenantID: "test",
+				FailMode: failMode,
+			}
+			gate := NewHTTPPolicyClient(gateCfg, nil)
+			gate.HTTPClient = &http.Client{Timeout: 250 * time.Millisecond}
+			s.PolicyCheck = gate.Check
+		})
+		defer teardown()
+
+		body := `{"model":"gpt-4","messages":[],"stream":true}`
+		req, _ := http.NewRequest("POST", base+"/v1/chat/completions", strings.NewReader(body))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("fail-mode %s: post: %v", failMode, err)
+		}
+		defer resp.Body.Close()
+		got, _ := io.ReadAll(resp.Body)
+		return string(got)
+	}
+
+	t.Run("deny", func(t *testing.T) {
+		got := driveOnce(t, "deny")
+		if !strings.Contains(got, FailModeRuleClosed) {
+			t.Errorf("fail-mode=deny: expected refusal to contain %q; got %q", FailModeRuleClosed, got)
+		}
+		// MUST NOT carry the audit variant — that's a different mode.
+		if strings.Contains(got, FailModeRuleClosedAudit) {
+			t.Errorf("fail-mode=deny: refusal must not contain audit-variant rule; got %q", got)
+		}
+		// Refusal must replace the buffered tool_call (no leak).
+		if strings.Contains(got, `"call_fm"`) {
+			t.Errorf("fail-mode=deny: buffered tool_call leaked: %q", got)
+		}
+	})
+
+	t.Run("fail-closed-with-audit", func(t *testing.T) {
+		got := driveOnce(t, "fail-closed-with-audit")
+		if !strings.Contains(got, FailModeRuleClosedAudit) {
+			t.Errorf("fail-mode=fail-closed-with-audit: expected refusal to contain %q; got %q", FailModeRuleClosedAudit, got)
+		}
+		if strings.Contains(got, `"call_fm"`) {
+			t.Errorf("fail-mode=fail-closed-with-audit: buffered tool_call leaked: %q", got)
+		}
+	})
+}
+
+// TestStreaming_FailMode_BareErrorFallback_DistinctRules covers the
+// test-shim path where PolicyCheck returns a bare error without a
+// fail-mode-shaped Decision. The streaming orchestrator's
+// fallbackFailModeRule must still emit the right rule per --fail-mode
+// so dashboards stay consistent regardless of which path constructed
+// the Decision.
+func TestStreaming_FailMode_BareErrorFallback_DistinctRules(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		f, _ := w.(http.Flusher)
+		_, _ = fmt.Fprintf(w,
+			`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_fb","type":"function","function":{"name":"bash","arguments":"{}"}}]},"finish_reason":null}]}`+"\n\n")
+		_, _ = fmt.Fprintf(w,
+			`data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		if f != nil {
+			f.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	driveOnce := func(t *testing.T, failMode string) string {
+		t.Helper()
+		base, teardown := newStreamingTestServer(t, upstream, func(s *Server) {
+			s.cfg.FailMode = failMode
+			s.BuildRefusal = BuildRefusalRich
+			s.PolicyCheck = func(ctx context.Context, tc *ToolCallCheck) (Decision, error) {
+				return Decision{}, fmt.Errorf("simulated /v1/check unreachable")
+			}
+		})
+		defer teardown()
+
+		body := `{"model":"gpt-4","messages":[],"stream":true}`
+		req, _ := http.NewRequest("POST", base+"/v1/chat/completions", strings.NewReader(body))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("fail-mode %s: post: %v", failMode, err)
+		}
+		defer resp.Body.Close()
+		got, _ := io.ReadAll(resp.Body)
+		return string(got)
+	}
+
+	t.Run("deny", func(t *testing.T) {
+		got := driveOnce(t, "deny")
+		if !strings.Contains(got, FailModeRuleClosed) {
+			t.Errorf("fail-mode=deny fallback: expected %q; got %q", FailModeRuleClosed, got)
+		}
+		if strings.Contains(got, FailModeRuleClosedAudit) {
+			t.Errorf("fail-mode=deny fallback: must not contain audit variant; got %q", got)
+		}
+	})
+
+	t.Run("fail-closed-with-audit", func(t *testing.T) {
+		got := driveOnce(t, "fail-closed-with-audit")
+		if !strings.Contains(got, FailModeRuleClosedAudit) {
+			t.Errorf("fail-mode=fail-closed-with-audit fallback: expected %q; got %q", FailModeRuleClosedAudit, got)
+		}
+	})
 }

@@ -60,6 +60,19 @@ const (
 	// tool call is no longer the right tool (operators should split
 	// the workload).
 	MaxConfigurableBufferBytes = 64 * 1024 * 1024 // 64 MiB
+
+	// DefaultMaxConcurrentStreams caps simultaneously-active streaming
+	// requests on the proxy. Each in-flight stream owns a per-request
+	// accumulator + read buffer (up to ~2x --max-buffer-bytes), so a
+	// global cap is the only thing keeping memory bounded under fan-out
+	// load. 100 was picked as a default that balances normal SDK
+	// concurrency (typically <10) against worst-case memory (100 × 1
+	// MiB ≈ 200 MiB read+accumulator territory). Operators with heavy
+	// fan-out should raise this and lower --max-buffer-bytes
+	// proportionally; operators on tiny boxes should lower it.
+	//
+	// 0 disables the cap entirely (legacy behaviour). Closes R-Sec H3.
+	DefaultMaxConcurrentStreams = 100
 )
 
 // Config is the parsed CLI/env configuration for one proxy invocation.
@@ -111,6 +124,18 @@ type Config struct {
 	// surface is stable from the first build.
 	MaxBufferBytes int
 
+	// MaxConcurrentStreams caps simultaneously-active streaming
+	// requests across the whole proxy. When the cap is reached, new
+	// streaming requests are refused with 503 + Retry-After: 5 instead
+	// of being processed (which would otherwise allocate another
+	// per-stream accumulator + read buffer pair). 0 disables the cap.
+	// Default: DefaultMaxConcurrentStreams.
+	//
+	// Closes R-Sec H3 (audit B6). Memory ceiling for streaming was
+	// previously unbounded in the limit; the per-stream cap
+	// (--max-buffer-bytes) only constrains a single in-flight call.
+	MaxConcurrentStreams int
+
 	// LogLevel controls stderr verbosity. "info" or "debug".
 	LogLevel string
 
@@ -149,6 +174,7 @@ func ParseConfigWithOutput(args []string, errOut io.Writer) (*Config, error) {
 	tenantID := fs.String("tenant-id", DefaultTenantID, "Tenant ID")
 	failMode := fs.String("fail-mode", DefaultFailMode, `Fail mode when /v1/check is unreachable: "deny" | "allow" | "fail-closed-with-audit"`)
 	maxBufferBytes := fs.Int("max-buffer-bytes", DefaultMaxBufferBytes, "Per-stream tool-call buffer cap in bytes (A22 wires actual buffering)")
+	maxConcurrentStreams := fs.Int("max-concurrent-streams", DefaultMaxConcurrentStreams, "Global cap on simultaneous streaming requests; 0 disables the cap. Excess requests are refused with 503 + Retry-After: 5.")
 	logLevel := fs.String("log-level", DefaultLogLevel, `Stderr verbosity: "info" | "debug"`)
 	policyPath := fs.String("policy", "", "Path to policy YAML for tool→scope mapping; empty falls back to DefaultLLMToolScopeMap with no operator overrides")
 
@@ -157,17 +183,18 @@ func ParseConfigWithOutput(args []string, errOut io.Writer) (*Config, error) {
 	}
 
 	cfg := &Config{
-		Listen:            *listen,
-		UpstreamOpenAI:    *upstreamOpenAI,
-		UpstreamAnthropic: *upstreamAnthropic,
-		GuardURL:          *guardURL,
-		APIKey:            *apiKey,
-		ProxyAPIKey:       *proxyAPIKey,
-		TenantID:          *tenantID,
-		FailMode:          *failMode,
-		MaxBufferBytes:    *maxBufferBytes,
-		LogLevel:          *logLevel,
-		PolicyPath:        *policyPath,
+		Listen:               *listen,
+		UpstreamOpenAI:       *upstreamOpenAI,
+		UpstreamAnthropic:    *upstreamAnthropic,
+		GuardURL:             *guardURL,
+		APIKey:               *apiKey,
+		ProxyAPIKey:          *proxyAPIKey,
+		TenantID:             *tenantID,
+		FailMode:             *failMode,
+		MaxBufferBytes:       *maxBufferBytes,
+		MaxConcurrentStreams: *maxConcurrentStreams,
+		LogLevel:             *logLevel,
+		PolicyPath:           *policyPath,
 	}
 
 	if cfg.APIKey == "" {
@@ -222,6 +249,11 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxBufferBytes > MaxConfigurableBufferBytes {
 		return fmt.Errorf("--max-buffer-bytes %d exceeds maximum %d", c.MaxBufferBytes, MaxConfigurableBufferBytes)
+	}
+
+	// Negative max-concurrent-streams is a typo; 0 disables the cap.
+	if c.MaxConcurrentStreams < 0 {
+		return fmt.Errorf("--max-concurrent-streams must be >= 0, got %d", c.MaxConcurrentStreams)
 	}
 
 	if c.TenantID == "" {

@@ -138,6 +138,81 @@ func LLMProxyBufferOverflowFor(provider string) uint64 {
 	return llmProxyBufferOverflowCount[llmProxyOverflowKey{Provider: provider}]
 }
 
+// LLM-proxy non-streaming overflow metrics. F9 (B2) wires the
+// non-streaming forwarders to read upstream responses bounded by
+// --max-buffer-bytes and refuse overflows with a synthetic refusal
+// JSON object. Distinct from the streaming overflow counter so
+// dashboards can break out the two failure modes (the streaming
+// counter measures runaway tool_call argument accumulation; this
+// one measures upstream response bodies that are simply too large
+// to safely inspect for tool_calls).
+var (
+	llmProxyNonStreamingOverflowMu    sync.Mutex
+	llmProxyNonStreamingOverflowCount = map[llmProxyOverflowKey]uint64{}
+)
+
+// IncLLMProxyNonStreamingOverflow increments
+// agentguard_llmproxy_non_streaming_overflow_total{provider=...}.
+// Provider MUST be "openai" or "anthropic" — the LLM proxy enforces
+// that upstream so cardinality stays bounded.
+func IncLLMProxyNonStreamingOverflow(provider string) {
+	if provider == "" {
+		provider = "unknown"
+	}
+	llmProxyNonStreamingOverflowMu.Lock()
+	llmProxyNonStreamingOverflowCount[llmProxyOverflowKey{Provider: provider}]++
+	llmProxyNonStreamingOverflowMu.Unlock()
+}
+
+// LLMProxyNonStreamingOverflowFor returns the current count (for tests).
+func LLMProxyNonStreamingOverflowFor(provider string) uint64 {
+	llmProxyNonStreamingOverflowMu.Lock()
+	defer llmProxyNonStreamingOverflowMu.Unlock()
+	return llmProxyNonStreamingOverflowCount[llmProxyOverflowKey{Provider: provider}]
+}
+
+// LLM-proxy global concurrent-stream metrics. The proxy refuses new
+// streaming requests with 503 + Retry-After when the
+// --max-concurrent-streams cap is hit; rejections are visible here so
+// operators know to raise the cap (or scale horizontally) rather than
+// silently dropping requests. The active gauge is sampled by the
+// llmproxy server, not the central server, so it lives in its own
+// process — but we ship it through the same metrics surface so a
+// single Prometheus scrape config covers both binaries when the
+// llmproxy mounts /metrics. Closes R-Sec H3.
+var (
+	llmProxyStreamsActive       int64 // atomic; gauge value
+	llmProxyStreamsRejectedTotal uint64 // atomic; counter
+)
+
+// SetLLMProxyStreamsActive updates the active-streams gauge. Called
+// from the llmproxy server on every stream entry/exit (which atomically
+// also updates the underlying server-side counter — this metric
+// mirrors that counter). 0 is a valid value (no streams in flight).
+func SetLLMProxyStreamsActive(n int64) {
+	atomic.StoreInt64(&llmProxyStreamsActive, n)
+}
+
+// IncLLMProxyStreamsRejected bumps
+// agentguard_llmproxy_streams_rejected_total. Called once per
+// streaming request that was refused with 503 because the global
+// cap was already at MaxConcurrentStreams.
+func IncLLMProxyStreamsRejected() {
+	atomic.AddUint64(&llmProxyStreamsRejectedTotal, 1)
+}
+
+// LLMProxyStreamsActive returns the current active-streams gauge value
+// (for tests).
+func LLMProxyStreamsActive() int64 {
+	return atomic.LoadInt64(&llmProxyStreamsActive)
+}
+
+// LLMProxyStreamsRejectedTotal returns the rejected-streams counter
+// (for tests).
+func LLMProxyStreamsRejectedTotal() uint64 {
+	return atomic.LoadUint64(&llmProxyStreamsRejectedTotal)
+}
+
 // Audit replay + rotation counters. Replay happens once at startup (seeding
 // in-memory decision counters from the audit log); rotations happen inline
 // on FileLogger.Log when the size threshold is crossed.
@@ -439,6 +514,28 @@ func IncDecision(decision string) {
 	}
 }
 
+// ApprovalReplayMismatchTotal counts /v1/check requests that carried an
+// approval_id whose corresponding PendingAction.Request did not match the
+// retry's operationally-meaningful fields (agent_id / scope / command /
+// path / domain / url / action). Mismatches are NOT short-circuited to
+// the cached decision — the request falls through to normal Engine.Check
+// evaluation. This metric is the security signal: legitimate retries
+// match shape and never increment it; a non-zero rate means either a
+// buggy gateway is reusing ids across distinct actions or an attacker
+// who learned an approved id is replaying it against unrelated commands.
+//
+// See V05 audit B1 (R-Sec H1, R-Stub C3) for the underlying gating-
+// bypass finding the validator closes.
+var ApprovalReplayMismatchTotal uint64
+
+// IncApprovalReplayMismatch increments
+// agentguard_approval_replay_mismatch_total. Called from
+// pkg/proxy.handleCheck when the approval-id round-trip lookup hits an
+// entry but the retry request's shape differs from the original.
+func IncApprovalReplayMismatch() {
+	atomic.AddUint64(&ApprovalReplayMismatchTotal, 1)
+}
+
 // IncRateLimited increments the rate-limit-specific counter.
 //
 // It used to also bump ChecksTotal/DeniedTotal, which double-counted
@@ -549,6 +646,9 @@ func WritePrometheus(w io.Writer) {
 	writeCounter(w, "agentguard_rate_limited_total",
 		"Number of requests denied by the rate limiter.",
 		atomic.LoadUint64(&RateLimitedTotal))
+	writeCounter(w, "agentguard_approval_replay_mismatch_total",
+		"approval_id round-trips whose retry request shape did not match the original PendingAction.Request and therefore fell through to fresh policy evaluation. Non-zero values indicate either a buggy gateway or an attempted replay attack — see audit B1.",
+		atomic.LoadUint64(&ApprovalReplayMismatchTotal))
 
 	writeGauge(w, "agentguard_pending_approvals",
 		"Current number of actions waiting for human approval.",
@@ -592,6 +692,13 @@ func WritePrometheus(w io.Writer) {
 		"Wall-clock duration of the most recent startup audit replay.",
 		time.Duration(atomic.LoadInt64(&auditReplayDurationSeconds)).Seconds())
 
+	writeGauge(w, "agentguard_llmproxy_streams_active",
+		"Current number of in-flight streaming LLM proxy requests (server-process gauge; bounded by --max-concurrent-streams).",
+		float64(atomic.LoadInt64(&llmProxyStreamsActive)))
+	writeCounter(w, "agentguard_llmproxy_streams_rejected_total",
+		"LLM proxy streaming requests refused with 503 because the --max-concurrent-streams cap was reached.",
+		atomic.LoadUint64(&llmProxyStreamsRejectedTotal))
+
 	writeRequestRejected(w)
 	writeNotifyDropped(w)
 	writeApprovalEvicted(w)
@@ -599,6 +706,7 @@ func WritePrometheus(w io.Writer) {
 	writeSSEDropped(w)
 	writeMigrationStatus(w)
 	writeLLMProxyBufferOverflow(w)
+	writeLLMProxyNonStreamingOverflow(w)
 	writeDeprecations(w)
 }
 
@@ -615,6 +723,35 @@ func writeLLMProxyBufferOverflow(w io.Writer) {
 		snap[k] = v
 	}
 	llmProxyBufferOverflowMu.Unlock()
+	if len(snap) == 0 {
+		return
+	}
+	keys := make([]llmProxyOverflowKey, 0, len(snap))
+	for k := range snap {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return keys[i].Provider < keys[j].Provider
+	})
+	for _, k := range keys {
+		fmt.Fprintf(w, "%s{provider=\"%s\"} %d\n", name, escapeLabel(k.Provider), snap[k])
+	}
+}
+
+// writeLLMProxyNonStreamingOverflow emits the non-streaming overflow
+// counter. Mirrors writeLLMProxyBufferOverflow's shape so dashboards can
+// graph the two failure modes side-by-side. Always emits HELP/TYPE so
+// the series is visible before the first overflow happens.
+func writeLLMProxyNonStreamingOverflow(w io.Writer) {
+	const name = "agentguard_llmproxy_non_streaming_overflow_total"
+	const help = "LLM-proxy non-streaming upstream responses that exceeded --max-buffer-bytes and were converted to synthetic refusals, by provider."
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+	llmProxyNonStreamingOverflowMu.Lock()
+	snap := make(map[llmProxyOverflowKey]uint64, len(llmProxyNonStreamingOverflowCount))
+	for k, v := range llmProxyNonStreamingOverflowCount {
+		snap[k] = v
+	}
+	llmProxyNonStreamingOverflowMu.Unlock()
 	if len(snap) == 0 {
 		return
 	}

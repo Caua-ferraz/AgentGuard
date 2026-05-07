@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 )
 
 // TestForward_BodyRoundTripsByteIdentical confirms the proxy's forward
@@ -241,6 +245,598 @@ func TestForward_QueryStringPreserved(t *testing.T) {
 
 	if gotQuery != "api-version=2024-01-01" {
 		t.Errorf("upstream query = %q, want api-version=2024-01-01", gotQuery)
+	}
+}
+
+// ----- F9 (B2) — non-streaming tool_call gating tests -----
+
+// newGatedTestServer builds a Server pointed at the supplied upstream
+// with a PolicyCheck hook installed for the non-streaming gating tests.
+// Returns the base URL + a teardown func.
+func newGatedTestServer(
+	t *testing.T,
+	upstreamOpenAI, upstreamAnthropic *httptest.Server,
+	hook func(ctx context.Context, tc *ToolCallCheck) (Decision, error),
+	mutators ...func(*Config),
+) (*Server, string, func()) {
+	t.Helper()
+	srv, base, teardown := newTestServer(t, upstreamOpenAI, upstreamAnthropic, mutators...)
+	if hook != nil {
+		srv.PolicyCheck = hook
+	}
+	return srv, base, teardown
+}
+
+// makeOpenAIResponse helper: build a non-streaming chat.completion JSON
+// body with the supplied tool_calls.
+func makeOpenAIResponse(t *testing.T, model string, toolCalls []ChatCompletionToolCallEcho) []byte {
+	t.Helper()
+	resp := ChatCompletionResponse{
+		ID:      "chatcmpl-test",
+		Object:  "chat.completion",
+		Created: 1700000000,
+		Model:   model,
+		Choices: []ChatCompletionChoice{
+			{
+				Index: 0,
+				Message: ChatCompletionMessage{
+					Role:      "assistant",
+					ToolCalls: toolCalls,
+				},
+				FinishReason: "tool_calls",
+			},
+		},
+	}
+	b, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
+}
+
+// makeAnthropicResponse helper: build a non-streaming Messages JSON body
+// with the supplied content blocks.
+func makeAnthropicResponse(t *testing.T, model string, content []AnthropicContentBlock) []byte {
+	t.Helper()
+	resp := AnthropicMessagesResponse{
+		ID:         "msg_test",
+		Type:       "message",
+		Role:       "assistant",
+		Model:      model,
+		Content:    content,
+		StopReason: "tool_use",
+	}
+	b, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
+}
+
+// TestForwardChatCompletion_NonStreamingAllowPath_ByteIdentity confirms
+// that when PolicyCheck returns ALLOW for every tool_call the upstream
+// response body reaches the client byte-identical.
+func TestForwardChatCompletion_NonStreamingAllowPath_ByteIdentity(t *testing.T) {
+	upstreamBody := makeOpenAIResponse(t, "gpt-4", nil)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(upstreamBody)
+	}))
+	defer upstream.Close()
+
+	var hookCalls atomic.Int64
+	_, base, teardown := newGatedTestServer(t, upstream, nil, func(ctx context.Context, tc *ToolCallCheck) (Decision, error) {
+		hookCalls.Add(1)
+		return Decision{Allow: true, Rule: "allow:test"}, nil
+	})
+	defer teardown()
+
+	resp, err := http.Post(base+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(got, upstreamBody) {
+		t.Errorf("byte-identity violated:\n got=%q\nwant=%q", string(got), string(upstreamBody))
+	}
+	// No tool_calls in response → hook should NOT fire.
+	if hookCalls.Load() != 0 {
+		t.Errorf("PolicyCheck called %d times for response with no tool_calls (want 0)", hookCalls.Load())
+	}
+}
+
+// TestForwardChatCompletion_NonStreamingAllowPath_WithToolCall_ByteIdentity
+// confirms a response that DOES contain tool_calls passes through
+// byte-identical when every gate decision is ALLOW.
+func TestForwardChatCompletion_NonStreamingAllowPath_WithToolCall_ByteIdentity(t *testing.T) {
+	upstreamBody := makeOpenAIResponse(t, "gpt-4", []ChatCompletionToolCallEcho{
+		{
+			ID:   "call_1",
+			Type: "function",
+			Function: ChatCompletionToolEcho{
+				Name:      "list_files",
+				Arguments: `{"path":"/tmp"}`,
+			},
+		},
+	})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(upstreamBody)
+	}))
+	defer upstream.Close()
+
+	var hookCalls atomic.Int64
+	_, base, teardown := newGatedTestServer(t, upstream, nil, func(ctx context.Context, tc *ToolCallCheck) (Decision, error) {
+		hookCalls.Add(1)
+		if tc.ToolName != "list_files" {
+			t.Errorf("ToolName = %q, want list_files", tc.ToolName)
+		}
+		return Decision{Allow: true, Rule: "allow:test"}, nil
+	})
+	defer teardown()
+
+	resp, err := http.Post(base+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"gpt-4","messages":[]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(got, upstreamBody) {
+		t.Errorf("byte-identity violated on ALLOW path:\n got=%q\nwant=%q", string(got), string(upstreamBody))
+	}
+	if hookCalls.Load() != 1 {
+		t.Errorf("PolicyCheck called %d times, want 1", hookCalls.Load())
+	}
+}
+
+// TestForwardChatCompletion_NonStreamingDenyPath_RewritesToRefusal
+// confirms a DENY decision rewrites the upstream response into a
+// synthetic refusal that decodes as a valid ChatCompletionResponse.
+func TestForwardChatCompletion_NonStreamingDenyPath_RewritesToRefusal(t *testing.T) {
+	upstreamBody := makeOpenAIResponse(t, "gpt-4", []ChatCompletionToolCallEcho{
+		{
+			ID:   "call_secret",
+			Type: "function",
+			Function: ChatCompletionToolEcho{
+				Name:      "bash",
+				Arguments: `{"command":"rm -rf /"}`,
+			},
+		},
+	})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(upstreamBody)
+	}))
+	defer upstream.Close()
+
+	srv, base, teardown := newGatedTestServer(t, upstream, nil, func(ctx context.Context, tc *ToolCallCheck) (Decision, error) {
+		return Decision{
+			Allow:  false,
+			Reason: "rm -rf blocked",
+			Rule:   "deny:shell:rm_rf",
+		}, nil
+	})
+	defer teardown()
+	srv.BuildRefusal = BuildRefusalRich
+
+	resp, err := http.Post(base+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"gpt-4","messages":[]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (synthetic refusal must be 200 for SDK happy path)", resp.StatusCode)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	gotStr := string(got)
+
+	// Upstream tool_call id MUST NOT leak into client output.
+	if strings.Contains(gotStr, "call_secret") {
+		t.Errorf("upstream tool_call id leaked into refusal: %q", gotStr)
+	}
+	if strings.Contains(gotStr, "rm -rf /") {
+		t.Errorf("upstream tool_call arguments leaked into refusal: %q", gotStr)
+	}
+
+	// Response must decode as a normal ChatCompletionResponse.
+	var refusal ChatCompletionResponse
+	if err := json.Unmarshal(got, &refusal); err != nil {
+		t.Fatalf("refusal not a valid ChatCompletionResponse: %v\nbody=%q", err, gotStr)
+	}
+	if len(refusal.Choices) == 0 {
+		t.Fatalf("refusal has no choices: %q", gotStr)
+	}
+	choice := refusal.Choices[0]
+	if choice.Message.Role != "assistant" {
+		t.Errorf("refusal role = %q, want assistant", choice.Message.Role)
+	}
+	if choice.FinishReason != "stop" {
+		t.Errorf("refusal finish_reason = %q, want stop", choice.FinishReason)
+	}
+	content := ""
+	if choice.Message.Content != nil {
+		content = *choice.Message.Content
+	}
+	if !strings.Contains(content, "rm -rf blocked") {
+		t.Errorf("refusal content missing reason: %q", content)
+	}
+	if !strings.Contains(content, "deny:shell:rm_rf") {
+		t.Errorf("refusal content missing rule: %q", content)
+	}
+	// Refusal must echo the original model name so SDKs that index
+	// responses by model see the right value.
+	if refusal.Model != "gpt-4" {
+		t.Errorf("refusal model = %q, want gpt-4", refusal.Model)
+	}
+}
+
+// TestForwardChatCompletion_NonStreamingApprovalPath_IncludesApprovalURL
+// confirms a REQUIRE_APPROVAL decision surfaces the approval URL +
+// approval_id in the synthetic refusal text.
+func TestForwardChatCompletion_NonStreamingApprovalPath_IncludesApprovalURL(t *testing.T) {
+	upstreamBody := makeOpenAIResponse(t, "gpt-4", []ChatCompletionToolCallEcho{
+		{
+			ID:   "call_x",
+			Type: "function",
+			Function: ChatCompletionToolEcho{
+				Name:      "send_email",
+				Arguments: `{"to":"ceo@acme.com"}`,
+			},
+		},
+	})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(upstreamBody)
+	}))
+	defer upstream.Close()
+
+	srv, base, teardown := newGatedTestServer(t, upstream, nil, func(ctx context.Context, tc *ToolCallCheck) (Decision, error) {
+		return Decision{
+			Allow:            false,
+			RequiresApproval: true,
+			Reason:           "outbound email needs approval",
+			Rule:             "require_approval:network:email",
+			ApprovalID:       "ap_xyz789",
+			ApprovalURL:      "http://127.0.0.1:8080/dashboard?approval=ap_xyz789",
+		}, nil
+	})
+	defer teardown()
+	// Wire BuildRefusalRich so the test exercises the operator-grade
+	// refusal builder (the default fallback omits approval fields).
+	srv.BuildRefusal = BuildRefusalRich
+
+	resp, err := http.Post(base+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"gpt-4","messages":[]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+
+	var refusal ChatCompletionResponse
+	if err := json.Unmarshal(got, &refusal); err != nil {
+		t.Fatalf("refusal not valid JSON: %v", err)
+	}
+	if len(refusal.Choices) == 0 || refusal.Choices[0].Message.Content == nil {
+		t.Fatalf("refusal missing content: %q", string(got))
+	}
+	content := *refusal.Choices[0].Message.Content
+	for _, want := range []string{"ap_xyz789", "http://127.0.0.1:8080/dashboard?approval=ap_xyz789", "_meta.dev.agentguard/approval_id"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("approval refusal content missing %q: %q", want, content)
+		}
+	}
+}
+
+// TestForwardChatCompletion_NonStreamingMultipleToolCalls_AllAllow
+// confirms a response with multiple tool_calls passes through verbatim
+// when every gate decision is ALLOW.
+func TestForwardChatCompletion_NonStreamingMultipleToolCalls_AllAllow(t *testing.T) {
+	upstreamBody := makeOpenAIResponse(t, "gpt-4", []ChatCompletionToolCallEcho{
+		{ID: "call_1", Type: "function", Function: ChatCompletionToolEcho{Name: "read_file", Arguments: `{"path":"/a"}`}},
+		{ID: "call_2", Type: "function", Function: ChatCompletionToolEcho{Name: "read_file", Arguments: `{"path":"/b"}`}},
+		{ID: "call_3", Type: "function", Function: ChatCompletionToolEcho{Name: "list_files", Arguments: `{"path":"/c"}`}},
+	})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(upstreamBody)
+	}))
+	defer upstream.Close()
+
+	var hookCalls atomic.Int64
+	_, base, teardown := newGatedTestServer(t, upstream, nil, func(ctx context.Context, tc *ToolCallCheck) (Decision, error) {
+		hookCalls.Add(1)
+		return Decision{Allow: true, Rule: "allow:test"}, nil
+	})
+	defer teardown()
+
+	resp, err := http.Post(base+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"gpt-4","messages":[]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+
+	if !bytes.Equal(got, upstreamBody) {
+		t.Errorf("byte-identity violated with 3 tool_calls:\n got=%q\nwant=%q", string(got), string(upstreamBody))
+	}
+	if hookCalls.Load() != 3 {
+		t.Errorf("PolicyCheck called %d times, want 3", hookCalls.Load())
+	}
+}
+
+// TestForwardChatCompletion_NonStreamingMultipleToolCalls_OneDenied
+// confirms that if any tool_call in a multi-call response is denied,
+// the entire response is rewritten — no partial leak of allowed calls.
+func TestForwardChatCompletion_NonStreamingMultipleToolCalls_OneDenied(t *testing.T) {
+	upstreamBody := makeOpenAIResponse(t, "gpt-4", []ChatCompletionToolCallEcho{
+		{ID: "call_safe_1", Type: "function", Function: ChatCompletionToolEcho{Name: "read_file", Arguments: `{"path":"/a"}`}},
+		{ID: "call_dangerous", Type: "function", Function: ChatCompletionToolEcho{Name: "bash", Arguments: `{"command":"rm -rf /"}`}},
+		{ID: "call_safe_2", Type: "function", Function: ChatCompletionToolEcho{Name: "read_file", Arguments: `{"path":"/b"}`}},
+	})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(upstreamBody)
+	}))
+	defer upstream.Close()
+
+	_, base, teardown := newGatedTestServer(t, upstream, nil, func(ctx context.Context, tc *ToolCallCheck) (Decision, error) {
+		if tc.ToolName == "bash" {
+			return Decision{Allow: false, Reason: "bash blocked", Rule: "deny:shell:bash"}, nil
+		}
+		return Decision{Allow: true, Rule: "allow:test"}, nil
+	})
+	defer teardown()
+
+	resp, err := http.Post(base+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"gpt-4","messages":[]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	gotStr := string(got)
+
+	// None of the upstream tool_call ids may leak — even the safe ones,
+	// because the agent must not see any partial result when the call
+	// is denied.
+	for _, id := range []string{"call_safe_1", "call_dangerous", "call_safe_2"} {
+		if strings.Contains(gotStr, id) {
+			t.Errorf("tool_call id %q leaked into refusal: %q", id, gotStr)
+		}
+	}
+	// Response must decode as ChatCompletionResponse.
+	var refusal ChatCompletionResponse
+	if err := json.Unmarshal(got, &refusal); err != nil {
+		t.Fatalf("refusal not valid JSON: %v\nbody=%q", err, gotStr)
+	}
+	if len(refusal.Choices) == 0 {
+		t.Fatalf("refusal has no choices")
+	}
+}
+
+// TestForwardChatCompletion_NonStreamingOverflow_BufferLimit confirms
+// upstream responses larger than --max-buffer-bytes are converted to
+// synthetic refusals and the non-streaming overflow metric increments.
+func TestForwardChatCompletion_NonStreamingOverflow_BufferLimit(t *testing.T) {
+	// Build a response larger than the cap.
+	bigArgs := strings.Repeat("X", 2048)
+	upstreamBody := makeOpenAIResponse(t, "gpt-4", []ChatCompletionToolCallEcho{
+		{ID: "call_huge", Type: "function", Function: ChatCompletionToolEcho{Name: "bash", Arguments: `{"x":"` + bigArgs + `"}`}},
+	})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(upstreamBody)
+	}))
+	defer upstream.Close()
+
+	before := metrics.LLMProxyNonStreamingOverflowFor("openai")
+
+	_, base, teardown := newGatedTestServer(t, upstream, nil,
+		func(ctx context.Context, tc *ToolCallCheck) (Decision, error) {
+			return Decision{Allow: true}, nil
+		},
+		func(c *Config) { c.MaxBufferBytes = 256 },
+	)
+	defer teardown()
+
+	resp, err := http.Post(base+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"gpt-4","messages":[]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("overflow status = %d, want 200", resp.StatusCode)
+	}
+
+	// Refusal must decode as ChatCompletionResponse.
+	var refusal ChatCompletionResponse
+	if err := json.Unmarshal(got, &refusal); err != nil {
+		t.Fatalf("overflow refusal not valid JSON: %v\nbody=%q", err, string(got))
+	}
+	// Metric must have ticked.
+	after := metrics.LLMProxyNonStreamingOverflowFor("openai")
+	if after != before+1 {
+		t.Errorf("overflow metric not incremented: before=%d after=%d", before, after)
+	}
+}
+
+// TestForwardChatCompletion_NonStreamingMalformedUpstream_PassesThroughVerbatim
+// confirms that when the upstream returns invalid JSON, the proxy does
+// not try to gate — it passes the bytes through unmodified with the
+// upstream's status code.
+func TestForwardChatCompletion_NonStreamingMalformedUpstream_PassesThroughVerbatim(t *testing.T) {
+	upstreamBody := []byte(`{this is not valid json`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(upstreamBody)
+	}))
+	defer upstream.Close()
+
+	var hookCalls atomic.Int64
+	_, base, teardown := newGatedTestServer(t, upstream, nil, func(ctx context.Context, tc *ToolCallCheck) (Decision, error) {
+		hookCalls.Add(1)
+		return Decision{Allow: true}, nil
+	})
+	defer teardown()
+
+	resp, err := http.Post(base+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"gpt-4","messages":[]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+
+	if !bytes.Equal(got, upstreamBody) {
+		t.Errorf("malformed upstream body not passed through verbatim:\n got=%q\nwant=%q", string(got), string(upstreamBody))
+	}
+	if hookCalls.Load() != 0 {
+		t.Errorf("PolicyCheck fired on malformed upstream: %d calls (want 0 — proxy must not gate uninspectable bytes)", hookCalls.Load())
+	}
+}
+
+// TestForwardAnthropicMessages_NonStreamingDenyPath confirms the
+// Anthropic shape gates tool_use blocks and rewrites to a synthetic
+// AnthropicMessagesResponse.
+func TestForwardAnthropicMessages_NonStreamingDenyPath(t *testing.T) {
+	upstreamBody := makeAnthropicResponse(t, "claude-3-5-sonnet-20241022", []AnthropicContentBlock{
+		{Type: "text", Text: "I'll help with that."},
+		{
+			Type:  "tool_use",
+			ID:    "toolu_dangerous",
+			Name:  "bash",
+			Input: json.RawMessage(`{"command":"rm -rf /"}`),
+		},
+	})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(upstreamBody)
+	}))
+	defer upstream.Close()
+
+	srv, base, teardown := newGatedTestServer(t, nil, upstream, func(ctx context.Context, tc *ToolCallCheck) (Decision, error) {
+		if tc.ToolName != "bash" {
+			t.Errorf("ToolName = %q, want bash", tc.ToolName)
+		}
+		return Decision{
+			Allow:  false,
+			Reason: "rm -rf blocked",
+			Rule:   "deny:shell:rm_rf",
+		}, nil
+	})
+	defer teardown()
+	srv.BuildRefusal = BuildRefusalRich
+
+	resp, err := http.Post(base+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"claude-3-5-sonnet-20241022","messages":[]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	gotStr := string(got)
+
+	if strings.Contains(gotStr, "toolu_dangerous") {
+		t.Errorf("upstream tool_use id leaked: %q", gotStr)
+	}
+	if strings.Contains(gotStr, "rm -rf /") {
+		t.Errorf("upstream tool_use input leaked: %q", gotStr)
+	}
+
+	var refusal AnthropicMessagesResponse
+	if err := json.Unmarshal(got, &refusal); err != nil {
+		t.Fatalf("refusal not valid AnthropicMessagesResponse: %v\nbody=%q", err, gotStr)
+	}
+	if refusal.Type != "message" {
+		t.Errorf("refusal type = %q, want message", refusal.Type)
+	}
+	if refusal.Role != "assistant" {
+		t.Errorf("refusal role = %q, want assistant", refusal.Role)
+	}
+	if refusal.StopReason != "end_turn" {
+		t.Errorf("refusal stop_reason = %q, want end_turn", refusal.StopReason)
+	}
+	if len(refusal.Content) == 0 {
+		t.Fatalf("refusal has no content blocks")
+	}
+	// At least one content block must be a text block carrying the reason+rule.
+	foundText := false
+	for _, b := range refusal.Content {
+		if b.Type == "text" {
+			foundText = true
+			if !strings.Contains(b.Text, "rm -rf blocked") {
+				t.Errorf("text block missing reason: %q", b.Text)
+			}
+			if !strings.Contains(b.Text, "deny:shell:rm_rf") {
+				t.Errorf("text block missing rule: %q", b.Text)
+			}
+		}
+		if b.Type == "tool_use" {
+			t.Errorf("refusal must not contain tool_use blocks (would re-trigger model's denied call), got %q", b.ID)
+		}
+	}
+	if !foundText {
+		t.Errorf("refusal missing text block: %q", gotStr)
+	}
+}
+
+// TestForwardAnthropicMessages_NonStreamingAllowPath_ByteIdentity
+// confirms an Anthropic non-streaming response with ALLOWed tool_use
+// passes through byte-identical.
+func TestForwardAnthropicMessages_NonStreamingAllowPath_ByteIdentity(t *testing.T) {
+	upstreamBody := makeAnthropicResponse(t, "claude-3-5-sonnet-20241022", []AnthropicContentBlock{
+		{
+			Type:  "tool_use",
+			ID:    "toolu_safe",
+			Name:  "list_files",
+			Input: json.RawMessage(`{"path":"/tmp"}`),
+		},
+	})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(upstreamBody)
+	}))
+	defer upstream.Close()
+
+	var hookCalls atomic.Int64
+	_, base, teardown := newGatedTestServer(t, nil, upstream, func(ctx context.Context, tc *ToolCallCheck) (Decision, error) {
+		hookCalls.Add(1)
+		return Decision{Allow: true}, nil
+	})
+	defer teardown()
+
+	resp, err := http.Post(base+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"claude-3-5-sonnet-20241022","messages":[]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+
+	if !bytes.Equal(got, upstreamBody) {
+		t.Errorf("byte-identity violated on Anthropic ALLOW path:\n got=%q\nwant=%q", string(got), string(upstreamBody))
+	}
+	if hookCalls.Load() != 1 {
+		t.Errorf("PolicyCheck called %d times, want 1", hookCalls.Load())
 	}
 }
 

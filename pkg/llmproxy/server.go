@@ -17,11 +17,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 )
 
 // BuildVersion is overridden via -ldflags by the binary entry point.
@@ -173,6 +178,13 @@ type Server struct {
 	// same Server (defensive — one Run per process is the contract).
 	running   sync.Mutex
 	startTime time.Time
+
+	// streamingActive counts in-flight streaming requests across the
+	// whole server process. Enforced against cfg.MaxConcurrentStreams
+	// in the streaming dispatch path; exposed via the
+	// agentguard_llmproxy_streams_active gauge. Read-only outside the
+	// streaming entry/exit fences. Closes R-Sec H3.
+	streamingActive atomic.Int64
 }
 
 // NewServer constructs a Server from a parsed Config. URL validation
@@ -258,28 +270,114 @@ func (s *Server) Run(ctx context.Context) error {
 // routes builds the request multiplexer. Method-prefix patterns
 // require Go 1.22+ (project pins go 1.22 in go.mod, see CLAUDE.md
 // "Project Conventions").
+//
+// Every registered handler is wrapped with recoverPanic so a panic in
+// a per-request goroutine (parser, accumulator, refusal builder)
+// returns 500 to the client instead of crashing the entire process.
+// Streaming responses that have already begun writing bytes can't
+// emit a clean 500 (headers are gone); recoverPanic logs the stack
+// in that case and the client sees a truncated SSE stream — far
+// better than a process restart that drops every other in-flight
+// request. Closes R-Sec H2.
 func (s *Server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// OpenAI-shape routes — non-streaming forwarding via A21. A22
 	// will inspect responses for tool_calls and route through
 	// PolicyCheck once that hook is wired.
-	mux.HandleFunc("POST /v1/chat/completions", s.authMiddleware(s.handleChatCompletions))
-	mux.HandleFunc("POST /v1/completions", s.authMiddleware(s.handleLegacyCompletions))
+	mux.HandleFunc("POST /v1/chat/completions", s.recoverPanic(s.authMiddleware(s.handleChatCompletions)))
+	mux.HandleFunc("POST /v1/completions", s.recoverPanic(s.authMiddleware(s.handleLegacyCompletions)))
 
 	// Anthropic-shape route.
-	mux.HandleFunc("POST /v1/messages", s.authMiddleware(s.handleAnthropicMessages))
+	mux.HandleFunc("POST /v1/messages", s.recoverPanic(s.authMiddleware(s.handleAnthropicMessages)))
 
 	// Pass-through routes — no tool calls in these responses; one
 	// audit entry tag (A19/A24's job) but no policy gating.
-	mux.HandleFunc("POST /v1/embeddings", s.authMiddleware(s.handlePassThroughOpenAI))
-	mux.HandleFunc("GET /v1/models", s.authMiddleware(s.handlePassThroughOpenAI))
+	mux.HandleFunc("POST /v1/embeddings", s.recoverPanic(s.authMiddleware(s.handlePassThroughOpenAI)))
+	mux.HandleFunc("GET /v1/models", s.recoverPanic(s.authMiddleware(s.handlePassThroughOpenAI)))
 
 	// Proxy-level liveness. NOT auth-gated so health checks work
 	// even when --proxy-api-key is set.
-	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /healthz", s.recoverPanic(s.handleHealth))
 
 	return mux
+}
+
+// recoverPanic catches any panic raised by a downstream handler, logs
+// the stack trace, and (if no bytes have flushed yet) returns a JSON
+// 500 to the client. Streaming responses that have already begun
+// writing SSE bytes will see only the log line — once headers + bytes
+// are on the wire we can't safely inject a JSON error envelope without
+// corrupting the stream. The panic is contained either way; the
+// process keeps serving other in-flight requests.
+//
+// Mirrors pkg/proxy/server.go:recoverPanic. Closes R-Sec H2.
+func (s *Server) recoverPanic(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("llmproxy: PANIC %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
+				// Best-effort 500. If the handler already wrote
+				// headers (notably any streaming path that has
+				// flushed at least once), http stdlib swallows the
+				// WriteHeader and we just log; clients will see the
+				// stream end abruptly, which their SDKs already
+				// handle as a network-level disconnect.
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":{"message":"internal server error","type":"agentguard_error"}}`))
+			}
+		}()
+		next(w, r)
+	}
+}
+
+// admitStream attempts to acquire a streaming slot. Returns true if
+// the request may proceed (caller must release with releaseStream
+// when the handler returns); false if the global cap is reached
+// (caller has already responded with 503 + Retry-After). When
+// MaxConcurrentStreams == 0 the cap is disabled and admitStream is
+// always true.
+//
+// Caller pattern (mirrors authMiddleware pairing):
+//
+//	if !s.admitStream(w) { return }
+//	defer s.releaseStream()
+//
+// Closes R-Sec H3.
+func (s *Server) admitStream(w http.ResponseWriter) bool {
+	cap := s.cfg.MaxConcurrentStreams
+	if cap <= 0 {
+		// Disabled; still bump the gauge so operators can observe
+		// in-flight streams even when uncapped.
+		n := s.streamingActive.Add(1)
+		metrics.SetLLMProxyStreamsActive(n)
+		return true
+	}
+	// Optimistic add-then-check keeps this lock-free; if we overshoot
+	// we decrement and refuse, which costs one extra atomic op in the
+	// rare overflow case.
+	n := s.streamingActive.Add(1)
+	if n > int64(cap) {
+		s.streamingActive.Add(-1)
+		metrics.SetLLMProxyStreamsActive(s.streamingActive.Load())
+		metrics.IncLLMProxyStreamsRejected()
+		w.Header().Set("Retry-After", "5")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"message":"server overloaded; too many concurrent streams","type":"agentguard_error"}}`))
+		return false
+	}
+	metrics.SetLLMProxyStreamsActive(n)
+	return true
+}
+
+// releaseStream is the matching counterpart to admitStream. Always
+// safe to call once per successful admitStream return; never call it
+// when admitStream returned false (the slot was already released).
+func (s *Server) releaseStream() {
+	n := s.streamingActive.Add(-1)
+	metrics.SetLLMProxyStreamsActive(n)
 }
 
 // handleHealth is the proxy's own liveness endpoint. Distinct from
@@ -347,7 +445,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.forwardOpenAI(r.Context(), w, r, body, "/v1/chat/completions"); err != nil {
+	// F9 (B2): non-streaming /v1/chat/completions now inspects the
+	// upstream response for tool_calls and gates each one, mirroring
+	// the streaming path's pause/resume/rewrite. Until v0.5 fixup this
+	// was a verbatim pass-through (the wire-level firewall claim was
+	// false for stream=false agents).
+	if err := s.forwardChatCompletion(r.Context(), w, r, body, &req); err != nil {
 		writeJSONError(w, http.StatusBadGateway, fmt.Errorf("upstream error: %w", err))
 	}
 }
@@ -395,6 +498,11 @@ func (s *Server) handleLegacyCompletions(w http.ResponseWriter, r *http.Request)
 // passthrough — but we route through the same SSE machinery so
 // byte-identity and flush semantics match the chat-completions path.
 func (s *Server) handleStreamingLegacyCompletion(w http.ResponseWriter, r *http.Request, body []byte) {
+	if !s.admitStream(w) {
+		return
+	}
+	defer s.releaseStream()
+
 	upstreamResp, err := s.dispatchStreamingUpstream(r.Context(), s.openaiURL, "/v1/completions", r.Header, body)
 	if err != nil {
 		s.streamingForwardError(w, err)
@@ -460,7 +568,9 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := s.forwardAnthropic(r.Context(), w, r, body, "/v1/messages"); err != nil {
+	// F9 (B2): non-streaming /v1/messages mirrors the streaming gating
+	// path. See forwardChatCompletion above for the rationale.
+	if err := s.forwardAnthropicMessages(r.Context(), w, r, body, &req); err != nil {
 		writeJSONError(w, http.StatusBadGateway, fmt.Errorf("upstream error: %w", err))
 	}
 }

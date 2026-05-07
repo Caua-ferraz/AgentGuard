@@ -1,0 +1,16 @@
+: Synthesized 2026-05-05 — SSE FIXTURE: closing args fragment + finish_reason in same event
+: Pins the fix for audit blocker B3. Real OpenAI streams sometimes
+: pack the closing args fragment and finish_reason: tool_calls into a
+: single SSE event; the parser must process the args fragment BEFORE
+: checking finish_reason or the assembled arguments are truncated and
+: the gate never fires.
+data: {"id":"chatcmpl-X","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+
+data: {"id":"chatcmpl-X","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"bash","arguments":""}}]}}]}
+
+data: {"id":"chatcmpl-X","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\":\"l"}}]}}]}
+
+data: {"id":"chatcmpl-X","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"s\"}"}}]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+

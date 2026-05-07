@@ -297,3 +297,117 @@ func TestNewEngine_NilProviderRejected(t *testing.T) {
 		t.Error("expected error for nil provider, got nil")
 	}
 }
+
+// TestFilePolicyProvider_WatchCallbackPanicDoesNotKillWatcher is a
+// regression test for R-Code H1 (audit-fixup F2). Before the fix, a
+// panic inside a Watch callback (e.g. the wired gate.SetPolicy hitting
+// a nil-deref on a malformed policy update) propagated up the file
+// watcher's goroutine, killing it silently. Subsequent policy edits
+// were then dropped on the floor with no operator signal. The fix
+// wraps every callback dispatch in safeCallback (defer / recover +
+// log).
+//
+// We register a Watch callback that panics on first invocation, then
+// modify the policy file twice. The second modification's callback
+// MUST still fire — proving the watcher goroutine survived the first
+// panic.
+func TestFilePolicyProvider_WatchCallbackPanicDoesNotKillWatcher(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.yaml")
+	writeMinimalPolicy(t, path, "v1")
+
+	p, err := NewFilePolicyProvider(path)
+	if err != nil {
+		t.Fatalf("NewFilePolicyProvider: %v", err)
+	}
+	defer p.Close()
+
+	var calls atomic.Int32
+	fired := make(chan *Policy, 4)
+	stop, err := p.Watch(LocalTenantID, func(pol *Policy) {
+		n := calls.Add(1)
+		if n == 1 {
+			panic("simulated downstream panic on first policy update")
+		}
+		select {
+		case fired <- pol:
+		default:
+		}
+	})
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	defer stop()
+
+	// First mutation: the callback panics. We don't expect to receive on
+	// `fired` for this one. We do expect the watcher goroutine to
+	// survive — verified by the second mutation reaching us.
+	time.Sleep(1100 * time.Millisecond)
+	writeMinimalPolicy(t, path, "v2")
+
+	// Wait for the first call to land before triggering the second so
+	// we don't accidentally collapse the two events into one mtime tick
+	// on coarse-resolution filesystems.
+	deadline := time.Now().Add(5 * time.Second)
+	for calls.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if calls.Load() < 1 {
+		t.Fatal("first callback (the panicking one) never fired; watcher may not have observed the file change at all")
+	}
+
+	// Second mutation: the callback must fire normally.
+	time.Sleep(1100 * time.Millisecond)
+	writeMinimalPolicy(t, path, "v3")
+
+	select {
+	case pol := <-fired:
+		if pol == nil {
+			t.Fatal("second callback fired with nil policy")
+		}
+		if pol.Name != "v3" {
+			t.Errorf("expected v3 on second fire, got %q", pol.Name)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second callback did not fire within 5s — watcher goroutine died on the first panic (H1 regressed)")
+	}
+
+	if got := calls.Load(); got < 2 {
+		t.Errorf("expected at least 2 callback invocations, got %d", got)
+	}
+}
+
+// TestStaticPolicyProvider_UpdatePolicy_PanickingWatcherDoesNotPoisonOthers
+// confirms that safeCallback is also applied on the StaticPolicyProvider
+// dispatch path. A misbehaving consumer must not starve the rest of the
+// registered watchers.
+func TestStaticPolicyProvider_UpdatePolicy_PanickingWatcherDoesNotPoisonOthers(t *testing.T) {
+	prov := NewStaticPolicyProvider(&Policy{Version: "1", Name: "v1"})
+	defer prov.Close()
+
+	stopBad, err := prov.Watch(LocalTenantID, func(*Policy) {
+		panic("simulated panic in watcher A")
+	})
+	if err != nil {
+		t.Fatalf("Watch A: %v", err)
+	}
+	defer stopBad()
+
+	got := make(chan *Policy, 2)
+	stopGood, err := prov.Watch(LocalTenantID, func(p *Policy) { got <- p })
+	if err != nil {
+		t.Fatalf("Watch B: %v", err)
+	}
+	defer stopGood()
+
+	prov.UpdatePolicy(&Policy{Version: "1", Name: "v2"})
+
+	select {
+	case fired := <-got:
+		if fired.Name != "v2" {
+			t.Errorf("expected v2, got %q", fired.Name)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("good watcher did not fire after panicking watcher (H1 regressed on StaticPolicyProvider)")
+	}
+}

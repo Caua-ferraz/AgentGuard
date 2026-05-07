@@ -408,8 +408,9 @@ func (b *BufferedAsyncLogger) tryDrainOverflow() {
 			respilled++
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		log.Printf("WARN audit buffered: scan draining %s: %v", drainingPath, err)
+	scanErr := scanner.Err()
+	if scanErr != nil {
+		log.Printf("WARN audit buffered: scan draining %s: %v", drainingPath, scanErr)
 	}
 	// Close the read handle BEFORE os.Remove so Windows lets the unlink
 	// through (Windows refuses to remove a file open in the current
@@ -418,7 +419,34 @@ func (b *BufferedAsyncLogger) tryDrainOverflow() {
 		log.Printf("WARN audit buffered: close draining %s: %v", drainingPath, cerr)
 	}
 
-	if err := os.Remove(drainingPath); err != nil {
+	// On scanner error (e.g. line larger than the 4 MiB buffer, or a
+	// truncated read) we MUST NOT remove drainingPath: the unread tail
+	// would be silently lost — that's the H5 audit finding. The rename
+	// above already swapped a fresh overflow file in for concurrent
+	// appendOverflow callers, so the safe recovery posture is to rename
+	// the draining file BACK to b.overflowPath so the next recovery
+	// tick (or the next process startup) picks it up. If a fresh
+	// overflow file has appeared in the meantime (concurrent saturation
+	// during this drain) we keep the draining file in place under its
+	// `.draining.<ts>` name; an operator must inspect / merge it
+	// manually, but the entries are durable on disk.
+	if scanErr != nil {
+		b.overflowMu.Lock()
+		_, statErr := os.Stat(b.overflowPath)
+		if errors.Is(statErr, os.ErrNotExist) {
+			if rerr := os.Rename(drainingPath, b.overflowPath); rerr != nil {
+				log.Printf("WARN audit buffered: re-spill rename %s -> %s after scan error: %v (preserving %s)",
+					drainingPath, b.overflowPath, rerr, drainingPath)
+			} else {
+				log.Printf("WARN audit buffered: preserved partial drain by renaming %s -> %s for next tick", drainingPath, b.overflowPath)
+			}
+		} else {
+			// A fresh overflow already exists; leave the draining file
+			// in place under its timestamped name. Operator-recoverable.
+			log.Printf("WARN audit buffered: leaving %s on disk after scanner error (fresh overflow already exists)", drainingPath)
+		}
+		b.overflowMu.Unlock()
+	} else if err := os.Remove(drainingPath); err != nil {
 		log.Printf("WARN audit buffered: remove draining %s: %v", drainingPath, err)
 	}
 

@@ -85,7 +85,9 @@ agentguard-mcp-gateway \
 | `--guard-url`       | no         | central server URL. Default `http://127.0.0.1:8080`. |
 | `--api-key`         | no         | bearer for `/v1/check`. Falls back to `AGENTGUARD_API_KEY` env. |
 | `--tenant-id`       | no         | default `local`.                                |
-| `--fail-mode`       | no         | `deny` / `allow` / `fail-closed-with-audit`. Default `deny`. |
+| `--fail-mode`       | no         | `deny` / `allow` / `fail-closed-with-audit`. Default `deny`. In v0.5, `fail-closed-with-audit` is identical to `deny` except for the synthetic Rule string (`deny:gateway:fail_closed_audit`) so operators can monitor central-server outage events specifically. v0.5 does **not** emit a local audit log entry — that arrives in v0.6 (`TODO(v0.6, #fail-closed-with-audit-local-emit)`). See [`PROXY_ARCHITECTURE.md`](./PROXY_ARCHITECTURE.md) § 6.1. |
+| `--policy`          | no         | Path to AgentGuard policy YAML. **Required** when `--policy-mode strict` (the default). Used to resolve `tool_scope_map` overrides for the dual-check (`mcp_tool` + mapped scope). |
+| `--policy-mode`     | no         | `strict` (default) or `fast`. `strict` requires `--policy` and fails closed if the file is missing/invalid; `fast` skips loading and uses only the gateway's built-in default mapping. |
 | `--log-level`       | no         | stderr verbosity. Default `info`.               |
 | `--upstream-timeout`| no         | per-frame upstream-response timeout. Default `30s`. |
 | `--reconnect-cap`   | no         | upper bound on reconnect backoff. Default `60s`. |

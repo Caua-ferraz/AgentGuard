@@ -2,14 +2,16 @@
 
 AgentGuard ships Python adapters that wrap popular agent frameworks so every tool call, navigation, or MCP request passes through `/v1/check` before executing. All adapters live under `plugins/python/agentguard/adapters/` and are gated behind pip extras (`pip install agentguardproxy[langchain]` etc.).
 
-| Framework | Module | Extra |
-|---|---|---|
-| LangChain | `agentguard.adapters.langchain` | `[langchain]` |
-| CrewAI | `agentguard.adapters.crewai` | `[crewai]` |
-| browser-use | `agentguard.adapters.browseruse` | `[browser-use]` |
-| MCP (Claude Desktop / Cursor / etc.) | `agentguard.adapters.mcp` | `[mcp]` (or core for legacy installs) |
+| Integration | Tier | Module / Binary | Extra | Doc |
+|---|---|---|---|---|
+| **MCP Gateway** | Hero (wire-level) | `agentguard-mcp-gateway` binary | n/a (Go binary) | [`MCP_GATEWAY.md`](MCP_GATEWAY.md), [`QUICKSTART_MCP.md`](QUICKSTART_MCP.md) |
+| **LLM API Proxy** | Hero (wire-level) | `agentguard-llm-proxy` binary | n/a (Go binary) | [`LLM_API_PROXY.md`](LLM_API_PROXY.md), [`QUICKSTART_LLM_PROXY.md`](QUICKSTART_LLM_PROXY.md) |
+| LangChain | Compatibility (SDK) | `agentguard.adapters.langchain` | `[langchain]` | this doc |
+| CrewAI | Compatibility (SDK) | `agentguard.adapters.crewai` | `[crewai]` | this doc |
+| browser-use | Compatibility (SDK) | `agentguard.adapters.browseruse` | `[browser-use]` | this doc |
+| MCP (Python adapter) | Compatibility (SDK) | `agentguard.adapters.mcp` | `[mcp]` (or core for legacy installs) | this doc |
 
-The adapters are AgentGuard's **compatibility tier** — each one gates the modern API of its target framework. The proxy is the hero; the adapters exist so a one-line `import` is enough to opt your agent into policy enforcement.
+The MCP Gateway and the LLM API Proxy are the **hero** integration paths — they enforce at the wire by sitting between the agent and its tools / model API, with no opt-in required by the agent code. The Python adapters in this doc form the **compatibility tier** for direct callers (offline scripts, custom transports, advisory enforcement) — each one gates the modern API of its target framework, and the agent must call the wrapped object for the gate to fire.
 
 ## Compatibility Matrix
 

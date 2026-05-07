@@ -37,8 +37,8 @@ verbatim only if `settings.json` is empty. Otherwise, merge the
       "args": [
         "--upstream", "fs:npx -y @modelcontextprotocol/server-filesystem /tmp",
         "--guard-url", "http://127.0.0.1:8080",
-        "--api-key", "$AGENTGUARD_API_KEY",
         "--policy", "/etc/agentguard/policy.yaml",
+        "--tenant-id", "local",
         "--policy-mode", "strict"
       ],
       "env": {
@@ -97,6 +97,24 @@ In Zed's Assistant panel:
 - Ask the model to read a file from `/tmp` → ALLOW (default policy).
 - Ask it to read `/etc/passwd` → DENY, visible on the dashboard.
 - Open <http://127.0.0.1:8080/dashboard> to see the live event feed.
+
+## API key handling
+
+Do **not** pass `--api-key "$AGENTGUARD_API_KEY"` as an `args` entry.
+Zed does **not** shell-expand `$VAR` references inside JSON `args` —
+the gateway would receive the literal string `$AGENTGUARD_API_KEY`
+and authentication would fail. Instead, use the `env` block above to
+inject the key as an environment variable; the gateway picks up
+`AGENTGUARD_API_KEY` automatically when the `--api-key` flag is
+absent.
+
+## Tenant ID
+
+v0.5 is single-tenant. Use `--tenant-id local` (the only value the
+central server recognizes). Multi-tenant routing lands in v0.6 — until
+then, `--tenant-id <anything-other-than-local>` returns 404 from
+`/v1/check`, the gateway hits its `--fail-mode` path, and every action
+denies (or is blanket-allowed, depending on your `--fail-mode`).
 
 ## Notes
 

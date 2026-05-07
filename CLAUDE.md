@@ -78,7 +78,7 @@ Order inside `checkCost` (all with write lock held):
 
 ### Conditional rules (`matchConditions`, engine.go:828)
 - `require_prior`: queries `HistoryQuerier.RecentActions(agentID, scope, since=now-time_window)`. A prior `ALLOW` whose `Action`/`Command` equals or glob-matches `require_prior` satisfies the condition. The querier is the `auditHistoryAdapter` around `Logger.Query` (wired in `NewServer`).
-- `time_window` **without** `require_prior`: no-op (always satisfied). `LoadFromFile` emits a `WARNING` log line naming the rule. This preserves v0.4.0 pass-through behavior.
+- `time_window` **without** `require_prior`: hard load error (`errorTimeWindowOnlyConditions` in engine.go:456-470). v0.4.x emitted only a WARNING; v0.5 promotes it to a load failure that aborts startup or hot-reload. POLICY_REFERENCE.md § "Conditional rules" documents the contract.
 - No querier wired (or query errors) → condition fails (rule does not match).
 
 ### Policy load (`LoadFromFile`, engine.go:103)
@@ -179,7 +179,7 @@ Counters (atomic `uint64`):
 Gauge:
 - `agentguard_pending_approvals` (recomputed on every `/metrics` scrape via `ApprovalQueue.PendingCount`)
 
-Histograms (buckets `[0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000]` ms + `+Inf`):
+Histograms (buckets `[0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000]` ms + `+Inf`; the v0.5 release added the three top buckets to keep tail-latency observability honest under audit-replay startup spikes):
 - `agentguard_request_duration_ms` (end-to-end `/v1/check`)
 - `agentguard_policy_eval_duration_ms` (`Engine.Check` only)
 - `agentguard_audit_write_duration_ms` (`Logger.Log` only)
@@ -257,20 +257,24 @@ Reads the current version from `cmd/agentguard/main.go` (`version = "..."`), val
 - **CORS permissive-localhost** is the default and accepts any `http://localhost:*` / `http://127.0.0.1:*`. Safe because session cookies are `SameSite=Strict` and all state-changing endpoints require CSRF. Set `--allowed-origin https://app.example` for strict single-origin mode.
 - **Cookie `Secure` flag is driven by `r.TLS`**, not `X-Forwarded-Proto`. Behind a TLS-terminating proxy, cookies are issued without `Secure` — safe on the wire (the proxy enforces HTTPS) but a lint failure on pedantic audits.
 - **`SessionTTL = 1h` and `MaxSessions = 1024` are hardcoded** in `auth.go`. No CLI flag yet.
-- **`conditions.time_window` without `require_prior`** is a deliberate no-op preserved for v0.4.0 policy backward compat. `LoadFromFile` logs a warning.
+- **`conditions.time_window` without `require_prior` is a hard load error** as of v0.5 (`errorTimeWindowOnlyConditions` in `pkg/policy/engine.go:456-470`). v0.4.x emitted only a WARNING; v0.5 promotes it to a load failure. Operators upgrading must remove time-window-only conditions from their policies first.
 - **Pattern `*`** in wildcard mode crosses `/` boundaries. That's intentional for shell commands (`"rm -rf *"` matches `"rm -rf /home/user"`). For path patterns prefer `**`.
 - **`globMatch` for domains** uses the same wildcard semantics. `*.foo.com` matches `api.foo.com`; it does **not** match `foo.com`.
-- **Audit log has no rotation.** `audit.jsonl` grows unbounded with mode `0600`. Ship to external log aggregator in production.
+- **Audit log rotation is on by default** (v0.5). `runServe` constructs `audit.NewFileLoggerWithRotation` whenever `--audit-max-size-mb > 0` (default 100). Flags: `--audit-max-size-mb` (100), `--audit-max-backups` (5), `--audit-max-age-days` (30), `--audit-compress` (true). Setting `--audit-max-size-mb 0` restores the v0.4.x unbounded-growth behavior. Rotated archives carry a `_meta.rotated_from` chain; do NOT stack an external rotator (e.g. logrotate) against the same file or the chain corrupts.
+- **`BufferedAsyncLogger` wraps the `FileLogger` by default** (v0.5; `--audit-buffered=true`). The audit hot path enqueues into a bounded channel (`--audit-queue-size 1024`) drained by `--audit-workers 4` goroutines, with disk-overflow durability spilling to `<audit-log>.overflow.jsonl` when the queue saturates. Disable with `--audit-buffered=false` to write straight through to FileLogger (v0.4.x behavior). The legacy `Logger.Log` mutex is now hidden behind the buffered queue, so audit I/O no longer blocks `/v1/check`.
 - **`notify.DroppedEvents` is an `atomic uint64`** retained for Go consumers; drop events are also exposed via Prometheus as `agentguard_notify_events_dropped_total{notifier,reason}`.
 - **`SQLiteLogger` is unused.** Wiring requires adding `modernc.org/sqlite` as an import side-effect and swapping the logger in `runServe`.
-- **Python SDK and TypeScript SDK differ on failure mode**: Python is always fail-closed (DENY); TypeScript honors `failMode: 'deny' | 'allow'` (default `deny`).
+- **SDK fail-mode parity**: both Python and TypeScript SDKs honor `fail_mode` / `failMode` with values `deny` (default), `allow`, or `fail-closed-with-audit`. v0.4.0 had Python-only fail-closed; v0.4.1+ unified the surface across both SDKs.
 - **The approval ID generator aborts the request with 500** if `crypto/rand` returns an error — intentional, since a non-random ID would be guessable.
-- **`Logger.Log` serializes on one mutex.** Hot path; replace with batched writes or `SQLiteLogger` if audit I/O dominates p99.
+- **`--debug-pprof` opens a localhost-only second listener** (`--debug-pprof-port`, default 6060) for the Go pprof handlers. Off by default; the listener is hardcoded to `127.0.0.1` and never binds beyond loopback. Operators tunnel via `kubectl port-forward` / `ssh -L` when remote access is needed.
+- **The two Phase 4 binaries (`agentguard-mcp-gateway`, `agentguard-llm-proxy`) live under `cmd/agentguard-mcp-gateway/` and `cmd/agentguard-llm-proxy/`** with their logic in `pkg/mcpgw/` and `pkg/llmproxy/` respectively. They consume the same `pkg/policy`, `pkg/audit`, and `pkg/notify` as the central server. Each writes audit entries with `Entry.Transport ∈ {"sdk","mcp_gateway","llm_api_proxy"}` so `/v1/audit?transport=...` filters by integration path.
+- **The `mcp_tool` policy scope** is the dual-check counterpart used by the MCP Gateway alongside a mapped concrete scope (e.g., `shell` or `network`). `tool_scope_map` in policy YAML is the operator override surface for the gateway's and LLM proxy's mappings. The LLM proxy's `unmapped` sentinel scope (`pkg/llmproxy/scope_map.go:45`) flags tool calls with no mapping — `validateToolScopeMap` rejects `unmapped` from operator policy, so it is gate-time only.
+- **MCP gateway JSON-RPC error codes**: `-32000` (`ErrCodePolicyDeny`), `-32001` (`ErrCodePolicyApproval`), `-32002` (`ErrCodeUpstreamUnavail`). Wire-protocol contract; MCP clients branch on these for UX-correct rendering.
 
 ## Project Conventions
 
 - Go module path: `github.com/Caua-ferraz/AgentGuard`. Do **not** rename without updating imports + Docker + CI.
-- One external Go dep (`gopkg.in/yaml.v3`) — adding dependencies requires a conscious justification.
+- Two external Go deps: `gopkg.in/yaml.v3` (policy parsing) and `github.com/fsnotify/fsnotify` (policy hot-reload watcher). Adding any further dependency requires a conscious justification.
 - Python SDK core must stay stdlib-only. Framework integrations go under `plugins/python/agentguard/adapters/` as optional extras in `pyproject.toml`.
 - TypeScript SDK must stay on native `fetch`/`AbortController` — no polyfills.
 - Standard Go conventions (`gofmt`, `go vet`, table-driven tests). Prefer explicit error returns over panics.

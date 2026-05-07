@@ -1,5 +1,5 @@
 {
-  "_comment": "AgentGuard MCP Gateway config for Continue.dev. Source: https://docs.continue.dev/customize/deep-dives/mcp (verified 2026-05-05). Continue's preferred config format is YAML in newer releases; the JSON shape below works for the legacy ~/.continue/config.json file. See continue-config.md for both options.",
+  "_comment": "AgentGuard MCP Gateway config for Continue.dev. Source: https://docs.continue.dev/customize/deep-dives/mcp (verified 2026-05-05). Continue's preferred config format is YAML in newer releases; the JSON shape below works for the legacy ~/.continue/config.json file. See continue-config.md for both options. Do NOT pass --api-key '$AGENTGUARD_API_KEY' literally — Continue does not shell-expand $VAR in JSON args. Inject the key via the env block; the gateway reads AGENTGUARD_API_KEY from the environment when the --api-key flag is absent. v0.5 is single-tenant: --tenant-id must be 'local'.",
 
   "mcpServers": {
     "agentguard": {
@@ -10,9 +10,8 @@
         "--upstream", "fetch:npx -y @modelcontextprotocol/server-fetch",
         "--upstream", "github:npx -y @modelcontextprotocol/server-github",
         "--guard-url", "http://127.0.0.1:8080",
-        "--api-key", "$AGENTGUARD_API_KEY",
         "--policy", "/etc/agentguard/policy.yaml",
-        "--tenant-id", "continue-local",
+        "--tenant-id", "local",
         "--policy-mode", "strict",
         "--fail-mode", "deny",
         "--log-level", "info"

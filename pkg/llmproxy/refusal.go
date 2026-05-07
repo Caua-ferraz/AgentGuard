@@ -37,22 +37,37 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // BuildRefusalRich is the function A24 wires into Server.BuildRefusal.
 // Called by streaming.go's gateAndFlush* on DENY/REQUIRE_APPROVAL or
 // by the overflow path with a synthetic Decision (see streaming.go's
-// runOpenAIStreamLoop / runAnthropicStreamLoop).
+// runOpenAIStreamLoop / runAnthropicStreamLoop). Also called by F9
+// (B2) for non-streaming refusals via the same hook — the
+// ctx.NonStreaming flag picks the shape.
 //
 // Always returns a non-nil byte slice: an empty refusal would leave
-// the SSE stream open and SDK clients would hang.
+// the SSE stream open (or yield a zero-length response on the
+// non-streaming path) and SDK clients would hang.
 func BuildRefusalRich(provider string, decision Decision, ctx *RefusalContext) []byte {
 	msg := buildRefusalMessage(decision)
+	nonStreaming := ctx != nil && ctx.NonStreaming
+	model := ""
+	if ctx != nil {
+		model = ctx.Model
+	}
 
 	switch provider {
 	case "openai":
+		if nonStreaming {
+			return buildOpenAIRefusalNonStreaming(msg, model)
+		}
 		return buildOpenAIRefusalSSE(msg)
 	case "anthropic":
+		if nonStreaming {
+			return buildAnthropicRefusalNonStreaming(msg, model)
+		}
 		idx := 0
 		if ctx != nil && ctx.AnthropicToolUseIndex >= 0 {
 			idx = ctx.AnthropicToolUseIndex
@@ -62,7 +77,10 @@ func BuildRefusalRich(provider string, decision Decision, ctx *RefusalContext) [
 		// Defensive: A22 always passes "openai" or "anthropic". If a
 		// new provider lands without updating this switch, fall back
 		// to the OpenAI shape — most upstreams accept it as a
-		// degenerate text-completion stream.
+		// degenerate text-completion (or chat.completion) response.
+		if nonStreaming {
+			return buildOpenAIRefusalNonStreaming(msg, model)
+		}
 		return buildOpenAIRefusalSSE(msg)
 	}
 }
@@ -171,6 +189,88 @@ func buildOpenAIRefusalSSE(message string) []byte {
 		return []byte("data: " + string(fallback) + "\n\ndata: [DONE]\n\n")
 	}
 	return []byte("data: " + string(b) + "\n\ndata: [DONE]\n\n")
+}
+
+// buildOpenAIRefusalNonStreaming emits the synthetic refusal as a
+// single non-streaming OpenAI ChatCompletionResponse JSON object — the
+// shape SDK clients decode when they POST with stream=false. F9 (B2)
+// wires this path; the streaming path stays on buildOpenAIRefusalSSE.
+//
+// The response intentionally omits tool_calls (the model's tool_call is
+// dropped on the deny path) and sets finish_reason="stop" so SDK
+// clients treat the synthetic message as a normal assistant turn that
+// completes the conversation cleanly.
+//
+// model is the original request's model name when available; empty
+// falls back to "agentguard-refusal" so the response is still a valid
+// JSON object the SDK can decode without errors on the model field.
+func buildOpenAIRefusalNonStreaming(message, model string) []byte {
+	if model == "" {
+		model = "agentguard-refusal"
+	}
+	payload := map[string]interface{}{
+		"id":      "agentguard-refusal",
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   model,
+		"choices": []map[string]interface{}{
+			{
+				"index": 0,
+				"message": map[string]interface{}{
+					"role":    "assistant",
+					"content": message,
+				},
+				"finish_reason": "stop",
+			},
+		},
+		"usage": map[string]interface{}{
+			"prompt_tokens":     0,
+			"completion_tokens": 0,
+			"total_tokens":      0,
+		},
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		// Marshal of a known-shape map cannot fail in practice; the
+		// fallback keeps the response decodable as a minimal JSON
+		// object.
+		return []byte(`{"id":"agentguard-refusal","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"AgentGuard refusal"},"finish_reason":"stop"}]}`)
+	}
+	return b
+}
+
+// buildAnthropicRefusalNonStreaming emits the synthetic refusal as a
+// single non-streaming AnthropicMessagesResponse JSON object. Mirrors
+// buildOpenAIRefusalNonStreaming for the Anthropic shape: the
+// content array carries one text block (no tool_use, since the
+// upstream's tool_use is dropped on the deny path) and stop_reason is
+// "end_turn" so the SDK does not expect a tool result to follow.
+func buildAnthropicRefusalNonStreaming(message, model string) []byte {
+	if model == "" {
+		model = "agentguard-refusal"
+	}
+	payload := map[string]interface{}{
+		"id":    "agentguard-refusal",
+		"type":  "message",
+		"role":  "assistant",
+		"model": model,
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": message,
+			},
+		},
+		"stop_reason": "end_turn",
+		"usage": map[string]interface{}{
+			"input_tokens":  0,
+			"output_tokens": 0,
+		},
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return []byte(`{"id":"agentguard-refusal","type":"message","role":"assistant","content":[{"type":"text","text":"AgentGuard refusal"}],"stop_reason":"end_turn"}`)
+	}
+	return b
 }
 
 // buildAnthropicRefusalSSE emits the Anthropic-shape synthetic refusal:

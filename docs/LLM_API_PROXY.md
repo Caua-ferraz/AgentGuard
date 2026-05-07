@@ -86,6 +86,7 @@ agentguard-llm-proxy \
 | `--tenant-id`            | tenant header value                                       | `local`                      |
 | `--fail-mode`            | `deny` / `allow` / `fail-closed-with-audit`               | `deny`                       |
 | `--max-buffer-bytes`     | per-stream tool-call buffer cap (see § 6)                 | `1048576` (1 MiB)            |
+| `--policy`               | path to AgentGuard policy YAML; loaded only for `tool_scope_map` operator overrides. Without it, the proxy falls back to `DefaultLLMToolScopeMap` and logs a WARN at startup. | unset |
 | `--log-level`            | stderr verbosity                                          | `info`                       |
 
 If `--api-key` is unset and `--listen` is non-loopback (`0.0.0.0:` or
@@ -720,7 +721,14 @@ constructor isn't overriding `base_url` from elsewhere.
 anything — every tool call triggers a callback to the central
 server's `/v1/check`. If the central server is down, the proxy's
 `--fail-mode` controls behaviour: `deny` (default), `allow`, or
-`fail-closed-with-audit`.
+`fail-closed-with-audit`. In v0.5, `fail-closed-with-audit` is
+identical to `deny` except for the synthetic Rule string
+(`deny:llm_api_proxy:fail_closed_audit`) so operators can monitor
+central-server outage events specifically. v0.5 does **not** emit a
+local audit log entry from the proxy side — that arrives in v0.6
+(`TODO(v0.6, #fail-closed-with-audit-local-emit)`). See
+[`docs/PROXY_ARCHITECTURE.md`](./PROXY_ARCHITECTURE.md) § 6.1 for the
+full table.
 
 **Two API keys, two purposes.** `OPENAI_API_KEY` /
 `ANTHROPIC_API_KEY` flows through the proxy verbatim to the upstream;

@@ -525,9 +525,41 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	// would be charged twice for one logical action.
 	if req.ApprovalID != "" {
 		if pa, ok := s.approval.Lookup(req.ApprovalID); ok {
-			result := s.resolvedApprovalToResult(req, pa)
-			s.logAndRespond(w, req, result, start)
-			return
+			// Bind the cached decision to the original request shape.
+			// Without this guard, /v1/check (intentionally unauthenticated)
+			// becomes a credential-bearer endpoint whose credential — the
+			// approval_id — is broadcast through audit logs, SSE feeds,
+			// webhook payloads, and the refusal text echoed back to the
+			// model. Anyone (or any buggy agent) who learns an approved
+			// id could submit ANY action with that id and short-circuit
+			// to ALLOW. Compare on operationally-meaningful fields only;
+			// SessionID/EstCost/Meta legitimately drift across retries
+			// (see matchesOriginalRequest for the full rationale).
+			//
+			// On mismatch, fall through to normal Engine.Check rather
+			// than returning a 4xx — the latter would let an attacker
+			// distinguish "id valid but action wrong" from "id unknown",
+			// turning the endpoint into an oracle. Closes audit B1
+			// (R-Sec H1 + R-Stub C3, two reviewers, same finding).
+			if !matchesOriginalRequest(req, pa.Request) {
+				metrics.IncApprovalReplayMismatch()
+				log.Printf("approval_id %q replayed against mismatched action: agent=%q vs %q, scope=%q vs %q, command=%q vs %q, path=%q vs %q, domain=%q vs %q, url=%q vs %q, action=%q vs %q (falling through to fresh policy evaluation)",
+					req.ApprovalID,
+					req.AgentID, pa.Request.AgentID,
+					req.Scope, pa.Request.Scope,
+					req.Command, pa.Request.Command,
+					req.Path, pa.Request.Path,
+					req.Domain, pa.Request.Domain,
+					req.URL, pa.Request.URL,
+					req.Action, pa.Request.Action,
+				)
+				// Intentional fall-through: do NOT short-circuit, do NOT
+				// 4xx. Normal Engine.Check runs below.
+			} else {
+				result := s.resolvedApprovalToResult(req, pa)
+				s.logAndRespond(w, req, result, start)
+				return
+			}
 		}
 		// Unknown approval_id — fall through to normal evaluation.
 	}
@@ -678,6 +710,57 @@ func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, 
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		log.Printf("Response encode error: %v", err)
 	}
+}
+
+// matchesOriginalRequest returns true iff the retry request's
+// operationally-meaningful fields equal those of the originally-
+// approved PendingAction. This is the v0.5 audit-B1 guard against
+// approval-id replay across mismatched actions.
+//
+// Compared fields (mismatch on any one → fall through to fresh policy
+// evaluation rather than returning the cached decision):
+//
+//	AgentID  — the human approved an action FOR this agent; another
+//	           agent re-using the id is unambiguously a different
+//	           authorisation request.
+//	Scope    — same logical reason: a shell approval is not a network
+//	           approval.
+//	Command  — covers the shell scope (and any free-form Pattern-based
+//	           rule scope) where the policy decision turns on the exact
+//	           command string.
+//	Path     — filesystem scope identity.
+//	Domain   — network scope identity (host-only rules).
+//	URL      — network scope identity (full-URL rules; some operators
+//	           gate on URL rather than Domain to authorise a specific
+//	           endpoint).
+//	Action   — covers Action+Paths style filesystem rules and any
+//	           future scope that authorises by named action.
+//
+// NOT compared (legitimately drift across retries):
+//
+//	SessionID — agents may reconnect/retry from a fresh session id
+//	            without invalidating an in-flight approval.
+//	EstCost   — cost-scoped retries inherently recompute cost (a token
+//	            estimate, an exchange-rate refresh, a refunded
+//	            reservation). Binding here would cause every cost
+//	            retry to fall through and ask for re-approval.
+//	Meta      — carries transport tags ("transport", "arg_*", trace
+//	            ids) that are diagnostic, not authorising. Binding on
+//	            Meta would couple the security check to telemetry
+//	            evolution. The transport tag itself is preserved on
+//	            the audit entry via logAndRespond regardless.
+//
+// SchemaVersion is also not compared: it's a wire-protocol version
+// negotiation field, validated independently before this point in
+// handleCheck. ApprovalID is the lookup key by definition.
+func matchesOriginalRequest(retry policy.ActionRequest, original policy.ActionRequest) bool {
+	return retry.AgentID == original.AgentID &&
+		retry.Scope == original.Scope &&
+		retry.Command == original.Command &&
+		retry.Path == original.Path &&
+		retry.Domain == original.Domain &&
+		retry.URL == original.URL &&
+		retry.Action == original.Action
 }
 
 // resolvedApprovalToResult converts a PendingAction (resolved or not)

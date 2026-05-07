@@ -6,43 +6,33 @@ Day-2 concerns for running AgentGuard in production: log rotation, scaling, capa
 
 ## Audit log rotation
 
-**AgentGuard does not rotate `audit.jsonl`.** The file is opened with `O_CREATE|O_WRONLY|O_APPEND` at mode `0600` and grows forever until you rotate it externally.
+**AgentGuard rotates `audit.jsonl` by default.** The size-triggered rotator is wired into `runServe` and active out of the box, controlled by these `agentguard serve` flags:
 
-Two follow-on consequences:
+| Flag | Default | Purpose |
+|---|---|---|
+| `--audit-max-size-mb` | `100` | Rotate when the active file reaches this size (MiB). Set to `0` to disable rotation entirely. |
+| `--audit-max-backups` | `5` | Number of rotated files to retain. Older files are deleted on rotation. |
+| `--audit-max-age-days` | `30` | Maximum age (days) of rotated files before deletion. |
+| `--audit-compress` | `true` | gzip-compress rotated files (`.gz` suffix). |
 
-1. **Disk usage** grows proportional to request volume. A busy deployment can produce hundreds of MB per day.
-2. **Startup replay** re-reads the entire file. `NewServer` calls `Logger.Query({})` once at boot and replays every entry through `metrics.IncDecision` so `/metrics` and `/api/stats` survive restarts with accurate counters. A multi-GB log delays counter accuracy until the scan completes.
+Rotated files carry a `_meta.rotated_from` chain pointing to the previous segment (see [`docs/FILE_FORMATS.md`](FILE_FORMATS.md#rotated-file-headers)) so external consumers can stitch the timeline.
 
-### Recommended pattern: external shipper + periodic truncate
+> **Do not stack rotators.** Operators following older guidance should NOT also configure `logrotate` (or any external rotator) against `audit.jsonl` — the dual-rotator chain corrupts the rotation index and breaks the `_meta.rotated_from` continuity. Pick one. If you need `logrotate`'s archival semantics, set `--audit-max-size-mb 0` first to disable AgentGuard's own rotator.
 
-The audit log is append-only JSON Lines with one decision per line (schema in [`docs/FILE_FORMATS.md`](FILE_FORMATS.md)). Any log shipper that handles newline-delimited JSON works — Vector, Fluent Bit, Filebeat, Datadog agent, etc.
+Two follow-on consequences regardless of who rotates:
 
-Minimum safe rotation approach:
+1. **Disk usage** grows proportional to request volume × retention. A busy deployment can produce hundreds of MB per day; the defaults bound this to ~500 MiB across 5 backups.
+2. **Startup replay** re-reads the active file plus a checkpointed prefix of the rotation chain. `NewServer` calls `Logger.Query({})` once at boot and replays every entry through `metrics.IncDecision` so `/metrics` and `/api/stats` survive restarts with accurate counters. A multi-GB log delays counter accuracy until the scan completes.
 
-```bash
-#!/usr/bin/env bash
-# /usr/local/bin/rotate-agentguard-audit — cron nightly
-set -euo pipefail
+### External shipping (compatible with default rotation)
 
-AUDIT=/var/lib/agentguard/audit.jsonl
-ARCHIVE_DIR=/var/lib/agentguard/archive
+The audit log is append-only JSON Lines with one decision per line (schema in [`docs/FILE_FORMATS.md`](FILE_FORMATS.md)). Any log shipper that handles newline-delimited JSON works — Vector, Fluent Bit, Filebeat, Datadog agent, etc. Point your shipper at `audit.jsonl` AND the rotated `audit-*.jsonl[.gz]` siblings; the shipper does not need to truncate anything.
 
-mkdir -p "$ARCHIVE_DIR"
-stamp=$(date -u +%Y%m%dT%H%M%SZ)
-cp -a "$AUDIT" "$ARCHIVE_DIR/audit-$stamp.jsonl"
-gzip "$ARCHIVE_DIR/audit-$stamp.jsonl"
+### Disabling default rotation (legacy / external rotator path)
 
-# Truncate in place so the open file descriptor keeps working.
-: > "$AUDIT"
-```
+Set `--audit-max-size-mb 0`. AgentGuard then opens `audit.jsonl` with `O_CREATE|O_WRONLY|O_APPEND` at mode `0600` and never rotates it. Use this when you operate a managed log pipeline that handles rotation upstream (e.g., a sidecar that reads via `tail -F`).
 
-Key rules:
-
-- **Truncate in place** (`: > file`) instead of renaming + recreating. AgentGuard holds an open file descriptor on the original inode; a rename-and-recreate breaks that handle and new writes go into the renamed file.
-- **Archive first, truncate second.** If the machine crashes between the two, you have the archive and only lose the in-flight seconds.
-- **Do not truncate during startup replay.** Run rotation during off-peak hours and give the process headroom.
-
-If you need `logrotate`, use the `copytruncate` directive:
+If you must use `logrotate` against AgentGuard's audit file, use the `copytruncate` directive AND `--audit-max-size-mb 0`:
 
 ```
 /var/lib/agentguard/audit.jsonl {

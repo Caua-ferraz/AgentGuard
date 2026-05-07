@@ -215,7 +215,7 @@ Each `cmd/agentguard-*/main.go` is a **thin entry point**. Real logic
 lives in:
 
 ```
-pkg/mcpgateway/      (Phase 4B)
+pkg/mcpgw/           (Phase 4B)
 pkg/llmproxy/        (Phase 4C)
 ```
 
@@ -277,8 +277,15 @@ agentguard-llm-proxy --listen 127.0.0.1:8081 --guard-url http://127.0.0.1:8080
 The agent's environment:
 
 ```
-OPENAI_BASE_URL=http://127.0.0.1:8081
+OPENAI_BASE_URL=http://127.0.0.1:8081/v1
+ANTHROPIC_BASE_URL=http://127.0.0.1:8081
 ```
+
+Note the asymmetry: the OpenAI SDK appends paths under `OPENAI_BASE_URL`
+including the `/v1` segment that the proxy registers (`POST /v1/chat/completions`),
+so the env var must include `/v1`. The Anthropic SDK convention is the opposite —
+`ANTHROPIC_BASE_URL` is the *origin* and the SDK appends `/v1/messages` itself,
+so the env var must NOT include a `/v1` suffix.
 
 …and Claude Desktop's `claude_desktop_config.json` points at the gateway
 binary.
@@ -317,9 +324,9 @@ Both proxies adopt the **same** flag for parity:
 
 | value                       | behavior on `/v1/check` failure                           |
 |-----------------------------|-----------------------------------------------------------|
-| `deny`                      | synthesise `DENY` with `Rule="deny:guard_unreachable"`. The agent sees a deny. **Default.** |
-| `allow`                     | synthesise `ALLOW` with `Rule="allow:guard_unreachable"`. **Use only in trusted dev environments.** Logged as WARN at startup. |
-| `fail-closed-with-audit`    | synthesise `DENY` AND attempt to write a local audit entry to a fallback file (`<flag>.fallback.jsonl`). Useful when the central server is down but you still want a record of attempts. |
+| `deny`                      | synthesise `DENY` with `Rule="deny:<gateway>:fail_closed"` (LLM proxy emits `deny:llm_api_proxy:fail_closed`; MCP gateway emits `deny:gateway:fail_closed`). The agent sees a deny. **Default.** |
+| `allow`                     | synthesise `ALLOW` with `Rule="allow:<gateway>:fail_open"`. **Use only in trusted dev environments.** Logged as WARN at startup. |
+| `fail-closed-with-audit`    | synthesise `DENY` with a **distinct** `Rule="deny:<gateway>:fail_closed_audit"` so dashboards can break out central-server-outage events from plain fail-closed denials. v0.5 surfaces the failure via the rule string + metrics + stderr only — operators can grep audit logs for `fail_closed_audit` to find these events. v0.5 does **NOT** emit a local audit log entry; that arrives in v0.6 via `TODO(v0.6, #fail-closed-with-audit-local-emit)`, at which point the gateway will write a fallback file (`<flag>.fallback.jsonl`) when the central server is unreachable. Until v0.6, treat this mode as "deny + distinct rule" — the `_with_audit` suffix in the flag name signals roadmap intent rather than current behaviour. |
 
 The Python SDK (always fail-closed) and TypeScript SDK (configurable
 `failMode`) keep their existing behaviour — the new flag just brings the
@@ -373,33 +380,50 @@ respective doc.
 
 ## 8. Health & observability
 
-Both proxies expose a `/health` endpoint (or, for the MCP gateway, a
-JSON-RPC `agentguard/health` extension) returning:
+The two proxies have very different surfaces here. The original Phase 4A
+plan called for symmetric `/health` and `/metrics` HTTP endpoints, but
+the implementations diverged:
 
-```json
-{
-  "status": "ok",
-  "version": "0.5.0",
-  "guard_reachable": true,
-  "warnings": []
-}
-```
+- **LLM API Proxy** registers **`/healthz`** (note: not `/health`) returning
+  a flat status object:
 
-`warnings` carries human-readable degradation info (e.g., MCP gateway:
-`["upstream namespace 'github' degraded since 2026-05-06T12:34:56Z"]`).
+  ```json
+  {
+    "status": "ok",
+    "version": "0.5.0",
+    "transport": "llm_api_proxy",
+    "uptime_s": 412
+  }
+  ```
 
-Both proxies emit Prometheus metrics on `/metrics`:
+  No `guard_reachable` field, no `warnings` array. The proxy does **not**
+  expose its own `/metrics` endpoint; per-request metrics flow through
+  the central server's `/v1/check` instrumentation (see § 8.1 below).
+- **MCP Gateway** is a stdio JSON-RPC binary with **no HTTP surface at
+  all** — no `/health`, no `/metrics`. Operators inspect it via the
+  process's stderr log lines. Health is implicit in whether the host
+  client (Claude Desktop, Cursor, etc.) reports the gateway as alive.
 
-| metric                                                | scope              |
-|------------------------------------------------------|--------------------|
-| `agentguard_proxy_requests_total{transport,decision}` | both               |
-| `agentguard_proxy_check_duration_seconds{transport}`  | both (histogram)   |
-| `agentguard_mcp_upstream_state{namespace,state}`      | mcp_gateway only   |
-| `agentguard_llm_buffered_bytes{stream_id}`            | llm_api_proxy only |
-| `agentguard_llm_stream_overflow_total`                | llm_api_proxy only |
+### 8.1 Where the metrics actually live
 
-Metric names are reserved here; the implementing workers (A18/A22) add
-the registrations.
+Per-request gating metrics are emitted on the **central server's**
+`/metrics` endpoint, distinguished by the `Entry.Transport` audit field:
+
+| metric                                                       | source                            |
+|--------------------------------------------------------------|-----------------------------------|
+| `agentguard_checks_total`                                    | central server                    |
+| `agentguard_request_duration_ms`                             | central server                    |
+| `agentguard_llmproxy_buffer_overflow_total`                  | LLM API Proxy (process-local)     |
+| `agentguard_llmproxy_active_streams`                         | LLM API Proxy (process-local)     |
+
+Process-local LLM-proxy counters are written to the proxy's stderr log
+on a periodic tick rather than scraped over HTTP. Operators who need
+Prometheus-shape scrapes for the proxy itself should run the proxy
+behind a sidecar exporter that parses the stderr stream — that is
+deferred to v0.6.
+
+The MCP gateway has no scrape surface; its decisions surface in the
+central server's audit stream via `Entry.Transport == "mcp_gateway"`.
 
 ---
 

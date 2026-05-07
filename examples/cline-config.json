@@ -1,5 +1,5 @@
 {
-  "_comment": "AgentGuard MCP Gateway config for Cline (VS Code extension). See cline-config.md for the file path inside VS Code's globalStorage and verification steps. Source: https://docs.cline.bot/mcp/configuring-mcp-servers (verified 2026-05-05). Cline reuses Claude Desktop's mcpServers schema and adds disabled / alwaysAllow.",
+  "_comment": "AgentGuard MCP Gateway config for Cline (VS Code extension). See cline-config.md for the file path inside VS Code's globalStorage and verification steps. Source: https://docs.cline.bot/mcp/configuring-mcp-servers (verified 2026-05-05). Cline reuses Claude Desktop's mcpServers schema and adds disabled / alwaysAllow. Do NOT pass --api-key '$AGENTGUARD_API_KEY' literally — Cline does not shell-expand $VAR in JSON args. Inject the key via the env block; the gateway reads AGENTGUARD_API_KEY from the environment when the --api-key flag is absent. v0.5 is single-tenant: --tenant-id must be 'local'.",
 
   "mcpServers": {
     "agentguard": {
@@ -9,9 +9,8 @@
         "--upstream", "fetch:npx -y @modelcontextprotocol/server-fetch",
         "--upstream", "github:npx -y @modelcontextprotocol/server-github",
         "--guard-url", "http://127.0.0.1:8080",
-        "--api-key", "$AGENTGUARD_API_KEY",
         "--policy", "/etc/agentguard/policy.yaml",
-        "--tenant-id", "cline-local",
+        "--tenant-id", "local",
         "--policy-mode", "strict",
         "--fail-mode", "deny",
         "--log-level", "info"

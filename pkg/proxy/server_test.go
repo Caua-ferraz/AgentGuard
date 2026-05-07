@@ -2473,3 +2473,375 @@ func TestHandleCheck_ApprovalIDResolved_PreservesTransport(t *testing.T) {
 		t.Errorf("no audit entry with rule=allow:approved + transport=mcp_gateway; entries=%d", len(entries))
 	}
 }
+
+// --- /v1/check approval-id REPLAY guard (B1) ---
+//
+// /v1/check is intentionally unauthenticated; approval ids leak through
+// audit logs, SSE feeds, webhook payloads, and refusal text echoed to
+// the model. Without request-shape binding, anyone who learns an
+// approved id can replay it against ANY action and short-circuit to
+// ALLOW. The fix (matchesOriginalRequest) compares operationally-
+// meaningful fields between the retry and the original PendingAction
+// and falls through to fresh Engine.Check on mismatch.
+//
+// The tests below pin one mismatch dimension each, plus a sanity
+// regression test for the legitimate-retry path. See V05 audit B1
+// (R-Sec H1, R-Stub C3).
+
+// newReplayTestServer builds a test server with a richer policy than
+// newTestServer's default — adds filesystem and network rules with
+// require_approval entries so we can exercise per-scope path/url
+// mismatches without running into the default-deny fallback.
+func newReplayTestServer(t *testing.T) *Server {
+	t.Helper()
+	return newTestServer(t, func(cfg *Config) {
+		pol := &policy.Policy{
+			Version: "1",
+			Name:    "test-policy-replay",
+			Rules: []policy.RuleSet{
+				{
+					Scope:           "shell",
+					Allow:           []policy.Rule{{Pattern: "ls *"}, {Pattern: "echo *"}},
+					Deny:            []policy.Rule{{Pattern: "rm -rf *", Message: "Destructive command blocked"}},
+					RequireApproval: []policy.Rule{{Pattern: "sudo *"}},
+				},
+				{
+					Scope: "filesystem",
+					Allow: []policy.Rule{
+						{Action: "read", Paths: []string{"/tmp/**"}},
+					},
+					RequireApproval: []policy.Rule{
+						{Action: "write", Paths: []string{"/etc/**"}},
+					},
+				},
+				{
+					Scope:           "network",
+					Allow:           []policy.Rule{{Domain: "api.openai.com"}},
+					RequireApproval: []policy.Rule{{Domain: "*.example.com"}},
+				},
+			},
+		}
+		cfg.Engine = policy.NewEngineFromPolicy(pol)
+	})
+}
+
+// seedReplayApproval drives a /v1/check whose body matches `body` and
+// asserts a REQUIRE_APPROVAL is created; returns the approval id.
+func seedReplayApproval(t *testing.T, srv *Server, body string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleCheck(w, req)
+
+	var result policy.CheckResult
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("seed: decode: %v", err)
+	}
+	if result.Decision != policy.RequireApproval {
+		t.Fatalf("seed: expected REQUIRE_APPROVAL, got %s (rule=%s reason=%s)", result.Decision, result.Rule, result.Reason)
+	}
+	if result.ApprovalID == "" {
+		t.Fatal("seed: empty approval_id")
+	}
+	if err := srv.approval.Resolve(result.ApprovalID, policy.Allow); err != nil {
+		t.Fatalf("seed: Resolve: %v", err)
+	}
+	return result.ApprovalID
+}
+
+// retryCheck drives a /v1/check with the given body and returns the
+// decoded CheckResult plus the raw response code.
+func retryCheck(t *testing.T, srv *Server, body string) (policy.CheckResult, int) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleCheck(w, req)
+	var result policy.CheckResult
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("retry: decode: %v", err)
+	}
+	return result, w.Code
+}
+
+// assertNotShortCircuited asserts that the result did NOT come from the
+// approval-cache short-circuit path (i.e. rule != "allow:approved" and
+// != "deny:approved"). This is the load-bearing assertion for every
+// replay test — fall-through to Engine.Check is the security property.
+func assertNotShortCircuited(t *testing.T, result policy.CheckResult) {
+	t.Helper()
+	switch result.Rule {
+	case "allow:approved", "deny:approved", "deny:approved:invalid_resolution", "require_approval:pending":
+		t.Errorf("approval-id replay was short-circuited (rule=%q decision=%s) — request-shape validator failed",
+			result.Rule, result.Decision)
+	}
+}
+
+func TestHandleCheck_ApprovalIDReplay_DifferentAgent_FallsThrough(t *testing.T) {
+	srv := newReplayTestServer(t)
+
+	// Approve an action FOR agent_a.
+	approvalID := seedReplayApproval(t, srv,
+		`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a"}`)
+
+	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+
+	// agent_b replays the same id against the same command. Must NOT
+	// short-circuit; the policy still says REQUIRE_APPROVAL for agent_b.
+	body := fmt.Sprintf(`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_b","approval_id":%q}`, approvalID)
+	result, code := retryCheck(t, srv, body)
+
+	if code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", code)
+	}
+	assertNotShortCircuited(t, result)
+	if result.Decision == policy.Allow {
+		t.Errorf("decision = ALLOW; replay should NOT auto-allow for a different agent (rule=%q reason=%q)", result.Rule, result.Reason)
+	}
+	// The fresh evaluation under the test policy yields REQUIRE_APPROVAL
+	// (sudo * → require_approval), confirming the request was actually
+	// re-evaluated.
+	if result.Decision != policy.RequireApproval {
+		t.Errorf("decision = %s; want REQUIRE_APPROVAL (fresh evaluation)", result.Decision)
+	}
+	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got <= mismatchBefore {
+		t.Errorf("ApprovalReplayMismatchTotal = %d; want > %d (security signal not incremented)", got, mismatchBefore)
+	}
+}
+
+func TestHandleCheck_ApprovalIDReplay_DifferentScope_FallsThrough(t *testing.T) {
+	srv := newReplayTestServer(t)
+
+	// Approve a shell action.
+	approvalID := seedReplayApproval(t, srv,
+		`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a"}`)
+
+	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+
+	// Replay against the network scope (with the same other fields).
+	// Network scope has no rule for command="sudo apt install vim", so
+	// fresh evaluation yields default-deny.
+	body := fmt.Sprintf(`{"scope":"network","command":"sudo apt install vim","agent_id":"agent_a","approval_id":%q}`, approvalID)
+	result, _ := retryCheck(t, srv, body)
+
+	assertNotShortCircuited(t, result)
+	if result.Decision == policy.Allow {
+		t.Errorf("decision = ALLOW; replay across scopes must not auto-allow (rule=%q)", result.Rule)
+	}
+	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got <= mismatchBefore {
+		t.Errorf("ApprovalReplayMismatchTotal not incremented on scope mismatch")
+	}
+}
+
+func TestHandleCheck_ApprovalIDReplay_DifferentCommand_FallsThrough(t *testing.T) {
+	srv := newReplayTestServer(t)
+
+	// Operator approves `sudo apt install vim`.
+	approvalID := seedReplayApproval(t, srv,
+		`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a"}`)
+
+	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+
+	// Attacker replays the id with `rm -rf /`. The approval was for a
+	// different command; the cache must NOT honour it, and the policy's
+	// `rm -rf *` deny rule must fire instead.
+	body := fmt.Sprintf(`{"scope":"shell","command":"rm -rf /","agent_id":"agent_a","approval_id":%q}`, approvalID)
+	result, _ := retryCheck(t, srv, body)
+
+	assertNotShortCircuited(t, result)
+	if result.Decision != policy.Deny {
+		t.Errorf("decision = %s; want DENY (rm -rf * is denied; replay must not bypass)", result.Decision)
+	}
+	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got <= mismatchBefore {
+		t.Errorf("ApprovalReplayMismatchTotal not incremented on command mismatch")
+	}
+}
+
+func TestHandleCheck_ApprovalIDReplay_DifferentPath_FallsThrough(t *testing.T) {
+	srv := newReplayTestServer(t)
+
+	// Approve a write to /etc/hosts.
+	approvalID := seedReplayApproval(t, srv,
+		`{"scope":"filesystem","action":"write","path":"/etc/hosts","agent_id":"agent_a"}`)
+
+	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+
+	// Replay the id against /etc/shadow. Different path → must NOT
+	// short-circuit. /etc/shadow matches the same require_approval rule
+	// (Action=write, Paths=/etc/**), so fresh evaluation yields a fresh
+	// REQUIRE_APPROVAL — distinct from the cached "allow:approved".
+	body := fmt.Sprintf(`{"scope":"filesystem","action":"write","path":"/etc/shadow","agent_id":"agent_a","approval_id":%q}`, approvalID)
+	result, _ := retryCheck(t, srv, body)
+
+	assertNotShortCircuited(t, result)
+	if result.Decision == policy.Allow {
+		t.Errorf("decision = ALLOW; path-mismatched replay must not auto-allow (rule=%q)", result.Rule)
+	}
+	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got <= mismatchBefore {
+		t.Errorf("ApprovalReplayMismatchTotal not incremented on path mismatch")
+	}
+}
+
+func TestHandleCheck_ApprovalIDReplay_DifferentURL_FallsThrough(t *testing.T) {
+	srv := newReplayTestServer(t)
+
+	// Approve a network call to api.example.com with a specific URL.
+	approvalID := seedReplayApproval(t, srv,
+		`{"scope":"network","domain":"api.example.com","url":"https://api.example.com/safe","agent_id":"agent_a"}`)
+
+	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+
+	// Replay the id with a different URL on the same domain.
+	body := fmt.Sprintf(`{"scope":"network","domain":"api.example.com","url":"https://api.example.com/admin/wipe","agent_id":"agent_a","approval_id":%q}`, approvalID)
+	result, _ := retryCheck(t, srv, body)
+
+	assertNotShortCircuited(t, result)
+	if result.Decision == policy.Allow {
+		t.Errorf("decision = ALLOW; URL-mismatched replay must not auto-allow (rule=%q)", result.Rule)
+	}
+	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got <= mismatchBefore {
+		t.Errorf("ApprovalReplayMismatchTotal not incremented on URL mismatch")
+	}
+}
+
+func TestHandleCheck_ApprovalIDValidRetry_SameRequestStillShortCircuits(t *testing.T) {
+	srv := newReplayTestServer(t)
+
+	// Approve and immediately retry with the SAME shape. The legitimate
+	// retry path must continue to short-circuit (this is the whole
+	// reason A19b exists; the B1 fix must not break it).
+	approvalID := seedReplayApproval(t, srv,
+		`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a"}`)
+
+	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+
+	body := fmt.Sprintf(`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a","approval_id":%q}`, approvalID)
+	result, code := retryCheck(t, srv, body)
+
+	if code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", code)
+	}
+	if result.Decision != policy.Allow {
+		t.Errorf("decision = %s; want ALLOW (legitimate retry must still short-circuit) rule=%q", result.Decision, result.Rule)
+	}
+	if result.Rule != "allow:approved" {
+		t.Errorf("rule = %q; want allow:approved (legitimate retry path)", result.Rule)
+	}
+	if result.ApprovalID != approvalID {
+		t.Errorf("approval_id = %q; want %q (the original)", result.ApprovalID, approvalID)
+	}
+	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got != mismatchBefore {
+		t.Errorf("ApprovalReplayMismatchTotal = %d; want %d (legitimate retry must NOT bump the security signal)", got, mismatchBefore)
+	}
+}
+
+// TestHandleCheck_ApprovalIDValidRetry_NonAuthorisingFieldsDrift confirms
+// that Meta / SessionID / EstCost / SchemaVersion legitimately drift on
+// retry without breaking the short-circuit. Pins the matchesOriginalRequest
+// negative-space contract documented next to the helper.
+func TestHandleCheck_ApprovalIDValidRetry_NonAuthorisingFieldsDrift(t *testing.T) {
+	srv := newReplayTestServer(t)
+
+	approvalID := seedReplayApproval(t, srv,
+		`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a","session_id":"sess1","meta":{"transport":"sdk"}}`)
+
+	// Retry with a different session_id and different meta but
+	// identical authorising fields. Must short-circuit.
+	body := fmt.Sprintf(`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a","session_id":"sess2","meta":{"transport":"mcp_gateway","arg_url":"https://x.example/y"},"approval_id":%q}`, approvalID)
+	result, _ := retryCheck(t, srv, body)
+
+	if result.Rule != "allow:approved" {
+		t.Errorf("rule = %q; want allow:approved (session_id/meta drift must not break the cache)", result.Rule)
+	}
+}
+
+// TestHandleCheck_ApprovalIDReplay_LogsMismatchSignal verifies that on
+// a mismatch the security signal — the package-level metric counter —
+// is incremented. A non-zero rate is the operator-facing alert that
+// either a buggy gateway or a deliberate replay attempt is happening.
+func TestHandleCheck_ApprovalIDReplay_LogsMismatchSignal(t *testing.T) {
+	srv := newReplayTestServer(t)
+
+	approvalID := seedReplayApproval(t, srv,
+		`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a"}`)
+
+	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+
+	// Three different mismatched replays — each must bump the counter.
+	bodies := []string{
+		fmt.Sprintf(`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_b","approval_id":%q}`, approvalID),
+		fmt.Sprintf(`{"scope":"network","command":"sudo apt install vim","agent_id":"agent_a","approval_id":%q}`, approvalID),
+		fmt.Sprintf(`{"scope":"shell","command":"rm -rf /","agent_id":"agent_a","approval_id":%q}`, approvalID),
+	}
+	for i, b := range bodies {
+		_, _ = retryCheck(t, srv, b)
+		want := mismatchBefore + uint64(i+1)
+		if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got != want {
+			t.Errorf("after replay %d: ApprovalReplayMismatchTotal = %d; want %d", i+1, got, want)
+		}
+	}
+
+	// Confirm the metric is also surfaced via the Prometheus exposition
+	// (not just incremented in-memory) so operators can scrape it.
+	var buf bytes.Buffer
+	metrics.WritePrometheus(&buf)
+	if !strings.Contains(buf.String(), "agentguard_approval_replay_mismatch_total") {
+		t.Error("agentguard_approval_replay_mismatch_total not present in /metrics exposition")
+	}
+}
+
+// TestMatchesOriginalRequest is a focused unit test of the helper's
+// truth table. Keeps the field-comparison contract from drifting: if a
+// future contributor adds a new ActionRequest field that should be
+// authorising, this test should be extended in the same commit.
+func TestMatchesOriginalRequest(t *testing.T) {
+	base := policy.ActionRequest{
+		AgentID: "agent_a",
+		Scope:   "shell",
+		Command: "sudo apt install vim",
+		Path:    "/etc/hosts",
+		Domain:  "api.example.com",
+		URL:     "https://api.example.com/x",
+		Action:  "write",
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(r *policy.ActionRequest)
+		want   bool
+	}{
+		{"identical", func(r *policy.ActionRequest) {}, true},
+		{"different agent_id", func(r *policy.ActionRequest) { r.AgentID = "agent_b" }, false},
+		{"different scope", func(r *policy.ActionRequest) { r.Scope = "filesystem" }, false},
+		{"different command", func(r *policy.ActionRequest) { r.Command = "rm -rf /" }, false},
+		{"different path", func(r *policy.ActionRequest) { r.Path = "/etc/shadow" }, false},
+		{"different domain", func(r *policy.ActionRequest) { r.Domain = "evil.com" }, false},
+		{"different url", func(r *policy.ActionRequest) { r.URL = "https://api.example.com/admin" }, false},
+		{"different action", func(r *policy.ActionRequest) { r.Action = "read" }, false},
+
+		// Non-authorising fields: drift is allowed.
+		{"different session_id", func(r *policy.ActionRequest) {}, true}, // SessionID not in base; helper ignores it
+		{"different est_cost", func(r *policy.ActionRequest) {}, true},
+		{"different meta", func(r *policy.ActionRequest) {}, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			retry := base
+			tc.mutate(&retry)
+			// Apply the drift-allowed mutations directly:
+			switch tc.name {
+			case "different session_id":
+				retry.SessionID = "different"
+			case "different est_cost":
+				retry.EstCost = 99.99
+			case "different meta":
+				retry.Meta = map[string]string{"transport": "anything"}
+			}
+			if got := matchesOriginalRequest(retry, base); got != tc.want {
+				t.Errorf("matchesOriginalRequest(%s) = %v; want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}

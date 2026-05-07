@@ -68,16 +68,14 @@ audit log so every decision is unambiguous.
 
    Then update `--policy /etc/agentguard/policy.yaml` in the JSON to match.
 
-3. **Generate an API key** and export it in the shell that launches Claude
-   Desktop:
+3. **Generate an API key** and put it in the `env` block of the JSON
+   (the gateway reads `AGENTGUARD_API_KEY` from the subprocess
+   environment when the `--api-key` flag is absent — see "API key
+   handling" below):
 
    ```bash
    export AGENTGUARD_API_KEY="$(openssl rand -hex 32)"
    ```
-
-   Put the same value in the `env` block of the JSON. The flag value
-   `"$AGENTGUARD_API_KEY"` resolves from this `env` block — Claude Desktop
-   does **not** expand shell variables in flag strings.
 
 4. **Start the central AgentGuard server:**
 
@@ -108,6 +106,28 @@ In a Claude Desktop chat:
 
 If actions appear in Claude but never show on the dashboard, see the
 **Common gotchas** section in [`docs/MCP_GATEWAY.md`](../docs/MCP_GATEWAY.md#client-integration).
+
+## API key handling
+
+Do **not** pass `--api-key "$AGENTGUARD_API_KEY"` as an `args` entry.
+Claude Desktop does **not** shell-expand `$VAR` references inside the
+JSON `args` array — the gateway would receive the literal string
+`$AGENTGUARD_API_KEY` and authentication would fail. Instead, use the
+`env` block above to inject the key as an environment variable; the
+gateway picks up `AGENTGUARD_API_KEY` automatically when the
+`--api-key` flag is absent.
+
+If you really must pass the key on the command line, write the literal
+key into the `args` entry — but that bakes a secret into your config
+file, so prefer the `env` block.
+
+## Tenant ID
+
+v0.5 is single-tenant. Use `--tenant-id local` (the only value the
+central server recognizes). Multi-tenant routing lands in v0.6 — until
+then, `--tenant-id <anything-other-than-local>` returns 404 from
+`/v1/check`, the gateway hits its `--fail-mode` path, and every action
+denies (or is blanket-allowed, depending on your `--fail-mode`).
 
 ## Trimming the example
 

@@ -502,3 +502,105 @@ func TestBufferedAsync_RejectsEmptyOverflowPath(t *testing.T) {
 		t.Fatal("expected empty-overflow-path error")
 	}
 }
+
+// TestBufferedAsync_PreservesOverflowOnDrainScannerError is a regression
+// test for R-Code H5 (audit-fixup F2). Before the fix, tryDrainOverflow
+// removed the renamed `.draining.<ts>` file even when the JSON-Lines
+// scanner returned a non-nil error mid-stream — silently losing every
+// byte after the failure point. The fix preserves the file so the next
+// recovery tick (or process restart) can pick it up.
+//
+// We construct an overflow file containing one valid JSON line followed
+// by a single line longer than the scanner's 4 MiB max-token cap; the
+// scanner produces bufio.ErrTooLong on the second line. Without the
+// fix the file would be unlinked. With the fix, the file is renamed
+// back to b.overflowPath (since no concurrent saturation has produced
+// a fresh overflow), so disk durability survives.
+func TestBufferedAsync_PreservesOverflowOnDrainScannerError(t *testing.T) {
+	dir := t.TempDir()
+	overflowPath := filepath.Join(dir, "overflow.jsonl")
+
+	// Pre-create overflow file with: one valid JSON-Lines entry, then a
+	// >4 MiB blob (no newlines) which exceeds the scanner buffer cap and
+	// makes scanner.Scan() return false with scanner.Err() == bufio.ErrTooLong.
+	f, err := os.OpenFile(overflowPath, os.O_CREATE|os.O_WRONLY, DefaultFilePermissions)
+	if err != nil {
+		t.Fatalf("create overflow: %v", err)
+	}
+	enc := json.NewEncoder(f)
+	if err := enc.Encode(sampleEntry(0)); err != nil {
+		t.Fatalf("encode first entry: %v", err)
+	}
+	// 5 MiB of 'x' (no newline) — exceeds the 4 MiB scanner cap.
+	huge := strings.Repeat("x", 5*1024*1024)
+	if _, err := f.WriteString(huge); err != nil {
+		t.Fatalf("write huge blob: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close overflow: %v", err)
+	}
+
+	cap := &captureLogger{}
+	// RecoveryInterval set far in the future so the recoveryLoop does not
+	// race our explicit tryDrainOverflow call.
+	b, err := NewBufferedAsyncLogger(cap, BufferedAsyncOpts{
+		QueueSize:        16,
+		Workers:          2,
+		OverflowPath:     overflowPath,
+		RecoveryInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewBufferedAsyncLogger: %v", err)
+	}
+	defer b.Close()
+
+	// Trigger the drain explicitly. Same package, so we can call the
+	// unexported method directly.
+	b.tryDrainOverflow()
+
+	// On the bug, overflowPath would be gone (unlinked along with the
+	// draining file) and no `.draining.*` would remain. With the fix:
+	//   - the rename-back branch should put the partial file back at
+	//     overflowPath, OR
+	//   - the keep-as-draining branch should leave a `.draining.*`
+	//     sibling on disk.
+	// Either way, *something* with the original payload still exists.
+
+	if _, err := os.Stat(overflowPath); err == nil {
+		// Rename-back branch: the file is back at overflowPath. Verify
+		// it still contains the huge blob (i.e. data was not silently
+		// truncated to the scanner's read pointer).
+		data, rerr := os.ReadFile(overflowPath)
+		if rerr != nil {
+			t.Fatalf("read recovered overflow: %v", rerr)
+		}
+		if len(data) < len(huge) {
+			t.Errorf("recovered overflow truncated: got %d bytes, want >= %d", len(data), len(huge))
+		}
+		return
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected stat err on overflowPath: %v", err)
+	}
+
+	// Otherwise, expect a `.draining.*` sibling.
+	matches, gerr := filepath.Glob(overflowPath + ".draining.*")
+	if gerr != nil {
+		t.Fatalf("glob draining: %v", gerr)
+	}
+	if len(matches) == 0 {
+		t.Fatalf("expected overflow data preserved on disk after scan error; nothing matches %s or %s.draining.*", overflowPath, overflowPath)
+	}
+	// Verify at least one preserved draining file is non-empty.
+	totalBytes := int64(0)
+	for _, m := range matches {
+		fi, ferr := os.Stat(m)
+		if ferr != nil {
+			t.Errorf("stat %s: %v", m, ferr)
+			continue
+		}
+		totalBytes += fi.Size()
+	}
+	if totalBytes == 0 {
+		t.Errorf("preserved draining file(s) are empty: %v", matches)
+	}
+}

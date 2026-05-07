@@ -99,6 +99,24 @@ Open the Cline chat in VS Code and ask:
   AgentGuard either ALLOWs or surfaces an approval depending on policy.
 - "Read `/etc/passwd`" — DENY, dashboard shows the deny event.
 
+## API key handling
+
+Do **not** pass `--api-key "$AGENTGUARD_API_KEY"` as an `args` entry.
+Cline (like Claude Desktop) does **not** shell-expand `$VAR`
+references inside JSON `args` — the gateway would receive the literal
+string `$AGENTGUARD_API_KEY` and authentication would fail. Instead,
+use the `env` block above to inject the key as an environment
+variable; the gateway picks up `AGENTGUARD_API_KEY` automatically
+when the `--api-key` flag is absent.
+
+## Tenant ID
+
+v0.5 is single-tenant. Use `--tenant-id local` (the only value the
+central server recognizes). Multi-tenant routing lands in v0.6 — until
+then, `--tenant-id <anything-other-than-local>` returns 404 from
+`/v1/check`, the gateway hits its `--fail-mode` path, and every action
+denies (or is blanket-allowed, depending on your `--fail-mode`).
+
 ## Notes
 
 - If your VS Code window doesn't have the AgentGuard API key in its

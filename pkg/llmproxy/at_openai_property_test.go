@@ -64,14 +64,33 @@ func TestAT_OpenAIParser_AssemblesArgsAcrossArbitraryChunkBoundaries(t *testing.
 
 		fragments := splitIntoFragments(argsString, nSplits, r)
 
+		// Audit B3: with ~30% probability, bundle the FINAL args fragment
+		// into the same SSE event as finish_reason: "tool_calls". Real
+		// OpenAI streams sometimes pack these together; the parser must
+		// still assemble the full arguments. Without this branch in the
+		// generator, the property test misses the bundling regression.
+		bundleFinish := len(fragments) >= 2 && r.Intn(100) < 30
+
 		acc := NewOpenAIToolCallAccumulator(0)
 		// Start delta — establishes name + id + first (possibly empty) frag.
 		feed(acc, openAIStartDelta("call_prop", "bash", fragments[0]))
-		for _, frag := range fragments[1:] {
-			feed(acc, openAIArgDelta(frag))
+
+		var res FeedResult
+		var err error
+		if bundleFinish {
+			// All but the last fragment via separate arg deltas, then
+			// the last fragment + finish_reason in one bundled event.
+			for _, frag := range fragments[1 : len(fragments)-1] {
+				feed(acc, openAIArgDelta(frag))
+			}
+			res, err = acc.FeedEvent([]byte(openAIArgAndFinishDelta(fragments[len(fragments)-1])))
+		} else {
+			for _, frag := range fragments[1:] {
+				feed(acc, openAIArgDelta(frag))
+			}
+			// Close cycle.
+			res, err = acc.FeedEvent([]byte(openAIFinishDelta()))
 		}
-		// Close cycle.
-		res, err := acc.FeedEvent([]byte(openAIFinishDelta()))
 		if err != nil {
 			// JSON unmarshal of args may fail when rawJSON contains
 			// quote chars that break the wrapper — accept that case
@@ -79,7 +98,7 @@ func TestAT_OpenAIParser_AssemblesArgsAcrossArbitraryChunkBoundaries(t *testing.
 			// holds against RawArguments below.
 		}
 		if !res.Completed || len(res.CompletedToolCalls) != 1 {
-			t.Logf("seed=%d nSplits=%d: completion missing; res=%+v", seed, nSplits, res)
+			t.Logf("seed=%d nSplits=%d bundleFinish=%v: completion missing; res=%+v", seed, nSplits, bundleFinish, res)
 			return false
 		}
 		got := string(res.CompletedToolCalls[0].RawArguments)
@@ -391,6 +410,18 @@ func openAIArgDelta(argsFrag string) string {
 
 func openAIFinishDelta() string {
 	return `data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n"
+}
+
+// openAIArgAndFinishDelta emits a single SSE event that carries BOTH
+// the closing args fragment AND finish_reason: "tool_calls". This is
+// the bundling case real OpenAI streams sometimes produce; pinning
+// audit blocker B3 (parser must apply delta BEFORE checking
+// finish_reason in the same envelope).
+func openAIArgAndFinishDelta(argsFrag string) string {
+	return fmt.Sprintf(
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":%s}}]},"finish_reason":"tool_calls"}]}`+"\n\n",
+		mustJSON(argsFrag),
+	)
 }
 
 func mustJSON(s string) string {

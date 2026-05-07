@@ -8,7 +8,7 @@ Get AgentGuard running on your machine in under 5 minutes.
 |------|---------|-------|
 | Go | 1.22+ | `go version` |
 | Git | any | `git --version` |
-| Python (optional) | 3.8+ | `python --version` |
+| Python (optional) | 3.9+ | `python --version` |
 | Node.js (optional) | 18+ | `node --version` |
 | Docker (optional) | any | `docker --version` |
 
@@ -51,7 +51,7 @@ go build -o agentguard.exe ./cmd/agentguard
 
 ```bash
 curl http://localhost:8080/health
-# {"status":"ok","version":"0.4.1"}
+# {"status":"ok","version":"0.5.0"}
 ```
 
 Open `http://localhost:8080/dashboard` in your browser to see the live dashboard.
@@ -469,7 +469,7 @@ Configure webhook/Slack notifications in your policy:
 notifications:
   approval_required:
     - type: slack
-      url: "https://hooks.slack.com/services/YOUR/WEBHOOK"
+      url: "https://example.invalid/REPLACE_ME_BEFORE_DEPLOY"
     - type: console
   on_deny:
     - type: webhook

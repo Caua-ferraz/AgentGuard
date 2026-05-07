@@ -218,6 +218,15 @@ func (a *OpenAIToolCallAccumulator) FeedEvent(rawEvent []byte) (FeedResult, erro
 	//   3. finish_reason: "tool_calls" closes the active cycle →
 	//      Completed result with assembled tool calls.
 	//   4. Pure content delta with no active cycle → pass through.
+	//
+	// CRITICAL ORDERING (audit B3): when an event carries BOTH a
+	// tool_call delta AND finish_reason in the same envelope, we must
+	// apply the delta to the accumulator BEFORE we decide on completion.
+	// Real OpenAI streams sometimes pack the closing arg fragment and
+	// finish_reason: "tool_calls" together; if we early-returned on the
+	// tool_call branch (Accumulating) we would lose the finish signal,
+	// the gate would never fire, and buffered events would be silently
+	// dropped at EOF.
 
 	if hasToolCallDelta {
 		a.active = true
@@ -253,7 +262,23 @@ func (a *OpenAIToolCallAccumulator) FeedEvent(rawEvent []byte) (FeedResult, erro
 				}
 			}
 		}
-		return a.appendBuffered(rawEvent)
+		// Buffer the raw event so it is replayed on ALLOW.
+		appendRes, err := a.appendBuffered(rawEvent)
+		if err != nil {
+			return appendRes, err
+		}
+		// If THIS same event also carries finish_reason (tool_calls or
+		// any other terminal reason while we were active), close the
+		// cycle now — the closing arg fragment is already applied above.
+		if finishReasonToolCalls || hasFinishReason(env) {
+			calls, parseErr := a.assembleCompletedCalls()
+			res := FeedResult{
+				Completed:          true,
+				CompletedToolCalls: calls,
+			}
+			return res, parseErr
+		}
+		return appendRes, nil
 	}
 
 	if a.active {

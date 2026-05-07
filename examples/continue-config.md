@@ -32,12 +32,10 @@ mcpServers:
       - "github:npx -y @modelcontextprotocol/server-github"
       - "--guard-url"
       - "http://127.0.0.1:8080"
-      - "--api-key"
-      - "$AGENTGUARD_API_KEY"
       - "--policy"
       - "/etc/agentguard/policy.yaml"
       - "--tenant-id"
-      - "continue-local"
+      - "local"
       - "--policy-mode"
       - "strict"
       - "--fail-mode"
@@ -48,6 +46,12 @@ mcpServers:
       AGENTGUARD_API_KEY: set-from-shell-or-secret-store
       GITHUB_PERSONAL_ACCESS_TOKEN: set-from-shell-or-secret-store
 ```
+
+> Don't add `--api-key "$AGENTGUARD_API_KEY"` to the `args` list —
+> Continue does **not** shell-expand `$VAR` references in args. The
+> gateway reads `AGENTGUARD_API_KEY` from its environment when the
+> `--api-key` flag is absent, so the `env:` block above is sufficient.
+> See "API key handling" below.
 
 The file is auto-detected — no Continue restart needed for the YAML path
 (restart the chat panel to be safe).
@@ -107,6 +111,24 @@ In Continue's agent-mode chat:
 - "Fetch `https://example.com`" → ALLOW or REQUIRE_APPROVAL depending on
   the `network` rules in your policy.
 - "Read `/etc/passwd`" → DENY, dashboard shows event.
+
+## API key handling
+
+Do **not** pass `--api-key "$AGENTGUARD_API_KEY"` as an `args` entry.
+Continue does **not** shell-expand `$VAR` references inside JSON or
+YAML `args` — the gateway would receive the literal string
+`$AGENTGUARD_API_KEY` and authentication would fail. Instead, use the
+`env` block above to inject the key as an environment variable; the
+gateway picks up `AGENTGUARD_API_KEY` automatically when the
+`--api-key` flag is absent.
+
+## Tenant ID
+
+v0.5 is single-tenant. Use `--tenant-id local` (the only value the
+central server recognizes). Multi-tenant routing lands in v0.6 — until
+then, `--tenant-id <anything-other-than-local>` returns 404 from
+`/v1/check`, the gateway hits its `--fail-mode` path, and every action
+denies (or is blanket-allowed, depending on your `--fail-mode`).
 
 ## Notes
 

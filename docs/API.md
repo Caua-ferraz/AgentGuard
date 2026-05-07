@@ -235,8 +235,9 @@ Query the audit log.
 | `session_id` | string | — | Exact match. |
 | `decision` | string | — | `ALLOW`, `DENY`, `REQUIRE_APPROVAL`. |
 | `scope` | string | — | Exact match on `request.scope`. |
-| `limit` | int | `auditDefaultLimit` (default 50) | Silently clamped at `auditMaxLimit` (default 200). `<1` or non-integer → `400`. |
+| `limit` | int | `auditDefaultLimit` (default 100) | Silently clamped at `auditMaxLimit` (default 1000). `<1` or non-integer → `400`. |
 | `offset` | int | `0` | Skip N matching entries. Must be ≥ 0. |
+| `transport` | string | — | Filter on the `Entry.Transport` audit field. Recognised values: `sdk`, `mcp_gateway`, `llm_api_proxy`. Pre-v0.5 entries have no transport tag and are excluded when this filter is set. |
 
 ### Response
 
@@ -320,7 +321,7 @@ Returns `200` with no body. Safe to call with no session (no-op).
 ## `GET /health`
 
 ```json
-{ "status": "ok", "version": "0.4.1" }
+{ "status": "ok", "version": "0.5.0" }
 ```
 
 Always `200` once the HTTP server is accepting connections. Use for liveness probes (see [`DEPLOYMENT.md`](DEPLOYMENT.md)). The legacy `/health` body shape is unchanged in v0.5 — for the richer operator probe see `/v1/health` below.

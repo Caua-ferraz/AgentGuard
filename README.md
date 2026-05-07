@@ -149,7 +149,7 @@ docker run -d -p 8080:8080 \
   agentguard:latest
 ```
 
-Prerequisites: Go 1.22+, Python 3.8+ (optional, for the SDK). See [`docs/SETUP.md`](docs/SETUP.md) for details.
+Prerequisites: Go 1.22+, Python 3.9+ (optional, for the SDK; v0.5 dropped 3.8 — upstream EOL October 2024). See [`docs/SETUP.md`](docs/SETUP.md) for details.
 
 ### Minimal policy
 
@@ -203,7 +203,7 @@ CLI flags and subcommands: [`docs/CLI.md`](docs/CLI.md).
                                                           └─────────────┘
 ```
 
-Rule precedence: `deny → require_approval → allow → default deny`. Scopes: `filesystem`, `shell`, `network`, `browser`, `cost`. See [`docs/POLICY_REFERENCE.md`](docs/POLICY_REFERENCE.md).
+Rule precedence: `deny → require_approval → allow → default deny`. The seven policy scopes are `shell`, `filesystem`, `network`, `browser`, `cost`, `data`, and `mcp_tool` (plus the `unmapped` sentinel emitted by the LLM API Proxy when a tool call has no `tool_scope_map` entry). See [`docs/POLICY_REFERENCE.md`](docs/POLICY_REFERENCE.md).
 
 ## Limitations & Threat Model
 
@@ -264,8 +264,8 @@ Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS deta
 
 ### Implemented
 - [x] Core policy engine with YAML rules (deny → require_approval → allow → default deny)
-- [x] Audit logging (JSON lines)
-- [x] Shell, filesystem, network, browser, cost scopes (string-glob matching — see [Limitations](#limitations--threat-model))
+- [x] Audit logging (JSON lines) with size-triggered rotation, retention, and gzip compression — wired by default *(v0.5)*
+- [x] Shell, filesystem, network, browser, cost, `data`, and `mcp_tool` scopes (string-glob matching — see [Limitations](#limitations--threat-model))
 - [x] Approval queue with Slack/webhook/console notifications (in-memory, not persisted)
 - [x] Web dashboard (live SSE feed, stats, interactive approve/deny)
 - [x] Token-bucket rate limiting per scope per agent (in-memory)
@@ -274,15 +274,14 @@ Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS deta
 - [x] Conditional rules — `require_prior` and `time_window` conditions evaluated at check time
 - [x] Python SDK + adapters: LangChain, CrewAI, browser-use, MCP
 - [x] TypeScript/Node.js SDK
-- [x] Full CLI: serve, validate, approve, deny, status, audit, version
+- [x] Full CLI: serve, validate, check, approve, deny, status, audit, migrate, version
 - [x] Docker support with multi-stage build
 - [x] Policy hot-reload via `--watch`
+- [x] **Data scope** — first-class `data` scope for exfiltration / sensitive-payload checks, wired through policy engine and SDKs *(v0.5)*
 - [x] **MCP Gateway** — wire-level Model Context Protocol proxy with multi-upstream namespacing, capability merging, reconnect-with-backoff, and approval `_meta` round-trip; ships as the `agentguard-mcp-gateway` binary with copy-paste configs for Claude Desktop, Cursor, Cline, Continue, and Zed *(v0.5)*
 - [x] **LLM API Proxy** — drop-in OpenAI / Anthropic-compatible base URL with streaming pause/resume/rewrite, tool-call gating, provider-aware synthetic refusals, and tool→scope mapping; ships as the `agentguard-llm-proxy` binary with copy-paste examples for the OpenAI SDK, Anthropic SDK, LangChain, and CrewAI *(v0.5)*
 
 ### Planned
-- [ ] Audit-log rotation wired by default *(v0.5)*
-- [ ] Data exfiltration detection / `data` scope (PII scanning)
 - [ ] SQLite/PostgreSQL audit backend
 - [ ] Persistent approval queue
 - [ ] Policy-as-code (test policies in CI/CD)

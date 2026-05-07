@@ -3,11 +3,30 @@ package policy
 import (
 	"errors"
 	"fmt"
+	"log"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 
 	"gopkg.in/yaml.v3"
 )
+
+// safeCallback invokes cb(pol) with a deferred recover. R-Code H1 in the
+// v0.5 audit found that a panic inside a Watch callback (e.g. a malformed
+// policy update tripping a downstream invariant in gate.SetPolicy)
+// propagated all the way up the file-watcher goroutine, killing the
+// watcher silently — every subsequent policy update was then dropped on
+// the floor with no operator signal. This wrapper logs the panic with a
+// full stack trace and returns normally so the caller's callback loop
+// keeps running and the watcher goroutine survives.
+func safeCallback(cb func(*Policy), pol *Policy) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("policy: Watch callback panicked: %v\n%s", r, debug.Stack())
+		}
+	}()
+	cb(pol)
+}
 
 // LocalTenantID is the single tenant identifier used by AgentGuard v0.5.
 // Multi-tenant routing arrives in v0.6 (issue tracked in
@@ -224,7 +243,7 @@ func (p *FilePolicyProvider) onPolicyChange(newPol *Policy) {
 	}
 	p.mu.Unlock()
 	for _, cb := range cbs {
-		cb(newPol)
+		safeCallback(cb, newPol)
 	}
 }
 
@@ -323,7 +342,7 @@ func (p *StaticPolicyProvider) UpdatePolicy(pol *Policy) {
 	}
 	p.mu.Unlock()
 	for _, cb := range cbs {
-		cb(pol)
+		safeCallback(cb, pol)
 	}
 }
 

@@ -378,3 +378,182 @@ func TestBuildRefusalRich_NilContextSafe(t *testing.T) {
 		t.Errorf("nil ctx produced no events")
 	}
 }
+
+// --- F9 (B2) — non-streaming JSON-object refusals ---
+
+// TestBuildRefusalRich_OpenAINonStreaming_ValidJSON confirms that
+// passing NonStreaming=true on the context yields a single decodable
+// ChatCompletionResponse JSON object (not SSE bytes) with the reason +
+// rule embedded in choices[0].message.content.
+func TestBuildRefusalRich_OpenAINonStreaming_ValidJSON(t *testing.T) {
+	dec := Decision{
+		Allow:  false,
+		Reason: "shell rm -rf blocked",
+		Rule:   "deny:shell:rm_rf",
+	}
+	raw := BuildRefusalRich("openai", dec, &RefusalContext{
+		Provider:     "openai",
+		NonStreaming: true,
+		Model:        "gpt-4",
+	})
+
+	// Must NOT contain SSE markers.
+	if bytes.Contains(raw, []byte("data: ")) {
+		t.Errorf("non-streaming refusal contains SSE marker: %q", string(raw))
+	}
+	if bytes.Contains(raw, []byte("[DONE]")) {
+		t.Errorf("non-streaming refusal contains [DONE] sentinel: %q", string(raw))
+	}
+
+	var resp ChatCompletionResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("non-streaming refusal not a valid ChatCompletionResponse: %v\nbody=%q", err, string(raw))
+	}
+	if resp.Object != "chat.completion" {
+		t.Errorf("object = %q, want chat.completion", resp.Object)
+	}
+	if resp.Model != "gpt-4" {
+		t.Errorf("model = %q, want gpt-4", resp.Model)
+	}
+	if len(resp.Choices) != 1 {
+		t.Fatalf("expected 1 choice, got %d", len(resp.Choices))
+	}
+	c := resp.Choices[0]
+	if c.Message.Role != "assistant" {
+		t.Errorf("role = %q, want assistant", c.Message.Role)
+	}
+	if c.FinishReason != "stop" {
+		t.Errorf("finish_reason = %q, want stop", c.FinishReason)
+	}
+	content := ""
+	if c.Message.Content != nil {
+		content = *c.Message.Content
+	}
+	if !strings.Contains(content, "shell rm -rf blocked") {
+		t.Errorf("content missing reason: %q", content)
+	}
+	if !strings.Contains(content, "deny:shell:rm_rf") {
+		t.Errorf("content missing rule: %q", content)
+	}
+}
+
+// TestBuildRefusalRich_AnthropicNonStreaming_ValidJSON confirms the
+// Anthropic non-streaming refusal decodes as a valid Messages response.
+func TestBuildRefusalRich_AnthropicNonStreaming_ValidJSON(t *testing.T) {
+	dec := Decision{
+		Allow:  false,
+		Reason: "browser navigation blocked",
+		Rule:   "deny:browser:bad_domain",
+	}
+	raw := BuildRefusalRich("anthropic", dec, &RefusalContext{
+		Provider:     "anthropic",
+		NonStreaming: true,
+		Model:        "claude-3-5-sonnet-20241022",
+	})
+
+	if bytes.Contains(raw, []byte("event: ")) {
+		t.Errorf("non-streaming refusal contains SSE event marker: %q", string(raw))
+	}
+
+	var resp AnthropicMessagesResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("non-streaming refusal not a valid AnthropicMessagesResponse: %v\nbody=%q", err, string(raw))
+	}
+	if resp.Type != "message" {
+		t.Errorf("type = %q, want message", resp.Type)
+	}
+	if resp.Role != "assistant" {
+		t.Errorf("role = %q, want assistant", resp.Role)
+	}
+	if resp.Model != "claude-3-5-sonnet-20241022" {
+		t.Errorf("model = %q, want claude-3-5-sonnet-20241022", resp.Model)
+	}
+	if resp.StopReason != "end_turn" {
+		t.Errorf("stop_reason = %q, want end_turn", resp.StopReason)
+	}
+	if len(resp.Content) == 0 {
+		t.Fatalf("content array empty: %q", string(raw))
+	}
+	for _, b := range resp.Content {
+		if b.Type == "tool_use" {
+			t.Errorf("non-streaming refusal must not contain tool_use blocks: %+v", b)
+		}
+	}
+	if resp.Content[0].Type != "text" {
+		t.Errorf("first block type = %q, want text", resp.Content[0].Type)
+	}
+	if !strings.Contains(resp.Content[0].Text, "browser navigation blocked") {
+		t.Errorf("text missing reason: %q", resp.Content[0].Text)
+	}
+	if !strings.Contains(resp.Content[0].Text, "deny:browser:bad_domain") {
+		t.Errorf("text missing rule: %q", resp.Content[0].Text)
+	}
+}
+
+// TestBuildRefusalRich_StreamingFlagDistinguishesFormat confirms calling
+// the builder with NonStreaming=false vs NonStreaming=true produces
+// distinctly-shaped byte sequences (SSE vs JSON object).
+func TestBuildRefusalRich_StreamingFlagDistinguishesFormat(t *testing.T) {
+	dec := Decision{Allow: false, Reason: "test", Rule: "deny:test"}
+
+	streaming := BuildRefusalRich("openai", dec, &RefusalContext{
+		Provider:     "openai",
+		NonStreaming: false,
+	})
+	nonStreaming := BuildRefusalRich("openai", dec, &RefusalContext{
+		Provider:     "openai",
+		NonStreaming: true,
+	})
+
+	if bytes.Equal(streaming, nonStreaming) {
+		t.Fatalf("streaming and non-streaming refusal bytes are identical (flag has no effect)")
+	}
+	// Streaming must carry SSE markers; non-streaming must not.
+	if !bytes.Contains(streaming, []byte("data: ")) {
+		t.Errorf("streaming output missing SSE 'data: ' prefix: %q", string(streaming))
+	}
+	if !bytes.Contains(streaming, []byte("[DONE]")) {
+		t.Errorf("streaming output missing [DONE] sentinel: %q", string(streaming))
+	}
+	if bytes.Contains(nonStreaming, []byte("data: ")) {
+		t.Errorf("non-streaming output unexpectedly contains SSE marker: %q", string(nonStreaming))
+	}
+	// Non-streaming must decode as valid JSON.
+	var resp ChatCompletionResponse
+	if err := json.Unmarshal(nonStreaming, &resp); err != nil {
+		t.Errorf("non-streaming output is not a valid JSON object: %v", err)
+	}
+
+	// Same exercise on Anthropic provider.
+	streamingA := BuildRefusalRich("anthropic", dec, &RefusalContext{Provider: "anthropic", AnthropicToolUseIndex: 0})
+	nonStreamingA := BuildRefusalRich("anthropic", dec, &RefusalContext{Provider: "anthropic", NonStreaming: true})
+	if bytes.Equal(streamingA, nonStreamingA) {
+		t.Fatalf("Anthropic streaming and non-streaming refusal bytes are identical")
+	}
+	if !bytes.Contains(streamingA, []byte("event: ")) {
+		t.Errorf("Anthropic streaming output missing SSE event marker: %q", string(streamingA))
+	}
+	if bytes.Contains(nonStreamingA, []byte("event: ")) {
+		t.Errorf("Anthropic non-streaming output contains SSE event marker: %q", string(nonStreamingA))
+	}
+	var anth AnthropicMessagesResponse
+	if err := json.Unmarshal(nonStreamingA, &anth); err != nil {
+		t.Errorf("Anthropic non-streaming output is not a valid JSON object: %v", err)
+	}
+}
+
+// TestBuildRefusalRich_NonStreaming_EmptyModelFallback confirms an empty
+// Model field on the RefusalContext yields a synthetic model name (so
+// the output remains decodable) rather than emitting an empty string.
+func TestBuildRefusalRich_NonStreaming_EmptyModelFallback(t *testing.T) {
+	dec := Decision{Allow: false, Reason: "x", Rule: "deny:y"}
+	raw := BuildRefusalRich("openai", dec, &RefusalContext{Provider: "openai", NonStreaming: true})
+
+	var resp ChatCompletionResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Model == "" {
+		t.Errorf("empty model field on non-streaming refusal — SDKs may error on missing model")
+	}
+}

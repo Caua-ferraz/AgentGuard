@@ -20,10 +20,17 @@
 //	    --log-level info
 //
 // Set the agent's environment to point its OpenAI-compatible SDK at
-// the proxy:
+// the proxy. Note the asymmetric `/v1` convention between providers:
 //
-//	OPENAI_BASE_URL=http://127.0.0.1:8081
+//	OPENAI_BASE_URL=http://127.0.0.1:8081/v1
 //	ANTHROPIC_BASE_URL=http://127.0.0.1:8081
+//
+// The OpenAI SDK appends paths under OPENAI_BASE_URL including the
+// `/v1` segment that the proxy registers (POST /v1/chat/completions),
+// so the env var must include `/v1`. The Anthropic SDK convention is
+// the opposite — ANTHROPIC_BASE_URL is the *origin* and the SDK
+// appends `/v1/messages` itself, so the env var must NOT include a
+// `/v1` suffix.
 //
 // See docs/LLM_API_PROXY.md for the wire-format design and
 // docs/PROXY_ARCHITECTURE.md for cross-cutting decisions.
@@ -53,7 +60,7 @@ import (
 // Versions injected at link time via -ldflags. Defaults are used
 // for `go run ./cmd/agentguard-llm-proxy` and `go test`.
 var (
-	version = "0.4.1"
+	version = "0.5.0"
 	commit  = "dev"
 )
 

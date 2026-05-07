@@ -425,17 +425,24 @@ func NegotiateProtocolVersion(clientRequested string, supported []string) string
 	return chosen
 }
 
-// MergeCapabilities computes the gateway's advertised capabilities
-// given the negotiated set of upstream capability maps. v0.5 rules
-// (per docs/MCP_GATEWAY.md § 3.3):
+// MergeCapabilities returns the union of upstream capabilities for
+// advertisement to the client during initialize. v0.5 rules (per
+// docs/MCP_GATEWAY.md § 3.3):
 //
 //   - `tools` is always advertised; listChanged: false (the gateway
 //     does not subscribe to upstream tools/list_changed in v0.5).
 //   - `logging` is always advertised; gateway forwards
 //     logging/setLevel to every upstream.
-//   - `resources` and `prompts` are advertised iff at least one
-//     upstream advertises them.
 //   - `completions` is not advertised (v0.6 follow-up).
+//
+// v0.5 limitation: `resources` and `prompts` capabilities are
+// intentionally masked OUT — even when an upstream advertises them,
+// the gateway does NOT expose them to the client because resources/*
+// and prompts/* method routing is deferred to v0.6
+// (TODO(v0.6, #mcp-resources): forward resources/* + prompts/*
+// methods to the appropriate upstream). Advertising them in v0.5
+// would mislead the client into showing resources that every read
+// would reject with MethodNotFound (see Bridge.handleNotImplemented).
 //
 // TODO(v0.6, #mcp-list-changed): forward upstream
 // notifications/tools/list_changed and flip our advertised tools
@@ -446,24 +453,11 @@ func MergeCapabilities(upstreamCaps []map[string]interface{}) map[string]interfa
 		"logging": map[string]interface{}{},
 	}
 
-	hasResources := false
-	hasPrompts := false
-	for _, caps := range upstreamCaps {
-		if _, ok := caps["resources"]; ok {
-			hasResources = true
-		}
-		if _, ok := caps["prompts"]; ok {
-			hasPrompts = true
-		}
-	}
-
-	if hasResources {
-		// v0.5 forwards resources/* verbatim; subscribe is optional.
-		merged["resources"] = map[string]interface{}{}
-	}
-	if hasPrompts {
-		merged["prompts"] = map[string]interface{}{}
-	}
+	// Intentionally do NOT propagate `resources` or `prompts` from
+	// upstreams. See doc-comment above. The upstreamCaps loop is
+	// retained as a no-op to keep the signature stable and to make
+	// the masking explicit when v0.6 wiring lands.
+	_ = upstreamCaps
 
 	return merged
 }

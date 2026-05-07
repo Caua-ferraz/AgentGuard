@@ -8,12 +8,36 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- **MCP Gateway** — wire-level Model Context Protocol proxy that sits in front of any MCP server and policy-checks every `tools/call`. Targeted for v0.5.
-- **LLM API Proxy** — OpenAI/Anthropic-compatible base URL (`OPENAI_BASE_URL=http://…/v1`) so existing SDK clients flow through AgentGuard without code changes. Targeted for v0.5.
+- **MCP Gateway** (`agentguard-mcp-gateway` binary) — wire-level Model Context Protocol proxy that sits in front of one or more MCP servers and policy-checks every `tools/call`. Includes multi-upstream namespacing, capability merging, reconnect-with-backoff, and approval `_meta` round-trip. Operator-facing copy-paste configs for Claude Desktop, Cursor, Cline, Continue, and Zed under `examples/`.
+- **LLM API Proxy** (`agentguard-llm-proxy` binary) — OpenAI/Anthropic-compatible base URL (`OPENAI_BASE_URL=http://…/v1`, `ANTHROPIC_BASE_URL=http://…`) so existing SDK clients flow through AgentGuard without code changes. Streaming pause/resume/rewrite, tool-call gating, provider-aware synthetic refusals, and tool→scope mapping.
+- **`data` policy scope** — first-class scope for exfiltration / sensitive-payload checks; recognised by `pkg/policy/engine.go` and surfaced through both SDKs. Browser-use adapter's form-input check uses it.
+- **`mcp_tool` policy scope** — dual-check counterpart used by the MCP Gateway alongside a mapped concrete scope.
+- **`unmapped` LLM-proxy sentinel scope** — flags tool calls with no `tool_scope_map` entry. Gate-time only; rejected from operator policy by `validateToolScopeMap`. Operators write `scope: unmapped` rules to control the default-deny posture.
+- **`tool_scope_map` policy YAML key** — operator override surface shared between MCP Gateway and LLM API Proxy. Each binary loads the same policy file so the mapping stays in lockstep.
+- **`Entry.Transport string` audit field** — `sdk` / `mcp_gateway` / `llm_api_proxy`. Additive top-level field on the audit `Entry` struct (no `schema_version` bump). Pre-v0.5 entries have no transport tag and default to `sdk` for backward-compat consumers.
+- **`?transport=` filter on `GET /v1/audit`** (and the `agentguard audit --transport` CLI flag) — filters by integration path.
+- **`schema_version` wire field** on `/v1/check` request/response — defaults to `"v1"`; non-v1 values rejected with `400`.
+- **`/v1/health` HTTP endpoint** — open, returns `{"status","version"}`. Mirrors `/health` but lives under the `/v1` family for tenant-aware URL builders.
+- **`/v1/t/{tenant}/...` tenant-aware route family** — every operational endpoint mirrored under a tenant-aware path. v0.5 only recognises `local`; v0.6 swaps in a multi-tenant `PolicyProvider`.
+- **`agentguard check` CLI subcommand** — one-shot policy check (or batch from JSONL stdin) against a local policy file without going through the HTTP server. Per-field flags, `--request '<json>'`, `--stdin`, `--batch`, `--output text|json`, structured exit codes (`0` allow, `1` deny, `2` approval, `3` error).
+- **`--debug-pprof` / `--debug-pprof-port` serve flags** — expose Go pprof handlers on a separate localhost-only listener (default `127.0.0.1:6060`). Off by default; tunnel via `kubectl port-forward` or `ssh -L` for remote access.
+- **`--audit-buffered`, `--audit-queue-size`, `--audit-workers`, `--audit-overflow-path` serve flags** — wire the `BufferedAsyncLogger` (Phase 2 A6) so the `/v1/check` hot path no longer waits on the audit mutex. On by default; `--audit-buffered=false` restores the synchronous v0.4.x path.
+- **JSON-RPC error codes for the MCP Gateway**: `-32000` (`ErrCodePolicyDeny`), `-32001` (`ErrCodePolicyApproval`), `-32002` (`ErrCodeUpstreamUnavail`). Wire-protocol contract for MCP clients to branch on.
+- **`--policy` flag on `agentguard-llm-proxy`** — loads the central policy YAML for `tool_scope_map` operator overrides.
+- **`--policy` and `--policy-mode strict|fast` flags on `agentguard-mcp-gateway`** — `strict` (default) requires `--policy`; `fast` skips loading and uses bundled defaults.
+- **LLM streaming buffer cap** — `--max-buffer-bytes` (default `1048576`, ceiling `MaxConfigurableBufferBytes = 64 MiB`) per tool-call accumulator.
+- **Provider-aware synthetic refusal payloads** — `pkg/llmproxy/refusal.go` emits OpenAI-style assistant-text + `[DONE]` and Anthropic-style `content_block_*` shapes that match what each SDK expects.
+- **New Prometheus metrics**: `agentguard_llmproxy_buffer_overflow_total`, `agentguard_llmproxy_active_streams` (process-local on the LLM proxy); central server gains the `transport` label on existing decision counters.
 
 ### Changed
 
-- **Audit log rotation is wired by default.** Previously, the rotation primitives existed in `pkg/audit` but were not constructed by `runServe`; size-triggered rotation now runs out of the box. Rotated files are gzipped and carry a `_meta.rotated_from` pointer so startup replay walks the rotation chain. Operators who relied on external rotation can disable the built-in rotator via config.
+- **Audit log rotation is wired by default.** Previously, the rotation primitives existed in `pkg/audit` but were not constructed by `runServe`; size-triggered rotation now runs out of the box. Defaults: `--audit-max-size-mb 100`, `--audit-max-backups 5`, `--audit-max-age-days 30`, `--audit-compress true`. Rotated files are gzipped and carry a `_meta.rotated_from` pointer so startup replay walks the rotation chain. Operators who relied on external rotation can disable the built-in rotator via `--audit-max-size-mb 0`.
+- **`conditions.time_window` without `require_prior` is now a hard load error** (`errorTimeWindowOnlyConditions`). v0.4.x emitted only a WARNING; v0.5 promotes it to a load failure that aborts `serve` startup and hot-reload. Operators upgrading must remove time-window-only conditions from their policies first. `docs/MIGRATION.md` § v0.4.1 → v0.5 documents the upgrade path.
+- **Python SDK drops Python 3.8 support.** `pyproject.toml` requires `>=3.9`; CI matrix runs 3.9 / 3.10 / 3.11 / 3.12. 3.8 reached upstream EOL in October 2024.
+
+### Fixed
+
+- (no v0.5-specific fixes beyond those rolled into the above; security findings tracked in the v0.5 audit reports.)
 
 ## [0.4.1] — 2026-04-22
 

@@ -36,13 +36,23 @@ Start the proxy server. This is the only subcommand that runs a server process.
 | `--port <int>` | `8080` | TCP port. See bind behavior below. |
 | `--dashboard` | off | Serve `/dashboard` HTML + `/api/stream` SSE. Required for human approval UI. |
 | `--watch` | off | Poll the policy file every 2 s; hot-reload on mtime change. No restart needed. |
-| `--audit-log <path>` | `audit.jsonl` | Append-only JSON Lines file. Mode `0600`. Grows forever — see [`OPERATIONS.md`](OPERATIONS.md#audit-log-rotation). |
+| `--audit-log <path>` | `audit.jsonl` | Append-only JSON Lines file. Mode `0600`. Rotation is on by default; configurable via `--audit-max-size-mb`, `--audit-max-backups`, `--audit-max-age-days`, `--audit-compress`. Operators following older guidance should NOT also configure logrotate against `audit.jsonl` — the dual-rotator chain corrupts the rotation index. See [`OPERATIONS.md`](OPERATIONS.md#audit-log-rotation). |
 | `--api-key <key>` | *(empty)* | Bearer token for gated endpoints. **If empty, the server binds to `127.0.0.1` only** (localhost-only). |
 | `--base-url <url>` | `http://localhost:<port>` | External URL used when constructing `approval_url` in check responses. Set this behind a reverse proxy. |
 | `--allowed-origin <url>` | *(empty)* | Exact CORS origin. Empty = permissive-localhost (accepts any `http://localhost:*` or `http://127.0.0.1:*`). Set to `https://app.example` for strict single-origin. |
 | `--tls-terminated-upstream` | off | Issue session cookies with `Secure` even when `r.TLS == nil`. Set when behind a TLS-terminating proxy that does not forward `X-Forwarded-Proto`. See [`DEPLOYMENT.md`](DEPLOYMENT.md). |
 | `--session-cost-ttl <dur>` | `0` (never expire) | Evict idle session-cost accumulator entries. Example: `24h`. Zero keeps v0.4.0 behavior. |
 | `--session-cost-sweep-interval <dur>` | `max(ttl/4, 1m)` | Sweeper cadence. Ignored when `--session-cost-ttl 0`. |
+| `--audit-max-size-mb <int>` | `100` | Rotate when the live audit file reaches this MiB. `0` disables rotation entirely (v0.4.x behavior — unbounded growth). See [`OPERATIONS.md`](OPERATIONS.md#audit-log-rotation). |
+| `--audit-max-backups <int>` | `5` | Maximum number of rotated archives to retain. `0` keeps all archives indefinitely. |
+| `--audit-max-age-days <int>` | `30` | Maximum age (days) of archived audit files. Older archives pruned at rotation time. `0` disables age-based pruning. |
+| `--audit-compress` | `true` | gzip-compress rotated archives. Disable for plain JSONL siblings. |
+| `--audit-buffered` | `true` | Wrap the audit logger in a bounded async queue with disk-overflow durability so `/v1/check` no longer waits on the audit mutex. Disable to write straight to FileLogger (v0.4.x behavior). |
+| `--audit-queue-size <int>` | `1024` | Bounded queue size for the buffered async logger. Ignored unless `--audit-buffered`. |
+| `--audit-workers <int>` | `4` | Worker goroutines draining the buffered audit queue. Ignored unless `--audit-buffered`. |
+| `--audit-overflow-path <path>` | `<audit-log>.overflow.jsonl` | Disk-overflow spill file used when the buffered queue saturates. Ignored unless `--audit-buffered`. |
+| `--debug-pprof` | off | Expose Go pprof handlers on a **separate localhost-only** listener (`--debug-pprof-port`). Off by default; enable for performance investigations only. Tunnel via `kubectl port-forward` / `ssh -L` to access remotely — this listener never binds beyond `127.0.0.1`. |
+| `--debug-pprof-port <int>` | `6060` | Port for the localhost-only pprof listener. Ignored unless `--debug-pprof`. |
 
 ### Bind behavior
 
@@ -254,8 +264,9 @@ Query `/v1/audit` for recent decisions. All filters are optional and AND-combine
 | `--url <url>` | `http://localhost:8080` | Server URL. |
 | `--agent <id>` | *(none)* | Filter by exact `agent_id`. |
 | `--decision <D>` | *(none)* | `ALLOW`, `DENY`, or `REQUIRE_APPROVAL`. |
-| `--scope <name>` | *(none)* | `shell`, `filesystem`, `network`, `browser`, `cost`, `data`, etc. |
-| `--limit <int>` | `50` | Max entries. Server clamps above configured ceiling (default 200). |
+| `--scope <name>` | *(none)* | `shell`, `filesystem`, `network`, `browser`, `cost`, `data`, `mcp_tool`. |
+| `--transport <name>` | *(none)* | Filter by audit `transport` tag. One of `sdk`, `mcp_gateway`, `llm_api_proxy`. Pre-v0.5 entries are excluded when set. |
+| `--limit <int>` | `100` | Max entries. Server clamps silently above configured ceiling (default 1000). |
 | `--api-key <key>` | `$AGENTGUARD_API_KEY` | Bearer token. |
 
 ```bash

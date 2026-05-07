@@ -38,7 +38,7 @@ The approval queue is **in-memory**. Restart loses every pending entry — by de
 
 ### Does the audit log rotate?
 
-No — it grows forever. `audit.jsonl` is opened with `O_APPEND` and never renamed or truncated by AgentGuard. **You must rotate externally.** See [`OPERATIONS.md`](OPERATIONS.md#audit-log-rotation) for the truncate-in-place pattern. Also note the startup replay: the entire log is re-read on boot to seed counters, so letting it grow to multi-GB delays `/metrics` accuracy.
+Yes — rotation is **on by default** as of v0.5. The size-triggered rotator runs out of the box, controlled by `--audit-max-size-mb` (default 100 MiB), `--audit-max-backups` (default 5), `--audit-max-age-days` (default 30), and `--audit-compress` (default true). Operators following older guidance should NOT also configure `logrotate` against `audit.jsonl` — the dual-rotator chain corrupts the rotation index. See [`OPERATIONS.md`](OPERATIONS.md#audit-log-rotation). To opt out (e.g., when an external shipper handles rotation), set `--audit-max-size-mb 0`. Also note the startup replay: the active file plus a checkpointed prefix of the rotation chain is re-read on boot to seed counters.
 
 ### Why does `*.foo.com` not match `foo.com`?
 

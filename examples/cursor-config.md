@@ -93,6 +93,25 @@ In Cursor's chat (Composer):
   Windows) → DENY, surfaced on the dashboard at
   <http://127.0.0.1:8080/dashboard>.
 
+## API key handling
+
+Do **not** pass `--api-key "$AGENTGUARD_API_KEY"` as an `args` entry.
+Cursor's `${env:VAR}` interpolation has been unreliable across
+versions, and JSON-level `$VAR` shell-expansion never happens. The
+safe path is to set `AGENTGUARD_API_KEY` in the `env` block (or
+inherited from Cursor's parent shell) and **omit** the `--api-key`
+flag entirely — the gateway picks up the env var automatically when
+the flag is absent.
+
+## Tenant ID
+
+v0.5 is single-tenant. Use `--tenant-id local` (the only value the
+central server recognizes). Multi-tenant routing lands in v0.6 — until
+then, `--tenant-id <anything-other-than-local>` (including templated
+values like `cursor-${env:USER}`) returns 404 from `/v1/check`, the
+gateway hits its `--fail-mode` path, and every action denies (or is
+blanket-allowed, depending on your `--fail-mode`).
+
 ## Notes
 
 - Cursor passes namespace-prefixed tool names through verbatim, so policies

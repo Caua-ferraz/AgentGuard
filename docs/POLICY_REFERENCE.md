@@ -1,6 +1,6 @@
 # Policy Reference
 
-Canonical reference for the AgentGuard policy YAML format as of **v0.4.1**.
+Canonical reference for the AgentGuard policy YAML format as of **v0.5.0**.
 
 Source of truth: `pkg/policy/engine.go` (types) and `pkg/policy/engine.go:Engine.Check` (evaluation). Examples here are the shapes the Go YAML decoder accepts — unknown keys are silently ignored.
 
@@ -477,7 +477,7 @@ notifications:
   dispatch_timeout: "10s"            # applied to webhook + slack (per-target `timeout` wins)
   approval_required:
     - type: slack
-      url: "https://hooks.slack.com/services/..."
+      url: "https://example.invalid/REPLACE_ME_BEFORE_DEPLOY"
       timeout: "5s"
   on_deny:
     - type: webhook

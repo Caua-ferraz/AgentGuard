@@ -151,19 +151,47 @@ rules:
   # duplication. See docs/MCP_GATEWAY.md and
   # docs/POLICY_REFERENCE.md#mcp_tool-scope.
   #
-  # Uncomment and tune for your deployment:
-  #
-  # - scope: mcp_tool
-  #   deny:
-  #     - pattern: "fs:write_file"      # block writes entirely
-  #     - pattern: "github:delete_*"    # never delete via MCP
-  #   require_approval:
-  #     - pattern: "github:*"           # all github tool calls need approval
-  #     - pattern: "*:execute_*"        # any execute_* tool, any namespace
-  #   allow:
-  #     - pattern: "fs:read_*"          # safe reads
-  #     - pattern: "fs:list_*"
-  #     - pattern: "everything:*"       # MCP "everything" sample server
+  # IMPORTANT: in strict mode the mcp_tool leg is checked FIRST and
+  # short-circuits on non-ALLOW. If you ship a policy with no
+  # mcp_tool rules, the default-deny fall-through fires and EVERY
+  # MCP tools/call denies — see docs/MCP_GATEWAY.md for the full
+  # dual-check semantics. The block below is the safe-default rule
+  # set used by the MCP quickstart; tune for your deployment.
+  - scope: mcp_tool
+    deny:
+      # Block any namespace's destructive write/delete tools by name.
+      # Operators who need writes should add a narrower allow above.
+      - pattern: "*:write_file"
+        message: "Writes via MCP are blocked by default policy"
+      - pattern: "*:delete_*"
+        message: "Deletes via MCP are blocked by default policy"
+      - pattern: "*:remove_*"
+        message: "Removes via MCP are blocked by default policy"
+      # Any tool whose name starts with execute_ is treated as code
+      # execution regardless of namespace (run shells, eval, etc.).
+      - pattern: "*:execute_*"
+        message: "Executable MCP tools are blocked by default policy"
+    require_approval:
+      # Network-touching tools should ask before acting.
+      - pattern: "github:*"
+      - pattern: "*:fetch_*"
+      - pattern: "*:http_*"
+    allow:
+      # Default-allow for safe read/list/get tools across any
+      # upstream namespace. The dual-check still gates the *mapped*
+      # scope (filesystem, network, ...) per tool_scope_map.
+      - pattern: "*:read_*"
+      - pattern: "*:list_*"
+      - pattern: "*:get_*"
+      # The MCP filesystem reference server's tools (read_text_file,
+      # list_directory, etc.) are also covered by *:read_* / *:list_*
+      # but we whitelist the entire fs: namespace so search/info tools
+      # without a read_ prefix still pass the mcp_tool leg. The
+      # filesystem rules above remain authoritative for path-level
+      # gating via the dual-check.
+      - pattern: "fs:*"
+      # MCP "everything" sample server used by the quickstart docs.
+      - pattern: "everything:*"
 
 # tool_scope_map declares the tool-name → existing-scope mapping used
 # by BOTH the MCP Gateway (--policy-mode strict dual-check) and the
@@ -192,32 +220,41 @@ rules:
 # Operators who want unknown LLM tools to flow through must write an
 # explicit `scope: unmapped` rule.
 #
-# Uncomment and tune as needed:
-#
-# tool_scope_map:
-#   # --- MCP Gateway entries (namespaced names) ---
-#   - pattern: "fs:read_file"
-#     scope: filesystem
-#   - pattern: "fs:write_file"
-#     scope: filesystem
-#   - pattern: "fs:*"
-#     scope: filesystem
-#   - pattern: "github:*"
-#     scope: network
-#   - pattern: "*:execute_*"
-#     scope: shell
-#   - pattern: "*:run_command"
-#     scope: shell
-#
-#   # --- LLM API Proxy entries (bare names; defaults live in the
-#   # binary, override here when needed) ---
-#   #
-#   # - pattern: "my_company_deploy"
-#   #   scope: shell
-#   # - pattern: "fill_form"
-#   #   scope: data            # PII gating against `data` scope rules
-#   # - pattern: "submit_form"
-#   #   scope: data
+# The default map below covers the upstreams shipped in
+# examples/*-config.json (fs / fetch / github). Add entries for any
+# additional MCP servers you wire in.
+tool_scope_map:
+  # --- MCP Gateway entries (namespaced names) ---
+  # Filesystem server (npx @modelcontextprotocol/server-filesystem).
+  - pattern: "fs:*"
+    scope: filesystem
+  # Fetch server (npx @modelcontextprotocol/server-fetch) — every
+  # tool is a network egress.
+  - pattern: "fetch:*"
+    scope: network
+  # GitHub server (npx @modelcontextprotocol/server-github) — every
+  # tool ultimately hits api.github.com.
+  - pattern: "github:*"
+    scope: network
+  # Cross-namespace catch-alls (more specific patterns above win).
+  - pattern: "*:execute_*"
+    scope: shell
+  - pattern: "*:run_command"
+    scope: shell
+  - pattern: "*:fetch_*"
+    scope: network
+  - pattern: "*:http_*"
+    scope: network
+
+  # --- LLM API Proxy entries (bare names; defaults live in the
+  # binary, override here when needed) ---
+  #
+  # - pattern: "my_company_deploy"
+  #   scope: shell
+  # - pattern: "fill_form"
+  #   scope: data            # PII gating against `data` scope rules
+  # - pattern: "submit_form"
+  #   scope: data
 
 # Notifier filters (see docs/OBSERVABILITY.md):
 #   `approval_required` only fires on REQUIRE_APPROVAL decisions.

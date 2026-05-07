@@ -30,6 +30,17 @@ Default path: `audit.jsonl` (CLI `--audit-log`). JSON-Lines, one record per line
 
 **Corrupt meta record.** If the first non-empty line parses as JSON but has neither `_meta` nor the shape of an `audit.Entry`, the server refuses startup. Corrupt lines **after** the first are silently skipped, as they are today.
 
+**`Entry.Transport` field (v0.5+, additive — schema_version stays at 2).** Each `audit.Entry` written by a v0.5+ binary carries a top-level `transport` string identifying which integration path produced the entry:
+
+| value | source |
+|---|---|
+| `"sdk"` | direct `/v1/check` callers — Python SDK, TypeScript SDK, framework adapters, hand-rolled HTTP clients |
+| `"mcp_gateway"` | `agentguard-mcp-gateway` binary |
+| `"llm_api_proxy"` | `agentguard-llm-proxy` binary |
+| (omitted / empty string) | pre-v0.5 entries, or v0.5+ entries written before the writer was upgraded — readers should treat as `"sdk"` for filtering purposes |
+
+The field is purely additive: schema_version remains `2`. Pre-v0.5 readers ignore unknown top-level keys without error. v0.5+ writers MUST set `Transport` on every new entry; the central server's `/v1/check` handler stamps it from `meta["transport"]` on the inbound request, defaulting to `"sdk"` when the field is absent. External audit consumers implementing against this format MUST tolerate the field's absence on legacy data and SHOULD preserve it round-trip when re-serialising entries.
+
 ### `.replay-checkpoint` — audit replay checkpoint
 
 Default path: `<audit-dir>/.replay-checkpoint`. Single JSON record. Written after each successful `Logger.Log` flush.
@@ -42,7 +53,9 @@ On boot the server uses the checkpoint to resume replay without re-scanning the 
 
 ### `<audit-dir>/audit-<timestamp>.jsonl[.gz]` — rotated audit files
 
-Size-triggered rotation via the logger. Each rotated file carries the same schema-2 header as the live file, with `_meta.rotated_from` set to the path of the file whose tail rolled into it. Compression is applied to rotated files only; the live file stays uncompressed to keep appends cheap.
+#### Rotated file headers
+
+Size-triggered rotation via the logger. Each rotated file carries the same schema-2 header as the live file, with `_meta.rotated_from` set to the path of the file whose tail rolled into it. Compression is applied to rotated files only; the live file stays uncompressed to keep appends cheap. Startup replay walks the chain backwards via `_meta.rotated_from` until it reaches the segment indexed by `.replay-checkpoint`.
 
 ### `.v040-backup` — one-time rollback artifact
 

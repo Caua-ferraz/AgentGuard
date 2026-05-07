@@ -268,10 +268,10 @@ func TestAT_Concurrency_FailModeAllowAndDenyRespected(t *testing.T) {
 		base, teardown := newStreamingTestServer(t, upstream, func(s *Server) {
 			s.cfg.FailMode = "deny"
 			// Wire the rich refusal builder so the rule string
-			// `deny:llm_api_proxy:policy_unreachable` lands in the
-			// client-visible refusal — that's the dashboard-grep
-			// marker the operator alerts on. Default builder only
-			// renders Reason; rich renders Rule too.
+			// FailModeRuleClosed ("deny:llm_api_proxy:fail_closed")
+			// lands in the client-visible refusal — that's the
+			// dashboard-grep marker the operator alerts on. Default
+			// builder only renders Reason; rich renders Rule too.
 			s.BuildRefusal = BuildRefusalRich
 			s.PolicyCheck = func(ctx context.Context, tc *ToolCallCheck) (Decision, error) {
 				return Decision{}, fmt.Errorf("simulated /v1/check unreachable")
@@ -299,8 +299,13 @@ func TestAT_Concurrency_FailModeAllowAndDenyRespected(t *testing.T) {
 				if strings.Contains(gotStr, `"call_fm"`) {
 					leaks.Add(1)
 				}
-				// Rich refusal carries the policy-unreachable rule.
-				if !strings.Contains(gotStr, "policy_unreachable") {
+				// Rich refusal carries the fail-closed rule.
+				if !strings.Contains(gotStr, FailModeRuleClosed) {
+					leaks.Add(1)
+				}
+				// And it MUST NOT carry the audit variant — that's a
+				// different fail-mode and would mask a regression.
+				if strings.Contains(gotStr, FailModeRuleClosedAudit) {
 					leaks.Add(1)
 				}
 			}()

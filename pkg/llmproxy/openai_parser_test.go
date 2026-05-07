@@ -245,6 +245,74 @@ func TestOpenAIParser_DoneTerminatorWhileIdle(t *testing.T) {
 	}
 }
 
+// TestOpenAIParser_ArgsAndFinishReasonInSameEvent_AssemblesCorrectly pins
+// the fix for audit blocker B3: when an event carries BOTH the closing
+// argument fragment AND finish_reason: "tool_calls" in a single envelope,
+// the parser MUST apply the fragment to the accumulator BEFORE deciding
+// completion. Otherwise the assembled arguments string would lose its
+// final fragment and PolicyCheck would see truncated arguments.
+func TestOpenAIParser_ArgsAndFinishReasonInSameEvent_AssemblesCorrectly(t *testing.T) {
+	events := stripCommentEvents(readFixtureEvents(t, "openai_streaming_args_and_finish_in_one_event.txt"))
+	acc := NewOpenAIToolCallAccumulator(0)
+
+	var completed []ToolCallCheck
+	for i, ev := range events {
+		res, err := acc.FeedEvent(ev)
+		if err != nil {
+			t.Fatalf("event %d: %v", i, err)
+		}
+		if res.Completed {
+			completed = res.CompletedToolCalls
+		}
+	}
+	if len(completed) != 1 {
+		t.Fatalf("len(completed) = %d, want 1", len(completed))
+	}
+	wantArgs := `{"cmd":"ls"}`
+	gotArgs := strings.TrimSpace(string(completed[0].RawArguments))
+	if gotArgs != wantArgs {
+		t.Errorf("RawArguments = %q, want %q (closing fragment was dropped — B3 regression)", gotArgs, wantArgs)
+	}
+	if cmd, _ := completed[0].Arguments["cmd"].(string); cmd != "ls" {
+		t.Errorf("Arguments[cmd] = %v, want ls", completed[0].Arguments["cmd"])
+	}
+	if completed[0].ToolName != "bash" {
+		t.Errorf("ToolName = %q, want bash", completed[0].ToolName)
+	}
+	if completed[0].ToolCallID != "call_abc" {
+		t.Errorf("ToolCallID = %q, want call_abc", completed[0].ToolCallID)
+	}
+}
+
+// TestOpenAIParser_ArgsAndFinishReasonInSameEvent_FiresCompletion pins
+// that Completed is signalled exactly once after the bundling event,
+// rather than the accumulator silently dropping the cycle (the original
+// B3 bug shape: Accumulating returned, never closed, [DONE] consumed
+// while still active, EOF reached without ever firing the gate).
+func TestOpenAIParser_ArgsAndFinishReasonInSameEvent_FiresCompletion(t *testing.T) {
+	events := stripCommentEvents(readFixtureEvents(t, "openai_streaming_args_and_finish_in_one_event.txt"))
+	acc := NewOpenAIToolCallAccumulator(0)
+
+	completedCount := 0
+	var lastCompletedToolCalls []ToolCallCheck
+	for i, ev := range events {
+		res, err := acc.FeedEvent(ev)
+		if err != nil {
+			t.Fatalf("event %d: %v", i, err)
+		}
+		if res.Completed {
+			completedCount++
+			lastCompletedToolCalls = res.CompletedToolCalls
+		}
+	}
+	if completedCount != 1 {
+		t.Fatalf("Completed fired %d times, want exactly 1", completedCount)
+	}
+	if len(lastCompletedToolCalls) != 1 {
+		t.Fatalf("len(CompletedToolCalls) = %d, want 1", len(lastCompletedToolCalls))
+	}
+}
+
 // TestOpenAIParser_ExtractDataLine_SpaceTolerant — both `data: <json>`
 // and `data:<json>` (no space) shapes are recognised.
 func TestOpenAIParser_ExtractDataLine_SpaceTolerant(t *testing.T) {

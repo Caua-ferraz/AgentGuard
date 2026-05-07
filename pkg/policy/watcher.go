@@ -158,7 +158,14 @@ func (w *FileWatcher) reload() {
 		log.Printf("Policy reload failed: %v", err)
 		return
 	}
-	w.callback(pol)
+	// Wrap the user callback in safeCallback so a panic does not kill
+	// the watcher goroutine. R-Code H1 (v0.5 audit): in production the
+	// callback is FilePolicyProvider.onPolicyChange which fans out to
+	// each registered Watch consumer; safeCallback is also used inside
+	// onPolicyChange so a single misbehaving consumer cannot starve the
+	// rest. Defending here belt-and-braces guards direct WatchFile
+	// callers (tests, future providers).
+	safeCallback(w.callback, pol)
 }
 
 // Close stops the file watcher. Safe to call multiple times.

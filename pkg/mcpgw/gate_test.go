@@ -606,3 +606,71 @@ func TestInferFilesystemAction(t *testing.T) {
 		}
 	}
 }
+
+// TestHTTPPolicyClient_FailMode_DenyVsClosedAudit_DistinctRules pins
+// the B4 fix on the MCP gate side: --fail-mode deny and
+// --fail-mode fail-closed-with-audit must emit DISTINCT rule strings
+// so dashboards can break out central-server-outage events from plain
+// fail-closed denials.
+//
+// Pre-fix: the MCP gate's failModeDecision collapsed both branches into
+// the same `deny:gateway:fail_closed` rule, making the operator-claimed
+// `fail-closed-with-audit` mode observationally indistinguishable from
+// `deny`. Post-fix: `fail-closed-with-audit` emits FailModeRuleClosedAudit
+// and `deny` emits FailModeRuleClosed.
+func TestHTTPPolicyClient_FailMode_DenyVsClosedAudit_DistinctRules(t *testing.T) {
+	// Unreachable-guard server: hijacks the connection and closes it so
+	// every /v1/check call errors out and failModeDecision fires.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, _ := w.(http.Hijacker)
+		conn, _, _ := hj.Hijack()
+		_ = conn.Close()
+	}))
+	defer srv.Close()
+
+	driveOnce := func(t *testing.T, failMode string) Decision {
+		t.Helper()
+		cfg := &Config{
+			GuardURL:   srv.URL,
+			TenantID:   "local",
+			PolicyMode: "fast",
+			FailMode:   failMode,
+		}
+		gate := NewHTTPPolicyClient(cfg, nil)
+		gate.HTTPClient = &http.Client{Timeout: 250 * time.Millisecond}
+		dec, err := gate.Check(context.Background(), toolsCallReq("fs:read_file", nil))
+		if err != nil {
+			t.Fatalf("fail-mode %s: Check should not bubble err, got %v", failMode, err)
+		}
+		return dec
+	}
+
+	t.Run("deny", func(t *testing.T) {
+		dec := driveOnce(t, "deny")
+		if dec.Allow {
+			t.Fatalf("fail-mode=deny: expected DENY, got %+v", dec)
+		}
+		if dec.Rule != FailModeRuleClosed {
+			t.Errorf("fail-mode=deny: expected Rule=%q, got %q", FailModeRuleClosed, dec.Rule)
+		}
+		if dec.Rule == FailModeRuleClosedAudit {
+			t.Errorf("fail-mode=deny: rule must not be the audit variant")
+		}
+	})
+
+	t.Run("fail-closed-with-audit", func(t *testing.T) {
+		dec := driveOnce(t, "fail-closed-with-audit")
+		if dec.Allow {
+			t.Fatalf("fail-mode=fail-closed-with-audit: expected DENY, got %+v", dec)
+		}
+		if dec.Rule != FailModeRuleClosedAudit {
+			t.Errorf("fail-mode=fail-closed-with-audit: expected Rule=%q, got %q", FailModeRuleClosedAudit, dec.Rule)
+		}
+		if dec.Rule == FailModeRuleClosed {
+			t.Errorf("fail-mode=fail-closed-with-audit: rule must not collapse to plain fail_closed")
+		}
+		if !strings.Contains(dec.Reason, "central server unreachable") {
+			t.Errorf("expected fail-closed reason; got %q", dec.Reason)
+		}
+	})
+}
