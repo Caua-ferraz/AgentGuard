@@ -525,6 +525,70 @@ func TestBuildMappedActionRequest_ShellArgs(t *testing.T) {
 	}
 }
 
+// TestHTTPPolicyClient_PropagatesApprovalID — A19b. The bridge stamps
+// ToolsCallRequest.ApprovalID from `_meta.dev.agentguard/approval_id`;
+// the gateway's HTTPPolicyClient must forward this as a top-level
+// ApprovalID field on the /v1/check body so the central server can
+// look up the approval queue and short-circuit. This pins the wire
+// shape — without it, the "approve once, model proceeds" UX would
+// silently degrade to "every retry creates a fresh approval".
+func TestHTTPPolicyClient_PropagatesApprovalID(t *testing.T) {
+	m := newMockGuardServer(t)
+	gate := newGateForTest(t, m, "fast", nil)
+
+	req := toolsCallReq("fs:dangerous_tool", map[string]interface{}{"target": "x"})
+	req.ApprovalID = "ap_12345_test_round_trip"
+
+	if _, err := gate.Check(context.Background(), req); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+
+	m.scopeMu.Lock()
+	defer m.scopeMu.Unlock()
+	if len(m.receivedReqs) == 0 {
+		t.Fatal("mock server received zero requests")
+	}
+	for _, ar := range m.receivedReqs {
+		if ar.ApprovalID != req.ApprovalID {
+			t.Errorf("ActionRequest.ApprovalID = %q; want %q (scope=%s)", ar.ApprovalID, req.ApprovalID, ar.Scope)
+		}
+	}
+}
+
+// TestHTTPPolicyClient_PropagatesApprovalID_DualCheck — same
+// guarantee for the strict-mode dual-check path: the approval id
+// must appear on BOTH the mcp_tool and the mapped-scope /v1/check
+// calls so the server can short-circuit either layer's decision.
+func TestHTTPPolicyClient_PropagatesApprovalID_DualCheck(t *testing.T) {
+	m := newMockGuardServer(t)
+	pol := &policy.Policy{
+		Version: "1",
+		Name:    "x",
+		ToolScopeMap: []policy.ToolScopeMapping{
+			{Pattern: "fs:*", Scope: "filesystem"},
+		},
+	}
+	gate := newGateForTest(t, m, "strict", pol)
+
+	req := toolsCallReq("fs:write_file", map[string]interface{}{"path": "/tmp/x"})
+	req.ApprovalID = "ap_dualcheck_test"
+
+	if _, err := gate.Check(context.Background(), req); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+
+	m.scopeMu.Lock()
+	defer m.scopeMu.Unlock()
+	if len(m.receivedReqs) != 2 {
+		t.Fatalf("expected 2 mock calls (mcp_tool + filesystem), got %d", len(m.receivedReqs))
+	}
+	for _, ar := range m.receivedReqs {
+		if ar.ApprovalID != req.ApprovalID {
+			t.Errorf("ActionRequest.ApprovalID on scope=%s = %q; want %q", ar.Scope, ar.ApprovalID, req.ApprovalID)
+		}
+	}
+}
+
 func TestInferFilesystemAction(t *testing.T) {
 	cases := map[string]string{
 		"read_file":   "read",

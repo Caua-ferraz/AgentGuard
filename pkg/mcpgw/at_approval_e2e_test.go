@@ -10,26 +10,23 @@ package mcpgw_test
 //      with the API key.
 //   3. /v1/status/{id} reports the approval as resolved=true,
 //      decision="ALLOW".
+//   4. The model retries the same tools/call with
+//      `_meta.dev.agentguard/approval_id` set; the bridge stamps it on
+//      the /v1/check body's top-level ApprovalID field; the central
+//      server's handleCheck consults the approval queue, sees the
+//      resolved ALLOW, and short-circuits. The retry succeeds with a
+//      non-error result. The audit log gains a SECOND mcp_gateway
+//      entry tagged rule="allow:approved" — investigators can
+//      distinguish policy-allowed from human-approved decisions in the
+//      audit log.
 //
-// What this test does NOT do (and why): the v0.5 plan called for
-// step 4 — "retry the tools/call with `_meta.dev.agentguard/approval_id`
-// and assert ALLOW". The bridge does pass the approval_id through to
-// the central server's /v1/check via meta.approval_id (gate.go:181),
-// but the central server's `policy.Engine.Check` is stateless w.r.t.
-// the approval queue: re-checking the same require_approval rule
-// produces a fresh PendingAction with a NEW approval_id. The
-// short-circuit-on-approved-id path is owned by the policy hook
-// (verified by A17's TestBridge_PolicyApprovalRoundTrip), but in
-// production the hook is HTTPPolicyClient.Check, which forwards to
-// /v1/check rather than checking the approval state directly.
-//
-// This is documented as a v0.6 follow-up:
-//   TODO(v0.6, #mcp-approval-roundtrip): central server's
-//   /v1/check should consult ApprovalQueue when meta.approval_id
-//   is set; if Resolved && Decision==ALLOW, return ALLOW
-//   with rule="allow:approval_resolved:<id>". Today the operator
-//   approve clears the queue but the model's retry produces a new
-//   approval — the operator would have to approve again.
+// History: v0.5 originally shipped Phase 4B with this test in
+// "log the gap" mode because handleCheck was stateless w.r.t. the
+// approval queue and re-evaluation produced a fresh approval id.
+// A19b (post-Phase 4B fixup, pre-Phase 4C) added the
+// ActionRequest.ApprovalID field + handleCheck short-circuit; this
+// test was flipped from logging the gap to asserting the closed
+// round-trip. See .audit/v05_decisions.md "A19b" entry.
 //
 // Important caveat (Q3 from Phase 4A review): this test verifies
 // `_meta` round-tripping inside the gateway's own retry path. It does
@@ -229,14 +226,13 @@ func TestAT_ApprovalE2E_RequireApproveRetry(t *testing.T) {
 		t.Errorf("status.Decision = %q; want ALLOW", status.Decision)
 	}
 
-	// 4. Document the v0.6 gap. We retry the tools/call with
-	//    `_meta.dev.agentguard/approval_id` set; the bridge stamps it
-	//    on the /v1/check meta as designed, but the v0.5 central
-	//    server doesn't consult the approval queue on check, so we
-	//    expect a SECOND REQUIRE_APPROVAL response with a fresh id.
-	//    This pins the current behaviour so a v0.6 fix that closes the
-	//    gap will trip this assertion deliberately and force the test
-	//    to be updated.
+	// 4. Retry the tools/call with `_meta.dev.agentguard/approval_id`
+	//    set. The bridge stamps it onto ToolsCallRequest.ApprovalID;
+	//    HTTPPolicyClient.Check propagates that to the /v1/check body's
+	//    top-level ApprovalID field; the central server's handleCheck
+	//    consults the approval queue, sees the resolved ALLOW, and
+	//    short-circuits without creating a fresh approval entry.
+	//    The retry MUST succeed with a non-error result.
 	h.send(map[string]interface{}{
 		"jsonrpc": "2.0", "id": 3, "method": "tools/call",
 		"params": map[string]interface{}{
@@ -255,51 +251,56 @@ func TestAT_ApprovalE2E_RequireApproveRetry(t *testing.T) {
 	if err := json.Unmarshal(r2.Result, &retryResult); err != nil {
 		t.Fatalf("decode retry: %v", err)
 	}
-	retryID, _ := extractApprovalMeta(t, r2.Result)
-	if !retryResult.IsError {
-		// The retry succeeded! That would mean the gap is closed —
-		// great news, but the test author should refactor this case.
-		t.Logf("INFO: retry returned non-error result. The v0.6 gap may be closed; please update this test.")
-	} else if retryID == "" {
-		t.Errorf("retry isError=true but no approval_id surfaced; result: %+v", retryResult)
-	} else if retryID == approvalID {
-		// Same id reused — this would actually be a positive sign,
-		// suggesting the central server short-circuits on the approval
-		// id. Document.
-		t.Logf("INFO: retry returned the SAME approval id (%s); short-circuit may be partially wired.", retryID)
-	} else {
-		// Expected v0.5 behaviour: a fresh approval id is created.
-		t.Logf("v0.5 documented gap reproduced: retry produced fresh approval id %s (original was %s). TODO(v0.6, #mcp-approval-roundtrip).",
-			retryID, approvalID)
+	if retryResult.IsError {
+		// Surface the body so a regression here is debuggable from CI logs.
+		var bodyText string
+		if len(retryResult.Content) > 0 {
+			bodyText = retryResult.Content[0].Text
+		}
+		t.Fatalf("retry returned isError=true; expected ALLOW short-circuit. body: %q", bodyText)
+	}
+	// The retry must NOT contain a new approval_id in _meta — the
+	// short-circuit path returns ALLOW directly.
+	if retryID, _ := extractApprovalMeta(t, r2.Result); retryID != "" {
+		t.Errorf("retry surfaced approval_id %q in _meta; short-circuit ALLOW should not advertise an approval", retryID)
 	}
 
-	// 5. Verify the audit log has the REQUIRE_APPROVAL entry from
-	//    step 1 (the retry's REQUIRE_APPROVAL is acceptable but not
-	//    asserted on, given the v0.5 gap above).
+	// 5. Audit log invariants:
+	//    - Two mcp_gateway entries: REQUIRE_APPROVAL on the first call,
+	//      ALLOW on the retry.
+	//    - The retry's ALLOW carries rule="allow:approved" so audit
+	//      investigators can distinguish human-approved from
+	//      policy-allowed decisions (T1 reinforcement).
+	//    - No fresh approval entry was created on the retry — the
+	//      original entry is reused.
 	entries, err := fl.Query(audit.QueryFilter{
 		Transport: audit.TransportMCPGateway,
 	})
 	if err != nil {
 		t.Fatalf("audit query: %v", err)
 	}
-	if len(entries) < 1 {
-		t.Fatalf("expected ≥1 mcp_gateway audit entries, got %d", len(entries))
+	if len(entries) < 2 {
+		t.Fatalf("expected ≥2 mcp_gateway audit entries (REQUIRE_APPROVAL + ALLOW), got %d", len(entries))
 	}
-	var sawApproval bool
-	var sawTransport bool
+	var sawRequireApproval, sawAllowApproved bool
 	for _, e := range entries {
-		if string(e.Result.Decision) == "REQUIRE_APPROVAL" {
-			sawApproval = true
+		if e.EffectiveTransport() != audit.TransportMCPGateway {
+			t.Errorf("entry has transport=%q; want mcp_gateway", e.EffectiveTransport())
 		}
-		if e.EffectiveTransport() == audit.TransportMCPGateway {
-			sawTransport = true
+		switch string(e.Result.Decision) {
+		case "REQUIRE_APPROVAL":
+			sawRequireApproval = true
+		case "ALLOW":
+			if e.Result.Rule == "allow:approved" {
+				sawAllowApproved = true
+			}
 		}
 	}
-	if !sawApproval {
-		t.Errorf("audit log missing any REQUIRE_APPROVAL entry")
+	if !sawRequireApproval {
+		t.Errorf("audit log missing REQUIRE_APPROVAL entry from the first call")
 	}
-	if !sawTransport {
-		t.Errorf("audit log missing entry with transport=mcp_gateway")
+	if !sawAllowApproved {
+		t.Errorf("audit log missing ALLOW entry with rule=allow:approved from the retry; the short-circuit may not have fired")
 	}
 }
 
@@ -322,16 +323,3 @@ func extractApprovalMeta(t *testing.T, raw json.RawMessage) (id, url string) {
 	return meta[mcpgw.MetaApprovalIDKey], meta["dev.agentguard/approval_url"]
 }
 
-// containsAny returns true iff s contains any of the substrings in subs.
-func containsAny(s string, subs []string) bool {
-	for _, sub := range subs {
-		if len(sub) > 0 && len(s) >= len(sub) {
-			for i := 0; i+len(sub) <= len(s); i++ {
-				if s[i:i+len(sub)] == sub {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}

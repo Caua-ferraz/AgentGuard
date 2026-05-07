@@ -2162,3 +2162,314 @@ func TestTransportFromRequest_UnitTable(t *testing.T) {
 		})
 	}
 }
+
+// --- /v1/check approval-id round-trip (A19b) ---
+//
+// When a model retries a tool call after a human resolved the
+// approval on the dashboard, the gateway propagates the original
+// approval_id (carried through MCP `_meta.dev.agentguard/approval_id`
+// or the SDK's equivalent). The server consults the approval queue
+// before running policy and short-circuits to the human's decision
+// rather than producing a fresh REQUIRE_APPROVAL entry. These tests
+// pin the four code paths: ALLOW short-circuit, DENY short-circuit,
+// still-pending pass-through, and unknown-id fall-through. Plus a
+// unit test for ApprovalQueue.Lookup's read-only contract.
+
+// seedApproval drives a /v1/check that the test policy requires-approval
+// for and returns the resulting approval id. Convenience for the
+// round-trip tests below — keeps each test focused on the retry leg.
+func seedApproval(t *testing.T, srv *Server) string {
+	t.Helper()
+	body := `{"scope":"shell","command":"sudo apt install vim"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleCheck(w, req)
+
+	var result policy.CheckResult
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("seed: decode: %v", err)
+	}
+	if result.Decision != policy.RequireApproval {
+		t.Fatalf("seed: expected REQUIRE_APPROVAL, got %s (reason=%s)", result.Decision, result.Reason)
+	}
+	if result.ApprovalID == "" {
+		t.Fatal("seed: empty approval_id")
+	}
+	return result.ApprovalID
+}
+
+func TestHandleCheck_ApprovalIDResolved_AllowShortCircuits(t *testing.T) {
+	srv := newTestServer(t)
+
+	approvalID := seedApproval(t, srv)
+	queueSizeBefore := len(srv.approval.pending)
+
+	// Human approves on the dashboard.
+	if err := srv.approval.Resolve(approvalID, policy.Allow); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	// Model retries with approval_id propagated.
+	body := fmt.Sprintf(`{"scope":"shell","command":"sudo apt install vim","approval_id":%q}`, approvalID)
+	req := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleCheck(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result policy.CheckResult
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Decision != policy.Allow {
+		t.Errorf("retry decision = %s; want ALLOW (rule=%s reason=%s)", result.Decision, result.Rule, result.Reason)
+	}
+	if result.Rule != "allow:approved" {
+		t.Errorf("retry rule = %q; want allow:approved", result.Rule)
+	}
+	if result.ApprovalID != approvalID {
+		t.Errorf("retry approval_id = %q; want %q (the original)", result.ApprovalID, approvalID)
+	}
+
+	if got := len(srv.approval.pending); got != queueSizeBefore {
+		t.Errorf("queue size grew: before=%d after=%d (no new entry should have been created)", queueSizeBefore, got)
+	}
+}
+
+func TestHandleCheck_ApprovalIDResolved_DenyShortCircuits(t *testing.T) {
+	srv := newTestServer(t)
+
+	approvalID := seedApproval(t, srv)
+	queueSizeBefore := len(srv.approval.pending)
+
+	if err := srv.approval.Resolve(approvalID, policy.Deny); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	body := fmt.Sprintf(`{"scope":"shell","command":"sudo apt install vim","approval_id":%q}`, approvalID)
+	req := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleCheck(w, req)
+
+	var result policy.CheckResult
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Decision != policy.Deny {
+		t.Errorf("retry decision = %s; want DENY", result.Decision)
+	}
+	if result.Rule != "deny:approved" {
+		t.Errorf("retry rule = %q; want deny:approved", result.Rule)
+	}
+	if result.ApprovalID != approvalID {
+		t.Errorf("retry approval_id = %q; want %q", result.ApprovalID, approvalID)
+	}
+
+	if got := len(srv.approval.pending); got != queueSizeBefore {
+		t.Errorf("queue size grew: before=%d after=%d", queueSizeBefore, got)
+	}
+}
+
+func TestHandleCheck_ApprovalIDStillPending_ReturnsExistingApproval(t *testing.T) {
+	srv := newTestServer(t)
+
+	approvalID := seedApproval(t, srv)
+	queueSizeBefore := len(srv.approval.pending)
+
+	// Retry BEFORE the human resolves. Server should return the SAME
+	// approval id back (no fresh entry) so the client can keep waiting.
+	body := fmt.Sprintf(`{"scope":"shell","command":"sudo apt install vim","approval_id":%q}`, approvalID)
+	req := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleCheck(w, req)
+
+	var result policy.CheckResult
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Decision != policy.RequireApproval {
+		t.Errorf("retry decision = %s; want REQUIRE_APPROVAL (still pending)", result.Decision)
+	}
+	if result.Rule != "require_approval:pending" {
+		t.Errorf("retry rule = %q; want require_approval:pending", result.Rule)
+	}
+	if result.ApprovalID != approvalID {
+		t.Errorf("retry approval_id = %q; want %q (the SAME id, not a new one)", result.ApprovalID, approvalID)
+	}
+	if result.ApprovalURL == "" {
+		t.Error("retry should reuse the existing approval URL so polling clients keep working")
+	}
+
+	if got := len(srv.approval.pending); got != queueSizeBefore {
+		t.Errorf("queue size grew: before=%d after=%d", queueSizeBefore, got)
+	}
+}
+
+func TestHandleCheck_ApprovalIDUnknown_FallsThrough(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Bogus approval_id, but the underlying command is policy-allowed.
+	// The server must fall through to fresh evaluation (not 404), so the
+	// caller still gets a correct policy decision.
+	body := `{"scope":"shell","command":"ls -la","approval_id":"ap_bogus_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleCheck(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var result policy.CheckResult
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Decision != policy.Allow {
+		t.Errorf("decision = %s; want ALLOW (bogus approval_id should not block normal evaluation)", result.Decision)
+	}
+	if result.Rule == "allow:approved" {
+		t.Errorf("bogus approval_id should NOT short-circuit; rule = %q", result.Rule)
+	}
+}
+
+func TestHandleCheck_ApprovalIDEmpty_FallsThrough(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Body has no approval_id at all (legacy SDK shape). Confirms the
+	// short-circuit doesn't accidentally fire when the field is empty.
+	body := `{"scope":"shell","command":"ls -la"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleCheck(w, req)
+
+	var result policy.CheckResult
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Decision != policy.Allow {
+		t.Errorf("decision = %s; want ALLOW", result.Decision)
+	}
+}
+
+func TestApprovalQueue_LookupIsReadOnly(t *testing.T) {
+	q := &ApprovalQueue{
+		pending: make(map[string]*PendingAction),
+		maxSize: MaxPendingApprovals,
+	}
+	pa, err := q.Add(policy.ActionRequest{Scope: "shell", Command: "sudo true"},
+		policy.CheckResult{Decision: policy.RequireApproval, Reason: "test"})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	got, ok := q.Lookup(pa.ID)
+	if !ok {
+		t.Fatalf("Lookup(%s) = false; want true", pa.ID)
+	}
+	if got.ID != pa.ID {
+		t.Errorf("Lookup ID = %q; want %q", got.ID, pa.ID)
+	}
+
+	// Mutate the returned struct. The queue's internal entry must NOT
+	// observe the change — Lookup returns a defensive copy.
+	got.Resolved = true
+	got.Decision = "ALLOW"
+	got.Request.Command = "rm -rf /"
+
+	q.mu.RLock()
+	internal := q.pending[pa.ID]
+	q.mu.RUnlock()
+	if internal.Resolved {
+		t.Error("internal entry was mutated via Lookup return value (Resolved=true)")
+	}
+	if internal.Decision != "" {
+		t.Errorf("internal entry Decision = %q; want empty (caller mutated copy bled through)", internal.Decision)
+	}
+	if internal.Request.Command != "sudo true" {
+		t.Errorf("internal entry Command = %q; want %q", internal.Request.Command, "sudo true")
+	}
+
+	if _, ok := q.Lookup("ap_does_not_exist"); ok {
+		t.Error("Lookup of unknown id returned ok=true")
+	}
+}
+
+// TestHandleCheck_ApprovalIDResolved_PreservesTransport — the audit
+// entry written for a resolved-approval round-trip must carry the
+// retry request's transport tag, NOT default to "sdk". A real MCP
+// gateway re-stamps `meta["transport"] = "mcp_gateway"` on the retry,
+// so investigators querying `transport=mcp_gateway` see both the
+// original REQUIRE_APPROVAL entry and the resolved-approved entry.
+func TestHandleCheck_ApprovalIDResolved_PreservesTransport(t *testing.T) {
+	srv := newTestServer(t)
+
+	// 1. First call from the gateway — REQUIRE_APPROVAL entry is
+	//    written with transport=mcp_gateway.
+	body1 := `{
+		"scope": "shell",
+		"command": "sudo apt install vim",
+		"agent_id": "mcp-gateway:claude-desktop",
+		"meta": {"transport": "mcp_gateway"}
+	}`
+	w1 := httptest.NewRecorder()
+	srv.handleCheck(w1, httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body1)))
+
+	var first policy.CheckResult
+	if err := json.NewDecoder(w1.Body).Decode(&first); err != nil {
+		t.Fatalf("decode first: %v", err)
+	}
+	if first.Decision != policy.RequireApproval {
+		t.Fatalf("first decision = %s; want REQUIRE_APPROVAL", first.Decision)
+	}
+	approvalID := first.ApprovalID
+
+	// 2. Operator approves.
+	if err := srv.approval.Resolve(approvalID, policy.Allow); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	// 3. Gateway retries with approval_id + the same transport stamp.
+	body2 := fmt.Sprintf(`{
+		"scope": "shell",
+		"command": "sudo apt install vim",
+		"agent_id": "mcp-gateway:claude-desktop",
+		"approval_id": %q,
+		"meta": {"transport": "mcp_gateway"}
+	}`, approvalID)
+	w2 := httptest.NewRecorder()
+	srv.handleCheck(w2, httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(body2)))
+
+	var second policy.CheckResult
+	if err := json.NewDecoder(w2.Body).Decode(&second); err != nil {
+		t.Fatalf("decode second: %v", err)
+	}
+	if second.Decision != policy.Allow || second.Rule != "allow:approved" {
+		t.Fatalf("second decision/rule = %s/%q; want ALLOW/allow:approved", second.Decision, second.Rule)
+	}
+
+	// 4. The resolved-approved audit entry must be tagged
+	//    transport=mcp_gateway (inherited from the retry request's
+	//    meta), not the default "sdk" bucket.
+	entries, err := srv.cfg.Logger.Query(audit.QueryFilter{
+		Transport: audit.TransportMCPGateway,
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	var sawApproved bool
+	for _, e := range entries {
+		if e.Result.Rule == "allow:approved" && e.EffectiveTransport() == audit.TransportMCPGateway {
+			sawApproved = true
+			break
+		}
+	}
+	if !sawApproved {
+		t.Errorf("no audit entry with rule=allow:approved + transport=mcp_gateway; entries=%d", len(entries))
+	}
+}

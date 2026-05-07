@@ -506,18 +506,39 @@ approves on the dashboard, the model retries the same `tools/call` with
 }
 ```
 
-The gateway:
+The round-trip is single-hop and stateless on the gateway — the
+central server owns the truth:
 
-1. Checks `_meta["dev.agentguard/approval_id"]` against the central
-   server's `/v1/status/{id}`.
-2. If the approval is **resolved=true && decision=ALLOW**:
-   - Skip the policy re-check (the operator already decided).
-   - Forward to the upstream.
-3. If **resolved=true && decision=DENY**: return JSON-RPC tool error
-   with the operator's reason.
-4. If **resolved=false** (still pending) or **404** (expired): return
-   the same `[AgentGuard] Action requires approval` payload — the
-   model is welcome to retry again.
+1. The bridge reads `_meta["dev.agentguard/approval_id"]` and stamps
+   it on the internal `ToolsCallRequest.ApprovalID`.
+2. `HTTPPolicyClient.Check` propagates the value as a top-level
+   `approval_id` field on the `/v1/check` body (alongside the existing
+   `meta.approval_id` echo, which is retained for audit-trail
+   discoverability).
+3. The central server's `handleCheck`, when it sees a non-empty
+   `approval_id` on the wire, consults its `ApprovalQueue` *before*
+   running policy:
+   - **resolved=true && decision=ALLOW** → returns
+     `decision: ALLOW, matched_rule: "allow:approved"`. The audit
+     log records this as a separate entry tagged
+     `transport: "mcp_gateway"` so investigators can distinguish
+     human-approved from policy-allowed traffic.
+   - **resolved=true && decision=DENY** → returns
+     `decision: DENY, matched_rule: "deny:approved"`. The bridge
+     surfaces it as a tool error with the operator's reason.
+   - **resolved=false** (still pending) → returns the *same*
+     `approval_id` and `approval_url` back, so the polling client
+     keeps waiting rather than spawning a duplicate queue entry.
+   - **unknown id** (typo / expired / wrong tenant) → falls through
+     to normal policy evaluation. An attacker who guesses an id
+     gains nothing; an honest caller with a stale id gets correct
+     enforcement.
+
+The gateway never queries `/v1/status/{id}` directly on the retry —
+that endpoint is reserved for the polling SDK clients. The dual-check
+pattern (mcp_tool + mapped scope) preserves the approval id on both
+calls so a resolved approval short-circuits whichever scope the
+policy used to require it.
 
 The reserved `_meta` prefix `dev.agentguard/` follows the MCP
 `2025-11-25` `_meta` rules: reverse-DNS-style label, recommended

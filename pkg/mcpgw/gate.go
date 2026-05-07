@@ -116,12 +116,22 @@ func (c *HTTPPolicyClient) Check(ctx context.Context, req *ToolsCallRequest) (De
 	}
 
 	// 1. mcp_tool scope check. Always runs.
+	//
+	// ApprovalID propagation: when the host retries a tools/call with
+	// `_meta.dev.agentguard/approval_id` set, the bridge stamps it on
+	// req.ApprovalID and we forward it as a top-level field on the
+	// /v1/check body. The central server's handleCheck consults the
+	// approval queue first when this is set; resolved entries short-
+	// circuit the policy evaluation entirely so a human's approve/deny
+	// is honored across the model's retry. (A19b — closes
+	// #mcp-approval-roundtrip.)
 	mcpAR := policy.ActionRequest{
-		Scope:     "mcp_tool",
-		AgentID:   req.AgentID,
-		SessionID: req.SessionID,
-		Command:   req.FullName,
-		Meta:      buildMcpMeta(req),
+		Scope:      "mcp_tool",
+		AgentID:    req.AgentID,
+		SessionID:  req.SessionID,
+		Command:    req.FullName,
+		Meta:       buildMcpMeta(req),
+		ApprovalID: req.ApprovalID,
 	}
 	decMCP, err := c.callV1Check(ctx, mcpAR)
 	if err != nil {
@@ -205,10 +215,11 @@ func buildMcpMeta(req *ToolsCallRequest) map[string]string {
 // existing scope rules without requiring duplicate mcp_tool rules.
 func buildMappedActionRequest(req *ToolsCallRequest, mappedScope string) policy.ActionRequest {
 	ar := policy.ActionRequest{
-		Scope:     mappedScope,
-		AgentID:   req.AgentID,
-		SessionID: req.SessionID,
-		Meta:      buildMcpMeta(req),
+		Scope:      mappedScope,
+		AgentID:    req.AgentID,
+		SessionID:  req.SessionID,
+		Meta:       buildMcpMeta(req),
+		ApprovalID: req.ApprovalID,
 	}
 
 	switch mappedScope {

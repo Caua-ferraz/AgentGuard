@@ -504,6 +504,34 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 
+	// Approval-id round-trip: if the caller (typically the MCP gateway
+	// retrying after a human approve/deny on the dashboard) set
+	// ApprovalID, consult the approval queue before running policy.
+	// This is what closes the "approve once, model proceeds" UX —
+	// without this, the model's retry produces a fresh REQUIRE_APPROVAL
+	// cycle even though a human already decided.
+	//
+	// Resolved entries short-circuit to the human's decision (ALLOW or
+	// DENY). Still-pending entries return REQUIRE_APPROVAL referencing
+	// the SAME id so the client can keep polling rather than spawning
+	// duplicate queue entries. Unknown ids fall through to normal
+	// policy evaluation: an attacker who guesses an approval_id gains
+	// nothing (policy still runs fresh), and an honest caller with a
+	// stale id gets correct enforcement rather than a 4xx surprise.
+	//
+	// We deliberately bypass the rate limiter for the resolved-approval
+	// path: the human already paid the latency cost of the original
+	// REQUIRE_APPROVAL evaluation, and the retry's bucket consumption
+	// would be charged twice for one logical action.
+	if req.ApprovalID != "" {
+		if pa, ok := s.approval.Lookup(req.ApprovalID); ok {
+			result := s.resolvedApprovalToResult(req, pa)
+			s.logAndRespond(w, req, result, start)
+			return
+		}
+		// Unknown approval_id — fall through to normal evaluation.
+	}
+
 	// Rate limiting check (before policy evaluation)
 	if rlCfg := s.cfg.Engine.RateLimitConfig(req.Scope, req.AgentID); rlCfg != nil {
 		window, err := ratelimit.ParseWindow(rlCfg.Window)
@@ -649,6 +677,73 @@ func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		log.Printf("Response encode error: %v", err)
+	}
+}
+
+// resolvedApprovalToResult converts a PendingAction (resolved or not)
+// into a CheckResult suitable for the /v1/check response on a retry
+// that carries an approval_id.
+//
+// Resolution → decision mapping:
+//
+//	resolved=false                → REQUIRE_APPROVAL with the SAME id
+//	                                (rule="require_approval:pending"),
+//	                                reusing the existing approval URL
+//	                                so a polling client keeps waiting.
+//	resolved=true, decision=ALLOW → ALLOW (rule="allow:approved").
+//	resolved=true, decision=DENY  → DENY (rule="deny:approved").
+//	resolved=true, decision=other → defensive DENY
+//	                                (rule="deny:approved:invalid_resolution").
+//
+// The defensive branch only triggers if a future code path stamps a
+// non-canonical decision string on Resolve; today Resolve only writes
+// "ALLOW" or "DENY" (see ApprovalQueue.Resolve).
+//
+// Note that the original PendingAction.Request's transport is *not*
+// re-applied here — the caller (handleCheck) hands logAndRespond the
+// retry request as-is, and the retry request's own meta["transport"]
+// is what gets stamped on the audit entry. In practice the gateway
+// re-stamps "mcp_gateway" on every retry, so the audit log shows the
+// same transport for both the original REQUIRE_APPROVAL entry and the
+// resolved-approved entry. SDK callers that propagate approval_id
+// without setting transport will land in the default "sdk" bucket on
+// both legs, which is also consistent.
+func (s *Server) resolvedApprovalToResult(req policy.ActionRequest, pa *PendingAction) policy.CheckResult {
+	if !pa.Resolved {
+		return policy.CheckResult{
+			Decision:    policy.RequireApproval,
+			Rule:        "require_approval:pending",
+			Reason:      fmt.Sprintf("approval %s still pending human review", pa.ID),
+			ApprovalID:  pa.ID,
+			ApprovalURL: fmt.Sprintf("%s/v1/approve/%s", s.cfg.BaseURL, pa.ID),
+		}
+	}
+
+	switch policy.Decision(pa.Decision) {
+	case policy.Allow:
+		return policy.CheckResult{
+			Decision:   policy.Allow,
+			Rule:       "allow:approved",
+			Reason:     fmt.Sprintf("approval %s resolved ALLOW by human", pa.ID),
+			ApprovalID: pa.ID,
+		}
+	case policy.Deny:
+		return policy.CheckResult{
+			Decision:   policy.Deny,
+			Rule:       "deny:approved",
+			Reason:     fmt.Sprintf("approval %s resolved DENY by human", pa.ID),
+			ApprovalID: pa.ID,
+		}
+	default:
+		// Should be unreachable: ApprovalQueue.Resolve only writes
+		// canonical decisions. Treat any deviation as a hard DENY so an
+		// accidental future bug can never silently allow.
+		return policy.CheckResult{
+			Decision:   policy.Deny,
+			Rule:       "deny:approved:invalid_resolution",
+			Reason:     fmt.Sprintf("approval %s has unexpected resolution %q", pa.ID, pa.Decision),
+			ApprovalID: pa.ID,
+		}
 	}
 }
 
@@ -1050,6 +1145,25 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // ApprovalQueue methods
+
+// Lookup returns a snapshot of the pending entry for the given ID. The
+// bool result is false when the ID is unknown (e.g. expired/evicted,
+// typo, or wrong tenant). Read-only — uses RLock.
+//
+// The returned *PendingAction is a defensive copy: callers cannot
+// mutate queue state through it. The handleCheck approval-id round-
+// trip uses this on the hot path of every retry, so the read-lock
+// keeps it cheap relative to the existing /v1/check evaluation cost.
+func (q *ApprovalQueue) Lookup(id string) (*PendingAction, bool) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	pa, ok := q.pending[id]
+	if !ok {
+		return nil, false
+	}
+	cp := *pa
+	return &cp, true
+}
 
 // Add registers a new pending approval. If the queue is at capacity the
 // oldest resolved entry is evicted first (LRU on CreatedAt; resolution does

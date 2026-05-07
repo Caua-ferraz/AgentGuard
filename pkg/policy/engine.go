@@ -960,6 +960,28 @@ type ActionRequest struct {
 	SessionID     string            `json:"session_id,omitempty"`
 	EstCost       float64           `json:"est_cost,omitempty"`
 	Meta          map[string]string `json:"meta,omitempty"`
+
+	// ApprovalID, when set, instructs the central server's handleCheck
+	// to look up the approval queue before running policy. If a matching
+	// entry exists and is resolved, the server short-circuits with the
+	// human's resolved decision rather than re-evaluating policy from
+	// scratch. This is what makes the "approve once, model proceeds" UX
+	// work: when a model retries a tool call after a human clicks
+	// approve on the dashboard, the gateway propagates the original
+	// approval_id (carried through MCP `_meta.dev.agentguard/approval_id`)
+	// and the server honors the human's decision instead of producing a
+	// fresh REQUIRE_APPROVAL entry.
+	//
+	// Empty / unset → server evaluates fresh (legacy behavior; back-
+	// compat for SDK callers and any client that strips _meta).
+	//
+	// Wire-protocol note: the field is `omitempty` so existing v1
+	// clients that never set it serialize byte-for-byte identically to
+	// pre-A19b traffic. Engine.Check itself does NOT inspect this field —
+	// the lookup short-circuit lives in pkg/proxy.handleCheck so the
+	// approval queue (a server-side construct) is not dragged into the
+	// pure policy package.
+	ApprovalID string `json:"approval_id,omitempty"`
 }
 
 // Check evaluates an action request against the active policy for the
