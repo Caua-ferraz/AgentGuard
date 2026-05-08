@@ -1,4 +1,4 @@
-: Synthesized 2026-05-05 from docs/LLM_API_PROXY.md § 5.1; verify against
+: Synthesized 2026-05-05 from docs/LLM_API_PROXY.md § 5.0; verify against
 : real OpenAI Chat Completions SSE at A22 implementation time per the
 : Phase 4A "OpenAI streaming format unverified" note. Pre-tool content
 : deltas, then a tool_call. The text deltas pass through immediately;

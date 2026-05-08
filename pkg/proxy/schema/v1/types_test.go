@@ -19,8 +19,7 @@ import (
 
 // TestActionRequest_RoundTrip asserts that an ActionRequest with every
 // field populated survives a json.Marshal/json.Unmarshal cycle without
-// loss. Closes R1 F4 (no schema_version field) and R1 F7 (Go side of
-// the cross-language contract).
+// loss. Pins the Go side of the cross-language wire-format contract.
 func TestActionRequest_RoundTrip(t *testing.T) {
 	original := ActionRequest{
 		SchemaVersion: Version,

@@ -1,6 +1,6 @@
 package proxy
 
-// Tenant ID propagation for the v0.5 URL routing layer.
+// Tenant ID propagation for the URL routing layer.
 //
 // Two URL families coexist:
 //
@@ -11,13 +11,11 @@ package proxy
 // effective tenant via TenantIDFromContext, defaulting to LocalTenantID when
 // nothing is set (the legacy path). The tenant value is currently consumed
 // only by Engine.Check; the approval queue, audit log, SSE bus, and rate
-// limiter are still single-tenant in v0.5 and will be sharded in v0.6.
+// limiter are still single-tenant.
 //
-// TODO(v0.6, #N): shard ApprovalQueue / SSE bus / audit query / rate limiter
+// TODO(v0.6): shard ApprovalQueue / SSE bus / audit query / rate limiter
 // by tenantID. Today the tenant ID is threaded through the request context
-// but only Engine.Check actually partitions on it. The corresponding issue
-// title is recorded in .audit/v05_decisions.md ("Tenant URL routing + SDK
-// contract").
+// but only Engine.Check actually partitions on it.
 
 import (
 	"context"
@@ -65,7 +63,7 @@ func TenantIDFromContext(ctx context.Context) string {
 //     segment to be non-empty), but defensive coercion keeps the
 //     behavior predictable if a future router rewrite changes that.
 //   - tenant == LocalTenantID — fast-path: skip the provider lookup so
-//     the v0.5 hot path stays equivalent to the legacy URL family.
+//     the hot path stays equivalent to the legacy URL family.
 //   - Any other tenant — consult Engine.PolicyForTenant. ErrTenantNotFound
 //     surfaces as 404 + structured JSON body. Any other error is
 //     surfaced as 500 (provider infrastructure issue).

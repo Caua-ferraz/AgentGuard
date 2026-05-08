@@ -75,6 +75,35 @@ Version format: `MAJOR.MINOR.PATCH` → `0.0.0`
 
 > **PyPI note:** Never re-use a version number. PyPI permanently rejects duplicate uploads even after deletion. Always bump before publishing.
 
+## Running the Full Test Suite
+
+Before opening a PR, run all four test suites at once with the `test-all` script:
+
+```bash
+make test-all
+# or
+./scripts/test-all.sh
+```
+
+This runs, in order:
+
+| Suite | What it does |
+|-------|--------------|
+| `go` | `go test -race -coverprofile=coverage.out ./...` |
+| `policy` | builds the binary, runs `agentguard validate` on every YAML in `configs/` and `configs/examples/` |
+| `python` | `pip install -e ".[dev]"` + `pytest -v --cov=agentguard` in `plugins/python` |
+| `ts` | `npm install` + `npm run build` + `npm test` in `plugins/typescript` |
+
+The script does **not** stop on the first failure — every suite runs so you see the full picture in one go. Suites whose toolchain is missing (no `python`, no `npm`) are reported as `SKIP` rather than `FAIL`, so Go-only contributors aren't penalised on a partial setup. Final exit code is the number of failed suites (0 if all passed).
+
+Useful flags:
+
+- `--skip-go` / `--skip-policy` / `--skip-python` / `--skip-ts` — narrow the run
+- `--no-race` — drop the Go race detector for a faster Go suite
+- `-h`, `--help` — full usage
+
+Cross-platform: works under Git Bash on Windows, macOS, and Linux. The script auto-detects `agentguard.exe` vs `agentguard` based on the OS.
+
 ## Testing Metrics
 
 The `/metrics` endpoint exposes Prometheus-compatible counters and histograms. When working on the hot path (`handleCheck`, policy engine, audit logger), verify your changes don't regress latency:
@@ -117,7 +146,7 @@ Histogram buckets go from 0.25 ms to 1000 ms. A healthy server at low load shoul
 
 - Fork the repo, create a feature branch
 - Write tests for new functionality
-- Run `go test -race ./...` before submitting
+- Run `make test-all` before submitting (or `go test -race ./...` for a Go-only quick check)
 - Keep PRs focused — one feature or fix per PR
 - Update documentation if behavior changes
 

@@ -173,12 +173,11 @@ func TestEngineCheck_CostNoEstimate(t *testing.T) {
 	}
 }
 
-// TestOverrideDenyInheritance closes R2 E5 / T11. The default override mode
-// ("merge") inherits Deny rules from the base policy, so an agent override
-// that only widens the Allow list cannot accidentally bypass a base deny
-// such as `rm -rf *`. The "replace" mode opts out of inheritance and
-// reproduces the v0.4.x behavior — required for narrowly-scoped privileged
-// agents.
+// TestOverrideDenyInheritance pins the override-mode contract. The
+// default ("merge") inherits Deny rules from the base policy, so an agent
+// override that only widens the Allow list cannot accidentally bypass a
+// base deny such as `rm -rf *`. The "replace" mode opts out of
+// inheritance — required for narrowly-scoped privileged agents.
 func TestOverrideDenyInheritance(t *testing.T) {
 	build := func(mode string) *Policy {
 		return &Policy{

@@ -262,7 +262,7 @@ class TestApprovalPath:
 
 
 # ---------------------------------------------------------------------------
-# Defense contract under the v0.5.1 hybrid pattern.
+# Defense contract under the v0.5.0 hybrid pattern.
 #
 # v0.5.0 used a composition wrapper with a strict ``__getattr__`` allowlist
 # — every parent / unknown attribute access raised AttributeError. That
@@ -270,7 +270,7 @@ class TestApprovalPath:
 # BaseTool)`` failed (virtual-subclass registrations are no longer honored
 # by pydantic).
 #
-# v0.5.1 switches to a hybrid pattern: GuardedCrewTool **subclasses**
+# v0.5.0 switches to a hybrid pattern: GuardedCrewTool **subclasses**
 # CrewAI's ``BaseTool`` so the framework's isinstance check passes, and
 # every dispatch entry point (``run``, ``_run``, ``invoke``, ``ainvoke``,
 # ``__call__``, ``_arun``, ``arun``, ``to_structured_tool``) is explicitly

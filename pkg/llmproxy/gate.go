@@ -29,9 +29,9 @@ package llmproxy
 //     DENY with Rule="deny:llm_api_proxy:fail_closed".
 //   - --fail-mode fail-closed-with-audit: same DENY shape but the
 //     synthetic Rule is "deny:llm_api_proxy:fail_closed_audit" so
-//     dashboards can break out the two failure modes. v0.5 surfaces
-//     the failure via metrics + stderr logs only; v0.6 will emit a
-//     local audit entry from the proxy side. See
+//     dashboards can break out the two failure modes. The failure
+//     is surfaced via metrics + stderr logs today; a local audit
+//     entry from the proxy side is future work. See
 //     TODO(v0.6, #llm-proxy-fail-closed-audit-emit) below.
 //   - --fail-mode allow: /v1/check unreachable → synthetic ALLOW.
 //     Useful for dev / failover scenarios where availability beats
@@ -82,11 +82,11 @@ const (
 //     url+domain for network/browser, command for shell, ...).
 //   - meta.transport stamped as "llm_api_proxy" on every call so the
 //     central server's audit log + SSE chip + transport-tag tests
-//     (Phase 4B A19) attribute the entry to this proxy.
+//     attribute the entry to this proxy.
 type HTTPPolicyClient struct {
 	GuardURL string // e.g. "http://127.0.0.1:8080"
 	APIKey   string // bearer token; empty if --api-key not set
-	TenantID string // "local" for v0.5
+	TenantID string // tenant ID; "local" with the bundled FilePolicyProvider
 	FailMode string // "deny" | "allow" | "fail-closed-with-audit"
 
 	// HTTPClient is reused across calls. Set to a custom client in
@@ -535,9 +535,9 @@ func decisionFromCheckResult(cr policy.CheckResult) Decision {
 //
 // TODO(v0.6, #llm-proxy-fail-closed-audit-emit): the
 // "fail-closed-with-audit" branch currently surfaces only via metrics
-// + stderr; v0.6 will emit a local audit entry from the proxy side
-// (without round-tripping the central server) so operators can
-// reconstruct the deny chain when /v1/check is offline.
+// + stderr. A local audit entry from the proxy side (without round-
+// tripping the central server) so operators can reconstruct the deny
+// chain when /v1/check is offline is future work.
 func (c *HTTPPolicyClient) failModeDecision(err error) Decision {
 	switch strings.ToLower(c.FailMode) {
 	case "allow":

@@ -1,14 +1,12 @@
 package mcpgw
 
-// AT (Test Wrangler) — real MCP protocol exchange tests against the
-// Phase 4B stub_server (testdata/stub_server/main.go) driven by the
-// REAL StdioUpstream, NOT a fakeUpstream. The plan called for
-// `npx @modelcontextprotocol/server-everything`; we substitute the
-// Go stub for offline-deterministic CI behaviour. The substitution is
-// documented in .audit/v05_test_coverage.md.
+// Real MCP protocol exchange tests against testdata/stub_server/main.go
+// driven by the REAL StdioUpstream, NOT a fakeUpstream. We substitute
+// the Go stub for `npx @modelcontextprotocol/server-everything` so CI
+// stays offline and deterministic.
 //
-// Why this matters: A17's bridge_test.go uses fakeUpstream (in-process,
-// no subprocess). transport_test.go drives the StdioUpstream directly
+// Why this matters: bridge_test.go uses fakeUpstream (in-process, no
+// subprocess). transport_test.go drives the StdioUpstream directly
 // without the bridge. This file covers the layered case — Bridge.Run +
 // real StdioUpstream + real subprocess — which is the same code path
 // production agents-guarding-Claude-Desktop will hit.

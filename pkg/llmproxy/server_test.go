@@ -100,18 +100,14 @@ func TestServer_Healthz(t *testing.T) {
 	}
 }
 
-// ----- streaming routes to A22's pipeline -----
+// ----- streaming routes to the streaming pipeline -----
 
-// As of A22 (Phase 4C), streaming requests are NO LONGER 501. The
-// proxy now routes them through pkg/llmproxy/streaming.go which
-// pause/resume/rewrites tool_calls and forwards content deltas
-// byte-identical to the client. The previous 501 short-circuit has
-// been removed (alongside streamingNotImplemented).
-//
-// Detailed streaming behavior (byte-identity, deny path, overflow)
-// lives in streaming_test.go; here we only verify the wire-up: the
-// upstream is hit with stream:true and the proxy returns the
-// upstream bytes (instead of returning 501).
+// Streaming requests route through pkg/llmproxy/streaming.go which
+// pause/resume/rewrites tool_calls and forwards content deltas byte-
+// identical to the client. Detailed streaming behaviour (byte-identity,
+// deny path, overflow) lives in streaming_test.go; here we only verify
+// the wire-up: the upstream is hit with stream:true and the proxy
+// returns the upstream bytes.
 func TestServer_StreamingRoutesThroughUpstream(t *testing.T) {
 	upstreamCalled := false
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

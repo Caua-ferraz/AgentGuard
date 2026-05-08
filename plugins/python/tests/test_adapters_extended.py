@@ -111,11 +111,11 @@ class TestLangChainExtended:
         assert body["action"] == "write"
 
     def test_attribute_proxy_blocked(self, mock_server):
-        """v0.5.1: arbitrary attribute access is blocked.
+        """v0.5.0: arbitrary attribute access is blocked.
 
         v0.5.0 used a composition wrapper with a custom ``__getattr__``
         allowlist that raised AttributeError with a "bypass" message.
-        v0.5.1 switches to subclassing ``langchain_core.tools.BaseTool``,
+        v0.5.0 switches to subclassing ``langchain_core.tools.BaseTool``,
         so unknown attributes raise pydantic's standard "no such field"
         AttributeError instead. The security property is unchanged: the
         wrapper does not proxy arbitrary attributes to the wrapped tool.

@@ -1,20 +1,18 @@
 package llmproxy
 
-// streaming.go is the SSE pause/resume/rewrite orchestrator. It
-// implements the Phase 4A streaming hero feature:
+// streaming.go is the SSE pause/resume/rewrite orchestrator:
 //
 //   - Pure content deltas pass through to the client byte-identical
 //     to upstream (the byte-identity invariant on the ALLOW path).
 //   - Tool_call deltas are accumulated; the orchestrator pauses
 //     forwarding from the first tool_call delta until the call is
 //     fully assembled.
-//   - The assembled tool_call is gated through Server.PolicyCheck
-//     (A24's hook). On ALLOW, the buffered SSE event bytes are
-//     replayed to the client byte-identical, and forwarding resumes.
-//     On DENY / REQUIRE_APPROVAL, buffered events are discarded and
-//     a synthetic refusal is emitted via Server.BuildRefusal (also
-//     A24's hook; this file ships a default fallback for early
-//     bring-up).
+//   - The assembled tool_call is gated through Server.PolicyCheck.
+//     On ALLOW, the buffered SSE event bytes are replayed to the
+//     client byte-identical and forwarding resumes. On DENY /
+//     REQUIRE_APPROVAL, buffered events are discarded and a synthetic
+//     refusal is emitted via Server.BuildRefusal (this file ships a
+//     default fallback for tests).
 //   - Per-stream buffer cap (--max-buffer-bytes) bounds memory; if
 //     accumulated tool_call arguments exceed the cap, a synthetic
 //     refusal with reason "tool call arguments exceed gating buffer"
@@ -44,12 +42,12 @@ import (
 	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 )
 
-// RefusalContext is the input to Server.BuildRefusal (A24's hook).
-// Carries everything A24 needs to construct a provider-specific
+// RefusalContext is the input to Server.BuildRefusal. Carries
+// everything the builder needs to construct a provider-specific
 // synthetic refusal payload.
 type RefusalContext struct {
-	// Provider is "openai" or "anthropic". A24 uses this to pick
-	// the right SSE event shape.
+	// Provider is "openai" or "anthropic". Used to pick the right
+	// SSE event shape.
 	Provider string
 
 	// OriginalToolCall is the parsed tool call that was denied. May
@@ -67,10 +65,9 @@ type RefusalContext struct {
 	// (the streaming path's shape — assistant-text content delta +
 	// [DONE] for OpenAI; content_block_* events for Anthropic) to a
 	// single non-streaming JSON object the SDK decodes as a normal
-	// chat.completion / message response. F9 (B2) wires this for the
-	// non-streaming /v1/chat/completions and /v1/messages forwarders;
-	// the streaming orchestrator never sets it (zero-value preserves
-	// the SSE shape A22 wired).
+	// chat.completion / message response. The non-streaming
+	// /v1/chat/completions and /v1/messages forwarders set this; the
+	// streaming orchestrator never does (zero-value preserves SSE).
 	//
 	// Model is the original request's model string, surfaced into the
 	// synthetic non-streaming response so SDKs that index by model
@@ -181,10 +178,9 @@ func readSSEEvent(r *bufio.Reader, maxEventBytes int) ([]byte, error) {
 
 var errSSEEventTooLarge = errors.New("sse event exceeded buffer cap")
 
-// runPolicyCheck invokes Server.PolicyCheck (A24's hook). Default
-// behavior when nil: ALLOW. This makes early bring-up testable
-// without A24 wired (the streaming pipe itself works) and matches
-// A21's nil-safety pattern.
+// runPolicyCheck invokes Server.PolicyCheck. Default behaviour when
+// nil: ALLOW. This makes the streaming pipe testable without the gate
+// wired and matches the rest of the package's nil-safety pattern.
 func (s *Server) runPolicyCheck(ctx context.Context, tc ToolCallCheck) (Decision, error) {
 	if s.PolicyCheck == nil {
 		return Decision{Allow: true, Rule: "allow:llm_api_proxy:no_hook"}, nil
@@ -192,9 +188,9 @@ func (s *Server) runPolicyCheck(ctx context.Context, tc ToolCallCheck) (Decision
 	return s.PolicyCheck(ctx, &tc)
 }
 
-// buildRefusal calls Server.BuildRefusal (A24's hook) with a sane
-// default fallback. The default emits a minimal SSE refusal so unit
-// tests can exercise the deny path without A24 wired.
+// buildRefusal calls Server.BuildRefusal with a sane default fallback.
+// The default emits a minimal SSE refusal so unit tests can exercise
+// the deny path without the rich builder wired.
 func (s *Server) buildRefusal(provider string, decision Decision, ctx *RefusalContext) []byte {
 	if s.BuildRefusal != nil {
 		return s.BuildRefusal(provider, decision, ctx)
@@ -202,20 +198,19 @@ func (s *Server) buildRefusal(provider string, decision Decision, ctx *RefusalCo
 	return defaultRefusalBytes(provider, decision, ctx)
 }
 
-// defaultRefusalBytes is the early-bring-up fallback. A24 ships the
-// production refusal builder; until then we emit a minimal SSE
-// payload that closes the stream cleanly so SDK clients don't hang.
+// defaultRefusalBytes is the test-only fallback used when
+// Server.BuildRefusal is nil. Emits a minimal payload that closes the
+// stream cleanly so SDK clients don't hang. The production refusal
+// builder lives in refusal.go and is wired by main.go.
 //
 // Important: the OpenAI shape is assistant-text + [DONE]. The
-// previously-considered `role: "tool"` shape was rejected at design
-// time (Phase 4A § 5.3) because the response schema only emits
-// assistant role and SDKs hang on missing `tool_call_id`.
+// `role: "tool"` shape was rejected because the response schema only
+// emits assistant role and SDKs hang on missing `tool_call_id`.
 //
-// F9 (B2) extended this fallback to honour ctx.NonStreaming for the
-// non-streaming forwarders so the early-bring-up path also works on
-// non-streaming requests. Non-streaming refusals are single JSON
-// objects shaped like a normal upstream response — SDKs decode them
-// without going through SSE parsing.
+// Honours ctx.NonStreaming for the non-streaming forwarders. Non-
+// streaming refusals are single JSON objects shaped like a normal
+// upstream response — SDKs decode them without going through SSE
+// parsing.
 func defaultRefusalBytes(provider string, decision Decision, ctx *RefusalContext) []byte {
 	msg := decision.Reason
 	if msg == "" {
@@ -265,8 +260,8 @@ func defaultRefusalBytes(provider string, decision Decision, ctx *RefusalContext
 // defaultRefusalBytes. F9 (B2) wires it for the early-bring-up path
 // when Server.BuildRefusal is nil and the non-streaming forwarder
 // needs to emit a refusal. Mirrors BuildRefusalRich's non-streaming
-// shape but with the bare reason — A24's BuildRefusalRich produces
-// the operator-grade copy with rule + approval URL.
+// shape but with the bare reason — refusal.go's BuildRefusalRich
+// produces the operator-grade copy with rule + approval URL.
 //
 // model carries the original request's model name when available;
 // empty falls back to "agentguard-refusal" so the JSON object remains
@@ -322,11 +317,11 @@ func defaultRefusalNonStreamingBytes(provider, full, model string) []byte {
 	}
 }
 
-// handleStreamingChatCompletion replaces A21's 501 short-circuit for
-// OpenAI streaming. Per the byte-identity invariant: bytes delivered
-// to the client MUST be byte-identical to upstream output on the
-// ALLOW path. No JSON re-encoding; no whitespace normalization; no
-// header rewriting beyond hop-by-hop filtering.
+// handleStreamingChatCompletion implements OpenAI streaming with the
+// byte-identity invariant: bytes delivered to the client MUST be
+// byte-identical to upstream output on the ALLOW path. No JSON re-
+// encoding; no whitespace normalization; no header rewriting beyond
+// hop-by-hop filtering.
 //
 // Streaming admission control: admitStream gates entry against
 // cfg.MaxConcurrentStreams. Refused requests get 503 + Retry-After: 5

@@ -2,19 +2,16 @@
 //
 // BufferedAsyncLogger wraps any audit.Logger with a bounded channel and a
 // pool of N worker goroutines that drain the channel into the underlying
-// Log call. The wrapper exists to close three audit findings at once:
+// Log call. The wrapper:
 //
-//   - R2 S5 — synchronous flush on the request hot path (now: workers absorb
-//     I/O latency; Log() returns after a channel send / overflow append).
-//   - R2 S9 — silent drop on saturation. The channel is bounded; on full,
-//     entries are persisted to a JSON-Lines overflow file (mode 0600) and a
-//     recovery goroutine drains the overflow back into the channel when
-//     capacity returns. Entries are durable across the saturation boundary;
-//     they are NOT ordered across that boundary.
-//   - R4 E3 — JSON encode + file write happen under FileLogger.mu. With the
-//     wrapper, encode runs on workers; the underlying mutex hold shrinks to
-//     the actual encode+write, and the request goroutine no longer waits on
-//     the audit mutex at all (best case: enqueue + return).
+//   - Keeps the /v1/check hot path off the audit mutex: workers absorb
+//     I/O latency; Log() returns after a channel send or overflow append.
+//   - On saturation, persists entries to a JSON-Lines overflow file
+//     (mode 0600); a recovery goroutine drains the overflow back into
+//     the channel when capacity returns. Entries are durable across the
+//     saturation boundary; they are NOT ordered across that boundary.
+//   - Runs JSON encode + file write on workers, so the FileLogger.mu
+//     hold shrinks to the actual encode+write.
 //
 // Concurrency contract:
 //   - Log MUST NOT block. Path A: non-blocking channel send. Path B: append
@@ -32,10 +29,6 @@
 //     re-spills any line that would have blocked into a fresh overflow file.
 //   - Counters are exposed via getters that return atomic loads. Callers see
 //     a value at *some* point in time, not a snapshot across all three.
-//
-// Notifier-side spool-to-disk is the symmetrical R7 E5 finding for the
-// dispatcher. The audit-side path is closed by this wrapper; the notifier
-// equivalent is tracked separately under v0.6 (see TODO at end of file).
 package audit
 
 import (
@@ -203,11 +196,9 @@ func (b *BufferedAsyncLogger) Log(e Entry) error {
 	}
 }
 
-// Query passes through to the underlying logger. v0.6 may merge overflow
-// file results so a query during a saturation event returns a complete
-// view; for v0.5 we accept the gap (entries in the spill file are not yet
-// in the underlying logger's index) — the recovery goroutine closes the
-// gap within RecoveryInterval.
+// Query passes through to the underlying logger. Entries currently in the
+// overflow spill file are NOT yet visible to the index; the recovery
+// goroutine closes that gap within RecoveryInterval.
 func (b *BufferedAsyncLogger) Query(filter QueryFilter) ([]Entry, error) {
 	return b.underlying.Query(filter)
 }
@@ -421,15 +412,14 @@ func (b *BufferedAsyncLogger) tryDrainOverflow() {
 
 	// On scanner error (e.g. line larger than the 4 MiB buffer, or a
 	// truncated read) we MUST NOT remove drainingPath: the unread tail
-	// would be silently lost — that's the H5 audit finding. The rename
-	// above already swapped a fresh overflow file in for concurrent
-	// appendOverflow callers, so the safe recovery posture is to rename
-	// the draining file BACK to b.overflowPath so the next recovery
-	// tick (or the next process startup) picks it up. If a fresh
-	// overflow file has appeared in the meantime (concurrent saturation
-	// during this drain) we keep the draining file in place under its
-	// `.draining.<ts>` name; an operator must inspect / merge it
-	// manually, but the entries are durable on disk.
+	// would be silently lost. The rename above already swapped a fresh
+	// overflow file in for concurrent appendOverflow callers, so the
+	// safe recovery posture is to rename the draining file BACK to
+	// b.overflowPath so the next recovery tick (or process startup)
+	// picks it up. If a fresh overflow file has appeared in the meantime
+	// (concurrent saturation during this drain) we keep the draining
+	// file in place under its `.draining.<ts>` name; an operator must
+	// inspect / merge it manually, but the entries are durable on disk.
 	if scanErr != nil {
 		b.overflowMu.Lock()
 		_, statErr := os.Stat(b.overflowPath)
@@ -532,15 +522,11 @@ func (b *BufferedAsyncLogger) flushOverflowOnce(timeout time.Duration) {
 	}
 }
 
-// TODO(v0.6, #N): expose BufferedAsyncLogger counters via pkg/metrics
-//                 (audit_buffered_dropped_to_overflow_total,
-//                  audit_buffered_drained_from_overflow_total,
-//                  audit_buffered_queue_depth gauge). Wiring is intentionally
-//                 deferred so this PR stays focused on the data-path semantics;
-//                 the getters above (DroppedToOverflow / DrainedFromOverflow /
-//                 QueueDepth) are the seam metrics will read from.
+// TODO(v0.6): expose BufferedAsyncLogger counters via pkg/metrics
+// (audit_buffered_dropped_to_overflow_total,
+//  audit_buffered_drained_from_overflow_total,
+//  audit_buffered_queue_depth gauge). The getters above
+//  (DroppedToOverflow / DrainedFromOverflow / QueueDepth) are the seams.
 //
-// TODO(v0.6, #N): notifier-side spool-to-disk. The audit-side overflow
-//                 path closes R7 E5 for the audit logger; the symmetric
-//                 finding for pkg/notify (notifier queue full → silent
-//                 drop today) needs the same treatment in v0.6.
+// TODO(v0.6): notifier-side spool-to-disk. pkg/notify drops on queue
+// full today; mirror this overflow path for the dispatcher.

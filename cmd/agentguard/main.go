@@ -31,6 +31,12 @@ var (
 )
 
 func main() {
+	// Best-effort update check: kick off a background goroutine that asks
+	// GitHub for the latest release. It prints one line to stderr if the
+	// running binary is older. Disabled on dev builds and via
+	// AGENTGUARD_NO_UPDATE_CHECK=1. See update_check.go.
+	updateDone := startUpdateCheck(version)
+
 	// Subcommands
 	serveCmd := flag.NewFlagSet("serve", flag.ExitOnError)
 	policyFile := serveCmd.String("policy", "configs/default.yaml", "Path to policy file")
@@ -42,23 +48,21 @@ func main() {
 	baseURL := serveCmd.String("base-url", "", "External base URL for approval links (default: http://localhost:<port>)")
 	allowedOrigin := serveCmd.String("allowed-origin", "", "Exact CORS origin to accept (e.g. https://app.example). Empty means permissive-localhost (any http://localhost:* or http://127.0.0.1:*) for backward compat.")
 	tlsTerminated := serveCmd.Bool("tls-terminated-upstream", false, "Issue session cookies with Secure regardless of r.TLS — set when behind a TLS-terminating reverse proxy that does not forward X-Forwarded-Proto")
-	sessionCostTTL := serveCmd.Duration("session-cost-ttl", 0, "If > 0, evict session-cost accumulator entries idle longer than this duration (e.g. 24h). Zero preserves v0.4.0 behavior (entries never expire).")
+	sessionCostTTL := serveCmd.Duration("session-cost-ttl", 0, "If > 0, evict session-cost accumulator entries idle longer than this duration (e.g. 24h). Zero disables eviction (entries never expire).")
 	sessionCostSweep := serveCmd.Duration("session-cost-sweep-interval", 0, "How often to run the session-cost sweeper. Defaults to max(session-cost-ttl/4, 1m).")
 	// Audit log rotation. Defaults aim at production-friendly bounds:
 	// 100 MiB live-file ceiling, 30-day retention, 5 archives kept (older
 	// archives pruned by oldest-first lex order on the timestamp suffix),
-	// gzip on. Set --audit-max-size-mb=0 to disable rotation entirely (matches
-	// v0.4.x behavior — unbounded growth). See pkg/audit/rotation.go for
-	// the rotation contract.
-	auditMaxSizeMB := serveCmd.Int("audit-max-size-mb", 100, "Maximum size of the live audit log in MiB before rotation. 0 disables rotation (v0.4.x behavior).")
+	// gzip on. Set --audit-max-size-mb=0 to disable rotation entirely.
+	// See pkg/audit/rotation.go for the rotation contract.
+	auditMaxSizeMB := serveCmd.Int("audit-max-size-mb", 100, "Maximum size of the live audit log in MiB before rotation. 0 disables rotation.")
 	auditMaxBackups := serveCmd.Int("audit-max-backups", 5, "Maximum number of rotated archives to keep. 0 keeps all archives indefinitely.")
 	auditMaxAgeDays := serveCmd.Int("audit-max-age-days", 30, "Maximum age (in days) of archived audit files. Archives older than this are pruned at rotation time. 0 disables age-based pruning.")
 	auditCompress := serveCmd.Bool("audit-compress", true, "Gzip rotated archives. Disable to keep them as plain JSONL for grep tooling.")
-	// Buffered async audit logger (Phase 2 / v0.5). Wraps the FileLogger
-	// with a bounded queue + worker pool + disk-overflow durability so the
-	// /v1/check hot path no longer waits on the audit mutex. See
-	// pkg/audit/buffered.go for the contract. Closes R2 S5 / R2 S9 / R4 E3.
-	auditBuffered := serveCmd.Bool("audit-buffered", true, "Wrap the audit logger in a bounded async queue with disk-overflow durability. Disable to write straight to FileLogger (v0.4.x behavior).")
+	// Buffered async audit logger: bounded queue + worker pool + disk-
+	// overflow durability so the /v1/check hot path does not wait on the
+	// audit mutex. See pkg/audit/buffered.go for the contract.
+	auditBuffered := serveCmd.Bool("audit-buffered", true, "Wrap the audit logger in a bounded async queue with disk-overflow durability. Disable to write straight to FileLogger.")
 	auditQueueSize := serveCmd.Int("audit-queue-size", 1024, "Bounded queue size for the buffered async logger. Ignored unless --audit-buffered is set.")
 	auditWorkers := serveCmd.Int("audit-workers", 4, "Worker goroutines draining the buffered audit queue. Ignored unless --audit-buffered is set.")
 	auditOverflowPath := serveCmd.String("audit-overflow-path", "", "Path to the disk-overflow spill file used when the buffered queue saturates. Defaults to <audit-log>.overflow.jsonl. Ignored unless --audit-buffered is set.")
@@ -108,6 +112,12 @@ func main() {
 		printUsage()
 		os.Exit(1)
 	}
+
+	// Give the background update check up to 800ms to finish so any
+	// deprecation notice lands before subcommand output starts. If the
+	// check is still running after the deadline we just move on — the
+	// goroutine continues silently and a late print is harmless.
+	waitForUpdateCheck(updateDone, 800*time.Millisecond)
 
 	switch os.Args[1] {
 	case "serve":
@@ -213,10 +223,10 @@ type auditRotationOpts struct {
 // struct so runServe's signature stays bounded; the struct is translated
 // into a pkg/audit BufferedAsyncOpts inside runServe.
 //
-// Enabled=false reproduces v0.4.x behavior (writes go straight to the
-// FileLogger, /v1/check waits on the audit mutex). Enabled=true is the
-// v0.5 default and decouples the request path from audit I/O via a
-// bounded queue + worker pool + disk-overflow durability.
+// Enabled=false makes writes go straight to the FileLogger and /v1/check
+// waits on the audit mutex. Enabled=true (the default) decouples the
+// request path from audit I/O via a bounded queue + worker pool + disk-
+// overflow durability.
 type auditBufferedOpts struct {
 	Enabled      bool
 	QueueSize    int
@@ -239,11 +249,10 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		baseURL = fmt.Sprintf("http://localhost:%d", port)
 	}
 
-	// Spec R4 F1: warn the operator when session-cost TTL is disabled. The
-	// engine accumulator grows one entry per distinct session_id forever
-	// when the sweeper is off, and operators who never set --session-cost-ttl
-	// usually do not realise it. Behavior matches v0.4.0 (no eviction); we
-	// only complain so the surprise is documented in stderr.
+	// Warn the operator when session-cost TTL is disabled. The engine
+	// accumulator grows one entry per distinct session_id forever when
+	// the sweeper is off, and operators who never set --session-cost-ttl
+	// usually do not realise it.
 	if sessionCostTTL <= 0 {
 		log.Println("WARNING: --session-cost-ttl is 0; session-cost accumulator will grow unbounded. Set e.g. --session-cost-ttl 24h to bound memory.")
 	}
@@ -252,7 +261,6 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 	// 0.0.0.0 — because pprof exposes goroutine stacks and live memory
 	// shapes that should not leak to the network. Operators who want to
 	// reach it remotely must tunnel (`ssh -L`, `kubectl port-forward`).
-	// Closes R4 S2.
 	pprofSrv := startPprofServer(pprofCfg)
 	if pprofSrv != nil {
 		defer func() {
@@ -262,8 +270,8 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		}()
 	}
 	// Load policy through the provider abstraction. FilePolicyProvider
-	// wraps the existing single-file load + watch pattern; v0.6 swaps in
-	// a database-backed provider without changing engine or server code.
+	// wraps the single-file load + watch pattern; a database-backed
+	// provider can swap in without changing engine or server code.
 	provider, err := policy.NewFilePolicyProvider(policyFile)
 	if err != nil {
 		log.Fatalf("Failed to load policy %s: %v", policyFile, err)
@@ -293,8 +301,7 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 	//
 	// Rotation is on by default (100 MiB live cap, 30-day retention,
 	// 5 archives, gzip). Setting --audit-max-size-mb=0 disables rotation
-	// entirely and matches v0.4.x behavior (unbounded growth). Closes
-	// R7 E1 / T1 (audit log has no rotation).
+	// entirely (unbounded growth).
 	rotCfg := audit.RotationConfig{
 		MaxFiles: rotOpts.MaxBackups,
 		Compress: rotOpts.Compress,
@@ -315,11 +322,11 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		log.Fatalf("Failed to initialize audit log: %v", err)
 	}
 	// Optionally wrap the FileLogger in a BufferedAsyncLogger so the
-	// /v1/check hot path no longer waits on the audit mutex. The wrapper
+	// /v1/check hot path does not wait on the audit mutex. The wrapper
 	// owns its own goroutines (workers + recovery loop) and a bounded
 	// channel; on saturation, entries spill to a JSON-Lines overflow file
 	// (mode 0600) and a recovery goroutine drains them back into the queue
-	// when capacity returns. Closes R2 S5 / R2 S9 / R4 E3.
+	// when capacity returns.
 	//
 	// The wrapper does NOT close the underlying FileLogger — the deferred
 	// FileLogger.Close below owns that lifecycle. We defer the wrapper's
@@ -622,8 +629,8 @@ func runAuditQuery(baseURL, agent, decision, scope, transport string, limit int,
 		reqScope, _ := req["scope"].(string)
 		dec, _ := result["decision"].(string)
 		reason, _ := result["reason"].(string)
-		// Transport is omitempty on the wire — pre-v0.5 entries lack
-		// the field. Fall back to "sdk" so columns stay aligned.
+		// Transport is omitempty on the wire — older entries lack the
+		// field. Fall back to "sdk" so columns stay aligned.
 		tport, _ := e["transport"].(string)
 		if tport == "" {
 			tport = "sdk"

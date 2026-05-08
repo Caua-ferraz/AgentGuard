@@ -86,13 +86,13 @@ type Config struct {
 	// issued with Secure set regardless of whether the incoming request has
 	// r.TLS populated. Set this when AgentGuard runs behind a reverse proxy
 	// that terminates TLS and does not forward X-Forwarded-Proto. Default
-	// false preserves v0.4.0 behavior (cookie Secure keyed to r.TLS only).
+	// false keys cookie Secure to r.TLS only.
 	TLSTerminatedUpstream bool
 
 	// SessionCostTTL bounds how long an idle session_id entry lingers in the
 	// cost accumulator map. A periodic goroutine evicts entries whose last
-	// write was more than TTL ago. Zero disables the sweep (v0.4.0 behavior:
-	// entries accumulate for the process lifetime).
+	// write was more than TTL ago. Zero disables the sweep — entries
+	// accumulate for the process lifetime.
 	SessionCostTTL time.Duration
 	// SessionCostSweepInterval controls how often the sweeper runs. If zero
 	// and SessionCostTTL > 0, it defaults to SessionCostTTL/4 with a floor
@@ -190,10 +190,9 @@ type PendingAction struct {
 // AuditEvent is sent over SSE to dashboard clients for any check result.
 //
 // Transport identifies the integration path that produced the event
-// ("sdk", "mcp_gateway", "llm_api_proxy"). Defaults to "sdk" on the
-// wire when unset so dashboard JS does not need a fallback. Added in
-// v0.5 (Phase 4B, A19); pre-v0.5 SSE consumers see the field as an
-// extra (ignored) JSON key.
+// ("sdk", "mcp_gateway", "llm_api_proxy"). Defaults to "sdk" on the wire
+// when unset so dashboard JS does not need a fallback. Older SSE
+// consumers see the field as an extra (ignored) JSON key.
 type AuditEvent struct {
 	Type      string               `json:"type"` // "check", "approval", "resolved"
 	Timestamp time.Time            `json:"timestamp"`
@@ -312,9 +311,9 @@ func NewServer(cfg Config) *Server {
 	// Layout: /v1/t/{tenant}/<suffix>. The withTenant middleware extracts
 	// {tenant}, validates it via Engine.PolicyForTenant (404 on
 	// ErrTenantNotFound), stamps it on the request context, then delegates
-	// to the same handler the legacy /v1/<suffix> route uses. v0.5 only
-	// recognises the "local" tenant; v0.6 will swap in a database-backed
-	// PolicyProvider that resolves arbitrary tenant IDs.
+	// to the same handler the legacy /v1/<suffix> route uses. The default
+	// FilePolicyProvider only recognises the "local" tenant; a future
+	// database-backed PolicyProvider can resolve arbitrary tenant IDs.
 	//
 	// Auth posture mirrors the legacy routes exactly: /v1/t/{tenant}/check
 	// is open (the policy query endpoint), every other tenant-aware route
@@ -341,11 +340,11 @@ func NewServer(cfg Config) *Server {
 	mux.HandleFunc("/health", s.handleHealth)
 	// /v1/health is the operator-grade health endpoint (richer payload,
 	// includes last-request and last-policy-load timestamps + warnings).
-	// Anchored on a single tenant ("local") in v0.5; the tenant-aware
-	// route below anticipates A7's URL-routing scheme.
+	// Anchored on the "local" tenant; the tenant-aware route below uses
+	// the same handler with {tenant} extracted by withTenant.
 	mux.HandleFunc("GET /v1/health", s.handleHealthV1Local)
-	// Tenant-aware variant. v0.6 will add real multi-tenant resolution;
-	// v0.5 only resolves "local" and returns 404 for any other tenant.
+	// Tenant-aware variant. Currently only "local" resolves; any other
+	// tenant returns 404 until a multi-tenant PolicyProvider is wired.
 	mux.HandleFunc("GET /v1/t/{tenant}/health", s.handleHealthV1Tenant)
 	mux.HandleFunc("/metrics", s.handleMetrics)
 
@@ -360,8 +359,8 @@ func NewServer(cfg Config) *Server {
 		// Tenant-aware mirrors of the dashboard data endpoints. The
 		// dashboard HTML itself is intentionally NOT remapped to a
 		// tenant-aware URL — there is one operator UI per AgentGuard
-		// instance. SDK / CLI consumers that need per-tenant lists
-		// (for v0.6 multi-tenant) hit these JSON endpoints.
+		// instance. SDK / CLI consumers that need per-tenant lists hit
+		// these JSON endpoints.
 		mux.HandleFunc("GET /v1/t/{tenant}/api/pending",
 			s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handlePendingList)))
 		mux.HandleFunc("GET /v1/t/{tenant}/api/stream",
@@ -386,7 +385,6 @@ func NewServer(cfg Config) *Server {
 		// header pair via the recovered 500; withTraffic stamps
 		// lastRequestAtNs (used by /v1/health); withLogging is innermost
 		// so the recovered duration includes the panic path.
-		// Closes R3 #J.
 		Handler:           recoverPanic(withCORS(cfg.AllowedOrigin)(s.withTraffic(withLogging(mux)))),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -486,7 +484,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Wire-protocol version negotiation. Empty defaults to "v1" so v0.4.x
+	// Wire-protocol version negotiation. Empty defaults to "v1" so older
 	// clients continue to interoperate; any other value is rejected with
 	// 400 so a future "v2" client never silently misinterprets a v1 server.
 	// See pkg/proxy/schema/v1/schema.json and docs/WIRE_PROTOCOL.md.
@@ -596,9 +594,9 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	// Tenant resolution: legacy /v1/check has no tenant in the path and
 	// TenantIDFromContext defaults to LocalTenantID; tenant-aware
 	// /v1/t/{tenant}/check has been validated and stamped by withTenant
-	// before this handler runs. A7 plumbed the tenant through here as the
-	// first stage of multi-tenant URL routing; v0.6 will shard the
-	// approval queue / audit query / rate limiter on the same value.
+	// before this handler runs. The approval queue / audit query / rate
+	// limiter are currently single-tenant; multi-tenant sharding is
+	// future work — see pkg/proxy/tenant.go.
 	result := s.cfg.Engine.Check(req, TenantIDFromContext(r.Context()))
 	evalMs := float64(time.Since(evalStart).Microseconds()) / 1000.0
 	metrics.PolicyEvalDuration.Observe(evalMs)
@@ -714,8 +712,8 @@ func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, 
 
 // matchesOriginalRequest returns true iff the retry request's
 // operationally-meaningful fields equal those of the originally-
-// approved PendingAction. This is the v0.5 audit-B1 guard against
-// approval-id replay across mismatched actions.
+// approved PendingAction. Guards against approval-id replay across
+// mismatched actions.
 //
 // Compared fields (mismatch on any one → fall through to fresh policy
 // evaluation rather than returning the cached decision):
@@ -912,14 +910,12 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 
 // handleAuditQuery returns filtered audit log entries.
 //
-// Query-string contract (stable as of v0.4.1):
+// Query-string contract:
 //   - ?limit=N — integer in [1, MaxAuditQueryLimit]. Values above the ceiling
 //     are clamped silently. Missing/empty uses DefaultAuditQueryLimit.
 //     Non-integers or values < 1 return 400.
 //   - ?offset=N — integer ≥ 0. Defaults to 0. Non-integers or negatives
 //     return 400.
-//
-// Prior to v0.4.1 the handler ignored ?limit= and always passed 100.
 func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 	limit, err := parseBoundedInt(r.URL.Query().Get("limit"), s.auditDefaultLimit, 1, s.auditMaxLimit)
 	if err != nil {
@@ -1018,10 +1014,9 @@ type healthResponse struct {
 }
 
 // healthStaleTrafficWindow is the threshold above which /v1/health adds
-// "no traffic in 5m+" to the warnings array. Tuned for the v0.5
-// expected polling cadence (Prometheus + dashboard SSE keep traffic
-// constant in healthy deployments). var, not const, so tests can
-// override.
+// "no traffic in 5m+" to the warnings array. Tuned for typical polling
+// cadence (Prometheus + dashboard SSE keep traffic constant in healthy
+// deployments). var, not const, so tests can override.
 var healthStaleTrafficWindow = 5 * time.Minute
 
 // healthStalePolicyWindow is the threshold above which /v1/health adds
@@ -1039,8 +1034,8 @@ func (s *Server) handleHealthV1Local(w http.ResponseWriter, r *http.Request) {
 
 // handleHealthV1Tenant serves /v1/t/{tenant}/health. Extracts the tenant
 // from the URL path (Go 1.22+ wildcard) and resolves it via the
-// engine's policy provider. v0.5 only configures the "local" tenant;
-// any other value yields 404 via policy.ErrTenantNotFound.
+// engine's policy provider. With FilePolicyProvider only "local" is
+// configured; any other value yields 404 via policy.ErrTenantNotFound.
 func (s *Server) handleHealthV1Tenant(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	s.handleHealthV1(w, r, tenant)
@@ -1050,19 +1045,17 @@ func (s *Server) handleHealthV1Tenant(w http.ResponseWriter, r *http.Request) {
 // /v1/t/{tenant}/health. Returns 404 with a structured error body when
 // the tenant is unknown; otherwise 200 with the full healthResponse.
 //
-// TODO(v0.6, #N): integrate /v1/health with metrics-derived health
-//                 (audit failures, dispatcher saturation, etc.); for
-//                 now status is unconditionally "ok" and operators
-//                 alert on the warnings array.
+// TODO(v0.6): integrate /v1/health with metrics-derived health (audit
+// failures, dispatcher saturation, etc.); status is unconditionally
+// "ok" today and operators alert on the warnings array.
 func (s *Server) handleHealthV1(w http.ResponseWriter, r *http.Request, tenant string) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// Resolve the tenant via the engine's provider so v0.6 multi-tenant
+	// Resolve the tenant via the engine's provider so multi-tenant
 	// providers (which the engine has not subscribed to) still surface
 	// 404s correctly. We do not use the resolved *Policy here — the
-	// engine's last-load timestamp is already a function of the local
-	// tenant, and v0.5 has no per-tenant timestamp tracking. v0.6 will
-	// add a per-tenant timestamp map.
+	// engine's last-load timestamp is currently a function of the local
+	// tenant only. A per-tenant timestamp map is future work.
 	if _, err := s.cfg.Engine.PolicyForTenant(tenant); err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "tenant not found"})
@@ -1496,10 +1489,7 @@ func (s *Server) withTraffic(next http.Handler) http.Handler {
 // raised by a downstream handler, logs the stack trace, and returns a
 // generic 500 to the client. Without it, a panic inside Engine.Check or a
 // notifier callback would tear down the request goroutine but leave the
-// connection in an indeterminate state — and goroutines spawned by
-// AgentGuard itself (sweeper, dispatcher workers) had no recover at all.
-//
-// Closes R3 #J.
+// connection in an indeterminate state.
 func recoverPanic(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
@@ -1644,8 +1634,8 @@ var dashboardHTML = `<!DOCTYPE html>
       const decision = result.decision || 'UNKNOWN';
       const req = entry.request || {};
       const action = req.command || req.path || req.domain || 'unknown';
-      // Transport may sit at the top level (SSE event + v0.5+ audit
-      // entries) or be absent on pre-v0.5 audit entries; default 'sdk'.
+      // Transport may sit at the top level (SSE event + newer audit
+      // entries) or be absent on older audit entries; default 'sdk'.
       const transport = entry.transport || 'sdk';
       const el = document.createElement('div');
       el.className = 'entry ' + esc(decision);

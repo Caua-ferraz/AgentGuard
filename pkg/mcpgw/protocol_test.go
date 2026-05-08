@@ -216,8 +216,8 @@ func TestContentBlockPreservesUnknownFields(t *testing.T) {
 }
 
 func TestMergeCapabilities(t *testing.T) {
-	// v0.5 masks `resources` and `prompts` regardless of what upstreams
-	// advertise (see MergeCapabilities doc-comment + B5 audit finding).
+	// MergeCapabilities masks `resources` and `prompts` regardless of
+	// what upstreams advertise (see MergeCapabilities doc-comment).
 	// These cases assert that masking holds across upstream shapes.
 	cases := []struct {
 		name        string
@@ -268,11 +268,11 @@ func TestMergeCapabilities(t *testing.T) {
 	}
 }
 
-// TestMergeCapabilities_MasksResourcesAndPrompts is a regression test
-// for B5 (R-Stub C2): even when multiple upstreams advertise
+// TestMergeCapabilities_MasksResourcesAndPrompts is the regression test
+// for the masking invariant: even when multiple upstreams advertise
 // `resources` / `prompts`, the gateway must NOT expose those
 // capabilities to the client because resources/* and prompts/* method
-// routing is deferred to v0.6. Advertising them would mislead the
+// routing is not yet implemented. Advertising them would mislead the
 // client into showing resources that every read would reject with
 // MethodNotFound.
 func TestMergeCapabilities_MasksResourcesAndPrompts(t *testing.T) {
@@ -298,10 +298,10 @@ func TestMergeCapabilities_MasksResourcesAndPrompts(t *testing.T) {
 		t.Errorf("logging must always be advertised; got merged=%v", merged)
 	}
 	if _, ok := merged["resources"]; ok {
-		t.Errorf("resources must be masked in v0.5 (B5); got merged=%v", merged)
+		t.Errorf("resources must be masked; got merged=%v", merged)
 	}
 	if _, ok := merged["prompts"]; ok {
-		t.Errorf("prompts must be masked in v0.5 (B5); got merged=%v", merged)
+		t.Errorf("prompts must be masked; got merged=%v", merged)
 	}
 }
 

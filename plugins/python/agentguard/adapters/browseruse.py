@@ -34,9 +34,10 @@ Design notes
   the methods listed in :data:`_GATED_METHODS` plus a small allowlist of
   read-only properties via :data:`_ALLOWED_PASSTHROUGH`.
 - **Default deny on attribute access.** Anything not on the allowlist
-  raises ``AttributeError`` with a security explanation. This catches the
-  v0.4.x bypass where ``__getattr__`` silently fell through to
-  ``self._page.click(...)``, leaving every action method un-gated.
+  raises ``AttributeError`` with a security explanation. A permissive
+  ``__getattr__`` would silently fall through to
+  ``self._page.click(...)`` and leave every action method un-gated, so
+  the wrapper never adds one.
 - **Form values are redacted before transmission.** ``check_form_input``
   passes the field NAME through (operators need it for audit context)
   but rewrites long values to ``<redacted; len=N>`` so audit logs do not
@@ -44,9 +45,8 @@ Design notes
   through :func:`agentguard.adapters.mcp._redact` for the standard secret
   patterns (Bearer tokens, AWS keys, ``secret=...`` pairs, etc.).
 
-Closes audit findings R5 E4 (modern-API bypass via __getattr__),
-R5 E5 / R7 E3 (data scope unhandled by the engine — see
-pkg/policy/engine_data_test.go for the engine-side close).
+The data-scope contract is pinned by pkg/policy/engine_data_test.go
+on the engine side.
 """
 
 from typing import Any, Optional
@@ -215,11 +215,10 @@ class GuardedPage:
 
     Gated methods are explicit attributes on this class (see the bodies
     below). Anything else is rejected via ``__getattr__`` against
-    :data:`_ALLOWED_PASSTHROUGH`. This is deliberately stricter than the
-    v0.4.x adapter, which proxied every attribute access — that proxying
-    was the bypass closed by audit finding R5 E4: ``page.click(...)``,
-    ``page.fill(...)``, ``page.evaluate(...)`` all flowed through to the
-    raw Page without ever consulting the policy.
+    :data:`_ALLOWED_PASSTHROUGH`. A permissive ``__getattr__`` that
+    proxied every attribute access would let ``page.click(...)``,
+    ``page.fill(...)``, ``page.evaluate(...)`` flow through to the raw
+    Page without ever consulting the policy — so we never add one.
 
     Read-only properties listed in :data:`_ALLOWED_PASSTHROUGH` (url,
     title, content, viewport_size, is_closed, main_frame, context) are
@@ -529,10 +528,10 @@ class GuardedPage:
 
         Anything else raises ``AttributeError`` with a security
         explanation. The default-deny posture is intentional: silently
-        proxying unknown attributes to ``self._page`` was the v0.4.x
-        bypass that let modern Playwright APIs (route, expose_function,
-        ...) skip every gate. Adding a new method to the gated surface
-        is preferable to widening the allowlist.
+        proxying unknown attributes to ``self._page`` would let modern
+        Playwright APIs (route, expose_function, ...) skip every gate.
+        Adding a new method to the gated surface is preferable to
+        widening the allowlist.
         """
         # Avoid infinite recursion when our own internals are accessed
         # before __init__ completes.

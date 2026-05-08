@@ -1,16 +1,12 @@
-// AT (Test Wrangler) property + golden test — Phase 2.
+// Property + golden test for the v1 ActionRequest / CheckResult types.
 //
-// Catches silent wire-format drift on the v1 ActionRequest/CheckResult
-// types. We cannot reasonably shell out to a Python interpreter from a
-// Go test on Windows CI runners, so the property side is Go-only:
-// generate random valid ActionRequests, marshal+unmarshal, and assert
+// Catches silent wire-format drift. The property side is Go-only:
+// generate random valid ActionRequests, marshal + unmarshal, assert
 // reflexive equality. The cross-language anchor is the golden-fixture
-// check below: the Python and TypeScript SDK test files load the SAME
+// check below — the Python and TypeScript SDK test files load the SAME
 // fixture file from disk and assert structurally identical decode
 // results. If the Go re-encode here differs from the on-disk fixture,
 // that signals drift well before the SDKs notice.
-//
-// Closes the "no silent wire-format drift" guarantee for R1 F4 / F7.
 
 package v1
 

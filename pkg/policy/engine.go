@@ -26,11 +26,10 @@ const (
 
 // CheckResult is the response returned after evaluating an action against policy.
 //
-// SchemaVersion identifies the wire-format version. v0.5+ servers always
-// emit "v1"; clients may use it to negotiate forward-compatibility. The
-// `omitempty` tag preserves byte-for-byte compatibility with v0.4.x test
-// fixtures that decode the response and assert on the JSON shape — the
-// field is always populated by the proxy at response time. The full
+// SchemaVersion identifies the wire-format version. The proxy always emits
+// "v1" at response time; clients may use it to negotiate forward-
+// compatibility. The `omitempty` tag is kept so test fixtures that decode
+// the response and assert on the JSON shape stay byte-stable. The full
 // schema is documented in pkg/proxy/schema/v1/schema.json.
 type CheckResult struct {
 	SchemaVersion string   `json:"schema_version,omitempty"`
@@ -51,7 +50,7 @@ type Policy struct {
 	Notifications NotificationCfg     `yaml:"notifications,omitempty"`
 	// Proxy carries server-side tunables (session TTL, request body limit,
 	// audit query bounds). All subfields are optional; unset values fall
-	// back to the Default* constants below, which match v0.4.0 behavior.
+	// back to the Default* constants below.
 	Proxy ProxyCfg `yaml:"proxy,omitempty"`
 
 	// ToolScopeMap maps MCP tool names to existing policy scopes for the
@@ -90,9 +89,7 @@ type ToolScopeMapping struct {
 	Scope   string `yaml:"scope" json:"scope"`
 }
 
-// Defaults applied when the corresponding config key is unset. These
-// preserve v0.4.0 behavior so a policy file written against v0.4.0 keeps
-// its exact runtime semantics after upgrade.
+// Defaults applied when the corresponding config key is unset.
 const (
 	DefaultSessionTTL            = 1 * time.Hour
 	DefaultMaxRequestBodyBytes   = int64(1 << 20) // 1 MiB
@@ -178,11 +175,9 @@ type CostLimits struct {
 // OverrideMode controls how a per-scope override RuleSet combines with its
 // base counterpart. The default ("merge") inherits Deny and RequireApproval
 // rules from base while letting the override's Allow list narrow the scope.
-// Setting "replace" reproduces the v0.4.x behavior where the override
-// fully supplants the base RuleSet for that scope.
-//
-// Closes R2 E5 / T11 (audit finding "per-agent override silently widens
-// scope by dropping base deny rules").
+// Setting "replace" makes the override fully supplant the base RuleSet for
+// that scope (used when an agent's policy must explicitly drop a base
+// deny rule, with operator awareness).
 type AgentCfg struct {
 	Extends      string    `yaml:"extends"`
 	Override     []RuleSet `yaml:"override,omitempty"`
@@ -271,19 +266,17 @@ func LoadFromFile(path string) (*Policy, error) {
 	}
 
 	// Validate every rule-level rate_limit and condition.time_window
-	// duration. v0.4.x parsed these lazily at first request and silently
-	// fell through on parse error, so a typo like `window: "1minute"`
-	// produced a no-op rule. Closes R3 #5 / R3 #15 (window=0 panic in
-	// the limiter is also rejected here).
+	// duration at load time. Lazy parsing on the request path silently
+	// fell through on bad input, so a typo like `window: "1minute"`
+	// produced a no-op rule. window=0 (panic in the limiter) is also
+	// rejected here.
 	if err := validateRuleDurationsAndCounts(&pol); err != nil {
 		return nil, err
 	}
 
-	// Reject conditions with time_window but no require_prior. The
-	// v0.4.x build only WARNed and let the load succeed (the rule was a
-	// no-op at runtime). v0.5 hard-fails: leaving an inert condition in
-	// production is a footgun, and the deprecation warning has been live
-	// since v0.4.1. Closes R2 S11.
+	// Reject conditions with time_window but no require_prior. Such a
+	// condition is inert at runtime; we hard-fail at load so a footgun
+	// in production cannot hide behind a one-line typo.
 	if err := errorTimeWindowOnlyConditions(&pol); err != nil {
 		return nil, err
 	}
@@ -322,11 +315,10 @@ func validateFilesystemPaths(pol *Policy) error {
 // load — it is almost certainly an operator typo and the gateway's
 // dual-check would silently skip the second Engine.Check otherwise.
 //
-// The "mcp_tool" scope is the MCP Gateway's primary scope for the
-// first half of the dual-check pattern; it is added here in v0.5
-// alongside the gateway. The gateway dispatches "mcp_tool" through
-// the engine's generic path (no scope-specific handling), like the
-// "data" scope added in Phase 3 A13.
+// The "mcp_tool" scope is the MCP Gateway's primary scope for the first
+// half of the dual-check pattern. The gateway dispatches "mcp_tool"
+// through the engine's generic path (no scope-specific handling), like
+// the "data" scope.
 var knownPolicyScopes = map[string]struct{}{
 	"shell":      {},
 	"filesystem": {},
@@ -339,8 +331,8 @@ var knownPolicyScopes = map[string]struct{}{
 
 // validateToolScopeMap rejects a tool_scope_map whose entry has an
 // empty pattern, an empty scope, or a scope outside knownPolicyScopes.
-// Closes the silent-no-op footgun where a typo (`scope: filesytem`)
-// would cause the gateway's strict-mode dual-check to skip the second
+// Without this validation a typo (`scope: filesytem`) would cause the
+// gateway's strict-mode dual-check to silently skip the second
 // Engine.Check entirely.
 func validateToolScopeMap(pol *Policy) error {
 	for i, m := range pol.ToolScopeMap {
@@ -395,7 +387,7 @@ func validateRedactionPatterns(pol *Policy) error {
 // validateRuleDurationsAndCounts walks every RuleSet's rate_limit and every
 // rule-level condition.time_window, requiring durations to parse cleanly
 // and integer thresholds to be strictly positive. Both base rules and
-// per-agent overrides are checked. Closes R3 #5 / #15.
+// per-agent overrides are checked.
 func validateRuleDurationsAndCounts(pol *Policy) error {
 	check := func(loc string, rs RuleSet) error {
 		if rs.RateLimit != nil {
@@ -450,9 +442,8 @@ func validateRuleDurationsAndCounts(pol *Policy) error {
 }
 
 // errorTimeWindowOnlyConditions returns an error for any rule whose
-// conditions include a time_window without a require_prior. In v0.4.x this
-// was a WARN (and the rule became a runtime no-op). The deprecation has
-// been live for one release; v0.5 promotes it to an error.
+// conditions include a time_window without a require_prior. Such a rule
+// is a runtime no-op; rejecting it at load avoids silent footguns.
 func errorTimeWindowOnlyConditions(pol *Policy) error {
 	check := func(loc string, rules []Rule) error {
 		for i, r := range rules {
@@ -465,7 +456,7 @@ func errorTimeWindowOnlyConditions(pol *Policy) error {
 					if id == "" {
 						id = r.Domain
 					}
-					return fmt.Errorf("%s[%d](%q).conditions[%d]: time_window without require_prior is rejected as of v0.5; pair time_window with require_prior or remove it", loc, i, id, j)
+					return fmt.Errorf("%s[%d](%q).conditions[%d]: time_window without require_prior is rejected; pair time_window with require_prior or remove it", loc, i, id, j)
 				}
 			}
 		}
@@ -500,14 +491,10 @@ func errorTimeWindowOnlyConditions(pol *Policy) error {
 	return nil
 }
 
-// (warnTimeWindowOnlyConditions was removed in v0.5: the deprecated
-// pattern is now an error at load time via errorTimeWindowOnlyConditions.
-// See docs/DEPRECATIONS.md for the migration path.)
-
-// validateTunables bounds-checks every Phase-4 config key. Durations must
-// parse with time.ParseDuration and be strictly positive when present; byte
-// and row limits must be strictly positive when present; audit MaxLimit, if
-// set, must be >= audit DefaultLimit (including the case where one is set
+// validateTunables bounds-checks proxy/notification config keys. Durations
+// must parse with time.ParseDuration and be strictly positive when present;
+// byte and row limits must be strictly positive when present; audit MaxLimit,
+// if set, must be >= audit DefaultLimit (including the case where one is set
 // explicitly and the other relies on its default).
 //
 // Called from LoadFromFile after schema-level parsing. Errors returned here
@@ -691,17 +678,16 @@ type sessionCostEntry struct {
 }
 
 // Engine evaluates actions against a policy. The policy itself is owned
-// by a PolicyProvider (file-backed, static, or — in v0.6 — database-backed),
-// not by the Engine. Engine caches the latest *Policy for the local tenant
-// via a Watch subscription so that Check() does not pay a provider lookup
-// on every request.
+// by a PolicyProvider (file-backed, static, or a future database-backed
+// impl), not by the Engine. Engine caches the latest *Policy for the local
+// tenant via a Watch subscription so that Check() does not pay a provider
+// lookup on every request.
 //
 // Caching strategy: the cached pointer is refreshed whenever the provider
 // fires its watch callback (for FilePolicyProvider, on every successful
 // reload; for StaticPolicyProvider, on every UpdatePolicy call). All
 // reads of the cache use Engine.mu so a concurrent reload cannot tear a
-// pointer swap. See .audit/v05_decisions.md ("PolicyProvider interface
-// design") for the rationale on choosing watch-cache over per-Check Get.
+// pointer swap.
 type Engine struct {
 	mu           sync.RWMutex
 	provider     PolicyProvider
@@ -714,8 +700,6 @@ type Engine struct {
 	// recent successful policy load (initial Get + each Watch callback fire).
 	// Stored as int64 and accessed via sync/atomic so health probes can read
 	// it without contending with Engine.mu on the hot path.
-	// See .audit/v05_decisions.md ("Health endpoint: lastPolicyLoadAt
-	// location") for why this lives on Engine rather than PolicyProvider.
 	lastPolicyLoadAtNs int64
 }
 
@@ -907,8 +891,8 @@ func (e *Engine) SessionCostCount() int {
 
 // Policy returns the currently active policy for the local tenant
 // (thread-safe). Returns nil only if the provider's most recent Get
-// surfaced ErrTenantNotFound for the local tenant; in v0.5 that should
-// not happen at runtime because NewEngine refuses to construct without a
+// surfaced ErrTenantNotFound for the local tenant; this should not
+// happen at runtime because NewEngine refuses to construct without a
 // policy.
 func (e *Engine) Policy() *Policy {
 	e.mu.RLock()
@@ -919,13 +903,13 @@ func (e *Engine) Policy() *Policy {
 // PolicyForTenant returns the policy for tenantID (or the cached local
 // policy when tenantID is "" or LocalTenantID). Forwards to the
 // underlying provider for any other tenantID so multi-tenant providers
-// (v0.6+) can resolve tenants the engine has not subscribed to. Returns
+// can resolve tenants the engine has not subscribed to. Returns
 // ErrTenantNotFound when the tenant is unknown.
 //
 // Used by /v1/health and the /v1/t/{tenant}/health endpoint to validate
-// the requested tenant before composing the response. Health is the
-// only caller in v0.5; the hot path (Engine.Check) goes through the
-// existing dispatch logic and remains unchanged.
+// the requested tenant before composing the response. The hot path
+// (Engine.Check) goes through the existing dispatch logic and remains
+// unchanged.
 func (e *Engine) PolicyForTenant(tenantID string) (*Policy, error) {
 	if tenantID == "" || tenantID == LocalTenantID {
 		e.mu.RLock()
@@ -989,11 +973,9 @@ type ActionRequest struct {
 // rules -> default deny. Per-agent overrides are applied when AgentID
 // matches a key in policy.Agents.
 //
-// tenantID selects which policy to evaluate against. v0.5 only supports
-// the local tenant ("" and "local" are accepted; everything else returns
-// a synthetic DENY with Rule="deny:tenant:not_found"). The proxy passes
-// "local" today; multi-tenant URL routing arrives with worker A7 in this
-// phase.
+// tenantID selects which policy to evaluate against. The local tenant
+// ("" and "local" are accepted) is always valid; an unknown tenant
+// returns a synthetic DENY with Rule="deny:tenant:not_found".
 //
 // Bad-tenant is surfaced as a CheckResult Deny rather than an error
 // because the existing handleCheck flow already routes Deny through the
@@ -1001,9 +983,7 @@ type ActionRequest struct {
 // would force every caller to add bespoke fallback logic for a case the
 // CheckResult schema already covers. Future providers that need to
 // distinguish "tenant unknown" from "tenant denied" can do so via
-// Rule="deny:tenant:not_found" (the canonical sentinel). See
-// .audit/v05_decisions.md ("PolicyProvider interface design") for the
-// rationale.
+// Rule="deny:tenant:not_found" (the canonical sentinel).
 //
 // For cost-scoped requests that are ALLOWed, the session accumulator is
 // incremented atomically under the same write lock as the decision, so
@@ -1011,11 +991,10 @@ type ActionRequest struct {
 // configured max_per_session limit (TOCTOU fix).
 func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 	// Reject any tenant the provider does not recognise. We consult the
-	// provider rather than just the cached policy because v0.6 multi-tenant
-	// providers will populate other tenant IDs that this engine has not
+	// provider rather than just the cached policy because multi-tenant
+	// providers may populate other tenant IDs that this engine has not
 	// yet observed; refusing on cache miss alone would cause a false 404
-	// in those topologies. In v0.5 the only valid tenant is "local", so
-	// the cache and the provider always agree.
+	// in those topologies.
 	if tenantID == "" {
 		tenantID = LocalTenantID
 	}
@@ -1031,10 +1010,10 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 				}
 			}
 			// A non-ErrTenantNotFound error from the provider is an
-			// internal infrastructure failure (DB down in v0.6); treat
-			// it as default-deny with a distinct sentinel rule so
-			// operators can alert on it without confusing it with a
-			// missing-tenant case.
+			// internal infrastructure failure (e.g. DB down for a
+			// future DB-backed provider); treat it as default-deny
+			// with a distinct sentinel rule so operators can alert on
+			// it without confusing it with a missing-tenant case.
 			return CheckResult{
 				Decision: Deny,
 				Reason:   fmt.Sprintf("policy provider lookup failed for tenant %q: %v", tenantID, err),
@@ -1084,18 +1063,11 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 		// Data scope: gates form inputs, browser data exfiltration, and
 		// any other "value-bearing" action where the operator wants to
 		// apply PII / credential rules independently of the broader
-		// browser/network scopes. v0.5 has no scope-specific custom
-		// logic here — matching uses the standard Pattern (against
-		// req.Command, which carries the redacted form value), Domain
-		// (against req.URL/req.Domain), and Action (against
-		// req.Action — typically "form_input"). Default-deny applies
-		// when no rule matches, same as every other scope.
-		//
-		// Closes audit findings R5 E5 / R7 E3 ("data scope unhandled —
-		// silent default-deny without a clear sentinel"). The fall-
-		// through default-deny still fires when no data-scope rules
-		// exist, but it now has explicit tests and explicit
-		// documentation; operators who hit it find the right knob.
+		// browser/network scopes. No scope-specific custom logic here —
+		// matching uses the standard Pattern (against req.Command, which
+		// carries the redacted form value), Domain (against req.URL /
+		// req.Domain), and Action (against req.Action — typically
+		// "form_input"). Default-deny applies when no rule matches.
 		//
 		// TODO(v0.6, #data-pii): regex / classifier-based PII patterns
 		// (SSN, credit-card numbers, AWS keys) baked into a built-in
@@ -1175,23 +1147,20 @@ func (e *Engine) RateLimitConfig(scope, agentID string) *RateLimitCfg {
 //
 // Combine semantics depend on AgentCfg.OverrideMode:
 //
-//   - "merge" (default, v0.5+): the effective RuleSet for an overridden
-//     scope is base.Deny ∪ override.Deny, base.RequireApproval ∪
+//   - "merge" (default): the effective RuleSet for an overridden scope is
+//     base.Deny ∪ override.Deny, base.RequireApproval ∪
 //     override.RequireApproval, and override.Allow alone (so the agent can
 //     narrow the allow list without inheriting base allows it does not
 //     want). The override's RateLimit and Limits, when set, replace the
 //     base values; when unset, base wins. This preserves base safety
 //     guarantees (e.g. `deny: rm -rf *`) under per-agent customisation.
 //
-//   - "replace" (legacy, v0.4.x): the override RuleSet fully supplants the
-//     base RuleSet for that scope. Use only when the agent must not
-//     inherit anything — typically a privileged agent with its own
-//     hand-vetted policy.
+//   - "replace": the override RuleSet fully supplants the base RuleSet
+//     for that scope. Use only when the agent must not inherit anything
+//     — typically a privileged agent with its own hand-vetted policy.
 //
 // Scopes present only in the override are appended to the result regardless
 // of mode. Scopes present only in the base are passed through unchanged.
-//
-// Closes R2 E5 / T11.
 func (e *Engine) resolveRules(agentID string) []RuleSet {
 	if agentID == "" || e.policy.Agents == nil {
 		return e.policy.Rules
@@ -1320,14 +1289,11 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 
 	// Session-level cost enforcement.
 	//
-	// Closes R3 #4 (audit finding "est_cost == 0 cumulative bypass"). The
-	// v0.4.x guard `req.EstCost > 0` here meant an agent could submit
-	// est_cost=0 forever after blowing past max_per_session and always get
-	// ALLOW back. We now compare `cumulative + est_cost > max_per_session`
-	// regardless of est_cost: when est_cost==0, that simplifies to
-	// "cumulative > max", which correctly denies a session already over
-	// the cap while still allowing exactly-at-cap (the literal cap value
-	// itself stays a valid post-state).
+	// We compare `cumulative + est_cost > max_per_session` regardless of
+	// est_cost. When est_cost==0, that simplifies to "cumulative > max",
+	// which correctly denies a session already over the cap while still
+	// allowing exactly-at-cap. A guard like `req.EstCost > 0` here would
+	// let an agent submit est_cost=0 forever after blowing past the cap.
 	maxPerSession, err := parseDollar(rs.Limits.MaxPerSession)
 	if err != nil {
 		return CheckResult{
@@ -1684,12 +1650,10 @@ func wildcardMatch(pattern, value string) bool {
 // Returns true if all conditions are satisfied (or if there are no conditions).
 // Must be called with e.mu held (at least RLock).
 //
-// Backward-compat note (v0.4.1): a condition with a TimeWindow but no
-// RequirePrior is effectively a no-op — there's nothing to time-bound. The
-// v0.4.0 engine treated such conditions as "always satisfied"; we retain
-// that behavior here so policies written against v0.4.0 don't suddenly
-// fail-closed. `LoadFromFile` logs a warning when it sees such a rule so
-// authors learn about the mistake without production breakage.
+// LoadFromFile rejects time_window-only conditions (no require_prior), so
+// this path is only reachable for in-process policies that bypass loading
+// (tests, embedders constructing Policy literals). We keep the no-op pass-
+// through to stay tolerant rather than fail-closed in those cases.
 func (e *Engine) matchConditions(rule Rule, req ActionRequest) bool {
 	if len(rule.Conditions) == 0 {
 		return true
@@ -1698,7 +1662,6 @@ func (e *Engine) matchConditions(rule Rule, req ActionRequest) bool {
 	for _, cond := range rule.Conditions {
 		if cond.RequirePrior == "" {
 			// TimeWindow-only (or empty Condition): nothing to verify.
-			// Pass through — matches v0.4.0 behavior.
 			continue
 		}
 		if !e.checkRequirePrior(cond, req) {

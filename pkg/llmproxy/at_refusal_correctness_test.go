@@ -122,7 +122,7 @@ func TestAT_RefusalCorrectness_OpenAI_SDKParseable(t *testing.T) {
 		}
 		ch := env.Choices[0]
 		if ch.Delta.Role != "" && ch.Delta.Role != "assistant" {
-			t.Errorf("data[%d]: role = %q, want empty or assistant (role: tool was rejected at Phase 4A § 5.3)", i, ch.Delta.Role)
+			t.Errorf("data[%d]: role = %q, want empty or assistant (role: tool causes SDK hangs)", i, ch.Delta.Role)
 		}
 		hasRule := strings.Contains(ch.Delta.Content, "deny:shell:rm_rf")
 		hasFinishStop := ch.FinishReason != nil && *ch.FinishReason == "stop"

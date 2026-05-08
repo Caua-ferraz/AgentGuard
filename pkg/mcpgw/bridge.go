@@ -256,9 +256,8 @@ func (b *Bridge) Run(ctx context.Context, in io.Reader, out io.Writer, errLog io
 	}
 }
 
-// dispatchFrame parses one frame and routes it. Per Phase 3 A15's
-// pattern: malformed frames are logged and dropped without killing
-// the bridge.
+// dispatchFrame parses one frame and routes it. Malformed frames are
+// logged and dropped without killing the bridge.
 func (b *Bridge) dispatchFrame(ctx context.Context, line []byte, wg *sync.WaitGroup) {
 	// First peek at whether the frame has an id. A frame without an
 	// id is a notification; with id it's a request.
@@ -311,7 +310,7 @@ func (b *Bridge) dispatchFrame(ctx context.Context, line []byte, wg *sync.WaitGr
 		// Forward to every upstream best-effort.
 		b.writeResponse(b.handleLoggingSetLevel(ctx, id, probe.Params))
 	default:
-		// resources/* and prompts/* are out of scope for v0.5.
+		// resources/* and prompts/* are not yet routed.
 		// TODO(v0.6, #mcp-resources): forward resources/* and
 		// prompts/* with namespace-prefixed URIs.
 		b.writeResponse(NewResponseError(id, ErrCodeMethodNotFound,
@@ -319,9 +318,9 @@ func (b *Bridge) dispatchFrame(ctx context.Context, line []byte, wg *sync.WaitGr
 	}
 }
 
-// handleNotification routes notifications to upstreams. v0.5 broadcasts
-// to all upstreams (cancellation, initialized). Per-upstream targeted
-// notifications are a future enhancement.
+// handleNotification routes notifications to upstreams. Currently
+// broadcasts to all upstreams (cancellation, initialized). Per-upstream
+// targeted notifications are a future enhancement.
 func (b *Bridge) handleNotification(ctx context.Context, method string, params json.RawMessage) {
 	n := &Notification{
 		JSONRPC: JSONRPCVersion,
@@ -407,10 +406,10 @@ func (b *Bridge) handleInitialize(ctx context.Context, id RequestID, raw json.Ra
 // docs/MCP_GATEWAY.md § 4.2: fan out in parallel, concatenate
 // results, prefix tool names with the namespace.
 //
-// Pagination decision (per task spec): v0.5 refuses pagination at
-// the gateway and returns all tools in one page. Upstream-side
-// pagination is collapsed by walking each upstream's cursor until
-// exhausted before returning. Cursor opacity is preserved per spec.
+// Pagination: the gateway refuses host-side pagination and returns
+// all tools in one page. Upstream-side pagination is collapsed by
+// walking each upstream's cursor until exhausted before returning.
+// Cursor opacity is preserved.
 //
 // TODO(v0.6, #mcp-pagination): forward host cursor selectively per
 // namespace + multiplex nextCursor as base64({"ns":..., "cursor":...}).
@@ -681,7 +680,7 @@ func (b *Bridge) runPolicyCheck(ctx context.Context, req *ToolsCallRequest) (Dec
 	if b.PolicyCheck == nil {
 		return Decision{
 			Allow:  true,
-			Reason: "policy hook not wired (early bring-up; A18 implements)",
+			Reason: "policy hook not wired",
 			Rule:   "allow:policy_hook_unwired",
 		}, nil
 	}
@@ -795,9 +794,9 @@ func (b *Bridge) deriveAgentID() string {
 	return "mcp-gateway:" + b.clientInfo.Name
 }
 
-// deriveSessionID returns a stable per-host session id. v0.5 uses
-// the client name as the session key; future versions may add a
-// per-process pid or a uuid generated at initialize time.
+// deriveSessionID returns a stable per-host session id. Uses the
+// client name as the session key; future versions may add a per-
+// process pid or a uuid generated at initialize time.
 func (b *Bridge) deriveSessionID() string {
 	if b.clientInfo.Name == "" {
 		return "mcp-gateway-default"

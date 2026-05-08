@@ -4,11 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-> Tracks work in flight on `master` post-v0.5.1. Items here are *not* in any tagged release yet.
+> Tracks work in flight on `master` post-v0.5.0. Items here are *not* in any tagged release yet.
 
-## [0.5.1] — 2026-05-05
+## [0.5.0] — 2026-05-05
 
-> Python SDK adapter hotfix. CrewAI 1.x + pydantic 2.12 and langgraph 1.0 + langchain_core 1.x both reject the v0.5.0 composition-wrapper adapters at framework boundaries (`isinstance(thing, BaseTool)` / `isinstance(thing, Runnable)` no longer honour `BaseTool.register()` virtual-subclass registrations). v0.5.1 ships hybrid subclass+override adapters that satisfy the framework's isinstance checks natively while preserving the policy-enforcement contract by overriding every dispatch entry point. Python-only release; the Go binaries, MCP Gateway, and LLM API Proxy stay at v0.5.0.
+> Python SDK adapter hotfix. CrewAI 1.x + pydantic 2.12 and langgraph 1.0 + langchain_core 1.x both reject the v0.5.0 composition-wrapper adapters at framework boundaries (`isinstance(thing, BaseTool)` / `isinstance(thing, Runnable)` no longer honour `BaseTool.register()` virtual-subclass registrations). v0.5.0 ships hybrid subclass+override adapters that satisfy the framework's isinstance checks natively while preserving the policy-enforcement contract by overriding every dispatch entry point. Python-only release; the Go binaries, MCP Gateway, and LLM API Proxy stay at v0.5.0.
 
 ### Fixed
 

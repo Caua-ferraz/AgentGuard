@@ -1,15 +1,11 @@
 package proxy
 
-// AT (Test Wrangler) integration test — Phase 2.
+// Drives the BufferedAsyncLogger under live proxy load and confirms
+// every audit entry is durable: no entries lost across the saturation
+// boundary, retrievable via /v1/audit and via the underlying Query path.
 //
-// Drives the BufferedAsyncLogger (A6) under live proxy load (A4) and
-// confirms every audit entry is durable: no entries lost across the
-// saturation boundary, retrievable via /v1/audit and via the underlying
-// Query path.
-//
-// Workers exercised: A6 (BufferedAsyncLogger), A4 (handler chain), A10
-// (health endpoint as a witness, opportunistic). Failure mode caught:
-// any worker that drops, mis-counts, or fails to flush entries on Close.
+// Failure mode caught: any drop, mis-count, or failure to flush entries
+// on Close — and the /v1/health endpoint is observed opportunistically.
 
 import (
 	"context"

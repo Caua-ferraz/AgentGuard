@@ -1,9 +1,8 @@
 package proxy
 
 // Tests for the operator-grade /v1/health and /v1/t/{tenant}/health
-// endpoints introduced in v0.5 Phase 2 (worker A10). The legacy /health
-// endpoint stays unchanged and is covered by TestHandleHealth in
-// server_test.go.
+// endpoints. The legacy /health endpoint is unchanged and covered by
+// TestHandleHealth in server_test.go.
 //
 // We exercise the full handler chain via httptest.Server (not a raw
 // httptest.ResponseRecorder) because the tenant-aware route uses Go

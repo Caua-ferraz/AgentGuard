@@ -1,19 +1,14 @@
 package proxy
 
-// AT (Test Wrangler) integration test — Phase 2.
-//
 // Verifies that requests routed through the legacy /v1/check URL and
 // requests routed through the tenant-aware /v1/t/local/check URL produce
 // equivalent audit-trail entries (modulo per-request fields like
 // timestamp / duration_ms / approval_id).
 //
-// Workers exercised: A5 (PolicyProvider→Engine), A7 (tenant routing),
-// A6 (audit logger if buffered), and the cross-cutting handler chain.
-//
-// Failure mode this catches: a worker silently drops a field, populates a
-// different rule string, or routes one URL family through a stale Engine
-// pointer — the audit log would diverge between families and downstream
-// consumers (SIEM, dashboards) would see inconsistent event streams.
+// Failure mode this catches: a silent dropped field, a different rule
+// string, or one URL family routing through a stale Engine pointer —
+// the audit log would diverge between families and downstream consumers
+// (SIEM, dashboards) would see inconsistent event streams.
 
 import (
 	"bytes"

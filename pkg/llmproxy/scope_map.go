@@ -3,34 +3,32 @@ package llmproxy
 // scope_map.go provides the tool-name → existing-policy-scope mapping
 // the LLM API Proxy uses to gate tool calls emitted by upstream models.
 //
-// Phase 4A locked the design: the LLM API Proxy maps to existing
-// scopes only — `shell`, `filesystem`, `network`, `browser`, `data`,
-// `cost`. No new policy primitives. (See docs/PROXY_ARCHITECTURE.md
-// § 4 and docs/LLM_API_PROXY.md § "Tool call → scope mapping".)
+// The proxy maps to existing scopes only — `shell`, `filesystem`,
+// `network`, `browser`, `data`, `cost`. No new policy primitives.
+// (See docs/PROXY_ARCHITECTURE.md § 4 and docs/LLM_API_PROXY.md §
+// "Tool call → scope mapping".)
 //
-// Source-of-truth decision (A23, 2026-05-05): this module reuses
-// `policy.Policy.ToolScopeMap` rather than introducing a separate
-// `LLMToolScopeMap`. Rationale documented in `.audit/v05_decisions.md`
-// under "A23: LLM tool scope map source-of-truth": namespaced MCP tool
-// names (`<ns>:<tool>`) and bare LLM tool names (`bash`, `read_file`)
-// occupy disjoint regions of the pattern space, so collisions are
-// impossible without an operator deliberately writing one. A single
-// `tool_scope_map:` section in policy YAML therefore safely covers
-// both transports — operators write one mapping table, AgentGuard
-// dispatches it correctly per request transport.
+// Source-of-truth: this module reuses `policy.Policy.ToolScopeMap`
+// rather than introducing a separate `LLMToolScopeMap`. Namespaced MCP
+// tool names (`<ns>:<tool>`) and bare LLM tool names (`bash`,
+// `read_file`) occupy disjoint regions of the pattern space, so
+// collisions are impossible without an operator deliberately writing
+// one. A single `tool_scope_map:` section in policy YAML therefore
+// safely covers both transports — operators write one mapping table,
+// AgentGuard dispatches it correctly per request transport.
 //
-// The map A23 builds layers:
+// The merged map layers:
 //   1. Operator entries (from Policy.ToolScopeMap) — first-match-wins,
 //      so explicit operator overrides beat the bundled defaults.
 //   2. Default entries (DefaultLLMToolScopeMap below) — the baked-in
 //      mapping for common tool names that ship with most agent
 //      frameworks.
 //
-// A24 wires `MapLLMToolScope` (closing over the merged list) into
-// Server.ScopeMap. Tools not in either layer return the sentinel
-// scope "unmapped"; the policy engine fails closed on this scope
-// unless an operator writes an explicit `scope: unmapped` rule.
-// See docs/POLICY_REFERENCE.md § "LLM API Proxy tool scope mapping".
+// `MapLLMToolScope` (closing over the merged list) is wired into
+// Server.ScopeMap. Tools not in either layer return the sentinel scope
+// "unmapped"; the policy engine fails closed on this scope unless an
+// operator writes an explicit `scope: unmapped` rule. See
+// docs/POLICY_REFERENCE.md § "LLM API Proxy tool scope mapping".
 
 import (
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
@@ -41,12 +39,12 @@ import (
 // has no built-in handling for this scope — by design — so the gate
 // fails closed (default DENY) unless the operator opts into a
 // `scope: unmapped` rule. Stable string contract: documented in
-// docs/POLICY_REFERENCE.md and referenced from A24's gate code.
+// docs/POLICY_REFERENCE.md and referenced from gate code.
 const UnmappedScope = "unmapped"
 
 // DefaultLLMToolScopeMap is the baked-in mapping from common tool
-// names to existing AgentGuard policy scopes. Per Phase 4A, the LLM
-// API Proxy maps to existing scopes only — no new policy primitives.
+// names to existing AgentGuard policy scopes. The LLM API Proxy maps
+// to existing scopes only — no new policy primitives.
 //
 // Patterns are glob-matched (same matcher as policy rule patterns:
 // `*` matches any chars including `/`, `?` matches a single char,
@@ -134,9 +132,9 @@ func NewLLMToolScopeMap(pol *policy.Policy) []policy.ToolScopeMapping {
 	return merged
 }
 
-// MapLLMToolScope is the function A24 wires into Server.ScopeMap (via
-// a closure capturing the merged mapping list). Returns the scope of
-// the first matching entry, or UnmappedScope if nothing matches.
+// MapLLMToolScope is wired into Server.ScopeMap (via a closure
+// capturing the merged mapping list). Returns the scope of the first
+// matching entry, or UnmappedScope if nothing matches.
 //
 // "Unmapped" tools are routed to scope "unmapped" at gate time. The
 // policy engine has no built-in rules for this scope, so the default

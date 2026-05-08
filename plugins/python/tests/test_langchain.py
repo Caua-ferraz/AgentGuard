@@ -331,9 +331,9 @@ class TestBatch:
 
 
 # ---------------------------------------------------------------------------
-# Defense contract under the v0.5.1 hybrid pattern.
+# Defense contract under the v0.5.0 hybrid pattern.
 #
-# v0.5.0 used composition + a strict ``__getattr__`` allowlist; v0.5.1
+# v0.5.0 used composition + a strict ``__getattr__`` allowlist; v0.5.0
 # subclasses langchain_core.tools.BaseTool so isinstance(thing, Runnable)
 # succeeds at framework boundaries (langgraph 1.0 / langchain_core 1.x)
 # and overrides every dispatch entry to keep gating tight.

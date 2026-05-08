@@ -80,17 +80,16 @@ export interface AgentGuardOptions {
   /** Behavior when AgentGuard is unreachable: 'deny' (default) or 'allow' */
   failMode?: "deny" | "allow";
   /**
-   * Optional tenant identifier (v0.5+).
+   * Optional tenant identifier.
    *
    * When set to a non-empty value other than `"local"`, every HTTP call
    * is routed through the tenant-aware `/v1/t/{tenantId}/...` URL family
    * instead of the legacy `/v1/...` path. Empty string, `undefined`, or
-   * `"local"` selects the legacy URLs (wire-compatible with v0.4.x
-   * servers). Falls back to the `AGENTGUARD_TENANT_ID` env var when
-   * available (Node only).
+   * `"local"` selects the legacy URLs. Falls back to the
+   * `AGENTGUARD_TENANT_ID` env var when available (Node only).
    *
-   * v0.5 servers only recognise the literal `"local"` tenant; v0.6
-   * will validate against a configured tenant registry.
+   * The bundled FilePolicyProvider only recognises `"local"`;
+   * multi-tenant providers can register others.
    */
   tenantId?: string;
 }
@@ -148,15 +147,10 @@ class CheckResultImpl implements CheckResult {
 /**
  * Base class for AgentGuard policy-failure errors thrown by {@link guarded}.
  *
- * Backward-compatibility note
- * ---------------------------
- * Prior to v0.5.0 the {@link guarded} HOF threw plain `Error` instances with
- * human-readable messages. v0.5.0 introduces these typed subclasses so
- * callers can `catch (e) { if (e instanceof AgentGuardDeniedError) ... }`
- * and read structured fields (`result`, `approvalId`, `approvalUrl`). The
- * message text is preserved exactly — existing string/regex matchers keep
- * working — and every subclass extends the standard `Error`, so generic
- * `catch { ... }` handlers are unaffected.
+ * Callers can `catch (e) { if (e instanceof AgentGuardDeniedError) ... }`
+ * and read structured fields (`result`, `approvalId`, `approvalUrl`). Every
+ * subclass extends the standard `Error`, so generic `catch { ... }`
+ * handlers are unaffected.
  */
 export class AgentGuardError extends Error {
   readonly result?: CheckResult;
@@ -223,7 +217,6 @@ export class AgentGuardApprovalTimeoutError extends AgentGuardError {
  *
  * Lets callers tell apart "API key wrong / expired" from "approval poll
  * timed out" so the operator-facing error surfaces the right cause.
- * v0.5 addition (R5 P9).
  */
 export class AgentGuardAuthError extends AgentGuardError {
   readonly status: number;
@@ -244,8 +237,8 @@ const VALID_FAIL_MODES = ["deny", "allow"] as const;
 
 /**
  * Allowed keys on `AgentGuardOptions`. Used to reject unknown options at
- * construction time instead of silently ignoring them — a common typo
- * sink in v0.4.x. v0.5 R5 E15 closes this footgun.
+ * construction time instead of silently ignoring them — typos like
+ * `agnetId: "x"` should fail loudly, not silently default to `agentId=""`.
  */
 const VALID_AGENTGUARD_OPTION_KEYS: ReadonlySet<string> = new Set([
   "baseUrl",
@@ -294,10 +287,10 @@ export class AgentGuard {
     } else {
       const opts = baseUrlOrOptions ?? {};
 
-      // v0.5 (R5 E15): reject unknown options so a typo like
-      // `agnetId: "x"` raises at construction instead of silently
-      // running with `agentId = ""` and surfacing as a confusing
-      // policy-decision mystery later.
+      // Reject unknown options so a typo like `agnetId: "x"` raises
+      // at construction instead of silently running with
+      // `agentId = ""` and surfacing as a confusing policy-decision
+      // mystery later.
       const unknown = Object.keys(opts).filter(
         (k) => !VALID_AGENTGUARD_OPTION_KEYS.has(k)
       );
@@ -325,10 +318,10 @@ export class AgentGuard {
       this.tenantId = opts.tenantId !== undefined ? opts.tenantId : envTenantId;
     }
 
-    // v0.5 (R5 E10/E11): validate failMode. "deny" and "allow" are the
-    // only meaningful values; anything else (typo, accidental boolean,
-    // user passing the Python convention "DENY") is a programming bug
-    // and must surface at startup, not at the first request.
+    // Validate failMode. "deny" and "allow" are the only meaningful
+    // values; anything else (typo, accidental boolean, user passing the
+    // Python convention "DENY") is a programming bug and must surface
+    // at startup, not at the first request.
     if (
       !(VALID_FAIL_MODES as readonly string[]).includes(this.failMode)
     ) {
@@ -393,13 +386,11 @@ export class AgentGuard {
 
       clearTimeout(timer);
 
-      // v0.5 (R5 E8 / S13): honest response validation. The previous
-      // implementation called response.json() on whatever came back; a
-      // misconfigured reverse proxy returning HTML or a chunked text
-      // body would either explode or — worse — successfully decode a
-      // malformed JSON payload missing `decision` and we'd carry on
-      // with a CheckResult.decision of "DENY" (the default), masking
-      // the actual issue. Now we positively assert each layer.
+      // Honest response validation. A misconfigured reverse proxy
+      // returning HTML or a chunked text body would either explode or
+      // — worse — successfully decode a malformed JSON payload missing
+      // `decision`, masking the actual issue. We positively assert each
+      // layer.
       if (!response.ok) {
         return this.failModeResult(
           `AgentGuard returned status ${response.status}`
@@ -455,9 +446,8 @@ export class AgentGuard {
    *
    * Centralizes the fail-mode dispatch so transport failures and HTTP
    * contract violations (bad status, wrong content-type, malformed
-   * body) all flow through one decision point. v0.5 R5 E8 closes a
-   * subtle bug where a 200-OK with the wrong Content-Type would still
-   * try to decode the body and surface as an opaque "AgentGuard
+   * body) all flow through one decision point. Without this a 200-OK
+   * with the wrong Content-Type would surface as an opaque "AgentGuard
    * unreachable" instead of a clean "wrong content-type" reason.
    */
   private failModeResult(reason: string): CheckResult {
@@ -517,9 +507,9 @@ export class AgentGuard {
           this.url(`/status/${approvalId}`),
           { headers: this.authHeaders() }
         );
-        // v0.5 (R5 P9): 401/403 means the API key is broken. Continuing
-        // to poll would just spin until the deadline elapses and return
-        // a synthetic "Approval timed out" DENY, hiding the real cause.
+        // 401/403 means the API key is broken. Continuing to poll
+        // would just spin until the deadline elapses and return a
+        // synthetic "Approval timed out" DENY, hiding the real cause.
         if (res.status === 401 || res.status === 403) {
           throw new AgentGuardAuthError(
             `AgentGuard rejected status poll for ${approvalId} ` +
@@ -539,14 +529,13 @@ export class AgentGuard {
       } catch (e) {
         // AgentGuardAuthError must propagate so the caller sees the auth
         // failure immediately. Other transport errors (DNS, ECONNREFUSED,
-        // 5xx after readinng above) keep the v0.4.x semantics: swallow,
-        // retry until deadline.
+        // 5xx surfaced above) are swallowed and retried until deadline.
         if (e instanceof AgentGuardAuthError) throw e;
       }
 
-      // v0.5 (R5 E14): jittered sleep — 80%..120% of pollIntervalMs.
-      // Avoids a thundering-herd when many SDK clients wait on the same
-      // approval and would otherwise poll on identical period boundaries.
+      // Jittered sleep — 80%..120% of pollIntervalMs. Avoids a
+      // thundering-herd when many SDK clients wait on the same approval
+      // and would otherwise poll on identical period boundaries.
       const jitter = pollIntervalMs * (0.8 + 0.4 * Math.random());
       await new Promise((resolve) => setTimeout(resolve, jitter));
     }
@@ -563,7 +552,7 @@ export class AgentGuard {
  *
  * `waitForApproval: true` dispatches on the resolved decision instead of
  * throwing immediately on REQUIRE_APPROVAL — mirrors the Python SDK's
- * `wait_for_approval=True`. Defaults preserve v0.4.x behavior exactly.
+ * `wait_for_approval=True`.
  */
 export interface GuardedOptions<T extends (...args: unknown[]) => Promise<unknown>> {
   /** Custom extractor for the `CheckOptions` payload from the wrapped function's args. */
@@ -579,9 +568,9 @@ export interface GuardedOptions<T extends (...args: unknown[]) => Promise<unknow
 /**
  * Higher-order function that wraps an async function with an AgentGuard check.
  *
- * Overloads preserve v0.4.x ergonomics — callers can still pass a fourth
- * positional `getCheckOptions` callback — while adding a typed options
- * object for v0.5.0 callers that want `waitForApproval`.
+ * Two overloads: callers can pass a fourth positional `getCheckOptions`
+ * callback, or a typed options object that adds `waitForApproval`,
+ * `approvalTimeoutMs`, `approvalPollIntervalMs`.
  *
  * @example
  * ```ts
@@ -618,16 +607,15 @@ export function guarded<T extends (...args: unknown[]) => Promise<unknown>>(
     | ((...args: Parameters<T>) => CheckOptions)
     | GuardedOptions<T>
 ): T {
-  // Normalize the overload — treat a bare callback as the v0.4.x shape.
+  // Normalize the overload — a bare callback is the simple shape.
   const opts: GuardedOptions<T> =
     typeof optionsOrGetCheckOptions === "function"
       ? { getCheckOptions: optionsOrGetCheckOptions }
       : optionsOrGetCheckOptions ?? {};
 
-  // v0.5 (R5 E15): reject unknown option keys at decoration time.
-  // A typo such as `waitForApprovel: true` (notice the missing 'a')
-  // would otherwise be silently ignored and the wrapper would throw
-  // on REQUIRE_APPROVAL instead of waiting — surprising behavior.
+  // Reject unknown option keys at decoration time. A typo such as
+  // `waitForApprovel: true` would otherwise be silently ignored and
+  // the wrapper would throw on REQUIRE_APPROVAL instead of waiting.
   const unknownGuardedKeys = Object.keys(opts).filter(
     (k) => !VALID_GUARDED_OPTION_KEYS.has(k)
   );
@@ -678,7 +666,7 @@ export function guarded<T extends (...args: unknown[]) => Promise<unknown>>(
           resolved
         );
       }
-      // Default v0.4.x behavior — message text preserved.
+      // Stable message text — text-matchers in caller code depend on it.
       throw new AgentGuardApprovalRequiredError(
         `Action requires approval. Approve at: ${result.approvalUrl}`,
         result,

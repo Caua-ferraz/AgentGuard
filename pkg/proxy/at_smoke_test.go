@@ -32,8 +32,9 @@ import (
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
-// TestATSmoke_FullServerHappyPath is the AT-tier smoke test described in
-// the v0.5 Phase 1 brief.
+// TestATSmoke_FullServerHappyPath is the full-stack happy-path smoke test:
+// a real server boots, /v1/check returns ALLOW for a permitted action, and
+// the audit log + counters update accordingly.
 func TestATSmoke_FullServerHappyPath(t *testing.T) {
 	// Capture metrics baseline first so the assertion below is robust to
 	// other tests in the same `go test` run.

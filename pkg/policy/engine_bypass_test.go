@@ -306,9 +306,9 @@ func TestNormalizeRequest_URLEncoded(t *testing.T) {
 	}
 }
 
-// TestPolicyLoadRejectsTimeWindowWithoutPrior closes R2 S11. v0.4.x WARNed
-// on a time_window without require_prior and let the load succeed; v0.5
-// hard-fails so silent no-op rules cannot ship to production.
+// TestPolicyLoadRejectsTimeWindowWithoutPrior pins the load-time
+// rejection: a time_window without require_prior is a silent no-op
+// at runtime and must fail at load.
 func TestPolicyLoadRejectsTimeWindowWithoutPrior(t *testing.T) {
 	orphan := `
 version: "1"

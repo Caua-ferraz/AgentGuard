@@ -1,15 +1,13 @@
 package mcpgw_test
 
-// AT (Test Wrangler) — filesystem allow/deny E2E.
+// Filesystem allow/deny E2E.
 //
-// The plan called for this scenario against
-// `npx @modelcontextprotocol/server-filesystem`. We substitute the
-// Phase 4B Go stub (testdata/stub_server) and hand-code read_file
-// semantics, because:
-//   - Node/npx is not guaranteed in CI runners.
-//   - The substitution exercises the SAME bridge code path; the
-//     filesystem-server-specific behaviour (real read of /etc/passwd)
-//     is irrelevant for verifying the AgentGuard DENY before the call.
+// The natural upstream is `npx @modelcontextprotocol/server-filesystem`
+// but Node/npx is not guaranteed in CI runners. We substitute the Go
+// stub at testdata/stub_server and hand-code read_file semantics — the
+// substitution exercises the SAME bridge code path; the filesystem-
+// server-specific behaviour (real read of /etc/passwd) is irrelevant
+// for verifying the AgentGuard DENY before the call.
 //
 // What this test exercises end-to-end:
 //

@@ -166,7 +166,7 @@ class TestRealCrewKickoffGatesTool:
         fake_llm = _OfflineEchoLLM(model="offline/echo-fake")
 
         # The Agent constructor now accepts the GuardedCrewTool because
-        # v0.5.1's hybrid pattern actually subclasses BaseTool. If a future
+        # v0.5.0's hybrid pattern actually subclasses BaseTool. If a future
         # framework change removes that compatibility, the ValidationError
         # surfaces here unmasked rather than under a skip clause.
         try:

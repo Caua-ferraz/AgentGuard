@@ -134,7 +134,7 @@ class TestGuardCheck:
     def test_check_unreachable_fail_open(self):
         """fail_mode='allow' turns unreachable into ALLOW.
 
-        Locks the Phase-5.1 parity-prep contract: the default is still
+        Locks the Phase-5.0 parity-prep contract: the default is still
         'deny' (see test_check_unreachable_fails_closed), and an explicit
         'allow' is required to opt into fail-open — mirroring the TS SDK
         where `failMode: 'allow'` has always been an explicit opt-in.

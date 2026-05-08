@@ -13,13 +13,13 @@ package llmproxy
 //   - On REQUIRE_APPROVAL, embeds BOTH the approval URL the human
 //     visits AND the approval_id with a hint to round-trip it through
 //     `_meta.dev.agentguard/approval_id` on retry. Closes the
-//     "approve once, model proceeds" loop with Phase 4B A19b's
-//     central-server approval_id round-trip.
-//   - Provider-specific shape (per Phase 4A locked decisions):
+//     "approve once, model proceeds" loop with the central-server
+//     approval_id round-trip.
+//   - Provider-specific shape:
 //       OpenAI:   assistant-text content delta + finish_reason: "stop"
-//                 + [DONE]. NOT role: "tool" (rejected at Phase 4A
-//                 § 5.3 because the OpenAI SDKs hang on missing
-//                 `tool_call_id` when role: "tool" is synthesized).
+//                 + [DONE]. NOT role: "tool" (rejected: the OpenAI
+//                 SDKs hang on missing `tool_call_id` when role: "tool"
+//                 is synthesized).
 //       Anthropic: text content_block at the buffered tool_use's index
 //                  + message_delta with stop_reason: end_turn +
 //                  message_stop. The buffered content_block_start was
@@ -40,12 +40,12 @@ import (
 	"time"
 )
 
-// BuildRefusalRich is the function A24 wires into Server.BuildRefusal.
-// Called by streaming.go's gateAndFlush* on DENY/REQUIRE_APPROVAL or
-// by the overflow path with a synthetic Decision (see streaming.go's
-// runOpenAIStreamLoop / runAnthropicStreamLoop). Also called by F9
-// (B2) for non-streaming refusals via the same hook — the
-// ctx.NonStreaming flag picks the shape.
+// BuildRefusalRich is wired into Server.BuildRefusal. Called by
+// streaming.go's gateAndFlush* on DENY / REQUIRE_APPROVAL or by the
+// overflow path with a synthetic Decision (see streaming.go's
+// runOpenAIStreamLoop / runAnthropicStreamLoop). Also called by the
+// non-streaming forwarder via the same hook — the ctx.NonStreaming
+// flag picks the shape.
 //
 // Always returns a non-nil byte slice: an empty refusal would leave
 // the SSE stream open (or yield a zero-length response on the
@@ -74,7 +74,7 @@ func BuildRefusalRich(provider string, decision Decision, ctx *RefusalContext) [
 		}
 		return buildAnthropicRefusalSSE(msg, idx)
 	default:
-		// Defensive: A22 always passes "openai" or "anthropic". If a
+		// Defensive: callers always pass "openai" or "anthropic". If a
 		// new provider lands without updating this switch, fall back
 		// to the OpenAI shape — most upstreams accept it as a
 		// degenerate text-completion (or chat.completion) response.

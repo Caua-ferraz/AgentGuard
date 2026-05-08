@@ -1,16 +1,13 @@
 package policy
 
-// AT (Test Wrangler) race test — Phase 2.
-//
 // Hammers FilePolicyProvider with concurrent Watch / Get / file-mutation
 // for 2 seconds and asserts:
 //   - no panics
 //   - no goroutine leak (NumGoroutine difference ≤ small constant)
-//   - run cleanly under -race
+//   - runs cleanly under -race
 //
-// Worker covered: A5 (FilePolicyProvider). Failure mode caught: a missing
-// lock, a callback registry leak, or a stop function that does not
-// actually unregister.
+// Failure modes caught: a missing lock, a callback registry leak, or a
+// stop function that does not actually unregister.
 
 import (
 	"os"

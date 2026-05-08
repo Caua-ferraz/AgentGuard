@@ -44,7 +44,7 @@ const MaxStdoutLineBytes = 4 * 1024 * 1024
 // Upstream is the gateway-side handle to one downstream MCP server.
 // Implementations own the subprocess lifetime, manage reconnect, and
 // offer a request/notification API to the bridge. Only stdio is
-// supported in v0.5; HTTP transport is reserved for v0.6.
+// wired today; HTTP transport is future work.
 type Upstream interface {
 	// Namespace returns the namespace label this upstream answers to
 	// (e.g. "fs", "github").
@@ -260,9 +260,9 @@ func (u *StdioUpstream) spawnLocked(ctx context.Context) error {
 
 	// Reader goroutine: parse newline-delimited JSON-RPC from stdout,
 	// route responses to pending[id] channels, log notifications to
-	// stderr (the bridge does not forward upstream-side notifications
-	// in v0.5 except for cancellation, which is initiated by the host
-	// not the upstream).
+	// stderr. The bridge does not forward upstream-side notifications
+	// today except for cancellation, which is initiated by the host
+	// not the upstream.
 	go u.readLoop(stdoutPipe)
 	// Stderr drain: copy upstream stderr to the gateway's logger so
 	// downstream warnings are visible to the operator without
@@ -303,9 +303,9 @@ func (u *StdioUpstream) readLoop(r io.Reader) {
 			}
 			continue
 		}
-		// Treat as notification or unsolicited message; for v0.5 we
-		// log and discard. (Future: route notifications/* to the
-		// bridge's notification channel.)
+		// Treat as notification or unsolicited message; we log and
+		// discard. (Future: route notifications/* to the bridge's
+		// notification channel.)
 		u.logger.Debugf("upstream %q: unsolicited frame dropped: %s", u.spec.Namespace, string(line))
 	}
 	if err := scanner.Err(); err != nil {

@@ -20,19 +20,10 @@ package mcpgw_test
 //      distinguish policy-allowed from human-approved decisions in the
 //      audit log.
 //
-// History: v0.5 originally shipped Phase 4B with this test in
-// "log the gap" mode because handleCheck was stateless w.r.t. the
-// approval queue and re-evaluation produced a fresh approval id.
-// A19b (post-Phase 4B fixup, pre-Phase 4C) added the
-// ActionRequest.ApprovalID field + handleCheck short-circuit; this
-// test was flipped from logging the gap to asserting the closed
-// round-trip. See .audit/v05_decisions.md "A19b" entry.
-//
-// Important caveat (Q3 from Phase 4A review): this test verifies
-// `_meta` round-tripping inside the gateway's own retry path. It does
-// NOT verify that real Claude Desktop preserves `_meta` across the
-// retry — that's a manual-test concern documented in the maintainer
-// checklist at the bottom of .audit/v05_test_coverage.md.
+// Important caveat: this test verifies `_meta` round-tripping inside
+// the gateway's own retry path. It does NOT verify that real Claude
+// Desktop preserves `_meta` across the retry — that's a manual-test
+// concern.
 
 import (
 	"bytes"

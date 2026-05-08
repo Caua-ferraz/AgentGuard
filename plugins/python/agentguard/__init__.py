@@ -47,7 +47,7 @@ DECISION_REQUIRE_APPROVAL = "REQUIRE_APPROVAL"
 
 # API endpoint paths. The leading "/v1" is added by Guard._url so a single
 # code path handles both the legacy /v1/<suffix> URLs and the tenant-aware
-# /v1/t/<tenant>/<suffix> form introduced in v0.5 (worker A7).
+# /v1/t/<tenant>/<suffix> form.
 ENDPOINT_CHECK = "/check"
 ENDPOINT_APPROVE = "/approve/"
 ENDPOINT_DENY = "/deny/"
@@ -61,10 +61,10 @@ ENDPOINT_STATUS = "/status/"
 LOCAL_TENANT_ID = "local"
 
 # Fail-mode values for the Guard() constructor. "deny" fails closed when the
-# AgentGuard proxy is unreachable (the v0.4.0 default and current v0.4.1
-# default). "allow" fails open — permitted as an explicit opt-in for agents
-# whose threat model treats AgentGuard as best-effort; the caller is
-# responsible for any resulting safety implications.
+# AgentGuard proxy is unreachable (the default). "allow" fails open —
+# permitted as an explicit opt-in for agents whose threat model treats
+# AgentGuard as best-effort; the caller is responsible for any resulting
+# safety implications.
 FAIL_MODE_DENY = "deny"
 FAIL_MODE_ALLOW = "allow"
 _VALID_FAIL_MODES = (FAIL_MODE_DENY, FAIL_MODE_ALLOW)
@@ -95,16 +95,16 @@ class CheckResult:
 # --- Typed exceptions raised by the @guarded decorator ---
 #
 # All three extend PermissionError so callers that already catch
-# PermissionError (the v0.4.0/v0.4.1 behavior) keep working unchanged.
-# New callers can catch the specific subclass and read structured fields
-# (result, approval_id, approval_url) instead of parsing error strings.
+# PermissionError keep working. New callers can catch the specific
+# subclass and read structured fields (result, approval_id,
+# approval_url) instead of parsing error strings.
 
 class AgentGuardError(PermissionError):
     """Base class for AgentGuard-raised permission failures.
 
     Carries the originating :class:`CheckResult` (if any) so callers can
     inspect the decision, matched rule, and approval metadata without
-    re-running the check. Messages preserve the v0.4.1 string format so
+    re-running the check. Messages preserve a stable string format so
     existing regex/text matchers continue to work.
     """
 
@@ -156,8 +156,8 @@ class AgentGuardAuthError(AgentGuardError):
     ``/v1/audit``).
 
     Distinguishes "API key wrong / expired" from "approval poll timed
-    out" so callers can surface the right operator-facing error. v0.5
-    addition (R5 P9). Extends :class:`AgentGuardError` so existing
+    out" so callers can surface the right operator-facing error.
+    Extends :class:`AgentGuardError` so existing
     ``except PermissionError:`` handlers still catch it.
     """
 
@@ -171,10 +171,9 @@ class AgentGuardAuthError(AgentGuardError):
         self.status = status
 
 
-# AgentGuardTimeoutError is an alias for AgentGuardApprovalTimeout — the
-# v0.5 plan referred to it by that name, but the v0.4.1 SDK already shipped
-# AgentGuardApprovalTimeout. The alias gives the new name without breaking
-# downstream `except AgentGuardApprovalTimeout:` handlers.
+# AgentGuardTimeoutError is an alias for AgentGuardApprovalTimeout
+# kept for backwards compatibility — `except AgentGuardApprovalTimeout:`
+# handlers still match.
 AgentGuardTimeoutError = AgentGuardApprovalTimeout
 
 
@@ -199,26 +198,20 @@ class Guard:
             timeout: HTTP timeout in seconds for individual calls.
             api_key: Bearer token for /v1/approve, /v1/deny, /v1/status.
                 Falls back to AGENTGUARD_API_KEY.
-            fail_mode: Behavior when the proxy is unreachable. "deny" (the
-                v0.4.0 default, current v0.4.1 default) returns a DENY
-                result so the agent fails closed. "allow" returns an ALLOW
-                result — use only when the threat model treats AgentGuard
-                as best-effort and the caller accepts the safety trade-off.
-                An invalid value raises ValueError at construction so the
-                bug surfaces at startup instead of mid-request.
-            tenant_id: Optional tenant identifier (v0.5+). When set to a
+            fail_mode: Behavior when the proxy is unreachable. "deny"
+                (the default) returns a DENY result so the agent fails
+                closed. "allow" returns an ALLOW result — use only when
+                the threat model treats AgentGuard as best-effort and
+                the caller accepts the safety trade-off. An invalid
+                value raises ValueError at construction.
+            tenant_id: Optional tenant identifier. When set to a
                 non-empty value other than ``"local"``, every HTTP call is
                 routed through the tenant-aware ``/v1/t/{tenant_id}/...``
-                URL family instead of the legacy ``/v1/...`` path. ``None``
-                or ``"local"`` selects the legacy URLs and is wire-compatible
-                with v0.4.x servers. Falls back to ``AGENTGUARD_TENANT_ID``.
-                v0.5 servers only recognise the literal ``"local"`` tenant;
-                v0.6 will validate against a configured tenant registry.
-
-        v0.5.0 parity note: the TypeScript SDK already honors `failMode`,
-        default `"deny"`. v0.5.0 will align both SDKs on explicit fail-mode
-        documentation. Adding `fail_mode` now is purely forward-compatible;
-        omitting it preserves v0.4.0 semantics exactly.
+                URL family instead of the legacy ``/v1/...`` path.
+                ``None`` or ``"local"`` selects the legacy URLs. Falls
+                back to ``AGENTGUARD_TENANT_ID``. The bundled
+                FilePolicyProvider only recognises ``"local"``;
+                multi-tenant providers can register others.
         """
         if fail_mode not in _VALID_FAIL_MODES:
             raise ValueError(
@@ -314,13 +307,12 @@ class Guard:
 
         try:
             with request.urlopen(req, timeout=self.timeout) as resp:
-                # --- Honest response validation (R5 E8 / S13) ---
-                # The previous implementation decoded whatever the proxy
-                # returned. A misconfigured reverse proxy serving an HTML
-                # error page or a chunked plaintext body would silently
-                # produce a JSONDecodeError that we *did* catch — but
-                # 200-OK plus a non-JSON body that happened to start with
-                # `{` would slip through. We now positively assert:
+                # --- Honest response validation ---
+                # A misconfigured reverse proxy serving an HTML error
+                # page or a chunked plaintext body would silently produce
+                # a JSONDecodeError that we *do* catch — but 200-OK plus
+                # a non-JSON body that happened to start with `{` would
+                # slip through. We positively assert:
                 #   1. status in 2xx
                 #   2. Content-Type is application/json (charset suffix ok)
                 #   3. body is a dict carrying a `decision` field
@@ -386,9 +378,9 @@ class Guard:
                     approval_url=body.get("approval_url", ""),
                 )
         except (error.URLError, OSError, json.JSONDecodeError) as e:
-            # Transport failure. fail_mode picks the safe default: "deny"
-            # preserves v0.4.0 fail-closed semantics; "allow" is an opt-in
-            # for callers whose threat model treats AgentGuard as advisory.
+            # Transport failure. fail_mode picks the default: "deny"
+            # fails closed; "allow" is an opt-in for callers whose
+            # threat model treats AgentGuard as advisory.
             #
             # We catch three classes here:
             #   - URLError: urlopen() connection-phase failures (connect
@@ -411,7 +403,7 @@ class Guard:
 
         Centralizes the fail-mode dispatch so transport failures and HTTP
         contract violations (bad status, wrong content type, malformed
-        body) all flow through one decision point. v0.5 addition (R5 E8).
+        body) all flow through one decision point.
         """
         decision = DECISION_ALLOW if self.fail_mode == FAIL_MODE_ALLOW else DECISION_DENY
         return CheckResult(decision=decision, reason=reason)
@@ -459,19 +451,17 @@ class Guard:
         Sends the API key on every poll because /v1/status is now auth-gated
         on servers configured with --api-key.
 
-        v0.5 changes (R5 E14, P9):
+        Behavior:
         - Polling is jittered to ``[0.8, 1.2] * poll_interval`` to avoid
           synchronized retries from many clients waiting on the same
           approval bursting the proxy at exact ``poll_interval`` boundaries.
-          ``time.sleep`` is retained — it is the documented pattern for
-          this kind of polling loop and consistent with the v0.4.x SDK.
         - HTTP 401 / 403 from the status endpoint raise
           :class:`AgentGuardAuthError` immediately. Continuing to poll
           would just spin until ``timeout`` elapsed and return a
           synthetic "Approval timed out" DENY, masking the real cause
-          (wrong/expired API key). Other HTTPErrors and URLErrors keep
-          the v0.4.x behavior of swallowing-and-retrying so transient
-          network blips do not abort a long-running approval wait.
+          (wrong/expired API key). Other HTTPErrors and URLErrors are
+          swallowed and retried so transient network blips do not abort
+          a long-running approval wait.
         """
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -519,9 +509,9 @@ class Guard:
 # ``Guard.check``. Anything outside this set is almost always a typo
 # (e.g. ``agent="x"`` instead of ``meta={"agent":"x"}``) — and silently
 # forwarding it to ``Guard.check`` would either be dropped on the floor
-# (``check`` only inspects keyword args it knows about) or raise a confusing
-# TypeError much later in the call chain. v0.5 R5 E15 closes this footgun
-# at the decorator boundary.
+# (``check`` only inspects keyword args it knows about) or raise a
+# confusing TypeError much later in the call chain. Reject at the
+# decorator boundary so the typo surfaces at definition time.
 _GUARDED_VALID_CHECK_KWARGS = frozenset({
     "action",
     "command",
@@ -570,17 +560,16 @@ def guarded(
     decision: ALLOW runs the function, DENY raises :class:`AgentGuardDenied`,
     a synthetic "Approval timed out" raises :class:`AgentGuardApprovalTimeout`.
     With ``wait_for_approval=False`` (default), the wrapper raises
-    :class:`AgentGuardApprovalRequired` immediately — preserving v0.4.1
-    behavior exactly, because that class extends ``PermissionError``.
+    :class:`AgentGuardApprovalRequired` immediately. That class extends
+    ``PermissionError``, so existing ``except PermissionError:`` handlers
+    continue to work unchanged.
 
-    All raised exceptions extend :class:`PermissionError`, so existing
-    ``except PermissionError:`` handlers continue to work unchanged.
-
-    v0.5 (R5 E15): unknown ``**check_kwargs`` raise ``TypeError`` at
-    decoration time. Only the keyword arguments :meth:`Guard.check`
-    understands (``action``, ``command``, ``path``, ``domain``, ``url``,
+    Unknown ``**check_kwargs`` raise ``TypeError`` at decoration time.
+    Only the keyword arguments :meth:`Guard.check` understands
+    (``action``, ``command``, ``path``, ``domain``, ``url``,
     ``session_id``, ``est_cost``, ``meta``) are accepted; a typo like
-    ``agent="x"`` no longer silently disappears.
+    ``agent="x"`` is rejected at definition time rather than silently
+    dropped.
     """
     unknown = set(check_kwargs) - _GUARDED_VALID_CHECK_KWARGS
     if unknown:
@@ -623,7 +612,8 @@ def guarded(
                         result=resolved,
                     )
                 raise AgentGuardApprovalRequired(
-                    # Preserve v0.4.1 message text so text-matchers still hit.
+                    # Stable message text — text-matchers in caller code
+                    # depend on it.
                     f"Action requires approval. Approve at: {result.approval_url}",
                     result=result,
                     approval_id=result.approval_id,

@@ -426,23 +426,21 @@ func NegotiateProtocolVersion(clientRequested string, supported []string) string
 }
 
 // MergeCapabilities returns the union of upstream capabilities for
-// advertisement to the client during initialize. v0.5 rules (per
+// advertisement to the client during initialize. Rules (per
 // docs/MCP_GATEWAY.md § 3.3):
 //
 //   - `tools` is always advertised; listChanged: false (the gateway
-//     does not subscribe to upstream tools/list_changed in v0.5).
+//     does not subscribe to upstream tools/list_changed yet).
 //   - `logging` is always advertised; gateway forwards
 //     logging/setLevel to every upstream.
-//   - `completions` is not advertised (v0.6 follow-up).
+//   - `completions` is not advertised.
 //
-// v0.5 limitation: `resources` and `prompts` capabilities are
-// intentionally masked OUT — even when an upstream advertises them,
-// the gateway does NOT expose them to the client because resources/*
-// and prompts/* method routing is deferred to v0.6
-// (TODO(v0.6, #mcp-resources): forward resources/* + prompts/*
-// methods to the appropriate upstream). Advertising them in v0.5
-// would mislead the client into showing resources that every read
-// would reject with MethodNotFound (see Bridge.handleNotImplemented).
+// `resources` and `prompts` capabilities are intentionally masked OUT —
+// even when an upstream advertises them, the gateway does NOT expose
+// them to the client because resources/* and prompts/* method routing
+// is not yet implemented (see TODO(v0.6, #mcp-resources)). Advertising
+// them today would mislead the client into showing resources that every
+// read would reject with MethodNotFound (see Bridge.handleNotImplemented).
 //
 // TODO(v0.6, #mcp-list-changed): forward upstream
 // notifications/tools/list_changed and flip our advertised tools
@@ -454,9 +452,9 @@ func MergeCapabilities(upstreamCaps []map[string]interface{}) map[string]interfa
 	}
 
 	// Intentionally do NOT propagate `resources` or `prompts` from
-	// upstreams. See doc-comment above. The upstreamCaps loop is
-	// retained as a no-op to keep the signature stable and to make
-	// the masking explicit when v0.6 wiring lands.
+	// upstreams. See doc-comment above. The upstreamCaps parameter is
+	// retained as a no-op to keep the signature stable for when the
+	// masking is removed.
 	_ = upstreamCaps
 
 	return merged

@@ -34,16 +34,6 @@
 //
 // See docs/LLM_API_PROXY.md for the wire-format design and
 // docs/PROXY_ARCHITECTURE.md for cross-cutting decisions.
-//
-// Phase 4C is split across four workers:
-//
-//   - A21: server skeleton + non-streaming forwarding + protocol types.
-//   - A22: streaming pause/resume/rewrite + tool-call accumulators.
-//   - A23: tool-call → policy-scope mapping (defaults + YAML override).
-//   - A24 (this build): policy gate (HTTPPolicyClient against /v1/check),
-//     rich provider-aware refusal builder, and the final main.go
-//     wiring that binds all three hooks (PolicyCheck, ScopeMap,
-//     BuildRefusal) to the server.
 package main
 
 import (
@@ -165,10 +155,10 @@ func main() {
 
 	// Tool-call-level audit + SSE flow through the central server's
 	// /v1/check path: the gate stamps meta["transport"] = "llm_api_proxy"
-	// on every check; Phase 4B A19's transport-tag plumbing in
-	// pkg/proxy + pkg/audit lands the entry on disk and on the SSE bus
-	// with the right chip. So no additional audit emission lives in
-	// the proxy itself — single source of truth.
+	// on every check; the transport-tag plumbing in pkg/proxy +
+	// pkg/audit lands the entry on disk and on the SSE bus with the
+	// right chip. So no additional audit emission lives in the proxy
+	// itself — single source of truth.
 
 	// Signal handling for graceful shutdown. The server cancels
 	// in-flight upstream calls when ctx is done.

@@ -61,8 +61,8 @@ type SessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]Session
 	// ttl bounds how long a newly-issued session stays valid. A zero value
-	// falls through to SessionTTL so older call sites (and tests that
-	// construct a store via NewSessionStore()) keep v0.4.0 semantics.
+	// falls through to SessionTTL so callers using NewSessionStore() get
+	// the package default.
 	ttl time.Duration
 }
 
@@ -87,10 +87,9 @@ func NewSessionStoreWithTTL(d time.Duration) *SessionStore {
 //
 // When the store is already at MaxSessions, Create first sweeps expired
 // entries (cheap dead-weight cleanup) and only returns ErrSessionStoreFull
-// if every remaining slot is still live. This replaces v0.4.0's silent
-// evict-the-oldest-live-session behavior — that silently kicked a real
-// operator out mid-approval whenever a rogue set of dashboard tabs racked
-// up more than MaxSessions entries.
+// if every remaining slot is still live. We deliberately do NOT silently
+// evict the oldest live session: a rogue set of dashboard tabs racking up
+// MaxSessions entries must not kick a real operator out mid-approval.
 func (s *SessionStore) Create() (Session, error) {
 	var b [32]byte
 	if _, err := rand.Read(b[:]); err != nil {

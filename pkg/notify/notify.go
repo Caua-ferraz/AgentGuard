@@ -53,8 +53,6 @@ type Notifier interface {
 // Slack HTTP requests unblock immediately) and is guarded by sync.Once so
 // repeated calls — common in shutdown paths that defer Close from multiple
 // owners — do not panic on a re-closed channel.
-//
-// Closes R3 #6 (sync.Once) and R3 #7 (in-flight HTTP cancellation).
 type Dispatcher struct {
 	notifiers []Notifier
 	queue     chan dispatchJob
@@ -127,7 +125,7 @@ func NewDispatcherWithOpts(cfg policy.NotificationCfg, workers, queueSize int) *
 	for i := 0; i < workers; i++ {
 		// Wrap each worker in a recover so a panic inside any custom
 		// notifier (or a stdlib http.Client.Do edge case) does not take
-		// the whole process down. Closes R3 #J for the dispatcher.
+		// the whole process down.
 		go workerWithRecover(d)
 	}
 
@@ -179,8 +177,6 @@ func (d *Dispatcher) worker() {
 // waiting on its remote, so graceful shutdown is bounded by the time a
 // single Notify() takes to observe the context (typically µs–ms) rather
 // than by DefaultHTTPTimeout per pending event.
-//
-// Closes R3 #6 and R3 #7.
 func (d *Dispatcher) Close() {
 	d.closeOnce.Do(func() {
 		// Cancel first so workers and in-flight HTTP requests start
@@ -285,8 +281,7 @@ func (w *WebhookNotifier) Notify(event Event) error {
 	ctx := w.ctx
 	if ctx == nil {
 		// Defensive: a WebhookNotifier constructed by hand (in tests) has
-		// no dispatcher context. Fall back to Background so behavior
-		// matches the v0.4.x build.
+		// no dispatcher context. Fall back to Background.
 		ctx = context.Background()
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.URL, bytes.NewReader(body))

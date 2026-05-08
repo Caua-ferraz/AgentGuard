@@ -563,7 +563,7 @@ func TestHandleAuditQuery(t *testing.T) {
 	}
 }
 
-// TestHandleAuditQuery_LimitAndOffset exercises the Phase 1.1 query-string
+// TestHandleAuditQuery_LimitAndOffset exercises the query-string
 // contract on /v1/audit: ?limit is honored (default 100, ceiling
 // MaxAuditQueryLimit, clamped silently above ceiling, 400 below 1 or
 // non-numeric), ?offset skips matching records before results are collected.
@@ -1875,13 +1875,13 @@ func TestRateLimitDoubleCount(t *testing.T) {
 	}
 }
 
-// --- Transport tag (Phase 4B / A19) ---
+// --- Transport tag ---
 //
-// The MCP Gateway and (future) LLM API Proxy stamp
-// meta["transport"] on every /v1/check call. The server defaults
-// unset transport to "sdk" so existing SDK callers don't need to
-// change. The audit entry, the SSE event broadcast, and /v1/audit's
-// transport= filter all read from the same source.
+// The MCP Gateway and the LLM API Proxy stamp meta["transport"] on
+// every /v1/check call. The server defaults unset transport to "sdk"
+// so SDK callers don't need to change. The audit entry, the SSE event
+// broadcast, and /v1/audit's transport= filter all read from the same
+// source.
 
 // readLatestAuditEntry returns the last decoded entry from the
 // FileLogger backing the test server. Useful for asserting on what

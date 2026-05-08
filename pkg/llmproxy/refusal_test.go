@@ -1,11 +1,11 @@
 package llmproxy
 
 // refusal_test.go covers BuildRefusalRich: the operator-grade synthetic
-// refusal text and provider-specific SSE shape A24 wires into
+// refusal text and provider-specific SSE shape wired into
 // Server.BuildRefusal. Cross-checks:
 //
 //   - OpenAI shape: assistant-text content delta + finish_reason: "stop"
-//                   followed by [DONE] (per Phase 4A § 5.3).
+//                   followed by [DONE].
 //   - Anthropic shape: content_block_start (text) at the buffered
 //                     tool_use's index, content_block_delta (text_delta),
 //                     content_block_stop, message_delta with
@@ -13,9 +13,7 @@ package llmproxy
 //   - Reason + Rule + ApprovalID/URL all surface in the human-readable
 //     message body.
 //
-// SSE parsing uses bufio because A22's existing streaming tests share
-// the same approach; keeps the assertion style uniform across the
-// llmproxy package.
+// SSE parsing uses bufio to match the streaming tests' assertion style.
 
 import (
 	"bufio"

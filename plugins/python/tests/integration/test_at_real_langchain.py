@@ -12,7 +12,7 @@ model emits a pre-canned sequence of ``AIMessage`` objects (including
 ones carrying ``tool_calls``), the agent runtime invokes the tool, and
 the gate must fire on that invocation path.
 
-Important architectural note (updated for v0.5.1):
+Important architectural note (updated for v0.5.0):
 -------------------------------------------------------
 v0.5.0 ``GuardedTool`` was a composition wrapper, not a ``BaseTool``
 subclass. langgraph's ``create_react_agent`` / langchain's
@@ -21,7 +21,7 @@ subclass. langgraph's ``create_react_agent`` / langchain's
 so the v0.5.0 wrapper was rejected with a ``ValueError`` and required
 a ``Tool.from_function(func=lambda x: gt.invoke(x))`` workaround.
 
-v0.5.1 switches to a hybrid subclass + override pattern:
+v0.5.0 switches to a hybrid subclass + override pattern:
 ``GuardedTool`` actually subclasses ``langchain_core.tools.BaseTool``,
 so isinstance checks succeed natively. The agent runtime now accepts
 ``GuardedTool`` directly, and these tests register it that way.
@@ -103,7 +103,7 @@ pytestmark = pytest.mark.integration
 def _make_gated_tool(guard, name: str = "echo", scope: str = "shell"):
     """Build a GuardedTool that the agent runtime registers DIRECTLY.
 
-    v0.5.1 subclasses ``langchain_core.tools.BaseTool``, so the agent
+    v0.5.0 subclasses ``langchain_core.tools.BaseTool``, so the agent
     runtime's ``isinstance(thing, Runnable)`` check accepts the wrapper
     natively — no more ``Tool.from_function(func=lambda x: gt.invoke(x))``
     workaround.

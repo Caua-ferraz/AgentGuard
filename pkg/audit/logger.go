@@ -45,8 +45,8 @@ type metaEnvelope struct {
 //
 // Transport identifies the integration path that produced this entry.
 // One of "sdk" (default; SDK call), "mcp_gateway" (MCP Gateway tool
-// call), "llm_api_proxy" (Phase 4C), or another gateway-defined value.
-// Empty on unmarshal of pre-v0.5 entries; readers MUST default to
+// call), "llm_api_proxy" (LLM API Proxy), or another gateway-defined
+// value. Empty on unmarshal of older entries; readers MUST default to
 // EffectiveTransport() when consuming the field. The field is additive
 // and does NOT bump the audit schema_version (still 2). See
 // docs/PROXY_ARCHITECTURE.md § "Audit transport tag".
@@ -61,7 +61,7 @@ type Entry struct {
 }
 
 // TransportSDK is the canonical transport string for SDK callers
-// (Python / TypeScript) that do not stamp meta["transport"]. Pre-v0.5
+// (Python / TypeScript) that do not stamp meta["transport"]. Older
 // audit entries also default to this value via EffectiveTransport.
 const TransportSDK = "sdk"
 
@@ -69,14 +69,13 @@ const TransportSDK = "sdk"
 // produced via the MCP Gateway (cmd/agentguard-mcp-gateway).
 const TransportMCPGateway = "mcp_gateway"
 
-// TransportLLMAPIProxy is the canonical transport string reserved for
-// Phase 4C's LLM API Proxy. Stamped by future code; included here so
-// readers/dashboards can pre-recognise the value.
+// TransportLLMAPIProxy is the canonical transport string for entries
+// produced via the LLM API Proxy (cmd/agentguard-llm-proxy).
 const TransportLLMAPIProxy = "llm_api_proxy"
 
 // EffectiveTransport returns e.Transport if set, otherwise the SDK
 // default. Use when reading audit entries that may have been written
-// by a pre-v0.5 binary (no Transport field on disk).
+// by an older binary (no Transport field on disk).
 func (e Entry) EffectiveTransport() string {
 	if e.Transport == "" {
 		return TransportSDK
@@ -95,7 +94,7 @@ type Logger interface {
 //
 // Offset is applied after filtering but before the Limit is reached: the first
 // Offset matching records are discarded, then up to Limit records are
-// collected. A Limit of 0 means "no cap" (compat with v0.4.0).
+// collected. A Limit of 0 means "no cap".
 type QueryFilter struct {
 	AgentID   string     `json:"agent_id,omitempty"`
 	SessionID string     `json:"session_id,omitempty"`
@@ -106,7 +105,7 @@ type QueryFilter struct {
 	Offset    int        `json:"offset,omitempty"`
 	// Transport filters by the integration path that produced the
 	// entry ("sdk", "mcp_gateway", "llm_api_proxy"). Compared against
-	// Entry.EffectiveTransport so pre-v0.5 entries (no Transport on
+	// Entry.EffectiveTransport so older entries (no Transport on
 	// disk) match the "sdk" value. Empty disables the filter.
 	Transport string `json:"transport,omitempty"`
 }
@@ -119,9 +118,9 @@ const DefaultFilePermissions = 0600
 //
 // Rotation: when rotCfg.MaxSize > 0, every Log() call stats the underlying
 // file after the write and hands off to rotateLocked() once the live file
-// meets or exceeds the threshold. Rotation is opt-in at v0.4.1 (wired via
+// meets or exceeds the threshold. Rotation is opt-in (wired via
 // NewFileLoggerWithRotation); callers using the zero-rotation NewFileLogger
-// keep v0.4.0's unbounded-growth behaviour.
+// get unbounded growth.
 type FileLogger struct {
 	mu     sync.Mutex
 	file   *os.File
@@ -133,8 +132,8 @@ type FileLogger struct {
 //
 // Schema v2: if the target file does not exist or is empty, the logger
 // writes a single {"_meta":{"schema_version":2,...}} header line before any
-// entries. Existing non-empty files are left alone — the v0.4.0_to_v0.4.1
-// migration is responsible for rewriting legacy (headerless, v1) files.
+// entries. Existing non-empty files are left alone — the
+// pkg/migrate/v040_to_v041 package rewrites legacy (headerless, v1) files.
 // Query() tolerates both cases transparently.
 func NewFileLogger(path string) (*FileLogger, error) {
 	// Determine if the file pre-exists and has content BEFORE opening in
@@ -218,11 +217,10 @@ func (l *FileLogger) Log(entry Entry) error {
 //     after we open are simply not seen by this query.
 //   - Scanner discards partial lines implicitly (each line terminated by \n).
 //
-// TODO(v0.6, #audit-perf-mutex): Query scans the full file linearly. For production
-// workloads with large audit logs, replace with a database-backed implementation
-// (SQLite or PostgreSQL). Pre-existing carry-over from v0.4.x; the v0.5 audit
-// review explicitly noted this should NOT block the v0.5 release — see
-// docs/SLO.md § "Deferred performance work".
+// TODO(v0.6, #audit-perf-mutex): Query scans the full file linearly. For
+// production workloads with large audit logs, replace with a database-backed
+// implementation (SQLite or PostgreSQL). See docs/SLO.md § "Deferred
+// performance work".
 func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 	l.mu.Lock()
 	path := l.file.Name()
@@ -266,10 +264,10 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 
 		var entry Entry
 		if err := json.Unmarshal(line, &entry); err != nil {
-			// Silent skip (v0.4.0 behavior) is dangerous: a gradually
-			// corrupted audit file would return fewer entries than expected
-			// with no signal. Count every corrupt line and log the first
-			// occurrence per query so the operator sees the degradation.
+			// Silent skip is dangerous: a gradually corrupted audit file
+			// would return fewer entries than expected with no signal.
+			// Count every corrupt line and log the first occurrence per
+			// query so the operator sees the degradation.
 			metrics.IncAuditCorruptLine()
 			if !corruptLogged {
 				log.Printf("WARN audit: skipping corrupt line in %s (%v)", path, err)

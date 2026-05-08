@@ -8,8 +8,6 @@ import (
 // BenchmarkEngineCheck_AllowFastPath measures the hot path: a single allow
 // rule whose pattern matches on the first comparison. This is the cheapest
 // possible Check() and the one production traffic dominates.
-//
-// Closes R4 S1 (engine ns/op + B/op baseline).
 func BenchmarkEngineCheck_AllowFastPath(b *testing.B) {
 	pol := &Policy{
 		Version: "1",

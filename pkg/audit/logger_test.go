@@ -131,9 +131,9 @@ func TestFileLogger_LogAndQuery(t *testing.T) {
 	}
 }
 
-// TestFileLogger_Offset covers the Phase 1.1 Offset field on QueryFilter.
-// Offset discards the first N matching records before Limit is applied, so
-// that a UI paginating the audit log can page forward without re-scanning
+// TestFileLogger_Offset covers the Offset field on QueryFilter.
+// Offset discards the first N matching records before Limit is applied,
+// so a UI paginating the audit log can page forward without re-scanning
 // from scratch.
 func TestFileLogger_Offset(t *testing.T) {
 	dir := t.TempDir()

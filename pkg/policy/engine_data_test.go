@@ -5,13 +5,13 @@ import (
 	"testing"
 )
 
-// Tests for the `data` scope, added in v0.5 to back the browser-use
-// adapter's check_form_input / GuardedPage.fill flow.
+// Tests for the `data` scope, used by the browser-use adapter's
+// check_form_input / GuardedPage.fill flow.
 //
 // The engine treats `data` as a generic scope: standard Pattern, Action,
 // and Domain matching apply with no scope-specific custom logic. The
 // tests below pin that contract so a future engine refactor cannot
-// silently regress (R5 E5 / R7 E3).
+// silently regress.
 
 func TestEngineCheck_DataScope_AllowsBenignValue(t *testing.T) {
 	pol := &Policy{

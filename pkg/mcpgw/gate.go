@@ -26,10 +26,10 @@ package mcpgw
 //     DENY with Rule="deny:gateway:fail_closed".
 //   --fail-mode fail-closed-with-audit: same DENY shape but the
 //     synthetic Rule is "deny:gateway:fail_closed_audit" so dashboards
-//     can break out the two failure modes. v0.5 surfaces the failure
-//     via metrics + stderr logs only; v0.6 will emit a local audit
-//     entry from the gateway side. See
-//     TODO(v0.6, #fail-closed-with-audit-local-emit) below.
+//     can break out the two failure modes. The failure is surfaced via
+//     metrics + stderr logs today; a local audit entry from the gateway
+//     side is future work. See TODO(v0.6, #fail-closed-with-audit-
+//     local-emit) below.
 //   --fail-mode allow: /v1/check unreachable → synthetic ALLOW. Used
 //     in dev to keep the host responsive when the central server is
 //     down; should NOT be the production setting.
@@ -62,9 +62,9 @@ const DefaultGuardHTTPTimeout = 5 * time.Second
 // contracts — referenced from dashboard + tests.
 //
 // FailModeRuleClosedAudit fires on `--fail-mode fail-closed-with-audit`
-// so dashboards can break out the two failure modes; v0.5 surfaces the
-// failure via metrics + stderr only. v0.6 will emit a local audit entry
-// from the gateway side. See
+// so dashboards can break out the two failure modes; the failure is
+// surfaced via metrics + stderr only today. A local audit entry from
+// the gateway side is future work. See
 // TODO(v0.6, #fail-closed-with-audit-local-emit) in failModeDecision.
 const (
 	FailModeRuleClosed      = "deny:gateway:fail_closed"
@@ -84,7 +84,7 @@ const (
 type HTTPPolicyClient struct {
 	GuardURL   string // e.g. "http://127.0.0.1:8080"
 	APIKey     string // bearer token; empty if --api-key not set
-	TenantID   string // "local" for v0.5
+	TenantID   string // tenant ID; "local" with the bundled FilePolicyProvider
 	PolicyMode string // "strict" | "fast"
 	FailMode   string // "deny" | "allow" | "fail-closed-with-audit"
 
@@ -428,10 +428,10 @@ func decisionFromCheckResult(cr policy.CheckResult) Decision {
 //
 // TODO(v0.6, #fail-closed-with-audit-local-emit): the
 // "fail-closed-with-audit" branch currently surfaces only via the
-// distinct rule string + metrics + stderr; v0.6 will emit a local audit
-// entry from the gateway side (without round-tripping the central
-// server) so operators can reconstruct the deny chain when /v1/check is
-// offline. Mirrors pkg/llmproxy/gate.go.
+// distinct rule string + metrics + stderr. A local audit entry from
+// the gateway side (without round-tripping the central server) so
+// operators can reconstruct the deny chain when /v1/check is offline
+// is future work. Mirrors pkg/llmproxy/gate.go.
 func (c *HTTPPolicyClient) failModeDecision(err error) Decision {
 	switch strings.ToLower(c.FailMode) {
 	case "allow":

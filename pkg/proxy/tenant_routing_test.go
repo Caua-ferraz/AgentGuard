@@ -1,9 +1,9 @@
 package proxy
 
-// Tests for the tenant-aware URL family /v1/t/{tenant}/... introduced
-// in v0.5 Phase 2 (worker A7). The legacy /v1/... routes still anchor on
-// the "local" tenant; the tenant-aware family extracts {tenant} from
-// the path and validates it via Engine.PolicyForTenant.
+// Tests for the tenant-aware URL family /v1/t/{tenant}/... — the legacy
+// /v1/... routes still anchor on the "local" tenant; the tenant-aware
+// family extracts {tenant} from the path and validates it via
+// Engine.PolicyForTenant.
 //
 // We use a real httptest.Server (rather than calling handlers directly
 // via httptest.NewRecorder) because Go 1.22+ ServeMux wildcard routes

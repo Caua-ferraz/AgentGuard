@@ -1,16 +1,14 @@
 package proxy
 
-// AT (Test Wrangler) integration test — Phase 2.
+// Exercises three surfaces stitched together:
+//   - FilePolicyProvider + watcher-driven engine refresh
+//   - the legacy /v1/check route
+//   - last_policy_load_at on /v1/health
 //
-// Exercises three workers' surfaces stitched together:
-//   - A5 (FilePolicyProvider + watcher-driven engine refresh)
-//   - A7 (legacy /v1/check route)
-//   - A10 (last_policy_load_at on /v1/health)
-//
-// Failure mode this test catches: a worker silently breaks the chain that
-// connects "policy file changed on disk" to "engine returns the new
-// decision" or "health endpoint reports the new load timestamp". Any of
-// these regressions would let v0.6 ship with a stale-policy bug.
+// Failure mode this catches: anything that silently breaks the chain
+// connecting "policy file changed on disk" to "engine returns the new
+// decision" or "health endpoint reports the new load timestamp" — i.e.
+// a stale-policy bug.
 
 import (
 	"bytes"

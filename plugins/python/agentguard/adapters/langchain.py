@@ -1,31 +1,20 @@
 """
-AgentGuard LangChain Adapter (v0.5.1 hybrid: subclass + override)
+AgentGuard LangChain Adapter — subclass + override.
 
 Wraps LangChain tools so every invocation passes through AgentGuard policy
 checks.
 
-Why this file changed in v0.5.1
--------------------------------
-v0.5.0 implemented ``GuardedTool`` as a *composition* wrapper (the wrapper
-held a wrapped LangChain tool via ``self.__tool`` and forbade attribute
-access through a strict ``__getattr__`` allowlist). That kept the gate
-tight but broke at framework boundaries:
+Architecture
+------------
+``GuardedTool`` subclasses ``langchain_core.tools.BaseTool`` directly
+so ``isinstance(thing, Runnable)`` and ``isinstance(thing, BaseTool)``
+checks succeed natively. langgraph 1.0 + langchain_core 1.x's
+``coerce_to_runnable`` and langchain 1.x's
+``langchain.agents.create_agent`` both reject composition wrappers,
+so the subclass approach is the only one that registers cleanly.
 
-  * langgraph 1.0 + langchain_core 1.x's ``coerce_to_runnable`` runs
-    ``isinstance(thing, Runnable)`` and rejects composition wrappers.
-  * langchain 1.x's ``langchain.agents.create_agent`` (the successor to
-    the deprecated ``create_react_agent``) uses the same isinstance
-    check. The integration test had to wrap GuardedTool in a
-    ``Tool.from_function(func=lambda x: gt.invoke(x))`` to register it
-    with the agent — that workaround is no longer required after v0.5.1.
-
-The v0.5.1 fix: subclass ``langchain_core.tools.BaseTool`` so isinstance
-passes natively, and preserve the policy-enforcement contract by
-overriding **every** entry point the framework calls. The
-"every-method-is-on-this-class" property substitutes for the
-composition-era ``__getattr__`` allowlist.
-
-Gated methods (each calls ``Guard.check`` before forwarding):
+To keep the gate tight without an ``__getattr__`` allowlist, **every**
+entry point the framework calls is explicitly overridden:
 
   - ``_run`` (abstract on the parent — required by the subclass) — the
     canonical sync dispatch path; ``BaseTool.run`` calls into ``_run``
@@ -39,19 +28,14 @@ Gated methods (each calls ``Guard.check`` before forwarding):
     gating is a v0.6 issue.
   - ``batch`` / ``abatch`` — gate each input independently; first DENY
     raises for the whole batch (whole-batch-fails-on-first-deny).
-  - ``run`` / ``arun`` — legacy entries; preserve v0.4.x string-on-deny
-    semantics (kept for backward compat).
+  - ``run`` / ``arun`` — legacy entries; preserve string-on-deny
+    semantics for callers that depend on it.
 
-The new defense contract
-------------------------
-Composition v0.5.0: "no parent methods are exposed; ``__getattr__`` is
-the single chokepoint."
-
-Subclass v0.5.1: "every gated method is explicitly overridden on this
-class. Pydantic ``PrivateAttr`` keeps internal references off
+The defense contract: every gated method is explicitly overridden on
+this class. Pydantic ``PrivateAttr`` keeps internal references off
 ``model_fields`` and out of ``model_dump`` payloads. The canary
-integration test (``test_at_real_langchain.py``) trips if upstream adds
-a new dispatch path that bypasses our overrides."
+integration test (``test_at_real_langchain.py``) trips if upstream
+adds a new dispatch path that bypasses our overrides.
 
 Lazy framework import
 ---------------------
@@ -65,10 +49,9 @@ the ``GuardedTool`` symbol is a callable factory that raises a clear
 Stream gating limitation
 ========================
 
-For ``stream``/``astream`` the gate fires **once** at stream open.
-Mid-stream tool calls (rare in v0.4 LangChain, increasingly common in
-agent loops with chunk-driven side-effects) bypass the gate. v0.6 issue
-title: ``langchain: per-chunk policy gating in stream()/astream()``.
+For ``stream`` / ``astream`` the gate fires **once** at stream open.
+Mid-stream tool calls bypass the gate. TODO(v0.6): per-chunk gating
+in ``stream()`` / ``astream()``.
 """
 
 from __future__ import annotations
@@ -143,10 +126,10 @@ def _build_guarded_tool_class() -> type:
         """Hybrid subclass-and-override wrapper around a LangChain ``BaseTool``.
 
         Subclasses ``BaseTool`` so framework-side ``isinstance(thing,
-        Runnable)`` checks succeed natively (closes the v0.5.0 langgraph
-        1.0 / langchain_core 1.x regression). Every entry point the
-        framework calls is explicitly overridden to gate via Guard.check
-        before forwarding.
+        Runnable)`` checks succeed natively (langgraph 1.0 /
+        langchain_core 1.x reject composition wrappers). Every entry
+        point the framework calls is explicitly overridden to gate via
+        Guard.check before forwarding.
         """
 
         # Pydantic private attrs — held on the instance but not part of
@@ -504,7 +487,8 @@ def _build_guarded_tool_class() -> type:
             return await self._tool.abatch(inputs, config=config, **kwargs)
 
         # --------------------------------------------------------------
-        # Legacy API (run / arun) — string-on-deny preserved for v0.4.x
+        # Legacy API (run / arun) — string-on-deny shape preserved for
+        # callers that depend on it; new code should prefer invoke().
         # --------------------------------------------------------------
 
         def run(  # type: ignore[override]
@@ -515,9 +499,9 @@ def _build_guarded_tool_class() -> type:
         ) -> Any:
             """Run the tool (legacy entry).
 
-            Returns a string message on DENY / REQUIRE_APPROVAL to preserve
-            v0.4.x behavior; new code should prefer ``invoke`` so failures
-            surface as exceptions.
+            Returns a string message on DENY / REQUIRE_APPROVAL (legacy
+            shape). New code should prefer ``invoke`` so failures surface
+            as exceptions.
             """
             result = self._gate(tool_input)
             inner = self._tool

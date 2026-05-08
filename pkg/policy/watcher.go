@@ -119,8 +119,8 @@ func (w *FileWatcher) watchFS(notify *fsnotify.Watcher) {
 	}
 }
 
-// poll is the fallback path used when fsnotify is unavailable. It matches
-// v0.4.0 behavior so nothing about the user-visible contract changes.
+// poll is the fallback path used when fsnotify is unavailable.
+// Operates by mtime comparison at DefaultPollInterval.
 func (w *FileWatcher) poll() {
 	ticker := time.NewTicker(DefaultPollInterval)
 	defer ticker.Stop()
@@ -159,12 +159,12 @@ func (w *FileWatcher) reload() {
 		return
 	}
 	// Wrap the user callback in safeCallback so a panic does not kill
-	// the watcher goroutine. R-Code H1 (v0.5 audit): in production the
-	// callback is FilePolicyProvider.onPolicyChange which fans out to
-	// each registered Watch consumer; safeCallback is also used inside
-	// onPolicyChange so a single misbehaving consumer cannot starve the
-	// rest. Defending here belt-and-braces guards direct WatchFile
-	// callers (tests, future providers).
+	// the watcher goroutine. In production the callback is
+	// FilePolicyProvider.onPolicyChange which fans out to each
+	// registered Watch consumer; safeCallback is also used inside
+	// onPolicyChange so a single misbehaving consumer cannot starve
+	// the rest. Defending here belt-and-braces guards direct
+	// WatchFile callers (tests, future providers).
 	safeCallback(w.callback, pol)
 }
 

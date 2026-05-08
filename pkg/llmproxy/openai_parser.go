@@ -16,7 +16,7 @@ package llmproxy
 //      configured cap (--max-buffer-bytes). The orchestrator emits a
 //      synthetic refusal and stops reading upstream.
 //
-// Per docs/LLM_API_PROXY.md § 5.1 the wire format is `data: <json>\n\n`
+// Per docs/LLM_API_PROXY.md § 5.0 the wire format is `data: <json>\n\n`
 // SSE events with a `data: [DONE]` sentinel. Tool_calls arrive across
 // multiple deltas keyed by `tool_calls[i].index` (NOT by id; ids may
 // be omitted on later fragments). `arguments` is a string of partial
@@ -38,22 +38,22 @@ type openAIDeltaEnvelope struct {
 }
 
 type openAIDeltaChoice struct {
-	Index        int                  `json:"index"`
-	Delta        openAIDeltaMessage   `json:"delta"`
-	FinishReason string               `json:"finish_reason,omitempty"`
+	Index        int                `json:"index"`
+	Delta        openAIDeltaMessage `json:"delta"`
+	FinishReason string             `json:"finish_reason,omitempty"`
 }
 
 type openAIDeltaMessage struct {
-	Role      string                  `json:"role,omitempty"`
-	Content   string                  `json:"content,omitempty"`
-	ToolCalls []openAIToolCallDelta   `json:"tool_calls,omitempty"`
+	Role      string                `json:"role,omitempty"`
+	Content   string                `json:"content,omitempty"`
+	ToolCalls []openAIToolCallDelta `json:"tool_calls,omitempty"`
 }
 
 type openAIToolCallDelta struct {
-	Index    int                       `json:"index"`
-	ID       string                    `json:"id,omitempty"`
-	Type     string                    `json:"type,omitempty"`
-	Function *openAIToolCallFuncDelta  `json:"function,omitempty"`
+	Index    int                      `json:"index"`
+	ID       string                   `json:"id,omitempty"`
+	Type     string                   `json:"type,omitempty"`
+	Function *openAIToolCallFuncDelta `json:"function,omitempty"`
 }
 
 type openAIToolCallFuncDelta struct {
@@ -65,11 +65,11 @@ type openAIToolCallFuncDelta struct {
 // its `tool_calls[i].index`). The Arguments builder accumulates the
 // partial-JSON string fragments verbatim.
 type openAIToolCallState struct {
-	Index        int
-	ID           string
-	Name         string
-	Arguments    strings.Builder
-	HasFunction  bool // we observed at least one function delta
+	Index       int
+	ID          string
+	Name        string
+	Arguments   strings.Builder
+	HasFunction bool // we observed at least one function delta
 }
 
 // FeedResult is what FeedEvent returns to the streaming orchestrator.
@@ -108,7 +108,7 @@ type FeedResult struct {
 //
 // One accumulator per stream — never share between requests. The
 // streaming orchestrator constructs a fresh one in each request
-// goroutine (per-request goroutine isolation is the Phase 4A rule).
+// goroutine (per-request goroutine isolation).
 type OpenAIToolCallAccumulator struct {
 	maxBufferBytes int
 
@@ -295,9 +295,9 @@ func (a *OpenAIToolCallAccumulator) FeedEvent(rawEvent []byte) (FeedResult, erro
 		if finishReasonToolCalls || hasFinishReason(env) {
 			calls, parseErr := a.assembleCompletedCalls()
 			// parseErr surfaces invalid-JSON-arguments cases to the
-			// caller. The caller (orchestrator) still proceeds with
-			// gating using RawArguments — A24's policy hook decides
-			// how to handle malformed args.
+			// caller. The orchestrator still proceeds with gating
+			// using RawArguments — the policy hook decides how to
+			// handle malformed args.
 			res := FeedResult{
 				Completed:          true,
 				CompletedToolCalls: calls,
@@ -444,4 +444,3 @@ func extractOpenAIDataLine(rawEvent []byte) (dataLine []byte, isDone bool, hasDa
 	}
 	return bb, false, true
 }
-

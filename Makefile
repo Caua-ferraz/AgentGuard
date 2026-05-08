@@ -1,4 +1,4 @@
-.PHONY: build build-mcp-gateway build-llm-proxy test lint run clean docker validate validate-examples bench help
+.PHONY: build build-mcp-gateway build-llm-proxy test test-all lint run clean docker validate validate-examples bench help
 
 # Binary name
 BINARY=agentguard
@@ -23,6 +23,10 @@ build-llm-proxy:
 ## test: Run all tests with race detection
 test:
 	go test -v -race -coverprofile=coverage.out ./...
+
+## test-all: Run every test suite (go, policy, python, ts) with summary
+test-all:
+	@./scripts/test-all.sh
 
 ## lint: Run linter
 lint:

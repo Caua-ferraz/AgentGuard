@@ -9,7 +9,7 @@ import (
 // TestSweepSessionCosts_EvictsStale (engine_extended_test.go). The extended
 // test backdates lastUpdated to skip the sleep; this one runs with a real
 // 100 ms TTL and a 200 ms sleep so the eviction path is also exercised
-// without test-only state surgery. Closes R4 F1.
+// without test-only state surgery.
 //
 // time.Sleep is used because we are explicitly verifying TTL semantics
 // against wall-clock time. Per project conventions sleeps are allowed in

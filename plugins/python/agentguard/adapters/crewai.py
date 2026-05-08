@@ -1,67 +1,39 @@
 """
-AgentGuard CrewAI Adapter (v0.5.1 hybrid: subclass + override)
+AgentGuard CrewAI Adapter — subclass + override.
 
 Wraps CrewAI tools so every invocation passes through AgentGuard policy checks.
 
-Why this file changed in v0.5.1
--------------------------------
-v0.5.0 implemented ``GuardedCrewTool`` as a *composition* wrapper that held
-a CrewAI ``BaseTool`` instance and registered itself as a virtual subclass
-via ``BaseTool.register(GuardedCrewTool)``. The composition approach kept
-the gating tight (an explicit ``__getattr__`` allowlist blocked any
-parent-method bypass) but it broke at framework boundaries:
+Architecture
+------------
+``GuardedCrewTool`` subclasses CrewAI's ``BaseTool`` directly so
+``isinstance(thing, BaseTool)`` checks succeed natively (CrewAI 1.x +
+pydantic 2.12 reject virtual-subclass registration via
+``BaseTool.register``). To keep the gate tight without an
+``__getattr__`` allowlist, **every** entry point the framework calls is
+explicitly overridden:
 
-  CrewAI 1.x + pydantic 2.12 emit::
-
-      For performance reasons, virtual subclasses registered using
-      'BaseTool.register()' are not supported in 'isinstance()' and
-      'issubclass()' checks.
-
-  Concretely::
-
-      Agent(tools=[GuardedCrewTool(...)])
-
-  raises::
-
-      pydantic_core._pydantic_core.ValidationError: 1 validation error for
-      Agent tools.0  Input should be a valid dictionary or instance of
-      BaseTool [...] input_type=GuardedCrewTool
-
-That same architectural class affects langgraph 1.0 + langchain_core 1.x
-(``isinstance(thing, Runnable)`` in ``coerce_to_runnable``).
-
-The v0.5.1 fix: actually subclass CrewAI's ``BaseTool`` so isinstance
-passes natively, and preserve the policy-enforcement contract by
-overriding **every** entry point the framework calls. The
-"every-method-is-on-this-class" property substitutes for the
-composition-era ``__getattr__`` allowlist:
-
-  - ``_run`` (abstract on the parent — we MUST override) gates every
-    sync dispatch path the framework drives. CrewAI's ``BaseTool.run``,
-    ``invoke`` (when present on a subclass / wrapper), and
-    ``to_structured_tool`` all read ``_run`` off the instance, so a
-    gated ``_run`` covers the entire sync surface.
+  - ``_run`` (abstract on the parent) gates every sync dispatch path
+    CrewAI drives. CrewAI's ``BaseTool.run``, ``invoke`` (when present
+    on a subclass / wrapper), and ``to_structured_tool`` all read
+    ``_run`` off the instance, so a gated ``_run`` covers the entire
+    sync surface.
   - ``_arun`` is overridden because CrewAI's ``arun`` calls ``_arun``.
   - ``run`` / ``arun`` / ``invoke`` / ``ainvoke`` / ``__call__`` are
     overridden explicitly so the gate fires regardless of which entry
-    the agent runtime picks. Each one also runs the tool through the
-    underlying instance's matching method, preserving CrewAI's usage
-    accounting (``_claim_usage`` etc.) when the underlying tool defines
-    those.
+    the agent runtime picks. Each one runs the tool through the
+    underlying instance's matching method to preserve CrewAI's usage
+    accounting (``_claim_usage`` etc.).
   - ``to_structured_tool`` is overridden so CrewAI's
-    ``to_structured_tool`` pipeline (which does ``func=self._run``) ends
-    up calling our gated ``_run``, not the wrapped tool's bare ``_run``.
+    ``to_structured_tool`` pipeline (which does ``func=self._run``)
+    ends up calling our gated ``_run``, not the wrapped tool's bare
+    ``_run``.
 
-The new defense contract
-------------------------
-Composition v0.5: "no parent methods are exposed; ``__getattr__`` is the
-single chokepoint."
-
-Subclass v0.5.1: "every gated method is explicitly overridden on this
-class; the canary integration test (``test_at_real_crewai.py``) trips if
-upstream adds a new dispatch path that bypasses our overrides." Pydantic
-``PrivateAttr`` keeps internal references (``_tool``, ``_guard``,
-``_scope``) off ``model_fields`` and out of ``model_dump`` payloads.
+The defense contract: every gated method is explicitly overridden on
+this class; the canary integration test (``test_at_real_crewai.py``)
+trips if upstream adds a new dispatch path that bypasses our overrides.
+Pydantic ``PrivateAttr`` keeps internal references (``_tool``,
+``_guard``, ``_scope``) off ``model_fields`` and out of ``model_dump``
+payloads.
 
 Lazy framework import
 ---------------------
@@ -174,9 +146,10 @@ def _build_guarded_class() -> type:
         """Hybrid subclass-and-override wrapper around a CrewAI ``BaseTool``.
 
         Subclasses ``BaseTool`` so framework-side ``isinstance`` checks
-        succeed natively (closes the v0.5.0 pydantic-2.12 / CrewAI 1.x
-        regression). Every entry point the framework calls is explicitly
-        overridden to gate via :meth:`Guard.check` before forwarding.
+        succeed natively (pydantic 2.12 / CrewAI 1.x reject virtual-
+        subclass registration). Every entry point the framework calls
+        is explicitly overridden to gate via :meth:`Guard.check` before
+        forwarding.
         """
 
         # Pydantic private attributes — held on the instance but not part

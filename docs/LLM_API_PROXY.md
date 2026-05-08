@@ -238,7 +238,7 @@ This is the core technical innovation. When the response is streaming
 and the model is calling tools, the proxy must:
 
 1. Read the SSE stream from upstream chunk by chunk.
-2. Parse tool-call deltas (different shape per provider — see § 5.1
+2. Parse tool-call deltas (different shape per provider — see § 5.0
    and § 5.2).
 3. **Accumulate** until a tool call is complete.
 4. **Pause** the stream to the client (do not flush partial deltas

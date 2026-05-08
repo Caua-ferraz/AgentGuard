@@ -1,14 +1,10 @@
 package main
 
-// AT (Test Wrangler) integration test — Phase 2.
-//
 // Parity test: `agentguard check` (offline CLI) must return the same
 // decision string that POST /v1/check returns when both consult the same
-// policy file. Closes a "two implementations of the same contract"
-// regression risk that would otherwise let the CLI and server drift.
-//
-// Workers exercised: A9 (CLI subcommand), A5 (FilePolicyProvider in both
-// paths), A8 (schema_version stamping), and the proxy handler chain.
+// policy file. Without this test the CLI and server can drift from each
+// other since they're two independent implementations of the same
+// contract.
 //
 // Implementation note: we call executeCheck directly rather than
 // shelling out to a built binary. Both the CLI and the server consume
@@ -54,8 +50,6 @@ rules:
       alert_threshold: "$1.00"
 `
 
-// writeParityPolicy materializes parityPolicy to a temp file and returns
-// its path.
 func writeParityPolicy(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -66,8 +60,6 @@ func writeParityPolicy(t *testing.T) string {
 	return p
 }
 
-// startParityServer boots a real Server backed by a FilePolicyProvider
-// pointed at policyPath, returns the URL.
 func startParityServer(t *testing.T, policyPath string) string {
 	t.Helper()
 	prov, err := policy.NewFilePolicyProvider(policyPath)
@@ -157,10 +149,10 @@ func TestATIntegration_CLIServerParity(t *testing.T) {
 	baseURL := startParityServer(t, policyPath)
 
 	type fixture struct {
-		name           string
-		body           string
-		wantDecision   string
-		wantCLIExit    int
+		name         string
+		body         string
+		wantDecision string
+		wantCLIExit  int
 	}
 	cases := []fixture{
 		{

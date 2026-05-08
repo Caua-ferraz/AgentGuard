@@ -81,9 +81,8 @@ type Config struct {
 //
 // The Command field is the raw command string that the transport
 // layer splits via a small shell-style tokenizer (see
-// SplitCommandLine). For v0.5 only stdio is supported; the
-// (currently unused) Transport field is reserved for v0.6 when
-// Streamable-HTTP transport ships.
+// SplitCommandLine). Currently only stdio is supported; the
+// Transport field is reserved for a future Streamable-HTTP impl.
 //
 // TODO(v0.6, #mcp-streamable-http): add Transport == "http" with a
 // URL field, paired with a different Upstream impl in transport.go.
@@ -91,7 +90,7 @@ type UpstreamSpec struct {
 	Namespace string // e.g. "fs", "github"
 	Command   string // raw command string, shell-tokenized at start time
 
-	// Transport is reserved for future use. v0.5 always uses stdio.
+	// Transport is reserved for future use; only stdio is wired today.
 	Transport string
 }
 

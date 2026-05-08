@@ -368,13 +368,12 @@ func TestPruneArchives_StandaloneCall(t *testing.T) {
 	}
 }
 
-// TestAuditRotation closes R7 E1 / T1: the FileLogger constructed via
-// NewFileLoggerWithRotation must produce a .gz archive when MaxSize is
-// crossed and Compress=true. This is the regression coupon for the
-// main.go wiring of --audit-* flags; the helper functions
-// (TestRotation_SizeTriggered, TestRotation_Compression) cover the lower
-// layers, but the named test makes the rotation contract grep-able from
-// the audit-finding map.
+// TestAuditRotation pins the rotation contract: a FileLogger
+// constructed via NewFileLoggerWithRotation must produce a .gz archive
+// when MaxSize is crossed and Compress=true. This is the regression
+// coupon for main.go's wiring of --audit-* flags; the helper functions
+// (TestRotation_SizeTriggered, TestRotation_Compression) cover the
+// lower layers.
 func TestAuditRotation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")

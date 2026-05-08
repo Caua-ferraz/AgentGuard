@@ -4,18 +4,18 @@
 // any tool calls the model emits through the central AgentGuard
 // policy engine.
 //
-// Phase 4C is split across four workers:
+// Major pieces:
 //
-//   - A21 (this file's worker) — server skeleton, non-streaming
-//     forwarding, protocol type definitions, integration hooks for
-//     the rest.
-//   - A22 — streaming pause/resume/rewrite (the technically deepest
-//     piece; SSE parsing for both providers, byte-identity invariant
-//     on ALLOW, synthetic refusal on DENY/REQUIRE_APPROVAL).
-//   - A23 — tool-call → policy-scope mapping (built-in defaults +
-//     YAML override).
-//   - A24 — wires the PolicyCheck hook against /v1/check, builds
-//     synthetic refusal payloads, fail-mode handling.
+//   - server.go — HTTP server skeleton, non-streaming forwarding,
+//     protocol types, integration hooks.
+//   - streaming.go — streaming pause/resume/rewrite (SSE parsing for
+//     both providers, byte-identity invariant on ALLOW, synthetic
+//     refusal on DENY / REQUIRE_APPROVAL).
+//   - scope_map.go — tool-call → policy-scope mapping (built-in
+//     defaults + YAML override).
+//   - gate.go — PolicyCheck hook wired against /v1/check, fail-mode
+//     handling.
+//   - refusal.go — synthetic-refusal payload construction.
 //
 // See docs/LLM_API_PROXY.md for the wire format design and
 // docs/PROXY_ARCHITECTURE.md for cross-cutting decisions (audit
@@ -49,10 +49,9 @@ const (
 	DefaultLogLevel          = "info"
 
 	// DefaultMaxBufferBytes (1 MiB) is the per-stream tool-call
-	// accumulation cap — Phase 4A Q2 user-approved value. Mirrors
-	// the central server's MaxRequestBodySize so /v1/check side-channel
-	// payloads always fit. A22 wires the actual buffering against
-	// this; A21 only stores the configured value.
+	// accumulation cap. Mirrors the central server's MaxRequestBodySize
+	// so /v1/check side-channel payloads always fit. The streaming
+	// path enforces this; the configured value is stored here.
 	DefaultMaxBufferBytes = 1024 * 1024 // 1 MiB
 
 	// MaxConfigurableBufferBytes refuses pathological values up front.
@@ -71,14 +70,14 @@ const (
 	// fan-out should raise this and lower --max-buffer-bytes
 	// proportionally; operators on tiny boxes should lower it.
 	//
-	// 0 disables the cap entirely (legacy behaviour). Closes R-Sec H3.
+	// 0 disables the cap entirely.
 	DefaultMaxConcurrentStreams = 100
 )
 
 // Config is the parsed CLI/env configuration for one proxy invocation.
 // Populated by ParseConfig. The server reads it once at startup and
-// treats it as immutable thereafter; hot-reload of any flag is out
-// of scope for v0.5.
+// treats it as immutable thereafter; hot-reload of flags is out of
+// scope.
 type Config struct {
 	// Listen is the proxy's HTTP bind address. Default DefaultListen
 	// (loopback). Non-loopback is rejected unless --proxy-api-key
@@ -93,7 +92,7 @@ type Config struct {
 	// (/v1/messages).
 	UpstreamAnthropic string
 
-	// GuardURL is the central AgentGuard server's base URL — A24's
+	// GuardURL is the central AgentGuard server's base URL — the
 	// PolicyCheck hook calls <GuardURL>/v1/check.
 	GuardURL string
 
@@ -115,13 +114,12 @@ type Config struct {
 
 	// FailMode mirrors the SDK / MCP gateway contract from
 	// docs/PROXY_ARCHITECTURE.md § 6.1: "deny" | "allow" |
-	// "fail-closed-with-audit". A24 honours this on /v1/check failures.
+	// "fail-closed-with-audit". The gate honours this on /v1/check
+	// failures.
 	FailMode string
 
 	// MaxBufferBytes caps the per-stream tool-call accumulation
-	// buffer. Phase 4A Q2 default = 1 MiB. A22 wires actual buffering
-	// against this; A21 only validates and stores it so the flag
-	// surface is stable from the first build.
+	// buffer (default 1 MiB). The streaming pipeline enforces it.
 	MaxBufferBytes int
 
 	// MaxConcurrentStreams caps simultaneously-active streaming
@@ -131,9 +129,9 @@ type Config struct {
 	// per-stream accumulator + read buffer pair). 0 disables the cap.
 	// Default: DefaultMaxConcurrentStreams.
 	//
-	// Closes R-Sec H3 (audit B6). Memory ceiling for streaming was
-	// previously unbounded in the limit; the per-stream cap
-	// (--max-buffer-bytes) only constrains a single in-flight call.
+	// Without this cap the streaming memory ceiling is unbounded; the
+	// per-stream cap (--max-buffer-bytes) only constrains a single
+	// in-flight call.
 	MaxConcurrentStreams int
 
 	// LogLevel controls stderr verbosity. "info" or "debug".
@@ -143,7 +141,7 @@ type Config struct {
 	// the LLM tool→scope mapping locally (operators run the same YAML
 	// the central server loads — typically a shared file path).
 	//
-	// Optional: when unset, A24's gate falls back to the bundled
+	// Optional: when unset, the gate falls back to the bundled
 	// DefaultLLMToolScopeMap and skips hot-reload. main.go logs a
 	// WARNING in that case because operator overrides won't apply.
 	// Cross-host deployments must mount the file on a shared volume
@@ -173,7 +171,7 @@ func ParseConfigWithOutput(args []string, errOut io.Writer) (*Config, error) {
 	proxyAPIKey := fs.String("proxy-api-key", "", "Optional bearer the proxy itself enforces on inbound requests (X-AgentGuard-Proxy-Auth). Empty = no proxy auth.")
 	tenantID := fs.String("tenant-id", DefaultTenantID, "Tenant ID")
 	failMode := fs.String("fail-mode", DefaultFailMode, `Fail mode when /v1/check is unreachable: "deny" | "allow" | "fail-closed-with-audit"`)
-	maxBufferBytes := fs.Int("max-buffer-bytes", DefaultMaxBufferBytes, "Per-stream tool-call buffer cap in bytes (A22 wires actual buffering)")
+	maxBufferBytes := fs.Int("max-buffer-bytes", DefaultMaxBufferBytes, "Per-stream tool-call buffer cap in bytes")
 	maxConcurrentStreams := fs.Int("max-concurrent-streams", DefaultMaxConcurrentStreams, "Global cap on simultaneous streaming requests; 0 disables the cap. Excess requests are refused with 503 + Retry-After: 5.")
 	logLevel := fs.String("log-level", DefaultLogLevel, `Stderr verbosity: "info" | "debug"`)
 	policyPath := fs.String("policy", "", "Path to policy YAML for tool→scope mapping; empty falls back to DefaultLLMToolScopeMap with no operator overrides")

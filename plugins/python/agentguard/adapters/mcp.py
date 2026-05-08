@@ -76,7 +76,7 @@ def _infer_check_params_for(tool: "ToolDefinition", arguments: dict) -> dict:
     Both the in-process server and the gateway need identical inference +
     redaction. Defining the logic once at module scope keeps the gateway
     from awkwardly invoking the unbound server method on a non-server
-    ``self`` (the v0.5 R7 E6 gateway preview is its own class).
+    ``self`` (the gateway is its own class).
     """
     from urllib.parse import urlparse  # local import — only used here
 
@@ -181,8 +181,8 @@ class GuardedMCPServer:
         """Delegate to :func:`_infer_check_params_for`.
 
         Kept as a method for back-compat with any subclass / test that
-        already binds it; the real logic (and v0.5 R7 T7 redaction) lives
-        in the module-level helper so :class:`GuardedMCPGateway` can
+        binds it; the real logic (including secret redaction) lives in
+        the module-level helper so :class:`GuardedMCPGateway` can
         reuse it without instantiating a server.
         """
         return _infer_check_params_for(tool, arguments)
@@ -194,19 +194,17 @@ class GuardedMCPServer:
         params = request.get("params", {})
 
         if method == "initialize":
-            # MCP clients advertise their protocol version in params. We pin to
-            # MCP_PROTOCOL_VERSION and do not yet negotiate — real negotiation
-            # is a v0.5.0 design item. If the client wants a different version
-            # (usually newer), log a single WARN to stderr so operators can
-            # see version drift, then respond with our pinned version. stdout
-            # is reserved for JSON-RPC on the stdio transport, so the warning
-            # MUST go to stderr.
+            # MCP clients advertise their protocol version in params. We pin
+            # to MCP_PROTOCOL_VERSION and do not yet negotiate. If the client
+            # wants a different version (usually newer), log a single WARN to
+            # stderr so operators can see version drift, then respond with
+            # our pinned version. stdout is reserved for JSON-RPC on the
+            # stdio transport, so the warning MUST go to stderr.
             client_version = params.get("protocolVersion") if isinstance(params, dict) else None
             if client_version and client_version != MCP_PROTOCOL_VERSION:
                 sys.stderr.write(
                     f"WARN agentguard.mcp: client requested protocolVersion "
-                    f"{client_version!r}, pinning to {MCP_PROTOCOL_VERSION!r} "
-                    f"(negotiation is a v0.5.0 design item)\n"
+                    f"{client_version!r}, pinning to {MCP_PROTOCOL_VERSION!r}\n"
                 )
                 sys.stderr.flush()
             return {
@@ -349,15 +347,15 @@ class GuardedMCPServer:
     def run(self):
         """Run the MCP server on stdio (blocking).
 
-        v0.5 (R5 E6, S9): each frame is processed inside a guard so that
-        a single malformed JSON line, a handler exception, or a
-        downstream-side error does not crash the adapter. Claude Desktop
-        (and similar long-lived MCP clients) keep one stdio session open
-        for the whole session — surviving a bad frame means the user
-        does not have to restart their editor every time a tool throws.
+        Each frame is processed inside a guard so a single malformed
+        JSON line, a handler exception, or a downstream-side error does
+        not crash the adapter. Claude Desktop (and similar long-lived
+        MCP clients) keep one stdio session open for the whole session
+        — surviving a bad frame means the user does not have to restart
+        their editor every time a tool throws.
 
         Behavior:
-        - blank / whitespace-only line: dropped silently (back-compat).
+        - blank / whitespace-only line: dropped silently.
         - JSON parse error: log to stderr, drop the frame. Best-effort
           JSON-RPC parse-error response is not emitted because the bad
           frame had no recoverable id.
@@ -431,8 +429,7 @@ class _UpstreamProcess:
     matching the stdio JSON-RPC pattern Claude Desktop and Cursor use.
     Server-initiated notifications (``listChanged`` etc.) are not
     forwarded; capability merging and namespaced tool prefixes are
-    deferred to v0.6's full Gateway implementation. v0.5 is a single
-    upstream, request/response only.
+    deferred. Single upstream, request/response only.
     """
 
     def __init__(self, command: list, env: Optional[dict] = None):
@@ -503,20 +500,21 @@ class _UpstreamProcess:
 class GuardedMCPGateway:
     """Single-upstream MCP gateway with AgentGuard in the middle.
 
-    v0.5 deliverable previewing the full Phase 4B Gateway. Spawns one
-    downstream MCP server (e.g. ``npx -y @modelcontextprotocol/server-filesystem``),
-    answers ``tools/list`` by forwarding to the downstream, and gates
-    every ``tools/call`` through ``Guard.check`` before forwarding.
+    Spawns one downstream MCP server (e.g.
+    ``npx -y @modelcontextprotocol/server-filesystem``), answers
+    ``tools/list`` by forwarding to the downstream, and gates every
+    ``tools/call`` through ``Guard.check`` before forwarding.
 
-    Limitations (closed in v0.6):
+    Limitations:
     - Single upstream — no capability merging.
     - No tool-name prefix / namespace separation.
     - Server-initiated notifications (``notifications/tools/list_changed``)
       are not forwarded.
     - No prompts/resources support — only ``tools/*`` is gated.
 
-    Use :class:`GuardedMCPServer` directly when you want to register
-    tools in code.
+    The full multi-upstream gateway lives in cmd/agentguard-mcp-gateway/
+    + pkg/mcpgw/. Use :class:`GuardedMCPServer` directly when you want
+    to register tools in code.
     """
 
     # Methods we always forward verbatim to the upstream.
@@ -549,7 +547,7 @@ class GuardedMCPGateway:
         Scope defaults to ``"shell"`` for unknown tools; ``_infer_check_params``
         upgrades to ``network`` / ``filesystem`` based on argument keys, so the
         default is mostly cosmetic. We do NOT try to read the description or
-        schema to guess a smarter scope — keep the gateway simple in v0.5.
+        schema to guess a smarter scope — the simple inference is the contract.
         """
         try:
             resp = self._upstream.request({
@@ -699,16 +697,16 @@ def main():
     """Entry point for running as ``python -m agentguard.adapters.mcp``.
 
     Modes:
-      - ``--upstream "<command...>"`` — gateway mode (R7 E6). Spawns the
+      - ``--upstream "<command...>"`` — gateway mode. Spawns the
         downstream MCP server given by the command, bridges JSON-RPC,
         and gates ``tools/call`` through AgentGuard. Example:
         ``python -m agentguard.adapters.mcp --guard-url http://localhost:8080
         --upstream "npx -y @modelcontextprotocol/server-filesystem /tmp"``.
-      - no ``--upstream`` — empty-server mode. The original v0.4.x
-        behavior, retained for back-compat with subclasses that
-        ``register tools in code``. Emits a stderr WARN so an operator
-        following the docs literally sees that no tools are registered
-        (instead of silently exposing a tool-less server to Claude
+      - no ``--upstream`` — empty-server mode. Retained for callers that
+        ``register tools in code`` via subclasses. Emits a stderr WARN
+        so an operator following the docs literally sees that no tools
+        are registered (instead of silently exposing a tool-less server
+        to Claude
         Desktop).
     """
     import argparse

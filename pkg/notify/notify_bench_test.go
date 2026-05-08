@@ -28,8 +28,6 @@ func (b *blockingNotifier) Notify(_ Event) error {
 // non-blocking select that decides between enqueue and drop. This is
 // the steady-state hot path under overload — the system that protects
 // the rest of AgentGuard from a slow webhook stalling /v1/check.
-//
-// Closes R4 S1 (notify ns/op + B/op baseline under saturation).
 func BenchmarkDispatcher_Send_QueueFull(b *testing.B) {
 	hold := make(chan struct{})
 	bn := &blockingNotifier{hold: hold}

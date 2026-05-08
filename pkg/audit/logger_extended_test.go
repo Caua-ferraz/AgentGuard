@@ -204,13 +204,10 @@ func TestFileLogger_LargeVolume(t *testing.T) {
 	}
 }
 
-// TestScannerErrChecked verifies that Query surfaces an error when the audit
-// log contains a single line that exceeds the scanner's max buffer
-// (bufio.ErrTooLong). v0.4.x silently truncated; v0.5 must return both the
-// successfully decoded prefix AND a non-nil error so callers know the result
-// set is incomplete.
-//
-// Closes R3 #1 (audit finding "bufio.Scanner.Err() is never checked").
+// TestScannerErrChecked verifies that Query surfaces an error when the
+// audit log contains a single line that exceeds the scanner's max buffer
+// (bufio.ErrTooLong). The contract: return both the successfully decoded
+// prefix AND a non-nil error so callers know the result set is incomplete.
 func TestScannerErrChecked(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")

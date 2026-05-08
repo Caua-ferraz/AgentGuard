@@ -1,12 +1,10 @@
 package llmproxy
 
-// forward.go is the non-streaming forward path. F9 (B2) closed the
-// gating gap: until v0.5 fixup, the non-streaming forwarder was a
-// verbatim pass-through (the streaming path A22 was the only place
-// tool_calls were inspected). Many production agents use stream=false
-// — batch evals, non-interactive workflows, frameworks that don't
-// enable streaming by default — so the "wire-level firewall" claim
-// required this path to gate too.
+// forward.go is the non-streaming forward path. It inspects and
+// gates tool_calls in the upstream response so the wire-level
+// firewall claim holds for stream=false agents (batch evals, non-
+// interactive workflows, frameworks that don't enable streaming by
+// default).
 //
 // Algorithm (mirrors streaming.go's pause/resume/rewrite, synchronous):
 //
@@ -420,10 +418,10 @@ func buildAnthropicNonStreamingCheck(s *Server, r *http.Request, resp *Anthropic
 //     server-side logs at OpenAI/Anthropic can identify proxied
 //     traffic. Spec-compliant per RFC 7231.
 //   - The request body is re-attached as a fresh io.Reader on each
-//     call so retries (currently none in v0.5) would be safe.
+//     call so retries (currently none) would be safe.
 //   - The response body is streamed back via io.Copy — the
 //     non-streaming JSON shape is small enough that this is fine.
-//     Once A22 wires streaming, that path uses a separate routine
+//     The streaming path uses a separate routine in streaming.go
 //     that pauses/resumes per tool call.
 func (s *Server) forwardTo(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte, upstream *url.URL, path string) error {
 	if upstream == nil {
@@ -472,11 +470,12 @@ func (s *Server) forwardTo(ctx context.Context, w http.ResponseWriter, r *http.R
 	// Stream body back. For non-streaming responses this is one
 	// contiguous JSON document; io.Copy is the right primitive.
 	//
-	// Hook for A22/A24: the non-streaming response may contain
-	// tool_calls (OpenAI) or tool_use blocks (Anthropic) that need
-	// gating. The proxy currently forwards verbatim; A24 wires the
-	// inspect-and-rewrite step here. The contract is documented
-	// in docs/LLM_API_PROXY.md § 3.2 ("Non-streaming").
+	// The non-streaming response may contain tool_calls (OpenAI) or
+	// tool_use blocks (Anthropic) that need gating; the inspect-and-
+	// rewrite step is in forwardChatCompletion / forwardAnthropicMessages.
+	// This helper is the verbatim pass-through used by /v1/embeddings
+	// and /v1/models. The contract is documented in
+	// docs/LLM_API_PROXY.md § 3.2 ("Non-streaming").
 	_, err = io.Copy(w, resp.Body)
 	if err != nil {
 		// If the client disconnected mid-copy that's not really

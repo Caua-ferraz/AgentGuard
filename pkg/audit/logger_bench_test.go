@@ -14,8 +14,7 @@ import (
 // directly into the SLO.
 //
 // Rotation is intentionally disabled here (NewFileLogger, not
-// NewFileLoggerWithRotation) so we measure the steady-state path. Closes
-// R4 S1 (audit ns/op + B/op baseline).
+// NewFileLoggerWithRotation) so we measure the steady-state path.
 func BenchmarkFileLogger_Log(b *testing.B) {
 	dir := b.TempDir()
 	path := filepath.Join(dir, "bench.jsonl")

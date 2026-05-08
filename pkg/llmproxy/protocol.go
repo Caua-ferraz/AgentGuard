@@ -3,9 +3,9 @@ package llmproxy
 // protocol.go defines the minimal request/response types the proxy
 // inspects. The proxy is a dumb-forward by design: bodies pass through
 // upstream as the original bytes. These structs exist only for the
-// inspection step (streaming detection + tool definitions for A23's
-// scope mapping). Unknown fields round-trip transparently because we
-// never re-encode the body.
+// inspection step (streaming detection + tool definitions for scope
+// mapping). Unknown fields round-trip transparently because we never
+// re-encode the body.
 //
 // Wire-format references:
 //
@@ -14,10 +14,9 @@ package llmproxy
 //   - Anthropic Messages:
 //     https://platform.claude.com/docs/en/api/messages
 //
-// Phase 4A flagged the OpenAI streaming docs as unverified (the docs
-// site rejected design-time WebFetch). Streaming-shape types live in
-// A22's parser; the non-streaming response shape modelled here is
-// stable and well-known.
+// Streaming-shape types live in the SSE parsers (openai_parser.go,
+// anthropic_parser.go); the non-streaming response shape modelled
+// here is stable and well-known.
 
 import (
 	"encoding/json"
@@ -28,8 +27,8 @@ import (
 // ChatCompletionRequest is the OpenAI /v1/chat/completions request
 // body, parsed only to the depth the proxy needs. The Messages slice
 // is kept as raw JSON because the proxy never inspects message
-// content; tools however are parsed so A23 can name-match them
-// against the scope map.
+// content; tools are parsed so the scope-mapping layer can name-match
+// them against the policy scope map.
 type ChatCompletionRequest struct {
 	Model    string               `json:"model"`
 	Stream   bool                 `json:"stream,omitempty"`
@@ -54,7 +53,7 @@ type ChatCompletionToolFunc struct {
 }
 
 // ChatCompletionResponse is the non-streaming response. Modelled to
-// the depth A24 needs (choices[i].message.tool_calls) plus
+// the depth the gate needs (choices[i].message.tool_calls) plus
 // passthrough-style fields the proxy might surface in audit meta
 // (id, model, usage).
 type ChatCompletionResponse struct {

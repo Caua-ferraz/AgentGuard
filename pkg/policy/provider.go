@@ -11,14 +11,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// safeCallback invokes cb(pol) with a deferred recover. R-Code H1 in the
-// v0.5 audit found that a panic inside a Watch callback (e.g. a malformed
-// policy update tripping a downstream invariant in gate.SetPolicy)
-// propagated all the way up the file-watcher goroutine, killing the
-// watcher silently — every subsequent policy update was then dropped on
-// the floor with no operator signal. This wrapper logs the panic with a
-// full stack trace and returns normally so the caller's callback loop
-// keeps running and the watcher goroutine survives.
+// safeCallback invokes cb(pol) with a deferred recover. A panic inside a
+// Watch callback (e.g. a malformed policy update tripping a downstream
+// invariant in gate.SetPolicy) would otherwise propagate up the file-
+// watcher goroutine and silently kill the watcher — every subsequent
+// policy update would then be dropped on the floor with no operator
+// signal. This wrapper logs the panic with a full stack trace and returns
+// normally so the caller's callback loop keeps running.
 func safeCallback(cb func(*Policy), pol *Policy) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -28,29 +27,26 @@ func safeCallback(cb func(*Policy), pol *Policy) {
 	cb(pol)
 }
 
-// LocalTenantID is the single tenant identifier used by AgentGuard v0.5.
-// Multi-tenant routing arrives in v0.6 (issue tracked in
-// .audit/v05_decisions.md, "PolicyProvider interface design"); until then
-// the proxy passes "local" on every Engine.Check call and FilePolicyProvider
-// rejects every other tenant value with ErrTenantNotFound.
+// LocalTenantID is the single tenant identifier the bundled
+// FilePolicyProvider recognises. The proxy passes "local" on every
+// Engine.Check call; FilePolicyProvider rejects every other tenant
+// value with ErrTenantNotFound.
 //
-// An empty tenantID is treated as a synonym for "local" so that
-// engine-internal call paths and Engine.Check callers built before the
-// signature change still resolve to the only configured policy.
+// An empty tenantID is treated as a synonym for "local" so engine-internal
+// call paths resolve to the only configured policy.
 const LocalTenantID = "local"
 
 // ErrTenantNotFound is returned by PolicyProvider.Get when the tenant has
 // no associated policy. The proxy surfaces this as a synthetic DENY with
 // Rule="deny:tenant:not_found" so the existing handleCheck flow does not
-// need bespoke 404 handling. v0.6+ multi-tenant providers (database, etcd)
-// will also map a missing tenant to ErrTenantNotFound.
+// need bespoke 404 handling. Multi-tenant providers (database, etcd) map
+// a missing tenant to the same error.
 var ErrTenantNotFound = errors.New("policy: tenant not found")
 
 // PolicyProvider abstracts policy retrieval. Engine reads policies through
-// this interface instead of loading from disk directly. Future v0.6
-// implementations (database, etcd, S3) implement the same interface
-// without engine changes. Closes audit finding R2 P1 (partial; full
-// closure ships with the database-backed provider in v0.6).
+// this interface instead of loading from disk directly. Alternative
+// implementations (database, etcd, S3) can satisfy the same interface
+// without engine changes.
 type PolicyProvider interface {
 	// Get returns the current policy for tenantID. The returned *Policy is
 	// a snapshot — callers must not mutate it (the engine treats it as
@@ -66,9 +62,9 @@ type PolicyProvider interface {
 	Watch(tenantID string, callback func(*Policy)) (stop func(), err error)
 
 	// Validate parses+validates a policy without committing it. Used by
-	// `agentguard validate` and (in v0.6+) a /v1/validate endpoint. The
-	// error message is intended for display to operators; it includes the
-	// YAML path of any failing field.
+	// `agentguard validate` and admin endpoints. The error message is
+	// intended for display to operators; it includes the YAML path of
+	// any failing field.
 	Validate(policyBytes []byte) error
 
 	// Close releases provider resources (file watchers, DB connections).
@@ -114,7 +110,7 @@ func validatePolicyBytes(data []byte) error {
 
 // FilePolicyProvider serves a single policy loaded from a YAML file. The
 // only valid tenantID is "local" (or the empty string, treated as a
-// synonym). Multi-file/multi-tenant arrives in v0.6.
+// synonym).
 //
 // Hot-reload is delegated to FileWatcher (pkg/policy/watcher.go), which
 // prefers fsnotify and falls back to ModTime polling. On a successful
@@ -158,7 +154,7 @@ func NewFilePolicyProvider(path string) (*FilePolicyProvider, error) {
 }
 
 // Get returns the current policy for tenantID. Only "" and "local" are
-// valid in v0.5; every other tenantID returns ErrTenantNotFound.
+// valid; every other tenantID returns ErrTenantNotFound.
 func (p *FilePolicyProvider) Get(tenantID string) (*Policy, error) {
 	if tenantID != "" && tenantID != LocalTenantID {
 		return nil, ErrTenantNotFound
@@ -202,11 +198,9 @@ func (p *FilePolicyProvider) Watch(tenantID string, cb func(*Policy)) (func(), e
 	return stop, nil
 }
 
-// Validate parses+validates raw YAML bytes without committing them. Used
-// by `agentguard validate` (after this refactor lands; v0.5 main.go still
-// calls LoadFromFile directly because it needs the parsed Policy back to
-// print rule counts). v0.6+ admin endpoints call this before writing a
-// new policy to disk or DB.
+// Validate parses+validates raw YAML bytes without committing them.
+// `agentguard validate` and any admin endpoints that pre-validate a policy
+// before writing it to disk/DB go through here.
 func (p *FilePolicyProvider) Validate(policyBytes []byte) error {
 	return validatePolicyBytes(policyBytes)
 }
@@ -253,7 +247,7 @@ func (p *FilePolicyProvider) onPolicyChange(newPol *Policy) {
 // Validate parses raw YAML and runs the standard checks but does NOT
 // rebind the static policy — Validate is a pure function.
 //
-// StaticPolicyProvider also serves as the v0.6 escape hatch for users who
+// StaticPolicyProvider also serves as the escape hatch for users who
 // embed AgentGuard as a library and prefer to manage policy lifecycle
 // themselves; UpdatePolicy lets them swap the served policy at runtime.
 type StaticPolicyProvider struct {

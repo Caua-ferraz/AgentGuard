@@ -210,7 +210,7 @@ class TestRealLangChainAttributeIntrospection:
     def test_bypass_attribute_blocked(self, integration_mock):
         """The wrapper does not expose an unguarded ``func`` callable.
 
-        v0.5.0 raised AttributeError with a "bypass" message; v0.5.1
+        v0.5.0 raised AttributeError with a "bypass" message; v0.5.0
         switches to subclassing BaseTool, so the AttributeError now comes
         from pydantic's normal "no such field" path rather than a custom
         ``__getattr__`` allowlist. The contract that matters for security
