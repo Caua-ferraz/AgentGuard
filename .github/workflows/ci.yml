@@ -96,7 +96,12 @@ jobs:
 
       - name: Install Python dependencies
         working-directory: plugins/python
-        run: pip install -e ".[dev]"
+        # Adapter unit tests (test_adapters.py, test_crewai.py, etc.) import
+        # the real langchain_core / crewai / mcp packages — the adapter
+        # modules raise ImportError at collection time when they're missing.
+        # browser-use is intentionally excluded: it pulls Playwright + ~200MB
+        # of Chromium and is exercised by the integration-tests matrix.
+        run: pip install -e ".[dev,langchain,crewai,mcp]"
 
       - name: Run Python tests
         working-directory: plugins/python
