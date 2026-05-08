@@ -16,7 +16,7 @@ one proxy, two providers.
 
 ## Prerequisites
 
-- Python 3.9+
+- Python 3.10+
 - `pip install "anthropic>=0.40"`
 - A valid `ANTHROPIC_API_KEY` (forwarded verbatim by the proxy as
   `x-api-key` to api.anthropic.com)

@@ -8,7 +8,7 @@ Get AgentGuard running on your machine in under 5 minutes.
 |------|---------|-------|
 | Go | 1.22+ | `go version` |
 | Git | any | `git --version` |
-| Python (optional) | 3.9+ | `python --version` |
+| Python (optional) | 3.10+ | `python --version` |
 | Node.js (optional) | 18+ | `node --version` |
 | Docker (optional) | any | `docker --version` |
 

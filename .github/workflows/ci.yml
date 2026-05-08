@@ -70,10 +70,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # 3.9 is the floor (pyproject.toml requires-python = ">=3.9"); 3.10 and
-        # 3.11 cover the LTS-ish middle versions; 3.12 is current. v0.5 R1 E1
-        # closed.
-        python-version: ['3.9', '3.10', '3.11', '3.12']
+        # 3.10 is the floor (pyproject.toml requires-python = ">=3.10"); 3.11
+        # is the LTS middle; 3.12 is current. 3.9 was dropped after upstream
+        # EOL (October 2025) and because the `mcp` extra requires >=3.10
+        # anyway — keeping 3.9 in the matrix only invited broken installs.
+        python-version: ['3.10', '3.11', '3.12']
     steps:
       - uses: actions/checkout@v4
 
@@ -96,10 +97,13 @@ jobs:
 
       - name: Install Python dependencies
         working-directory: plugins/python
-        # Adapter unit tests (test_adapters.py, test_crewai.py, etc.) import
-        # the real langchain_core / crewai / mcp packages — the adapter
-        # modules raise ImportError at collection time when they're missing.
-        # browser-use is intentionally excluded: it pulls Playwright + ~200MB
+        # Adapter unit tests (test_adapters.py, test_crewai.py, test_mcp*.py,
+        # etc.) import the real langchain_core, crewai, and mcp packages —
+        # the adapter modules raise ImportError at collection time when
+        # they're missing. Installing the extras here keeps the suite from
+        # silently skipping or hard-failing on import.
+        #
+        # `browser-use` is intentionally excluded: pulls Playwright + ~200MB
         # of Chromium and is exercised by the integration-tests matrix.
         run: pip install -e ".[dev,langchain,crewai,mcp]"
 

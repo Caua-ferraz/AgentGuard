@@ -11,7 +11,7 @@ stream against your AgentGuard policy before it reaches your code.
 
 ## Prerequisites
 
-- Python 3.9+
+- Python 3.10+
 - `pip install "openai>=1.0"`
 - A valid `OPENAI_API_KEY` (the proxy forwards it verbatim — it does
   not read the bearer token)

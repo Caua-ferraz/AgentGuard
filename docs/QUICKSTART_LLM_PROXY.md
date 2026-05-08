@@ -10,7 +10,7 @@ shows up live on a dashboard you can approve / deny from.
 
 ## Prerequisites
 
-- **Python 3.9+** with the OpenAI SDK: `pip install "openai>=1.0"`
+- **Python 3.10+** with the OpenAI SDK: `pip install "openai>=1.0"`
 - A valid `OPENAI_API_KEY` (the proxy forwards it verbatim to
   `api.openai.com`)
 - **Go 1.22+** for `go install`: <https://go.dev/dl/>

@@ -14,7 +14,7 @@ client.
 
 ## Prerequisites
 
-- Python 3.9+
+- Python 3.10+
 - `pip install "crewai>=0.80,<2.0"` (matches the pin in
   [`plugins/python/pyproject.toml`](../plugins/python/pyproject.toml))
 - A valid `OPENAI_API_KEY` (forwarded to OpenAI by LiteLLM via the

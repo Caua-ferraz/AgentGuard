@@ -17,7 +17,7 @@ var).
 
 ## Prerequisites
 
-- Python 3.9+
+- Python 3.10+
 - `pip install "langchain>=0.3,<2.0" "langchain-openai>=0.2"`
 - A valid `OPENAI_API_KEY` (the proxy forwards it verbatim)
 - Two `agentguard` binaries on `PATH`:

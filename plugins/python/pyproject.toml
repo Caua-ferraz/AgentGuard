@@ -8,14 +8,14 @@ version = "0.5.1"
 description = "Python SDK for AgentGuard — the firewall for AI agents"
 readme = "README.md"
 license = "Apache-2.0"
-# requires-python: 3.9 floor.
+# requires-python: 3.10 floor.
 #
-# v0.5 drops 3.8 (R1 E1). 3.8 reached upstream end-of-life in October 2024 and
-# the pinned framework extras (langchain >=0.3, crewai >=0.80, mcp >=0.9) all
-# require 3.9+ themselves; keeping 3.8 in the trove only invited a broken
-# `pip install agentguardproxy[langchain]` resolution. The CI matrix exercises
-# 3.9, 3.10, 3.11, 3.12 on every push.
-requires-python = ">=3.9"
+# 3.8 was dropped in v0.5.0 (upstream EOL October 2024). 3.9 was dropped
+# after upstream EOL (October 2025) — the `mcp` PyPI extra requires >=3.10
+# anyway, so keeping 3.9 in the trove invited a broken
+# `pip install agentguardproxy[mcp]` resolution. The CI matrix exercises
+# 3.10, 3.11, 3.12 on every push.
+requires-python = ">=3.10"
 authors = [
     { name = "Cauã Ferraz", email = "cauaferrazp@gmail.com" },
 ]
@@ -23,7 +23,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
