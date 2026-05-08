@@ -12,7 +12,6 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/Caua-ferraz/AgentGuard" alt="License" /></a>
   <a href="https://github.com/Caua-ferraz/AgentGuard/releases"><img src="https://img.shields.io/github/v/release/Caua-ferraz/AgentGuard?include_prereleases&sort=semver" alt="Latest release" /></a>
   <a href="https://pkg.go.dev/github.com/Caua-ferraz/AgentGuard"><img src="https://pkg.go.dev/badge/github.com/Caua-ferraz/AgentGuard.svg" alt="Go reference" /></a>
-  <a href="https://securityscorecards.dev/viewer/?uri=github.com/Caua-ferraz/AgentGuard"><img src="https://img.shields.io/ossf-scorecard/github.com/Caua-ferraz/AgentGuard?label=OpenSSF%20Scorecard" alt="OpenSSF Scorecard" /></a>
   <a href="https://pypi.org/project/agentguardproxy/"><img src="https://img.shields.io/pypi/v/agentguardproxy?label=PyPI%20%28agentguardproxy%29" alt="PyPI version" /></a>
 </p>
 
