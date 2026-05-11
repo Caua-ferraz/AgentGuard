@@ -10,7 +10,7 @@ The embedded web UI at `/dashboard`. Zero-dep HTML/JS bundled in the binary — 
 
 - **Triaging approvals** in real time as agents request them.
 - **Spot-checking audit decisions** without grepping `audit.jsonl`.
-- **Confirming the proxy is alive** when you can't reach `/health` directly.
+- **Confirming AgentGuard is alive** when you can't reach `/health` directly.
 
 For structured dashboards (Grafana, Datadog, etc.), use `/metrics` — see [`OBSERVABILITY.md`](OBSERVABILITY.md). The built-in dashboard is for humans, not SLOs.
 

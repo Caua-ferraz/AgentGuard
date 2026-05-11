@@ -134,4 +134,40 @@ Same as v0.4.0 → v0.4.1: `agentguard migrate --reset-checkpoint --audit-log <p
 
 ---
 
+## v0.5.0 → v0.5.1
+
+### What happens automatically
+
+- **Nothing on the server side.** No file rewrite, no policy schema change, no audit format change.
+- The central server, MCP Gateway, and LLM API Proxy all bump to v0.5.1; existing v0.5.0 audit logs replay cleanly, existing v0.5.0 policies load unchanged.
+
+### What you should do
+
+1. **Bump Python ≥ 3.10.** v0.5.1 drops Python 3.9 (upstream EOL October 2025; the `mcp` extra already required >=3.10). `pyproject.toml` is now `requires-python = ">=3.10"`. Users still on 3.9 should pin to `agentguardproxy==0.5.0` or upgrade their interpreter.
+
+   ```bash
+   pip install --upgrade "agentguardproxy==0.5.1"   # 3.10+ only
+   ```
+
+2. **Update the framework adapters.** If you wrote v0.5.0 code that worked around the composition-wrapper isinstance issue (e.g., `Tool.from_function(func=lambda x: gt.invoke(x))` for LangChain, or skipped `Agent(tools=[GuardedCrewTool(...)])`), you can now pass the wrappers in directly. The v0.5.1 adapters subclass `langchain_core.tools.BaseTool` and `crewai.tools.BaseTool` natively. See [`ADAPTERS.md`](ADAPTERS.md).
+
+3. **Optionally silence the new update notice.** Every subcommand of the `agentguard` binary asynchronously checks the GitHub Releases API at startup and prints a single stderr line if a newer release is published. Set `AGENTGUARD_NO_UPDATE_CHECK=1` in scripted environments where stderr noise is unwanted. See [`CLI.md`](CLI.md#update-notice-on-startup-v051).
+
+### New surfaces
+
+- **`AGENTGUARD_NO_UPDATE_CHECK`** environment variable — disables the v0.5.1 startup update-notice on all three binaries.
+- **`make test-all` / `scripts/test-all.sh`** — single entry point for Go + policy YAML + Python SDK + TypeScript SDK suites with PASS / FAIL / SKIP summary. See [`CONTRIBUTING.md`](CONTRIBUTING.md#running-the-full-test-suite).
+
+### Rollback to v0.5.0
+
+Trivial. v0.5.1 introduces no on-disk state, no schema bumps, and no wire-protocol changes:
+
+1. Reinstall v0.5.0 binaries (`go install …@v0.5.0`).
+2. Reinstall the Python SDK at the v0.5.0 release: `pip install --upgrade "agentguardproxy==0.5.0"`.
+3. Start. No data migration required either way.
+
+The only behavioural difference an operator might notice: v0.5.0 Python SDK on CrewAI 1.x + pydantic 2.12 / langgraph 1.0 + langchain_core 1.x fails the framework's `isinstance(thing, BaseTool)` check — that's the bug v0.5.1 fixes. If you downgrade and run a recent framework, pin to the older `crewai<1.0` / `langchain<1.0` line.
+
+---
+
 _Migration guides for prior releases live in the git history of this file._

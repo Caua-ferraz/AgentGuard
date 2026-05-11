@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a defect in the AgentGuard proxy, SDKs, or adapters.
+description: Report a defect in AgentGuard (server, MCP Gateway, LLM API Proxy, SDKs, or adapters).
 title: "[bug] "
 labels: ["bug", "triage"]
 body:

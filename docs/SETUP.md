@@ -8,9 +8,21 @@ Get AgentGuard running on your machine in under 5 minutes.
 |------|---------|-------|
 | Go | 1.22+ | `go version` |
 | Git | any | `git --version` |
-| Python (optional) | 3.10+ | `python --version` |
-| Node.js (optional) | 18+ | `node --version` |
+| Python (optional, for the SDK) | 3.10+ | `python --version` |
+| Node.js (optional, for the TS SDK) | 18+ | `node --version` |
 | Docker (optional) | any | `docker --version` |
+
+## What you're setting up
+
+AgentGuard is the **wire-level checkpoint** that sits between your agent and everything it touches. It runs as one or more of three enforcement layers, plus the AgentGuard server that owns policy + audit + approvals.
+
+| Layer | Binary | Use for | Code change |
+|---|---|---|---|
+| MCP traffic | `agentguard-mcp-gateway` | Claude Desktop, Cursor, Cline, Continue, Zed | None |
+| LLM API calls | `agentguard-llm-proxy` | OpenAI / Anthropic SDK code | One env var |
+| Direct calls | Python / TypeScript SDK + adapters | Custom code, framework integrations | Per-call `guard.check(...)` |
+
+Layer-specific quickstarts: [`QUICKSTART_MCP.md`](QUICKSTART_MCP.md) · [`QUICKSTART_LLM_PROXY.md`](QUICKSTART_LLM_PROXY.md). The rest of this guide covers building the binaries, running the server, and using the SDK.
 
 ## Quick Start
 
@@ -19,19 +31,30 @@ Get AgentGuard running on your machine in under 5 minutes.
 ```bash
 git clone https://github.com/Caua-ferraz/AgentGuard.git
 cd AgentGuard
+
+# Central server (always needed)
 go build -o agentguard ./cmd/agentguard
+
+# MCP Gateway (only if you're integrating MCP clients)
+go build -o agentguard-mcp-gateway ./cmd/agentguard-mcp-gateway
+
+# LLM API Proxy (only if you're proxying OpenAI / Anthropic SDK traffic)
+go build -o agentguard-llm-proxy ./cmd/agentguard-llm-proxy
 ```
 
-On Windows:
-```powershell
-go build -o agentguard.exe ./cmd/agentguard
+On Windows append `.exe` to each `-o` target. Or install everything from a remote tag:
+
+```bash
+go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@latest
+go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-mcp-gateway@latest
+go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@latest
 ```
 
 ### 2. Validate the Default Policy
 
 ```bash
 ./agentguard validate --policy configs/default.yaml
-# Output: VALID: default-sandbox — 18 rules across 4 scopes
+# Output: VALID: default-sandbox — 54 rules across 5 scopes  (numbers vary as the default ships more rules)
 ```
 
 ### 3. Start the Server
@@ -51,7 +74,7 @@ go build -o agentguard.exe ./cmd/agentguard
 
 ```bash
 curl http://localhost:8080/health
-# {"status":"ok","version":"0.5.0"}
+# {"status":"ok","version":"0.5.1"}
 ```
 
 Open `http://localhost:8080/dashboard` in your browser to see the live dashboard.
@@ -392,6 +415,15 @@ agentguard version
 | `--base-url` | `http://localhost:<port>` | External URL used to build `approval_url` values (e.g. when behind a reverse proxy). |
 | `--allowed-origin` | unset | Exact CORS origin to allow. Empty = permissive-localhost. |
 
+Full flag list (audit rotation, buffered async logger, pprof, session-cost TTL): `agentguard serve -h`. Reference page: [`CLI.md`](CLI.md).
+
+### Wire-level enforcement points
+
+Two additional binaries enforce at the wire. Both need `--guard-url` pointing at `agentguard serve`, and both read `AGENTGUARD_API_KEY` for authenticated server calls.
+
+- **`agentguard-mcp-gateway`** — sits between an MCP client and one or more MCP servers. Quickstart with copy-paste configs: [`QUICKSTART_MCP.md`](QUICKSTART_MCP.md). Reference: [`MCP_GATEWAY.md`](MCP_GATEWAY.md).
+- **`agentguard-llm-proxy`** — sits between OpenAI / Anthropic SDK code and the providers. Quickstart: [`QUICKSTART_LLM_PROXY.md`](QUICKSTART_LLM_PROXY.md). Reference: [`LLM_API_PROXY.md`](LLM_API_PROXY.md).
+
 ---
 
 ## Using Docker
@@ -507,18 +539,32 @@ rules:
 
 ## Running Tests
 
-```bash
-# Go tests with race detection
-go test -v -race ./...
+The fastest path is `make test-all`, which runs all four suites (Go, policy YAML validation, Python SDK, TypeScript SDK) in sequence and prints a PASS / FAIL / SKIP summary. Missing toolchains (no `python`, no `npm`) report SKIP cleanly so Go-only contributors aren't penalised. See [`CONTRIBUTING.md`](CONTRIBUTING.md#running-the-full-test-suite).
 
-# Go coverage
+```bash
+make test-all                   # everything
+# or, narrow:
+./scripts/test-all.sh --skip-ts
+./scripts/test-all.sh --no-race      # drop the Go race detector for speed
+```
+
+Per-suite manual invocations:
+
+```bash
+# Go tests with race detection + coverage
 go test -v -race -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 
-# Python SDK tests
+# Policy YAML validation (every example)
+make validate
+
+# Python SDK tests (adapter unit tests need framework extras)
 cd plugins/python
-pip install -e ".[dev]"
+pip install -e ".[dev,langchain,crewai,mcp]"
 pytest -v --cov=agentguard
+
+# TypeScript SDK tests
+cd plugins/typescript && npm install && npm run build && npm test
 ```
 
 ---
@@ -527,44 +573,44 @@ pytest -v --cov=agentguard
 
 ```
 agentguard/
-├── cmd/agentguard/          # CLI entry point
-│   └── main.go
+├── cmd/
+│   ├── agentguard/                  # Central server CLI (serve / validate / check / migrate / …)
+│   │   ├── main.go
+│   │   ├── check_cmd.go
+│   │   └── update_check.go
+│   ├── agentguard-mcp-gateway/      # v0.5 MCP Gateway binary
+│   │   └── main.go
+│   └── agentguard-llm-proxy/        # v0.5 LLM API Proxy binary
+│       └── main.go
 ├── pkg/
-│   ├── policy/              # Policy engine (YAML parsing, rule evaluation)
-│   │   ├── engine.go
-│   │   ├── engine_test.go
-│   │   ├── engine_agent_test.go
-│   │   └── watcher.go
-│   ├── proxy/               # HTTP proxy server + dashboard
-│   │   └── server.go
-│   ├── audit/               # Audit logging (JSON lines)
-│   │   ├── logger.go
-│   │   └── logger_test.go
-│   ├── notify/              # Webhook/Slack/console notifications
-│   │   └── notify.go
-│   └── ratelimit/           # Token-bucket rate limiter
-│       ├── ratelimit.go
-│       └── ratelimit_test.go
+│   ├── policy/                      # Policy engine (YAML parsing, rule evaluation, providers)
+│   ├── proxy/                       # Central HTTP server + dashboard + approval queue
+│   ├── audit/                       # Audit logging (JSON lines + rotation + buffered async)
+│   ├── notify/                      # Webhook / Slack / console notifications
+│   ├── ratelimit/                   # Token-bucket rate limiter
+│   ├── mcpgw/                       # MCP Gateway core (upstream multiplexing, namespacing)
+│   ├── llmproxy/                    # LLM API Proxy core (OpenAI / Anthropic stream gating)
+│   └── migrate/                     # On-disk schema migrations (audit / checkpoint format)
 ├── plugins/
-│   ├── python/              # Python SDK + adapters
+│   ├── python/                      # Python SDK + framework adapters
 │   │   ├── agentguard/
-│   │   │   ├── __init__.py
+│   │   │   ├── __init__.py          # Guard, @guarded, exception hierarchy
 │   │   │   └── adapters/
-│   │   │       ├── langchain.py
-│   │   │       ├── crewai.py
-│   │   │       ├── browseruse.py
-│   │   │       └── mcp.py
+│   │   │       ├── langchain.py     # GuardedTool, GuardedToolkit (subclasses BaseTool)
+│   │   │       ├── crewai.py        # GuardedCrewTool (subclasses crewai BaseTool)
+│   │   │       ├── browseruse.py    # GuardedBrowser / Page / Frame
+│   │   │       └── mcp.py           # GuardedMCPServer + Python MCP gateway
 │   │   ├── pyproject.toml
 │   │   └── README.md
-│   └── typescript/          # TypeScript SDK
+│   └── typescript/                  # TypeScript SDK
 │       ├── src/index.ts
-│       ├── package.json
-│       └── tsconfig.json
-├── configs/                 # Policy files
+│       └── package.json
+├── configs/                         # Policy files
 │   ├── default.yaml
 │   └── examples/
-├── docs/                    # Documentation
-├── Dockerfile
-├── Makefile
+├── examples/                        # MCP-client + SDK config snippets ready to copy
+├── docs/                            # Documentation
+├── Dockerfile                       # Multi-binary image
+├── Makefile                         # build / test / test-all / docker / …
 └── README.md
 ```

@@ -4,17 +4,38 @@ Questions that come up often in issues and conversations. For symptom-keyed debu
 
 ---
 
-### Is AgentGuard a sandbox?
+### What is AgentGuard, exactly?
 
-No. It is a **policy-enforcement proxy**. Agents call `/v1/check` before sensitive actions; AgentGuard decides `ALLOW` / `DENY` / `REQUIRE_APPROVAL`. It does not intercept syscalls, containerize processes, or prevent an agent that bypasses the SDK from acting. For strong isolation, pair AgentGuard with OS-level sandboxing (seccomp, AppArmor, containers, gVisor).
+**A wire-level checkpoint** that sits between an AI agent and everything it touches — shell, files, network, browser, MCP servers, the model itself. Every action is evaluated against a YAML policy and resolved as `ALLOW` / `DENY` / `REQUIRE_APPROVAL`, with a tamper-evident audit log and a human-in-the-loop approval queue behind it.
+
+The checkpoint runs at three layers, all sharing one policy + audit + approval queue:
+
+- **MCP traffic** → `agentguard-mcp-gateway` (Claude Desktop, Cursor, Cline, Continue, Zed)
+- **LLM API calls** → `agentguard-llm-proxy` (OpenAI / Anthropic SDK code, via `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL`)
+- **Direct calls** → Python / TypeScript SDK + framework adapters (LangChain, CrewAI, browser-use)
+
+### Is it a sandbox?
+
+No. AgentGuard does not intercept syscalls or containerize processes. A determined agent that controls its own runtime can bypass the checkpoint by talking to a different MCP server or ignoring `OPENAI_BASE_URL`. For strong isolation, pair AgentGuard with OS-level sandboxing (containers, seccomp, AppArmor) and network-egress controls.
 
 ### Do I need to modify my agent code?
 
-Yes — the integration is **opt-in**. Either:
-- Call `guard.check(...)` from the Python or TypeScript SDK before each sensitive action, or
-- Wrap your framework's tools with the adapters in [`ADAPTERS.md`](ADAPTERS.md) (LangChain, CrewAI, browser-use, MCP).
+Depends on the layer:
 
-There is no transparent-proxy mode — an agent that bypasses the SDK bypasses AgentGuard entirely.
+- **MCP Gateway** and **LLM API Proxy** — no agent code change. Point the client config or set an env var.
+- **SDK** — explicit `guard.check(...)` per call (or `@guarded`), or wrap framework tools with the adapters. This is the opt-in layer; use it for offline scripts, custom transports, or as an advisory gate where you control every call site.
+
+### Which layer should I use?
+
+| Use case | Best fit |
+|---|---|
+| Claude Desktop / Cursor / Cline / Continue / Zed | MCP Gateway |
+| Code already using the OpenAI / Anthropic SDKs | LLM API Proxy |
+| Custom agent code where you control every tool call | SDK |
+| Framework-based agent (LangChain, CrewAI, browser-use) | SDK adapters + optionally the LLM API Proxy |
+| Offline scripts / no network listener in the path | SDK |
+
+Layers compose — running the gateway *and* the LLM proxy *and* the SDK against the same policy is the typical production shape.
 
 ### Why is `/v1/check` unauthenticated?
 
@@ -53,7 +74,7 @@ See [`POLICY_REFERENCE.md`](POLICY_REFERENCE.md#wildcards) for the full pattern 
 
 ### Can I use `time_window` without `require_prior`?
 
-You can, but it's a **no-op**. `time_window` only means something as a modifier on a `require_prior` condition (i.e., "only match if the prior action happened within this window"). v0.4.1 emits a `WARNING` log line at policy load; v0.5.0 will make it a hard error. See [`DEPRECATIONS.md`](DEPRECATIONS.md).
+No — as of v0.5.0 this is a **hard policy-load error**. `time_window` only means something as a modifier on a `require_prior` condition (i.e., "only match if the prior action happened within this window"). v0.4.1 emitted a `WARNING` log line; v0.5.0 promoted it to a load failure. Either remove the orphan `time_window` or add a `require_prior` clause. See [`DEPRECATIONS.md`](DEPRECATIONS.md).
 
 ### Python fail-closed vs TypeScript failMode — which should I use?
 
@@ -66,11 +87,11 @@ Use fail-open only when AgentGuard is advisory (e.g., you have another enforceme
 
 ### Is the SQLite audit backend ready?
 
-It's implemented (`pkg/audit/sqlite_logger.go`) but **not wired in v0.4.1**. Activation requires adding `modernc.org/sqlite` as an import side-effect and constructing `audit.NewSQLiteLogger(path)` in `cmd/agentguard/main.go`. It's on the roadmap, not in production.
+It's implemented (`pkg/audit/sqlite_logger.go`) but still **not wired by default** in v0.5.x. Activation requires adding `modernc.org/sqlite` as an import side-effect and constructing `audit.NewSQLiteLogger(path)` in `cmd/agentguard/main.go`. The default JSON-Lines file logger (with rotation on by default since v0.5.0) covers every observed deployment so far; the SQLite path is kept around for the multi-tenant v0.6 work where range-query semantics matter more.
 
 ### Where's the admin API for managing approvers / RBAC?
 
-There isn't one. v0.4.1 has **one API key** — anyone with it has full access. Multi-user and RBAC are planned. For now, treat the API key like a root password.
+There isn't one. v0.5.x has **one API key** — anyone with it has full access to approve/deny/audit/status and the dashboard. Multi-user, multi-tenant, and RBAC are on the v0.6 roadmap (the v0.5 architecture moved the URL plumbing — `/v1/t/{tenant}/...` — into place; the data-structure sharding is what's left). For now, treat the API key like a root password.
 
 ### Can I edit policies from the dashboard?
 
@@ -100,7 +121,7 @@ Typical policy evaluation is sub-millisecond. End-to-end `/v1/check` runs in sin
 
 ### Can I use it as a library, not a proxy?
 
-The Go policy engine (`pkg/policy`) and audit logger (`pkg/audit`) are importable. The proxy is a thin wrapper around them. But the SDK/adapter story assumes an HTTP proxy — in-process embedding is uncommon and unsupported.
+The Go policy engine (`pkg/policy`), audit logger (`pkg/audit`), MCP gateway core (`pkg/mcpgw`), and LLM proxy core (`pkg/llmproxy`) are all importable Go packages. The three binaries (`agentguard`, `agentguard-mcp-gateway`, `agentguard-llm-proxy`) are thin wrappers around them, and the SDK + framework adapters assume an HTTP server endpoint — in-process embedding of the SDK story is uncommon and unsupported. If you want to embed the policy engine directly without an HTTP hop, lift `policy.Engine.Check` from `pkg/policy/engine.go`.
 
 ### Why YAML and not JSON / HCL / Rego?
 

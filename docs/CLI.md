@@ -1,12 +1,14 @@
 # CLI Reference
 
-Every AgentGuard subcommand, every flag, every env-var fallback. Source of truth: `cmd/agentguard/main.go`.
+Every `agentguard` (central server) subcommand, every flag, every env-var fallback. Source of truth: `cmd/agentguard/main.go`.
+
+> **Scope:** this page documents the `agentguard` binary — the central server that owns the policy engine, audit log, approval queue, and dashboard. For the v0.5 wire-level proxy binaries see [`MCP_GATEWAY.md`](MCP_GATEWAY.md) (`agentguard-mcp-gateway`) and [`LLM_API_PROXY.md`](LLM_API_PROXY.md) (`agentguard-llm-proxy`).
 
 ```
 agentguard <command> [flags]
 
 Commands:
-  serve       Start the AgentGuard proxy server
+  serve       Start the AgentGuard central server
   validate    Validate a policy file
   check       Run a one-shot policy check against a local policy file
   approve     Approve a pending action by ID
@@ -28,7 +30,7 @@ Global conventions:
 
 ## `agentguard serve`
 
-Start the proxy server. This is the only subcommand that runs a server process.
+Start the AgentGuard server. This is the only subcommand that runs a long-lived process.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -310,10 +312,20 @@ Startup migrations run automatically inside `agentguard serve` before the audit 
 
 ```bash
 agentguard version
-# agentguard 0.4.1 (abc1234)
+# agentguard 0.5.1 (abc1234)
 ```
 
 The `version` string is baked in at build time via `-ldflags "-X main.version=... -X main.commit=..."` (see `Makefile`).
+
+### Update notice on startup (v0.5.1+)
+
+Every subcommand kicks off an async best-effort check against the GitHub Releases API at startup (800 ms budget). If a newer release exists, one line lands on stderr before subcommand output; otherwise silent.
+
+```
+Notice: agentguard v0.5.1 is deprecated, version v0.5.2 available — https://github.com/Caua-ferraz/AgentGuard/releases/latest
+```
+
+Skipped when the binary was built with `commit=dev`, when `AGENTGUARD_NO_UPDATE_CHECK` is set, or when the HTTP request fails. Never touches stdout, never affects exit codes.
 
 ---
 
@@ -323,6 +335,7 @@ The `version` string is baked in at build time via `-ldflags "-X main.version=..
 |---|---|---|
 | `AGENTGUARD_API_KEY` | `approve`, `deny`, `status`, `audit` (when `--api-key` unset) | empty |
 | `AGENTGUARD_URL` | SDKs (not the CLI) | `http://localhost:8080` |
+| `AGENTGUARD_NO_UPDATE_CHECK` | All subcommands — disables the GitHub Releases startup check when set | unset |
 
 The CLI does **not** read `AGENTGUARD_URL` — pass `--url` explicitly. Only the Python/TypeScript SDKs honor that env var.
 
@@ -334,3 +347,5 @@ The CLI does **not** read `AGENTGUARD_URL` — pass `--url` explicitly. Only the
 - [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) — reverse proxy, TLS, CORS, bind behavior.
 - [`docs/API.md`](API.md) — HTTP surface the CLI calls.
 - [`docs/POLICY_REFERENCE.md`](POLICY_REFERENCE.md) — what `validate` checks.
+- [`docs/MCP_GATEWAY.md`](MCP_GATEWAY.md) — flags and configuration for the `agentguard-mcp-gateway` binary.
+- [`docs/LLM_API_PROXY.md`](LLM_API_PROXY.md) — flags and configuration for the `agentguard-llm-proxy` binary.

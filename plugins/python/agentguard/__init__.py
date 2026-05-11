@@ -178,7 +178,14 @@ AgentGuardTimeoutError = AgentGuardApprovalTimeout
 
 
 class Guard:
-    """Client for the AgentGuard proxy."""
+    """Client for the AgentGuard server — the SDK enforcement layer.
+
+    Call ``guard.check(scope, ...)`` before every gated action, or use the
+    ``@guarded`` decorator / framework adapters in ``agentguard.adapters``
+    for higher-level integration. For wire-level enforcement that needs no
+    agent code change, see the ``agentguard-mcp-gateway`` and
+    ``agentguard-llm-proxy`` binaries.
+    """
 
     def __init__(
         self,

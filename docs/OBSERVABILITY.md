@@ -71,6 +71,34 @@ Bucket boundaries are treated as a stable contract. Re-bucketing invalidates his
 
 ---
 
+## MCP Gateway / LLM API Proxy metrics (v0.5+)
+
+Each enforcement-point binary exposes its own `/metrics` on its listen port. The series below are emitted only by those binaries.
+
+**LLM API Proxy:**
+
+| Name | Labels | Meaning |
+|---|---|---|
+| `agentguard_llmproxy_streams_active` | `provider` | Gauge: open streaming responses. |
+| `agentguard_llmproxy_streams_rejected_total` | `provider`, `reason` | Concurrent-stream cap hit, etc. |
+| `agentguard_llmproxy_buffer_overflow_total` | `provider` | Per-stream tool-call buffer hit its ceiling. |
+| `agentguard_llmproxy_non_streaming_overflow_total` | `provider` | Same, for non-streaming responses. |
+| `agentguard_llmproxy_stream_duration_seconds` | `provider` | Histogram; use p99 to size graceful-shutdown windows. |
+| `agentguard_llmproxy_tool_calls_total` | `provider`, `decision` | Tool calls parsed from provider responses. |
+
+**MCP Gateway:**
+
+| Name | Labels | Meaning |
+|---|---|---|
+| `agentguard_mcpgw_upstream_reconnects_total` | `upstream` | Subprocess re-dials. |
+| `agentguard_mcpgw_upstream_calls_total` | `upstream`, `decision` | `tools/call` requests handled. |
+| `agentguard_mcpgw_approval_meta_roundtrips_total` | `outcome` | Approval round-trips via MCP `_meta`. |
+| `agentguard_mcpgw_call_duration_seconds` | `upstream` | Per-call end-to-end latency. |
+
+**Approval-id replay defense (server + LLM proxy):** `agentguard_approval_replay_mismatch_total` — non-zero is a security alert.
+
+---
+
 ## Prometheus scrape config
 
 ```yaml

@@ -4,21 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-> Tracks work in flight on `master` post-v0.5.0. Items here are *not* in any tagged release yet.
+> Tracks work in flight on `master` post-v0.5.1. Items here are *not* in any tagged release yet.
 
-## [0.5.0] — 2026-05-05
+## [0.5.1] — 2026-05-11
 
-> Python SDK adapter hotfix. CrewAI 1.x + pydantic 2.12 and langgraph 1.0 + langchain_core 1.x both reject the v0.5.0 composition-wrapper adapters at framework boundaries (`isinstance(thing, BaseTool)` / `isinstance(thing, Runnable)` no longer honour `BaseTool.register()` virtual-subclass registrations). v0.5.0 ships hybrid subclass+override adapters that satisfy the framework's isinstance checks natively while preserving the policy-enforcement contract by overriding every dispatch entry point. Python-only release; the Go binaries, MCP Gateway, and LLM API Proxy stay at v0.5.0.
+> Adapter hotfix + maintenance release. CrewAI 1.x + pydantic 2.12 and langgraph 1.0 + langchain_core 1.x both reject the v0.5.0 composition-wrapper adapters at framework boundaries (`isinstance(thing, BaseTool)` / `isinstance(thing, Runnable)` no longer honour `BaseTool.register()` virtual-subclass registrations). v0.5.1 ships hybrid subclass+override adapters that satisfy the framework's isinstance checks natively while preserving the policy-enforcement contract by overriding every dispatch entry point. All binaries (CLI, MCP Gateway, LLM API Proxy) bumped to v0.5.1 alongside the Python SDK. Python 3.9 dropped from the support matrix (upstream EOL October 2025); 3.10+ required.
 
 ### Fixed
 
 - **Python SDK CrewAI adapter** (`agentguard.adapters.crewai.GuardedCrewTool`) — now subclasses `crewai.tools.BaseTool` directly. `Agent(tools=[GuardedCrewTool(...)])` no longer raises `pydantic_core.ValidationError` on CrewAI 1.x. Every gated dispatch path (`_run`, `run`, `invoke`, `ainvoke`, `_arun`, `arun`, `__call__`, `to_structured_tool`) is explicitly overridden so future framework additions surface in the canary integration test rather than silently bypassing the gate.
 - **Python SDK LangChain adapter** (`agentguard.adapters.langchain.GuardedTool`) — now subclasses `langchain_core.tools.BaseTool`. `langgraph.prebuilt.create_react_agent(llm, tools=[GuardedTool(...)])` and `langchain.agents.create_agent(...)` both accept the wrapper directly; the v0.5.0 `Tool.from_function(func=lambda x: gt.invoke(x))` workaround is no longer required. ToolCall-shaped inputs (`{"name", "args", "id", "type": "tool_call"}`) are unwrapped to the underlying args dict before the gate runs.
 - Both adapters now use `pydantic.PrivateAttr` for internal references (`_tool`, `_guard`, `_scope`); these fields are excluded from `model_dump()` output and kept off `model_fields`.
+- **CI `python-test` job** — now installs `[dev,langchain,crewai,mcp]` so adapter unit tests can import the real framework packages. The previous lean `[dev]` install made ~50 tests fail with `ModuleNotFoundError` at collection time. `browser-use` remains excluded to keep the job lean (covered by the dedicated `integration-tests` matrix).
+
+### Added
+
+- **Best-effort update-notice on CLI invocation.** The `agentguard` binary asynchronously queries the GitHub Releases API at startup and prints a single stderr line if a newer version is published (`Notice: agentguard vX is deprecated, version vY available — …`). Bounded to 800 ms; errors and timeouts are silent. Disabled on `commit=dev` builds and via `AGENTGUARD_NO_UPDATE_CHECK=1`.
+- **`scripts/test-all.sh` + `make test-all`.** Single entry point that runs all four suites (Go, policy YAML, Python SDK, TypeScript SDK) with `PASS/FAIL/SKIP` summary. Missing toolchains report `SKIP` (Go-only contributors aren't penalised); the script never stops on first failure so a full picture lands in one go.
 
 ### Changed
 
 - The composition-era `__getattr__` allowlist (`_ALLOWED_PASSTHROUGH`) is removed from both adapters. Defense moves from "no parent attributes are exposed" to "every gated dispatch path is on this class, not inherited" — the canary integration tests (`tests/integration/test_at_real_crewai.py`, `tests/integration/test_at_real_langchain.py`) trip when upstream adds a new dispatch path that bypasses our overrides.
+- **Python support floor raised to 3.10.** `pyproject.toml` is now `requires-python = ">=3.10"`; CI matrix runs `3.10 / 3.11 / 3.12`. 3.9 reached upstream EOL in October 2025 and the `mcp` PyPI extra requires `>=3.10` anyway — keeping 3.9 in the trove invited broken `pip install agentguardproxy[mcp]` resolutions.
+
+### Removed
+
+- **Python 3.9 from `python-test` matrix** and from the `Programming Language :: Python :: 3.9` trove classifier. Users on 3.9 should pin to v0.5.0 or upgrade.
 
 ## [0.5.0] — 2026-05-05
 

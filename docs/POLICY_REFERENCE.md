@@ -1,6 +1,6 @@
 # Policy Reference
 
-Canonical reference for the AgentGuard policy YAML format as of **v0.5.0**.
+Canonical reference for the AgentGuard policy YAML format as of **v0.5.1**.
 
 Source of truth: `pkg/policy/engine.go` (types) and `pkg/policy/engine.go:Engine.Check` (evaluation). Examples here are the shapes the Go YAML decoder accepts — unknown keys are silently ignored.
 
@@ -130,7 +130,7 @@ If you set only `time_window`, the condition is a **no-op** — it is always sat
 WARNING: rule "…" has time_window without require_prior — condition will be ignored
 ```
 
-This is a deliberate v0.4.0-compat quirk. It is **scheduled to become a hard error in v0.5.0** (`docs/DEPRECATIONS.md`). Either remove the orphan `time_window` or add a `require_prior`.
+This was a deliberate v0.4.0 backward-compat quirk that **became a hard policy-load error in v0.5.0** (see [`DEPRECATIONS.md`](DEPRECATIONS.md)). Either remove the orphan `time_window` or add a `require_prior` clause.
 
 ### Footgun: no audit history → condition fails
 
@@ -192,7 +192,7 @@ Applies only when `scope: cost`. The incoming request must carry a numeric `est_
 
 - `sessionCosts` is in-memory only. Restart loses all session totals.
 - `--session-cost-ttl` evicts idle sessions so the map does not grow forever. Default `0` = never.
-- `Engine.RecordCost` / `RefundCost` exist for out-of-band accounting but are **not** wired into the HTTP proxy in v0.4.1.
+- `Engine.RecordCost` / `RefundCost` exist for out-of-band accounting but are still **not** wired into the HTTP request path as of v0.5.1 — call them from custom Go embeddings if you need pre-reserved cost accounting outside of `/v1/check`.
 
 ---
 

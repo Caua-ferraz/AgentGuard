@@ -174,7 +174,7 @@ spec:
     spec:
       containers:
         - name: agentguard
-          image: agentguard:0.4.1
+          image: agentguard:0.5.1
           args:
             - serve
             - --api-key=$(AGENTGUARD_API_KEY)
@@ -244,6 +244,29 @@ location = /v1/check {
 ```
 
 Or require a header set by an authenticating proxy (e.g., Cloudflare Access, oauth2-proxy) and reject at the edge.
+
+---
+
+## 5. Deploying the MCP Gateway and LLM API Proxy (v0.5+)
+
+These are the wire-level enforcement points. Both are stateless — they fan every gated request out to the AgentGuard server above.
+
+**Shape:** one per agent host, bound to `127.0.0.1`, with `--guard-url` pointing at the server.
+
+```bash
+agentguard-llm-proxy   --listen 127.0.0.1:8081 --guard-url https://guard.example.com --policy /etc/agentguard/policy.yaml
+agentguard-mcp-gateway --upstream "fs:npx -y @modelcontextprotocol/server-filesystem /tmp" \
+                       --guard-url https://guard.example.com --policy /etc/agentguard/policy.yaml
+```
+
+**Production defaults that matter:**
+
+- `--fail-mode=deny` — if the AgentGuard server is unreachable, refuse rather than passthrough.
+- `--listen 127.0.0.1:<port>` — inbound is not authenticated; bind only to trusted-network interfaces.
+- 30 s graceful-shutdown window (systemd `TimeoutStopSec=30s`, Kubernetes `terminationGracePeriodSeconds: 30`). The LLM proxy buffers tool calls inside streaming responses; a hard kill truncates the client's response.
+- Pin proxy binary and AgentGuard server to the same minor version; wire protocol is stable within `0.x.y`, not across majors.
+
+Examples (systemd unit, Kubernetes sidecar, MCP client configs): [`QUICKSTART_MCP.md`](QUICKSTART_MCP.md), [`QUICKSTART_LLM_PROXY.md`](QUICKSTART_LLM_PROXY.md). Wire-format reference: [`MCP_GATEWAY.md`](MCP_GATEWAY.md), [`LLM_API_PROXY.md`](LLM_API_PROXY.md).
 
 ---
 

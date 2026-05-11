@@ -160,7 +160,7 @@ Details: [`docs/POLICY_REFERENCE.md`](POLICY_REFERENCE.md).
 
 ## Condition has `time_window` but it is being ignored
 
-**Cause:** `time_window` without `require_prior` is a deliberate no-op kept for v0.4.0 backward compatibility. `LoadFromFile` logs a warning; v0.5.0 will error out.
+**Cause:** `time_window` without `require_prior` was a v0.4.0-compat no-op that **errors out at policy load as of v0.5.0**. `LoadFromFile` returns the validation error; the server refuses to boot until the policy is fixed. Either remove the orphan `time_window` or add a `require_prior` clause. See [`DEPRECATIONS.md`](DEPRECATIONS.md).
 
 **Confirm:** look for a line like:
 
@@ -224,9 +224,34 @@ docker run -d -p 8080:8080 \
 
 ---
 
+## MCP Gateway / LLM API Proxy issues (v0.5+)
+
+### MCP client shows zero tools after pointing at `agentguard-mcp-gateway`
+
+The gateway started but no `--upstream` is wired, or the upstream subprocess crashed at boot. Run the gateway in the foreground and watch for `WARN mcpgw upstream <name> spawn failed: ...`. Verify the upstream command runs standalone. Details: [`MCP_GATEWAY.md`](MCP_GATEWAY.md).
+
+### LLM API Proxy: SDK hangs / `unexpected end of stream`
+
+The proxy was killed mid-stream and the buffered tool-call payload was never flushed. Give it a 30 s graceful-shutdown window (`TimeoutStopSec=30s` / `terminationGracePeriodSeconds: 30`).
+
+### LLM API Proxy: agent sees `502 Bad Gateway`
+
+The proxy couldn't reach `--guard-url` or the bearer token is wrong. `curl -sf <guard-url>/health` to confirm reachability, then verify `AGENTGUARD_API_KEY` matches on both sides. With `--fail-mode=deny` (production default), in-flight calls return synthetic refusals until the server comes back.
+
+### Proxy rejects every incoming connection
+
+It bound to `127.0.0.1`. If your agent runs in a separate container or host, the loopback bind blocks it. Change to `--listen 0.0.0.0:<port>` **only on a trusted network** — proxy inbound is not authenticated.
+
+### Tool calls flow through the LLM API Proxy but never reach the AgentGuard server
+
+The client's `OPENAI_BASE_URL` is missing the `/v1` suffix, or the request is a plain chat completion (intentionally passthrough). Check `agentguard_llmproxy_tool_calls_total` — if it's not incrementing, no tool call was produced. Set `OPENAI_BASE_URL=http://127.0.0.1:8081/v1` (include `/v1`); for Anthropic use `ANTHROPIC_BASE_URL=http://127.0.0.1:8081` (no `/v1`). Details: [`QUICKSTART_LLM_PROXY.md`](QUICKSTART_LLM_PROXY.md).
+
+---
+
 ## Still stuck?
 
 - Run `agentguard status` — shows `/health` reachability and the pending queue.
-- Check `/metrics` — counters, gauges, histograms, dispatch drops.
+- Check `/metrics` on the central server AND on each proxy — counters, gauges, histograms, dispatch drops.
 - Response headers on `/v1/check`: `X-AgentGuard-Policy-Ms`, `X-AgentGuard-Audit-Ms`, `X-AgentGuard-Total-Ms` (timings in ms, 3 decimals).
-- Open an issue with: version (`agentguard version`), sanitized policy snippet, and the relevant log lines. Security-sensitive reports go to `cauaferraz@lictorate.com` — not the issue tracker.
+- Version skew: all three binaries report their version via `agentguard version` / `agentguard-mcp-gateway --version` / `agentguard-llm-proxy --version`. Mismatch is the most common ops-time bug after a partial upgrade.
+- Open an issue with: versions of all binaries, sanitized policy snippet, and the relevant log lines from both the proxy and the central server. Security-sensitive reports go to `cauaferraz@lictorate.com` — not the issue tracker.

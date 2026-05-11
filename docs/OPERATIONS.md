@@ -111,7 +111,7 @@ Operational guidance:
 | Constant | Value | Source |
 |---|---|---|
 | `SessionTTL` | `1h` | `pkg/proxy/auth.go` (default, overridable via `policy.proxy.session.ttl`) |
-| `MaxSessions` | `1024` | `pkg/proxy/auth.go` (hardcoded in v0.4.1) |
+| `MaxSessions` | `1024` | `pkg/proxy/auth.go` (still hardcoded as of v0.5.x) |
 
 At capacity, the oldest-by-expiry session is evicted. Under pathological login bursts you can see `503` with `Retry-After: 5` from `/auth/login`.
 
@@ -169,6 +169,18 @@ agentguard serve \
 Eviction logs `INFO: session-cost sweeper evicted N entries (ttl=…)` when non-zero.
 
 Trade-off: a short TTL resets session totals mid-run if an agent goes idle longer than the TTL. Pick `ttl` > your longest expected idle gap within a session.
+
+---
+
+## MCP Gateway and LLM API Proxy
+
+Both wire-level enforcement points are **stateless** — they fan every gated request out to the AgentGuard server. Restart freely, no audit replay on boot.
+
+- **Health:** `GET /health` on the proxy's listen port. Use as the readiness probe.
+- **Metrics:** `GET /metrics`. Proxy-specific series listed in [`OBSERVABILITY.md`](OBSERVABILITY.md#wire-level-proxy-metrics-v05) — watch `agentguard_llmproxy_buffer_overflow_total` and `agentguard_mcpgw_upstream_reconnects_total`.
+- **Shutdown:** the LLM API Proxy buffers tool calls inside streaming responses; give it 30 s graceful drain (`TimeoutStopSec=30s` / `terminationGracePeriodSeconds: 30`). A hard kill truncates the client's response.
+- **Version skew:** keep all binaries on the same `0.x.y`. The wire protocol is stable within a minor line; cross-minor mixing is unsupported. Upgrade the server first, then the proxies.
+- **Topology:** prefer per-agent sidecars — shared proxies couple every agent's lifecycle.
 
 ---
 

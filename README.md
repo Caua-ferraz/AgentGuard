@@ -183,34 +183,34 @@ CLI flags and subcommands: [`docs/CLI.md`](docs/CLI.md).
 
 ## Architecture
 
+AgentGuard is the **wire-level checkpoint** between your agent and everything it touches. The checkpoint runs at three layers; all three share one policy, one audit log, one approval queue.
+
 ```
-┌─────────────────┐     ┌──────────────────────────┐     ┌─────────────┐
-│   AI Agent      │────▶│   AgentGuard Proxy        │────▶│  Target     │
-│  (any framework)│◀────│                            │◀────│  (tools,    │
-│                 │     │  ┌──────────────────────┐  │     │   APIs,     │
-│  • LangChain    │     │  │  Policy Engine       │  │     │   shell)    │
-│  • CrewAI       │     │  ├──────────────────────┤  │     └─────────────┘
-│  • browser-use  │     │  │  Rate Limiter        │  │
-│  • Claude (MCP) │     │  ├──────────────────────┤  │     ┌─────────────┐
-│  • Custom       │     │  │  Approval Queue      │  │────▶│  Dashboard  │
-│                 │     │  ├──────────────────────┤  │     │  (web UI)   │
-│                 │     │  │  Notifier (Slack/WH) │  │     └─────────────┘
-│                 │     │  ├──────────────────────┤  │
-│                 │     │  │  Audit Logger         │  │     ┌─────────────┐
-│                 │     │  └──────────────────────┘  │────▶│  Audit Log  │
-└─────────────────┘     └──────────────────────────┘     │  (JSON)     │
-                                                          └─────────────┘
+   Claude Desktop / Cursor /         ┌──────────────────────┐
+   Cline / Continue / Zed   ───────▶ │ agentguard-mcp-      │ ─┐
+                                     │ gateway              │  │
+                                     └──────────────────────┘  │
+                                                               │     ┌──────────────────┐
+   OpenAI / Anthropic                ┌──────────────────────┐  │     │ AgentGuard server│
+   SDK code                 ───────▶ │ agentguard-llm-proxy │ ─┼───▶│ (agentguard      │
+   (OPENAI_BASE_URL,…)               │                      │  │     │  serve)          │
+                                     └──────────────────────┘  │     ├──────────────────┤
+                                                               │     │ policy · audit · │
+   Custom code (LangChain,           ┌──────────────────────┐  │     │ approvals ·      │
+   CrewAI, browser-use,     ───────▶ │ Python / TypeScript  │ ─┘     │ dashboard        │
+   custom)                           │ SDK + adapters       │        └──────────────────┘
+                                     └──────────────────────┘
 ```
 
-Rule precedence: `deny → require_approval → allow → default deny`. The seven policy scopes are `shell`, `filesystem`, `network`, `browser`, `cost`, `data`, and `mcp_tool` (plus the `unmapped` sentinel emitted by the LLM API Proxy when a tool call has no `tool_scope_map` entry). See [`docs/POLICY_REFERENCE.md`](docs/POLICY_REFERENCE.md).
+Rule precedence: `deny → require_approval → allow → default deny`. Policy scopes: `shell`, `filesystem`, `network`, `browser`, `cost`, `data`, `mcp_tool` (plus the `unmapped` sentinel emitted by the LLM API Proxy when a tool call has no `tool_scope_map` entry). See [`docs/POLICY_REFERENCE.md`](docs/POLICY_REFERENCE.md). Architecture deep-dive: [`docs/PROXY_ARCHITECTURE.md`](docs/PROXY_ARCHITECTURE.md).
 
 ## Limitations & Threat Model
 
 AgentGuard is a policy enforcement and audit layer. It is **not** an OS sandbox. Read this before you trust it as your last line of defense.
 
-- **The firewall is wire-level via the MCP Gateway and LLM API Proxy.** The **MCP Gateway** is the primary integration path for MCP-aware clients (Claude Desktop, Cursor, Cline, Continue, Zed), and the **LLM API Proxy** extends the same boundary to OpenAI / Anthropic SDK calls (`OPENAI_BASE_URL=http://127.0.0.1:8081/v1` and the Anthropic equivalent). The agent reaches its tools only through AgentGuard, so there is no opt-out short of pointing the client at a different MCP server or ignoring the SDK's base-URL configuration. Operators who control the agent's environment (env vars, network egress, MCP client config) get an enforcement boundary, not just an advisory one.
-- **The SDK is a compatibility tier.** It remains supported and tested for direct callers — but it is opt-in by design: the agent must call `guard.check(...)`. That makes it an *advisory* gate. Use it when the proxy is impractical (offline scripts, custom transports), and pair it with the proxy whenever both are available.
-- **AgentGuard does not sandbox the host or intercept syscalls.** A determined agent that controls its own runtime can bypass the proxy by ignoring `OPENAI_BASE_URL`, talking to a different MCP server, or shelling out directly. Combine AgentGuard with OS-level isolation (containers, seccomp, AppArmor, network egress rules) when the threat model includes a hostile agent.
+- **Two of the three layers are wire-level.** The MCP Gateway and LLM API Proxy sit between the agent and its tools / model. There is no opt-out short of pointing the client at a different MCP server or ignoring the SDK's base-URL configuration. Operators who control the agent's environment (env vars, network egress, MCP client config) get an enforcement boundary, not just an advisory one.
+- **The SDK layer is opt-in.** The agent must call `guard.check(...)` (directly, via `@guarded`, or via a framework adapter) — that makes it advisory. Use it when the wire-level layers are impractical (offline scripts, custom transports); pair it with the gateway / LLM proxy whenever both apply.
+- **AgentGuard does not sandbox the host or intercept syscalls.** A determined agent that controls its own runtime can bypass AgentGuard by ignoring `OPENAI_BASE_URL`, talking to a different MCP server, or shelling out directly. Combine AgentGuard with OS-level isolation (containers, seccomp, AppArmor, network egress rules) when the threat model includes a hostile agent.
 - **Pattern matching is string-glob, not semantic.** A deny rule for `rm -rf *` matches literal strings; an agent (or a creative human) can substitute equivalents (`find / -delete`, base64 payloads, etc.). Treat policies as a high-signal first filter, not a complete authorization model.
 - **Approval queue and rate-limiter state are in-memory.** Both reset on restart and are not shared across instances. Run `replicas: 1` until persistent state lands.
 
@@ -240,8 +240,14 @@ Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS deta
 | Topic | Doc |
 |---|---|
 | Getting started | [`docs/SETUP.md`](docs/SETUP.md) |
+| Quickstart — MCP Gateway (Claude Desktop / Cursor / Cline / Continue / Zed) | [`docs/QUICKSTART_MCP.md`](docs/QUICKSTART_MCP.md) |
+| Quickstart — LLM API Proxy (OpenAI / Anthropic SDKs) | [`docs/QUICKSTART_LLM_PROXY.md`](docs/QUICKSTART_LLM_PROXY.md) |
+| MCP Gateway reference + integration gotchas | [`docs/MCP_GATEWAY.md`](docs/MCP_GATEWAY.md) |
+| LLM API Proxy reference + integration gotchas | [`docs/LLM_API_PROXY.md`](docs/LLM_API_PROXY.md) |
+| End-to-end architecture (proxies + central server) | [`docs/PROXY_ARCHITECTURE.md`](docs/PROXY_ARCHITECTURE.md) |
 | Policy YAML schema + gotchas | [`docs/POLICY_REFERENCE.md`](docs/POLICY_REFERENCE.md) |
-| HTTP API | [`docs/API.md`](docs/API.md) |
+| HTTP API (central server) | [`docs/API.md`](docs/API.md) |
+| Wire protocol (SDK ↔ central server) | [`docs/WIRE_PROTOCOL.md`](docs/WIRE_PROTOCOL.md) |
 | CLI reference | [`docs/CLI.md`](docs/CLI.md) |
 | Python SDK | [`docs/SDK_PYTHON.md`](docs/SDK_PYTHON.md) |
 | Framework adapters (LangChain, CrewAI, browser-use, MCP) | [`docs/ADAPTERS.md`](docs/ADAPTERS.md) |
@@ -251,9 +257,12 @@ Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS deta
 | Day-2 operations | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) |
 | Metrics + alerting | [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) |
 | Tunable knobs | [`docs/TUNING.md`](docs/TUNING.md) |
+| SLO targets + measured baseline | [`docs/SLO.md`](docs/SLO.md) |
 | Troubleshooting | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) |
 | FAQ | [`docs/FAQ.md`](docs/FAQ.md) |
 | Config schema | [`docs/CONFIG.md`](docs/CONFIG.md) |
+| Migration from earlier versions | [`docs/MIGRATION.md`](docs/MIGRATION.md) |
+| Deprecations | [`docs/DEPRECATIONS.md`](docs/DEPRECATIONS.md) |
 | File formats + migrations | [`docs/FILE_FORMATS.md`](docs/FILE_FORMATS.md) |
 | Migration guide | [`docs/MIGRATION.md`](docs/MIGRATION.md) |
 | Deprecations | [`docs/DEPRECATIONS.md`](docs/DEPRECATIONS.md) |

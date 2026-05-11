@@ -329,7 +329,7 @@ Or drop-in:
 python -m agentguard.adapters.mcp --guard-url http://localhost:8080
 ```
 
-Implements `initialize`, `tools/list`, `tools/call`, and the `notifications/initialized` notification. The adapter pins `MCP_PROTOCOL_VERSION = "2024-11-05"`. v0.4.1 warns (does not error) on protocol-version mismatches from the client.
+Implements `initialize`, `tools/list`, `tools/call`, and the `notifications/initialized` notification. The adapter pins `MCP_PROTOCOL_VERSION = "2024-11-05"`. The Python adapter warns (does not error) on protocol-version mismatches from the client; for hard-fail behaviour, multi-upstream namespacing, and capability merging, use the v0.5 Go binary `agentguard-mcp-gateway` (see [`MCP_GATEWAY.md`](MCP_GATEWAY.md)) instead.
 
 Tool-call scope inference (from the tool's argument names):
 

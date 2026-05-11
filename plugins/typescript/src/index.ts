@@ -69,7 +69,7 @@ interface StatusResponseJSON {
 }
 
 export interface AgentGuardOptions {
-  /** Base URL of the AgentGuard proxy (default: http://localhost:8080) */
+  /** Base URL of the AgentGuard server (default: http://localhost:8080) */
   baseUrl?: string;
   /** Agent identifier sent with every check */
   agentId?: string;

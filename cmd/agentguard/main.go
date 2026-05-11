@@ -26,7 +26,7 @@ import (
 )
 
 var (
-	version = "0.5.0"
+	version = "0.5.1"
 	commit  = "dev"
 )
 
@@ -195,7 +195,7 @@ Usage:
   agentguard <command> [flags]
 
 Commands:
-  serve       Start the AgentGuard proxy server
+  serve       Start the AgentGuard server (policy engine, audit log, approval queue, dashboard)
   validate    Validate a policy file
   check       Run a one-shot policy check against a local policy file
   approve     Approve a pending action by ID
