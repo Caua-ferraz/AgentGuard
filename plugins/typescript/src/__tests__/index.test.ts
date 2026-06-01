@@ -374,7 +374,7 @@ describe("guarded()", () => {
       jsonResponse({ decision: "ALLOW", reason: "ok" })
     );
     const guard = new AgentGuard();
-    const fn = jest.fn<Promise<unknown>, unknown[]>(async (...args) => `ran ${String(args[0])}`);
+    const fn = jest.fn(async (...args) => `ran ${String(args[0])}`);
     const safe = guarded(guard, "shell", fn as unknown as AnyAsyncFn);
     await expect(safe("ls")).resolves.toBe("ran ls");
     expect(fn).toHaveBeenCalledTimes(1);
@@ -386,7 +386,7 @@ describe("guarded()", () => {
       jsonResponse({ decision: "DENY", reason: "nope" })
     );
     const guard = new AgentGuard();
-    const fn = jest.fn<Promise<unknown>, unknown[]>(async () => "should not run");
+    const fn = jest.fn(async () => "should not run");
     const safe = guarded(guard, "shell", fn as unknown as AnyAsyncFn);
     await expect(safe("rm -rf /")).rejects.toThrow(/denied by AgentGuard/);
     expect(fn).not.toHaveBeenCalled();
@@ -402,7 +402,7 @@ describe("guarded()", () => {
       })
     );
     const guard = new AgentGuard();
-    const fn = jest.fn<Promise<unknown>, unknown[]>(async () => "should not run");
+    const fn = jest.fn(async () => "should not run");
     const safe = guarded(guard, "cost", fn as unknown as AnyAsyncFn);
     await expect(safe("buy-a-car")).rejects.toThrow(/requires approval/);
     expect(fn).not.toHaveBeenCalled();
@@ -414,7 +414,7 @@ describe("guarded()", () => {
       jsonResponse({ decision: "ALLOW", reason: "ok" })
     );
     const guard = new AgentGuard();
-    const fn = jest.fn<Promise<unknown>, unknown[]>(async () => "ran");
+    const fn = jest.fn(async () => "ran");
     const getOpts = (...args: unknown[]): CheckOptions => ({
       url: String(args[0]),
       sessionId: "s",
@@ -457,7 +457,7 @@ describe("typed errors from guarded()", () => {
       })
     );
     const guard = new AgentGuard();
-    const fn = jest.fn<Promise<unknown>, unknown[]>(async () => "should not run");
+    const fn = jest.fn(async () => "should not run");
     const safe = guarded(guard, "shell", fn as unknown as AnyAsyncFn);
 
     let caught: unknown;
@@ -486,7 +486,7 @@ describe("typed errors from guarded()", () => {
       })
     );
     const guard = new AgentGuard();
-    const fn = jest.fn<Promise<unknown>, unknown[]>(async () => "should not run");
+    const fn = jest.fn(async () => "should not run");
     const safe = guarded(guard, "cost", fn as unknown as AnyAsyncFn);
 
     let caught: unknown;
@@ -547,7 +547,7 @@ describe("guarded() with waitForApproval", () => {
       })
     );
     const guard = new AgentGuard();
-    const fn = jest.fn<Promise<unknown>, unknown[]>(async (...args) => `ran ${String(args[0])}`);
+    const fn = jest.fn(async (...args) => `ran ${String(args[0])}`);
     const safe = guarded(guard, "shell", fn as unknown as AnyAsyncFn, {
       waitForApproval: true,
       approvalTimeoutMs: 2000,
@@ -576,7 +576,7 @@ describe("guarded() with waitForApproval", () => {
       })
     );
     const guard = new AgentGuard();
-    const fn = jest.fn<Promise<unknown>, unknown[]>(async () => "should not run");
+    const fn = jest.fn(async () => "should not run");
     const safe = guarded(guard, "shell", fn as unknown as AnyAsyncFn, {
       waitForApproval: true,
       approvalTimeoutMs: 2000,
@@ -610,7 +610,7 @@ describe("guarded() with waitForApproval", () => {
       jsonResponse({ id: "ap_wait_timeout", status: "pending" })
     );
     const guard = new AgentGuard();
-    const fn = jest.fn<Promise<unknown>, unknown[]>(async () => "should not run");
+    const fn = jest.fn(async () => "should not run");
     const safe = guarded(guard, "shell", fn as unknown as AnyAsyncFn, {
       waitForApproval: true,
       approvalTimeoutMs: 30,

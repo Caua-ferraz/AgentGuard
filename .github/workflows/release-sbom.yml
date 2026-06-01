@@ -1,0 +1,63 @@
+name: Generate SBOM on release
+
+# Triggers when a GitHub release is published. Builds the agentguard
+# binary the same way the Dockerfile does (CGO disabled, linux/amd64),
+# then runs syft against the binary to produce both SPDX and CycloneDX
+# SBOMs and attaches them to the release as downloadable assets.
+#
+# Why both formats: SPDX is the ISO/IEC 5962 standard format that
+# regulated buyers (FedRAMP, SOC 2 auditors) ask for by name; CycloneDX
+# is what most security scanners (Snyk, Dependency-Track, Grype) ingest
+# natively. Producing both costs nothing extra and avoids "can you
+# regenerate in X format" requests.
+#
+# Why scan the binary (not the source tree): syft on the compiled
+# binary records exactly what shipped — including the Go toolchain
+# version and the precise module versions linked in. Scanning the
+# source tree would over-report (test-only deps, build tools) and
+# under-detect (no toolchain metadata).
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write  # required to upload SBOM assets to the release
+
+jobs:
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build agentguard binary (matches Dockerfile flags)
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -ldflags="-s -w" -o dist/agentguard ./cmd/agentguard
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate SPDX SBOM
+        run: |
+          syft dist/agentguard \
+            -o spdx-json=agentguard-${{ github.event.release.tag_name }}.spdx.json
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          syft dist/agentguard \
+            -o cyclonedx-json=agentguard-${{ github.event.release.tag_name }}.cdx.json
+
+      - name: Attach SBOMs to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            "agentguard-${{ github.event.release.tag_name }}.spdx.json" \
+            "agentguard-${{ github.event.release.tag_name }}.cdx.json" \
+            --clobber

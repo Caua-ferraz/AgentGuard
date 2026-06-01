@@ -26,7 +26,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.25'
 
       - name: Build
         run: go build -v ./...
@@ -59,22 +59,46 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.25'
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: v1.61.0
+          version: v2.12.2
+
+  # CVE scan with reachability analysis. govulncheck only flags advisories
+  # whose vulnerable symbol is actually called from our code, so it stays
+  # quiet on theoretical issues in unused transitive code paths. Blocking
+  # on purpose: AgentGuard is a security product and cannot ship with a
+  # known-reachable advisory. If govulncheck fires, fix the advisory before
+  # merging (bump the dep, or refactor away the call site).
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        run: govulncheck ./...
 
   python-test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         # 3.10 is the floor (pyproject.toml requires-python = ">=3.10"); 3.11
-        # is the LTS middle; 3.12 is current. 3.9 was dropped after upstream
-        # EOL (October 2025) and because the `mcp` extra requires >=3.10
-        # anyway — keeping 3.9 in the matrix only invited broken installs.
-        python-version: ['3.10', '3.11', '3.12']
+        # and 3.12 are intermediate; 3.13 is the current stable and is also
+        # declared in the trove classifiers, so it must be exercised here.
+        # 3.9 was dropped after upstream EOL (October 2025) and because the
+        # `mcp` extra requires >=3.10 anyway — keeping 3.9 in the matrix only
+        # invited broken installs.
+        python-version: ['3.10', '3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
 
@@ -85,7 +109,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.25'
 
       - name: Build agentguard binary for E2E tests
         run: go build -o agentguard ./cmd/agentguard
@@ -161,7 +185,7 @@ jobs:
       - name: Set up Go (build agentguard binary)
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.25'
 
       - name: Build agentguard binary
         run: go build -o agentguard ./cmd/agentguard
@@ -205,9 +229,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # 18 is the floor (package.json engines.node = ">=18.0.0"); 20 is
-        # current LTS; 22 is the upcoming LTS. v0.5 R1 E2 closed.
-        node-version: ['18', '20', '22']
+        # 20 is the floor (package.json engines.node = ">=20.0.0"); 22 is
+        # Maintenance LTS; 24 is the current Active LTS. Node 18 was dropped
+        # after upstream EOL (2025-04-30). v0.5 R1 E2 closed.
+        node-version: ['20', '22', '24']
     steps:
       - uses: actions/checkout@v4
 

@@ -149,9 +149,15 @@ func NewResponseError(id RequestID, code int, message string, data json.RawMessa
 // -- MCP-specific shapes for the methods the gateway dispatches --
 
 // InitializeParams is the params object on `initialize`.
+//
+// `capabilities` is REQUIRED by the MCP spec — strict upstreams (e.g.
+// current @modelcontextprotocol/server-filesystem) reject initialize
+// when the field is missing or null. The tag has no omitempty so the
+// field is always emitted; send sites must ensure the map is non-nil
+// so it serializes as `{}` and not `null`.
 type InitializeParams struct {
 	ProtocolVersion string                 `json:"protocolVersion"`
-	Capabilities    map[string]interface{} `json:"capabilities,omitempty"`
+	Capabilities    map[string]interface{} `json:"capabilities"`
 	ClientInfo      ClientInfo             `json:"clientInfo"`
 }
 

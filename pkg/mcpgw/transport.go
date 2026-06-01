@@ -456,6 +456,9 @@ func (u *StdioUpstream) failPending() {
 // Initialize sends `initialize` to the upstream and caches the
 // negotiated state for reconnect.
 func (u *StdioUpstream) Initialize(ctx context.Context, protocolVersion string, clientCaps map[string]interface{}, clientInfo ClientInfo) (*InitializeResult, error) {
+	if clientCaps == nil {
+		clientCaps = map[string]interface{}{}
+	}
 	params := InitializeParams{
 		ProtocolVersion: protocolVersion,
 		Capabilities:    clientCaps,
