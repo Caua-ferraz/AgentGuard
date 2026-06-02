@@ -4,7 +4,38 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-> Tracks work in flight on `master` post-v0.5.1. Items here are *not* in any tagged release yet.
+> Tracks work in flight on `master` post-v0.5.2. Items here are *not* in any tagged release yet.
+
+## [0.5.2] — 2026-06-02
+
+> Maintenance release. Toolchain refresh (Go 1.22→1.25, Alpine 3.19→3.22 — both EOL on the previous pin), TypeScript SDK majors (TS 5→6, Jest 29→30, Node floor 18→20 — Node 18 EOL), supply-chain monitoring (govulncheck on every push, SBOM SPDX+CycloneDX attached on release), and a real bug fix in the MCP gateway: the upstream `initialize` was emitting `capabilities` as omitempty/null, which the current `@modelcontextprotocol/server-filesystem` (the README's quickstart example) and any spec-conformant strict server reject. The README's headline MCP Gateway path is functional again.
+
+### Fixed
+
+- **MCP Gateway initialize spec compliance** (`pkg/mcpgw/protocol.go`, `pkg/mcpgw/transport.go`) — `params.capabilities` is REQUIRED by the MCP spec; v0.5.0/v0.5.1 emitted it `omitempty` and sent `null` when the host passed no caps. Strict upstreams (current `@modelcontextprotocol/server-filesystem`) reject this with `expected object, received undefined`. Tag is now plain `json:"capabilities"`, and the send site normalises nil → `map[string]interface{}{}` so the field always serialises as `{}`. The README quickstart works again.
+- **Policy watcher modTime race** (`pkg/policy/watcher.go`) — fsnotify v1.10.1's faster event delivery exposed an existing race where a failed parse advanced `w.modTime` to the just-Stat'd mtime, then a subsequent good save whose mtime happened to fall *before* the advanced value (e.g. after a test bumped mtime to `now+2s`) was silently skipped. `modTime` now advances only on successful parse.
+- **`test_guardedtool_batch_all_allowed`** (`plugins/python/tests/test_langchain.py`) — assertion compared `calls == ["a","b","c"]` (execution order on a concurrent `batch()`); passed by luck on Python 3.10–3.12 schedulers, failed on 3.13. Now compares `sorted(calls)` — same semantic ("all three inputs ran exactly once") without scheduler dependence.
+
+### Changed
+
+- **Go toolchain → 1.25.** `go.mod`, Dockerfile builder stage, all CI `go-version` slots. 1.22 went EOL when 1.24 landed; only 1.25/1.26 are upstream-supported now.
+- **Docker runtime base → Alpine 3.22.** Dockerfile. 3.19 was EOL; 3.22 is supported through 2027-05.
+- **TypeScript SDK majors.** `typescript ^5.3 → ^6`, `jest ^29 → ^30`, `@types/jest ^29 → ^30`, `@types/node ^20 → ^22`. `ts-jest` stays on `^29.4` (it versions independently of Jest and 29.4.x supports Jest 30 via peers; no v30 exists). Fallout fixes: explicit `"types": ["node", "jest"]` in `tsconfig.json` (TS 6 stopped auto-discovering `@types/*`); dropped the now-invalid two-generic `jest.fn<Ret, Args>(...)` signature across 9 call sites in `src/__tests__/index.test.ts` (Jest 30 unified to a single function-type generic).
+- **Node floor → ≥20**, CI matrix `[18,20,22] → [20,22,24]`. Node 18 reached upstream EOL 2025-04-30; 24 is the current Active LTS.
+- **golangci-lint v1.61 → v2.12.2**, action `@v6 → @v8`. v1 is end-of-life. New `.golangci.yml` configures v2's stricter default linter set: errcheck excluded on `_test.go` files entirely and on conventional cleanup-path Close/Fprint patterns (with allowlists for the project's audit `Logger`, `policy.PolicyProvider`, `policy.Engine`, and `*fsnotify.Watcher` types).
+- **Python CI matrix gains 3.13** (`[3.10,3.11,3.12] → [3.10,3.11,3.12,3.13]`). The trove classifier already claimed 3.13; CI now actually exercises it.
+- **Go modules refreshed via `go get -u && go mod tidy`** — `fsnotify v1.9.0 → v1.10.1` (legitimate; v1.10.1 checksum recorded in `go.sum`), `golang.org/x/sys v0.13.0 → v0.45.0`. `gopkg.in/yaml.v3` stays.
+
+### Added
+
+- **`vulncheck` CI job** — blocking, reachability-aware Go CVE scan via `govulncheck` on every push and pull request. Reachability filtering keeps it quiet on theoretical issues in unused transitive code; only fires on advisories whose vulnerable symbol is actually called from project code.
+- **`release-sbom.yml` workflow** — on `release: published`, builds the binary with the same flags as the Dockerfile, runs `syft`, and attaches both SPDX-JSON and CycloneDX-JSON SBOMs to the GitHub release as downloadable assets. SPDX is the format auditors (SOC 2 / FedRAMP) ask for by name; CycloneDX is what most security scanners (Dependency-Track, Grype, Snyk) ingest natively.
+- **`.golangci.yml`** — first project-level golangci-lint config; documents what's excluded and why so future linter bumps don't require re-discovering the rationale.
+
+### Notes
+
+- **fsnotify supply-chain advisory (May 2026).** A maintainer access/ownership dispute around `fsnotify` surfaced in May 2026. v1.10.1 itself is legitimate; its checksum is now pinned in `go.sum` and verified by Go's module proxy. Reviewers should still eyeball the `go.sum` diff. Detection layering (dependabot + govulncheck + SBOM) is the response — see the new supply-chain monitoring entries above.
+- **MCP Gateway "examples" configs.** The five `examples/*-config.*` files reference `@modelcontextprotocol/server-filesystem` via `npx`. With the v0.5.2 gateway fix they work against the current published version; the gateway no longer requires pinning the filesystem-server.
 
 ## [0.5.1] — 2026-05-11
 
