@@ -334,7 +334,7 @@ data: {"type":"message_stop"}
 	// upstream emitted at the top. Its index must be 3 (the tool_use's
 	// original index) so the client's streaming JSON state machine
 	// sees the refusal text replace the tool_use cleanly.
-	var refusalStartIdx int = -1
+	refusalStartIdx := -1
 	seenTextBlockStart := false // index 0 from upstream
 	for _, p := range dataPayloads {
 		var env anthropicEventForSDK

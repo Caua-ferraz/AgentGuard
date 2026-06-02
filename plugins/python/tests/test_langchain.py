@@ -275,8 +275,15 @@ class TestBatch:
 
         out = gt.batch(["a", "b", "c"])
 
+        # `out` order matches input order (LangChain's batch preserves
+        # input/output alignment) but `calls` records execution order,
+        # which is non-deterministic when batch runs concurrently. The
+        # original assertion `calls == ["a","b","c"]` passed by luck on
+        # Python 3.10-3.12 schedulers but flaked on 3.13. Compare sorted
+        # so the assertion captures "all three inputs ran exactly once"
+        # without depending on the scheduler.
         assert out == ["echo:a", "echo:b", "echo:c"]
-        assert calls == ["a", "b", "c"]
+        assert sorted(calls) == ["a", "b", "c"]
 
     def test_guardedtool_batch_denies_first(self, mock_server_indexed):
         """First entry DENY → batch raises with index 0 in the message,

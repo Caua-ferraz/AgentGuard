@@ -1,0 +1,59 @@
+# golangci-lint v2 config.
+#
+# Pinned because the v2 bump (from v1.61) brought in a stricter default
+# linter set that fired on conventional Go patterns we treat as
+# acceptable. The default linter set ("standard") is kept; this file
+# only carves out the noise.
+#
+# Errcheck exclusions:
+#   - Test files: defer X.Close() / X.Close() at teardown is a Go test
+#     convention and not a real bug.
+#   - Production: the listed receivers are pure cleanup paths where the
+#     error has no actionable recipient at the call site (file handles
+#     in defer, http response bodies, sql rows iterator close, etc.) or
+#     are stdout/stderr writers (fmt.Fprint*) where a write failure has
+#     no recovery path. Anything OUTSIDE this allowlist still gets
+#     flagged.
+#
+# Staticcheck QF (quick-fix) rules:
+#   - Kept ON. The five callsites the v2 bump flagged are fixed in code
+#     (mechanical: WriteString(Sprintf) -> Fprintf, etc.) rather than
+#     silenced here, so future regressions in that style are caught.
+
+version: "2"
+
+linters:
+  default: standard
+  settings:
+    errcheck:
+      # Standard-library cleanup patterns: deferred Close() / writes to
+      # buffered writers where there is no actionable recipient.
+      exclude-functions:
+        - (io.Closer).Close
+        - (io.ReadCloser).Close
+        - (*os.File).Close
+        - (*database/sql.DB).Close
+        - (*database/sql.Rows).Close
+        - (*github.com/fsnotify/fsnotify.Watcher).Close
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        # Project-internal Close() on cleanup paths (defer at shutdown
+        # or end-of-goroutine). These types' Close() is idempotent
+        # bookkeeping; the call site has nowhere to escalate an error
+        # to. Listed by their package-qualified interface or concrete
+        # type so a stray Close() outside a teardown path still fires.
+        - (github.com/Caua-ferraz/AgentGuard/pkg/audit.Logger).Close
+        - (github.com/Caua-ferraz/AgentGuard/pkg/policy.PolicyProvider).Close
+        - (*github.com/Caua-ferraz/AgentGuard/pkg/policy.Engine).Close
+        - (*github.com/Caua-ferraz/AgentGuard/pkg/policy.FilePolicyProvider).Close
+        - (*github.com/Caua-ferraz/AgentGuard/pkg/policy.StaticPolicyProvider).Close
+        - (*github.com/Caua-ferraz/AgentGuard/pkg/audit.FileLogger).Close
+        - (*github.com/Caua-ferraz/AgentGuard/pkg/audit.BufferedAsyncLogger).Close
+        - (*github.com/Caua-ferraz/AgentGuard/pkg/audit.SQLiteLogger).Close
+        - (*github.com/Caua-ferraz/AgentGuard/pkg/mcpgw.StdioUpstream).Close
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck

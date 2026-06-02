@@ -459,30 +459,30 @@ func writeResultText(w io.Writer, req policy.ActionRequest, res policy.CheckResu
 	sb.WriteString("\tscope=")
 	sb.WriteString(req.Scope)
 	if req.Command != "" {
-		sb.WriteString(fmt.Sprintf(" command=%q", req.Command))
+		fmt.Fprintf(&sb, " command=%q", req.Command)
 	}
 	if req.Action != "" {
 		sb.WriteString(" action=")
 		sb.WriteString(req.Action)
 	}
 	if req.Path != "" {
-		sb.WriteString(fmt.Sprintf(" path=%q", req.Path))
+		fmt.Fprintf(&sb, " path=%q", req.Path)
 	}
 	if req.Domain != "" {
 		sb.WriteString(" domain=")
 		sb.WriteString(req.Domain)
 	}
 	if req.URL != "" {
-		sb.WriteString(fmt.Sprintf(" url=%q", req.URL))
+		fmt.Fprintf(&sb, " url=%q", req.URL)
 	}
 	if req.EstCost != 0 {
-		sb.WriteString(fmt.Sprintf(" est_cost=%.2f", req.EstCost))
+		fmt.Fprintf(&sb, " est_cost=%.2f", req.EstCost)
 	}
 	if res.Rule != "" {
-		sb.WriteString(fmt.Sprintf(" rule=%q", res.Rule))
+		fmt.Fprintf(&sb, " rule=%q", res.Rule)
 	}
 	if res.Reason != "" {
-		sb.WriteString(fmt.Sprintf(" reason=%q", res.Reason))
+		fmt.Fprintf(&sb, " reason=%q", res.Reason)
 	}
 	if res.ApprovalID != "" {
 		sb.WriteString(" approval_id=")

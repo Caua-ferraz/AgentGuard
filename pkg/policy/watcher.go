@@ -139,6 +139,15 @@ func (w *FileWatcher) poll() {
 // otherwise re-parses and invokes the callback. Parse errors are logged
 // but do not tear the watcher down — operators who save a malformed file
 // can fix it and the next event/tick picks up the good version.
+//
+// modTime tracks the last *successfully processed* version. It is NOT
+// updated on parse failure: doing so used to "consume" the failed
+// mtime, so a follow-up good save that happened to be timestamped
+// earlier than the failed mtime (e.g. after a test bumped mtime into
+// the future to force advancement) was silently skipped. Updating
+// only on success means a bad save can be repaired by any subsequent
+// write — the next event sees the current mtime is still > the last
+// good one and re-attempts parse.
 func (w *FileWatcher) reload() {
 	info, err := os.Stat(w.path)
 	if err != nil {
@@ -146,18 +155,20 @@ func (w *FileWatcher) reload() {
 		return
 	}
 	w.mu.Lock()
-	if !info.ModTime().After(w.modTime) {
-		w.mu.Unlock()
+	lastGood := w.modTime
+	w.mu.Unlock()
+	if !info.ModTime().After(lastGood) {
 		return
 	}
-	w.modTime = info.ModTime()
-	w.mu.Unlock()
 
 	pol, err := LoadFromFile(w.path)
 	if err != nil {
 		log.Printf("Policy reload failed: %v", err)
 		return
 	}
+	w.mu.Lock()
+	w.modTime = info.ModTime()
+	w.mu.Unlock()
 	// Wrap the user callback in safeCallback so a panic does not kill
 	// the watcher goroutine. In production the callback is
 	// FilePolicyProvider.onPolicyChange which fans out to each

@@ -267,17 +267,18 @@ func TestEngineCheck_ConcurrentSafety(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		go func(n int) {
 			defer func() { done <- struct{}{} }()
-			if n%3 == 0 {
+			switch n % 3 {
+			case 0:
 				r := engine.Check(ActionRequest{Scope: "shell", Command: "ls -la"}, "local")
 				if r.Decision != Allow {
 					t.Errorf("expected ALLOW for ls, got %s", r.Decision)
 				}
-			} else if n%3 == 1 {
+			case 1:
 				r := engine.Check(ActionRequest{Scope: "shell", Command: "rm file"}, "local")
 				if r.Decision != Deny {
 					t.Errorf("expected DENY for rm, got %s", r.Decision)
 				}
-			} else {
+			default:
 				r := engine.Check(ActionRequest{Scope: "network", Domain: "api.openai.com"}, "local")
 				if r.Decision != Allow {
 					t.Errorf("expected ALLOW for openai, got %s", r.Decision)
