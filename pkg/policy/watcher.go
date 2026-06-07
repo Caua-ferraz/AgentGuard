@@ -1,6 +1,8 @@
 package policy
 
 import (
+	"errors"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -161,7 +163,7 @@ func (w *FileWatcher) reload() {
 		return
 	}
 
-	pol, err := LoadFromFile(w.path)
+	pol, err := loadWithRetry(w.path)
 	if err != nil {
 		log.Printf("Policy reload failed: %v", err)
 		return
@@ -177,6 +179,45 @@ func (w *FileWatcher) reload() {
 	// the rest. Defending here belt-and-braces guards direct
 	// WatchFile callers (tests, future providers).
 	safeCallback(w.callback, pol)
+}
+
+// loadWithRetry re-reads and parses the policy, retrying ONLY transient
+// filesystem read errors. The motivating case is an atomic-replace edit
+// (write-temp + rename, the pattern every editor and `kubectl apply` uses):
+// on Windows the rename's MoveFileEx can leave the destination briefly locked,
+// so a reload's open-for-read racing it returns ERROR_SHARING_VIOLATION; on any
+// platform the file can momentarily vanish mid-replace (ENOENT). Both surface
+// as *fs.PathError. Without a retry the failing read is swallowed and — on the
+// event-driven fsnotify path, which has no periodic tick — the change is lost
+// until the next unrelated event, which may never come.
+//
+// Parse and validation errors are deterministic (a malformed file does not fix
+// itself in 15ms), so they are returned immediately; only the open/read step is
+// retried. The retry budget is tiny, spent solely on the rare failure path, and
+// runs on the watcher's background goroutine — it never touches the proxy's
+// request path, so it cannot affect the <3ms latency budget.
+func loadWithRetry(path string) (*Policy, error) {
+	const maxAttempts = 5
+	const backoff = 15 * time.Millisecond
+
+	var err error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		var pol *Policy
+		if pol, err = LoadFromFile(path); err == nil {
+			return pol, nil
+		}
+		// Retry only filesystem-level read failures (open/read), identified by
+		// a *fs.PathError anywhere in the chain. A parse/validation error is
+		// not a PathError, so it short-circuits out of the loop unchanged.
+		var pathErr *fs.PathError
+		if !errors.As(err, &pathErr) {
+			return nil, err
+		}
+		if attempt < maxAttempts-1 {
+			time.Sleep(backoff)
+		}
+	}
+	return nil, err
 }
 
 // Close stops the file watcher. Safe to call multiple times.
