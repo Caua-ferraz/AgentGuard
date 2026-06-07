@@ -173,13 +173,28 @@ func (s *Server) LastRequestAt() time.Time {
 type ApprovalQueue struct {
 	mu       sync.RWMutex
 	pending  map[string]*PendingAction
-	watchers []chan AuditEvent
+	watchers []sseWatcher
 	maxSize  int
+}
+
+// sseWatcher is one SSE subscriber plus the tenant whose events it receives.
+// A tenant-aware /v1/t/{tenant}/api/stream subscriber sees only that tenant's
+// events; the legacy /api/stream subscriber resolves to LocalTenantID, so in a
+// single-tenant deployment it behaves exactly as before. (There is no
+// all-tenants firehose yet — that is a future explicit operator opt-in.)
+type sseWatcher struct {
+	ch     chan AuditEvent
+	tenant string // normalized (non-empty); "" is coerced to LocalTenantID
 }
 
 // PendingAction is an action waiting for human approval.
 type PendingAction struct {
-	ID        string               `json:"id"`
+	ID string `json:"id"`
+	// TenantID is the tenant that produced this approval. Lookup/Resolve/List
+	// scope on it so one tenant can neither observe nor resolve another
+	// tenant's pending actions. Empty ("local") is omitted on the wire so
+	// single-tenant dashboard payloads stay byte-identical.
+	TenantID  string               `json:"tenant_id,omitempty"`
 	Request   policy.ActionRequest `json:"request"`
 	Result    policy.CheckResult   `json:"result"`
 	CreatedAt time.Time            `json:"created_at"`
@@ -193,9 +208,14 @@ type PendingAction struct {
 // ("sdk", "mcp_gateway", "llm_api_proxy"). Defaults to "sdk" on the wire
 // when unset so dashboard JS does not need a fallback. Older SSE
 // consumers see the field as an extra (ignored) JSON key.
+//
+// Tenant carries the owning tenant so broadcast can route the event only to
+// subscribers of that tenant. Omitted on the wire for the default "local"
+// tenant to keep single-tenant SSE payloads byte-identical.
 type AuditEvent struct {
 	Type      string               `json:"type"` // "check", "approval", "resolved"
 	Timestamp time.Time            `json:"timestamp"`
+	Tenant    string               `json:"tenant,omitempty"`
 	Transport string               `json:"transport,omitempty"`
 	Request   policy.ActionRequest `json:"request"`
 	Result    policy.CheckResult   `json:"result"`
@@ -502,6 +522,13 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 
+	// Tenant the action is evaluated against. For tenant-aware
+	// /v1/t/{tenant}/check this was validated + stamped by withTenant; for
+	// legacy /v1/check it defaults to LocalTenantID. Hoisted once so the
+	// approval-id, rate-limit-deny, and final response paths all stamp the
+	// same tenant on the audit entry.
+	tenantID := TenantIDFromContext(r.Context())
+
 	// Approval-id round-trip: if the caller (typically the MCP gateway
 	// retrying after a human approve/deny on the dashboard) set
 	// ApprovalID, consult the approval queue before running policy.
@@ -522,7 +549,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	// REQUIRE_APPROVAL evaluation, and the retry's bucket consumption
 	// would be charged twice for one logical action.
 	if req.ApprovalID != "" {
-		if pa, ok := s.approval.Lookup(req.ApprovalID); ok {
+		if pa, ok := s.approval.Lookup(req.ApprovalID, tenantID); ok {
 			// Bind the cached decision to the original request shape.
 			// Without this guard, /v1/check (intentionally unauthenticated)
 			// becomes a credential-bearer endpoint whose credential — the
@@ -555,7 +582,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 				// 4xx. Normal Engine.Check runs below.
 			} else {
 				result := s.resolvedApprovalToResult(req, pa)
-				s.logAndRespond(w, req, result, start)
+				s.logAndRespond(w, req, result, start, tenantID)
 				return
 			}
 		}
@@ -567,8 +594,8 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		window, err := ratelimit.ParseWindow(rlCfg.Window)
 		if err == nil {
 			// Normalize an empty agent_id so two distinct callers that both
-			// omit the field do not implicitly share the key "scope:" with
-			// any legitimate agent whose id is the literal empty string.
+			// omit the field do not implicitly share the key "scope::tenant"
+			// with any legitimate agent whose id is the literal empty string.
 			// All anonymous callers still share a single bucket per scope
 			// by design — partitioning by remote IP would require plumbing
 			// and opens a DoS vector via IP floods against MaxBuckets.
@@ -576,7 +603,13 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 			if agentID == "" {
 				agentID = "anonymous"
 			}
-			key := fmt.Sprintf("%s:%s", req.Scope, agentID)
+			// Key format is "scope:tenant:agent_id" — tenant is the MIDDLE
+			// field on purpose. ratelimit.scopeFromKey reads the first field
+			// for the eviction metric label, so keeping scope first leaves the
+			// (bounded-cardinality) label correct without a parser change, and
+			// the bucket is still partitioned per tenant so one tenant cannot
+			// consume another's rate budget.
+			key := fmt.Sprintf("%s:%s:%s", req.Scope, tenantID, agentID)
 			if err := s.limiter.Allow(key, rlCfg.MaxRequests, window); err != nil {
 				metrics.IncRateLimited()
 				result := policy.CheckResult{
@@ -584,26 +617,24 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 					Reason:   err.Error(),
 					Rule:     "deny:ratelimit:" + req.Scope,
 				}
-				s.logAndRespond(w, req, result, start)
+				s.logAndRespond(w, req, result, start, tenantID)
 				return
 			}
 		}
 	}
 
 	evalStart := time.Now()
-	// Tenant resolution: legacy /v1/check has no tenant in the path and
-	// TenantIDFromContext defaults to LocalTenantID; tenant-aware
-	// /v1/t/{tenant}/check has been validated and stamped by withTenant
-	// before this handler runs. The approval queue / audit query / rate
-	// limiter are currently single-tenant; multi-tenant sharding is
-	// future work — see pkg/proxy/tenant.go.
-	result := s.cfg.Engine.Check(req, TenantIDFromContext(r.Context()))
+	// Tenant resolution: tenantID was hoisted above from the request context
+	// (legacy /v1/check → LocalTenantID; tenant-aware route validated by
+	// withTenant). The approval queue / rate limiter are still single-tenant;
+	// that sharding is the next step — see pkg/proxy/tenant.go.
+	result := s.cfg.Engine.Check(req, tenantID)
 	evalMs := float64(time.Since(evalStart).Microseconds()) / 1000.0
 	metrics.PolicyEvalDuration.Observe(evalMs)
 
 	// If approval required, queue it
 	if result.Decision == policy.RequireApproval {
-		pending, err := s.approval.Add(req, result)
+		pending, err := s.approval.Add(req, result, tenantID)
 		if err != nil {
 			if errors.Is(err, ErrApprovalQueueFull) {
 				// Tell the client this is a transient capacity problem, not
@@ -647,10 +678,10 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	s.logAndRespond(w, req, result, start)
+	s.logAndRespond(w, req, result, start, tenantID)
 }
 
-func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, result policy.CheckResult, start time.Time) {
+func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, result policy.CheckResult, start time.Time, tenantID string) {
 	duration := time.Since(start)
 
 	// Stamp the wire-format version on the outgoing response so clients
@@ -678,6 +709,13 @@ func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, 
 		DurationMs: duration.Milliseconds(),
 		Transport:  transport,
 	}
+	// Stamp the tenant the action was evaluated against. The default "local"
+	// tenant is stored as "" (omitempty) so single-tenant audit output stays
+	// byte-identical to pre-v0.6 files; audit.Entry.EffectiveTenant() resolves
+	// "" → "local" on read. Non-local tenants are written verbatim.
+	if tenantID != "" && tenantID != policy.LocalTenantID {
+		entry.TenantID = tenantID
+	}
 	auditStart := time.Now()
 	if err := s.cfg.Logger.Log(entry); err != nil {
 		log.Printf("Audit log error: %v", err)
@@ -699,6 +737,7 @@ func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, 
 	s.approval.Broadcast(AuditEvent{
 		Type:      "check",
 		Timestamp: entry.Timestamp,
+		Tenant:    entry.TenantID, // "" for local (already normalized by the stamp above)
 		Transport: transport,
 		Request:   req,
 		Result:    result,
@@ -878,7 +917,7 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing id", http.StatusBadRequest)
 		return
 	}
-	if err := s.approval.Resolve(id, policy.Allow); err != nil {
+	if err := s.approval.Resolve(id, policy.Allow, TenantIDFromContext(r.Context())); err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
@@ -899,7 +938,7 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing id", http.StatusBadRequest)
 		return
 	}
-	if err := s.approval.Resolve(id, policy.Deny); err != nil {
+	if err := s.approval.Resolve(id, policy.Deny, TenantIDFromContext(r.Context())); err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
@@ -928,7 +967,14 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Scope the query to the request's tenant. Legacy /v1/audit has no tenant
+	// in the path → TenantIDFromContext returns LocalTenantID, so it returns
+	// only "local" entries (identical to legacy behavior in a single-tenant
+	// deployment, where every entry is "local"). The tenant-aware
+	// /v1/t/{tenant}/audit route was stamped by withTenant and is now scoped to
+	// that tenant — closing the cross-tenant audit-read leak (plan § 3.3).
 	filter := audit.QueryFilter{
+		TenantID:  TenantIDFromContext(r.Context()),
 		AgentID:   r.URL.Query().Get("agent_id"),
 		SessionID: r.URL.Query().Get("session_id"),
 		Decision:  r.URL.Query().Get("decision"),
@@ -1149,7 +1195,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 // handlePendingList returns pending approval actions.
 func (s *Server) handlePendingList(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(s.approval.List())
+	_ = json.NewEncoder(w).Encode(s.approval.List(TenantIDFromContext(r.Context())))
 }
 
 // handleEventStream is a Server-Sent Events endpoint for live updates.
@@ -1173,7 +1219,7 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	ch := s.approval.Subscribe()
+	ch := s.approval.Subscribe(TenantIDFromContext(r.Context()))
 	defer s.approval.Unsubscribe(ch)
 
 	for {
@@ -1200,7 +1246,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	pa, ok := s.approval.pending[id]
 	s.approval.mu.RUnlock()
 
-	if !ok {
+	// Scope to the request's tenant: an id owned by another tenant is reported
+	// as "not found" so status cannot be used as a cross-tenant existence
+	// oracle (mirrors Lookup/Resolve).
+	if !ok || !tenantsMatch(pa.TenantID, TenantIDFromContext(r.Context())) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -1230,11 +1279,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // mutate queue state through it. The handleCheck approval-id round-
 // trip uses this on the hot path of every retry, so the read-lock
 // keeps it cheap relative to the existing /v1/check evaluation cost.
-func (q *ApprovalQueue) Lookup(id string) (*PendingAction, bool) {
+func (q *ApprovalQueue) Lookup(id, tenantID string) (*PendingAction, bool) {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 	pa, ok := q.pending[id]
-	if !ok {
+	if !ok || !tenantsMatch(pa.TenantID, tenantID) {
+		// Unknown id OR an id owned by another tenant. Both return false so
+		// the caller falls through to fresh policy evaluation — a tenant that
+		// guesses another tenant's approval_id learns nothing and gains no
+		// short-circuit (no cross-tenant oracle).
 		return nil, false
 	}
 	cp := *pa
@@ -1248,7 +1301,7 @@ func (q *ApprovalQueue) Lookup(id string) (*PendingAction, bool) {
 // ErrApprovalQueueFull and the caller is expected to surface 503 +
 // Retry-After — silently dropping the request would leave the agent
 // waiting forever on an ID that does not exist.
-func (q *ApprovalQueue) Add(req policy.ActionRequest, result policy.CheckResult) (*PendingAction, error) {
+func (q *ApprovalQueue) Add(req policy.ActionRequest, result policy.CheckResult, tenantID string) (*PendingAction, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -1274,6 +1327,11 @@ func (q *ApprovalQueue) Add(req policy.ActionRequest, result policy.CheckResult)
 		Request:   req,
 		Result:    result,
 		CreatedAt: time.Now().UTC(),
+	}
+	// Store the local tenant as "" so single-tenant /api/pending payloads stay
+	// byte-identical; tenantsMatch normalizes "" ↔ "local" on every read.
+	if tenantID != policy.LocalTenantID {
+		pa.TenantID = tenantID
 	}
 	q.pending[id] = pa
 
@@ -1306,24 +1364,27 @@ func (q *ApprovalQueue) evictOldestResolvedLocked() bool {
 	return true
 }
 
-func (q *ApprovalQueue) Resolve(id string, decision policy.Decision) error {
+func (q *ApprovalQueue) Resolve(id string, decision policy.Decision, tenantID string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	pa, ok := q.pending[id]
-	if !ok {
+	if !ok || !tenantsMatch(pa.TenantID, tenantID) {
+		// A mismatched tenant is reported as "not found" (not 403) so a tenant
+		// cannot probe for the existence of another tenant's approval IDs.
 		return fmt.Errorf("pending action %s not found", id)
 	}
 
 	pa.Resolved = true
 	pa.Decision = string(decision)
 
-	// Broadcast resolution to SSE clients. Carry the original
-	// transport so dashboard JS keeps the same chip on the
-	// "resolved" event as on the original "check" event.
+	// Broadcast resolution to SSE clients of this tenant. Carry the original
+	// transport so dashboard JS keeps the same chip on the "resolved" event as
+	// on the original "check" event, and the tenant so it routes correctly.
 	q.broadcast(AuditEvent{
 		Type:      "resolved",
 		Timestamp: time.Now().UTC(),
+		Tenant:    pa.TenantID,
 		Transport: transportFromRequest(pa.Request),
 		Request:   pa.Request,
 		Result:    policy.CheckResult{Decision: decision, Reason: "manually " + strings.ToLower(string(decision))},
@@ -1332,13 +1393,16 @@ func (q *ApprovalQueue) Resolve(id string, decision policy.Decision) error {
 	return nil
 }
 
-func (q *ApprovalQueue) List() []*PendingAction {
+// List returns the unresolved pending actions owned by tenantID. The legacy
+// /api/pending route resolves to LocalTenantID, so single-tenant deployments
+// behave exactly as before.
+func (q *ApprovalQueue) List(tenantID string) []*PendingAction {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 
 	var list []*PendingAction
 	for _, pa := range q.pending {
-		if !pa.Resolved {
+		if !pa.Resolved && tenantsMatch(pa.TenantID, tenantID) {
 			list = append(list, pa)
 		}
 	}
@@ -1359,11 +1423,13 @@ func (q *ApprovalQueue) PendingCount() int {
 	return n
 }
 
-func (q *ApprovalQueue) Subscribe() chan AuditEvent {
+// Subscribe registers an SSE watcher that receives only events for tenantID.
+// The legacy /api/stream route subscribes as LocalTenantID.
+func (q *ApprovalQueue) Subscribe(tenantID string) chan AuditEvent {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	ch := make(chan AuditEvent, SSEChannelBufferSize)
-	q.watchers = append(q.watchers, ch)
+	q.watchers = append(q.watchers, sseWatcher{ch: ch, tenant: effectiveTenant(tenantID)})
 	metrics.IncSSESubscribers()
 	return ch
 }
@@ -1372,7 +1438,7 @@ func (q *ApprovalQueue) Unsubscribe(ch chan AuditEvent) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for i, w := range q.watchers {
-		if w == ch {
+		if w.ch == ch {
 			q.watchers = append(q.watchers[:i], q.watchers[i+1:]...)
 			metrics.DecSSESubscribers()
 			break
@@ -1394,9 +1460,15 @@ func (q *ApprovalQueue) broadcast(event AuditEvent) {
 }
 
 func (q *ApprovalQueue) broadcastLocked(event AuditEvent) {
-	for _, ch := range q.watchers {
+	for _, w := range q.watchers {
+		// Route the event only to subscribers of its tenant. The event stores
+		// the local tenant as "" (wire byte-identity); the watcher tenant is
+		// already normalized, so compare under the same normalization.
+		if !tenantsMatch(event.Tenant, w.tenant) {
+			continue
+		}
 		select {
-		case ch <- event:
+		case w.ch <- event:
 		default:
 			// Drop if consumer is slow. The metric lets ops see which
 			// deployments have backed-up SSE subscribers — a persistent

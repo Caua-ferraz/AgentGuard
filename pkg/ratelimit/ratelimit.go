@@ -93,11 +93,13 @@ func (l *Limiter) evictStaleLocked() {
 	}
 }
 
-// scopeFromKey extracts the scope prefix from a limiter key in the
-// "scope:agent_id" format used by the proxy. Unknown formats return
-// "unknown" so the counter stays well-labeled. The scope is the only
-// bounded-cardinality piece of the key, which is why the agent_id side is
-// discarded (millions of agent IDs would blow up Prometheus series).
+// scopeFromKey extracts the scope prefix from a limiter key. The proxy keys
+// buckets as "scope:tenant:agent_id" (tenant added in v0.6); scope is kept
+// first precisely so this extractor stays a single IndexByte with no parser
+// change. Unknown formats return "unknown" so the counter stays well-labeled.
+// The scope is the only bounded-cardinality piece of the key, which is why the
+// tenant and agent_id fields are discarded (millions of tenant/agent IDs would
+// blow up Prometheus series).
 func scopeFromKey(key string) string {
 	if i := strings.IndexByte(key, ':'); i >= 0 {
 		return key[:i]

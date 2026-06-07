@@ -9,13 +9,16 @@ package proxy
 //
 // Both families flow through the same handler chain. The handler reads the
 // effective tenant via TenantIDFromContext, defaulting to LocalTenantID when
-// nothing is set (the legacy path). The tenant value is currently consumed
-// only by Engine.Check; the approval queue, audit log, SSE bus, and rate
-// limiter are still single-tenant.
+// nothing is set (the legacy path). As of v0.6 the tenant value partitions
+// every per-request store: Engine.Check (policy + cost accumulator), the
+// rate limiter (bucket key "scope:tenant:agent"), the ApprovalQueue
+// (Lookup/Resolve/List/SSE), and the audit query (QueryFilter.TenantID).
+// Legacy /v1/... routes resolve to the "local" tenant, so single-tenant
+// deployments are unchanged.
 //
-// TODO(v0.6): shard ApprovalQueue / SSE bus / audit query / rate limiter
-// by tenantID. Today the tenant ID is threaded through the request context
-// but only Engine.Check actually partitions on it.
+// Remaining v0.6 work is durability, not isolation: the Store interface and
+// write-behind syncer (docs/v0.6-ARCHITECTURE-PLAN.md §2.3–2.4) persist this
+// now-tenant-keyed in-memory state to SQLite/Postgres.
 
 import (
 	"context"
@@ -51,6 +54,20 @@ func TenantIDFromContext(ctx context.Context) string {
 	}
 	return policy.LocalTenantID
 }
+
+// effectiveTenant coerces an empty (default) tenant id to LocalTenantID.
+// Pending actions and SSE events store the local tenant as "" so single-tenant
+// wire payloads stay byte-identical; every ownership/routing comparison
+// normalizes through this helper so "" and "local" are treated as the same
+// tenant. tenantsMatch compares two ids under that normalization.
+func effectiveTenant(t string) string {
+	if t == "" {
+		return policy.LocalTenantID
+	}
+	return t
+}
+
+func tenantsMatch(a, b string) bool { return effectiveTenant(a) == effectiveTenant(b) }
 
 // withTenant is the route middleware applied to every /v1/t/{tenant}/...
 // route. It extracts the tenant via r.PathValue("tenant") (Go 1.22+

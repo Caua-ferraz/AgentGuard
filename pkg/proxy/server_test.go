@@ -24,7 +24,7 @@ import (
 // mustAdd is a test helper that calls ApprovalQueue.Add and fails on error.
 func mustAdd(t *testing.T, q *ApprovalQueue, req policy.ActionRequest, result policy.CheckResult) *PendingAction {
 	t.Helper()
-	pa, err := q.Add(req, result)
+	pa, err := q.Add(req, result, "local")
 	if err != nil {
 		t.Fatalf("ApprovalQueue.Add: %v", err)
 	}
@@ -48,9 +48,9 @@ func newTestServer(t *testing.T, opts ...func(*Config)) *Server {
 		Name:    "test-policy",
 		Rules: []policy.RuleSet{
 			{
-				Scope: "shell",
-				Allow: []policy.Rule{{Pattern: "ls *"}, {Pattern: "echo *"}},
-				Deny:  []policy.Rule{{Pattern: "rm -rf *", Message: "Destructive command blocked"}},
+				Scope:           "shell",
+				Allow:           []policy.Rule{{Pattern: "ls *"}, {Pattern: "echo *"}},
+				Deny:            []policy.Rule{{Pattern: "rm -rf *", Message: "Destructive command blocked"}},
 				RequireApproval: []policy.Rule{{Pattern: "sudo *"}},
 			},
 			{
@@ -440,7 +440,7 @@ func TestHandleStatus_Resolved(t *testing.T) {
 		policy.ActionRequest{Scope: "shell", Command: "sudo test"},
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)
-	_ = srv.approval.Resolve(pending.ID, policy.Allow)
+	_ = srv.approval.Resolve(pending.ID, policy.Allow, "local")
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/status/"+pending.ID, nil)
 	w := httptest.NewRecorder()
@@ -1134,7 +1134,7 @@ func TestApprovalQueue_AddAndList(t *testing.T) {
 		t.Error("IDs should be unique")
 	}
 
-	list := q.List()
+	list := q.List("local")
 	if len(list) != 2 {
 		t.Errorf("expected 2 pending, got %d", len(list))
 	}
@@ -1148,12 +1148,12 @@ func TestApprovalQueue_ResolveRemovesFromList(t *testing.T) {
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)
 
-	if err := q.Resolve(pa.ID, policy.Allow); err != nil {
+	if err := q.Resolve(pa.ID, policy.Allow, "local"); err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 
 	// Resolved actions should not appear in List()
-	list := q.List()
+	list := q.List("local")
 	if len(list) != 0 {
 		t.Errorf("expected 0 pending after resolve, got %d", len(list))
 	}
@@ -1194,8 +1194,8 @@ func TestApprovalQueue_SubscribeTracksGauge(t *testing.T) {
 	}
 
 	before := readGauge()
-	a := q.Subscribe()
-	b := q.Subscribe()
+	a := q.Subscribe("local")
+	b := q.Subscribe("local")
 	if got := readGauge(); got != before+2 {
 		t.Errorf("gauge after 2 subs = %d, want %d", got, before+2)
 	}
@@ -1220,7 +1220,7 @@ func TestApprovalQueue_BroadcastDropsIncrementCounter(t *testing.T) {
 		maxSize: 10,
 	}
 
-	ch := q.Subscribe()
+	ch := q.Subscribe("local")
 	defer q.Unsubscribe(ch)
 
 	// Fill the buffer without draining. One more broadcast than
@@ -1265,10 +1265,10 @@ func TestApprovalQueue_EvictsOldestResolvedOnly(t *testing.T) {
 
 	// Resolve both `older` and `middle`. The next Add must evict `older` —
 	// not `middle`, even though both are resolved.
-	if err := q.Resolve(older.ID, policy.Allow); err != nil {
+	if err := q.Resolve(older.ID, policy.Allow, "local"); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.Resolve(middle.ID, policy.Allow); err != nil {
+	if err := q.Resolve(middle.ID, policy.Allow, "local"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1314,6 +1314,7 @@ func TestApprovalQueue_FullRejectsWhenAllUnresolved(t *testing.T) {
 	_, err := q.Add(
 		policy.ActionRequest{Scope: "shell", Command: "sudo c"},
 		policy.CheckResult{Decision: policy.RequireApproval},
+		"local",
 	)
 	if err == nil {
 		t.Fatal("Add at full capacity with no resolved entries must return an error")
@@ -1377,7 +1378,7 @@ func TestHandleCheck_503OnApprovalQueueFull(t *testing.T) {
 func TestApprovalQueue_ResolveNotFound(t *testing.T) {
 	q := &ApprovalQueue{pending: make(map[string]*PendingAction)}
 
-	err := q.Resolve("ap_nonexistent", policy.Allow)
+	err := q.Resolve("ap_nonexistent", policy.Allow, "local")
 	if err == nil {
 		t.Error("expected error for non-existent ID")
 	}
@@ -1386,7 +1387,7 @@ func TestApprovalQueue_ResolveNotFound(t *testing.T) {
 func TestApprovalQueue_SSEBroadcast(t *testing.T) {
 	q := &ApprovalQueue{pending: make(map[string]*PendingAction)}
 
-	ch := q.Subscribe()
+	ch := q.Subscribe("local")
 	defer q.Unsubscribe(ch)
 
 	// Add should trigger a broadcast via Resolve
@@ -1394,7 +1395,7 @@ func TestApprovalQueue_SSEBroadcast(t *testing.T) {
 		policy.ActionRequest{Scope: "shell", Command: "sudo test"},
 		policy.CheckResult{Decision: policy.RequireApproval},
 	)
-	_ = q.Resolve(pa.ID, policy.Allow)
+	_ = q.Resolve(pa.ID, policy.Allow, "local")
 
 	select {
 	case event := <-ch:
@@ -1947,7 +1948,7 @@ func TestHandleCheck_HonorsTransportFromMeta(t *testing.T) {
 func TestSSEEvent_IncludesTransport(t *testing.T) {
 	srv := newTestServer(t)
 
-	ch := srv.approval.Subscribe()
+	ch := srv.approval.Subscribe("local")
 	defer srv.approval.Unsubscribe(ch)
 
 	body := `{
@@ -1978,7 +1979,7 @@ func TestSSEEvent_ResolveCarriesTransport(t *testing.T) {
 
 	// 1. Submit a check that triggers REQUIRE_APPROVAL with
 	//    transport=mcp_gateway. Drain the "check" event.
-	ch := srv.approval.Subscribe()
+	ch := srv.approval.Subscribe("local")
 	defer srv.approval.Unsubscribe(ch)
 
 	body := `{
@@ -2008,7 +2009,7 @@ func TestSSEEvent_ResolveCarriesTransport(t *testing.T) {
 
 	// 2. Resolve the approval. The broadcast should preserve
 	//    transport=mcp_gateway.
-	if err := srv.approval.Resolve(result.ApprovalID, policy.Allow); err != nil {
+	if err := srv.approval.Resolve(result.ApprovalID, policy.Allow, "local"); err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 
@@ -2206,7 +2207,7 @@ func TestHandleCheck_ApprovalIDResolved_AllowShortCircuits(t *testing.T) {
 	queueSizeBefore := len(srv.approval.pending)
 
 	// Human approves on the dashboard.
-	if err := srv.approval.Resolve(approvalID, policy.Allow); err != nil {
+	if err := srv.approval.Resolve(approvalID, policy.Allow, "local"); err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 
@@ -2245,7 +2246,7 @@ func TestHandleCheck_ApprovalIDResolved_DenyShortCircuits(t *testing.T) {
 	approvalID := seedApproval(t, srv)
 	queueSizeBefore := len(srv.approval.pending)
 
-	if err := srv.approval.Resolve(approvalID, policy.Deny); err != nil {
+	if err := srv.approval.Resolve(approvalID, policy.Deny, "local"); err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 
@@ -2363,12 +2364,12 @@ func TestApprovalQueue_LookupIsReadOnly(t *testing.T) {
 		maxSize: MaxPendingApprovals,
 	}
 	pa, err := q.Add(policy.ActionRequest{Scope: "shell", Command: "sudo true"},
-		policy.CheckResult{Decision: policy.RequireApproval, Reason: "test"})
+		policy.CheckResult{Decision: policy.RequireApproval, Reason: "test"}, "local")
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
-	got, ok := q.Lookup(pa.ID)
+	got, ok := q.Lookup(pa.ID, "local")
 	if !ok {
 		t.Fatalf("Lookup(%s) = false; want true", pa.ID)
 	}
@@ -2395,7 +2396,7 @@ func TestApprovalQueue_LookupIsReadOnly(t *testing.T) {
 		t.Errorf("internal entry Command = %q; want %q", internal.Request.Command, "sudo true")
 	}
 
-	if _, ok := q.Lookup("ap_does_not_exist"); ok {
+	if _, ok := q.Lookup("ap_does_not_exist", "local"); ok {
 		t.Error("Lookup of unknown id returned ok=true")
 	}
 }
@@ -2430,7 +2431,7 @@ func TestHandleCheck_ApprovalIDResolved_PreservesTransport(t *testing.T) {
 	approvalID := first.ApprovalID
 
 	// 2. Operator approves.
-	if err := srv.approval.Resolve(approvalID, policy.Allow); err != nil {
+	if err := srv.approval.Resolve(approvalID, policy.Allow, "local"); err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 
@@ -2544,7 +2545,7 @@ func seedReplayApproval(t *testing.T, srv *Server, body string) string {
 	if result.ApprovalID == "" {
 		t.Fatal("seed: empty approval_id")
 	}
-	if err := srv.approval.Resolve(result.ApprovalID, policy.Allow); err != nil {
+	if err := srv.approval.Resolve(result.ApprovalID, policy.Allow, "local"); err != nil {
 		t.Fatalf("seed: Resolve: %v", err)
 	}
 	return result.ApprovalID

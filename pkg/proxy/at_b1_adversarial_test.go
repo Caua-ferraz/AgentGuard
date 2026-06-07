@@ -8,8 +8,10 @@ package proxy
 // Path, Domain, URL, Action) and the legitimate-retry sanity. AT adds
 // six adversarial scenarios that an attacker would naturally probe:
 //
-//   1. Tenant ID — does cross-tenant replay short-circuit? (ActionRequest
-//      has no TenantID field; ApprovalQueue.Lookup is global. v0.6 work.)
+//   1. Tenant ID — does cross-tenant replay short-circuit? (As of v0.6,
+//      ApprovalQueue.Lookup/Resolve are tenant-scoped: the tenant travels in
+//      the /v1/t/{tenant}/... path, and a foreign tenant's id resolves to
+//      "not found" — see TestApprovalQueueTenantIsolation.)
 //   2. Case sensitivity — agent_id "AGENT_A" vs "agent_a"; should NOT match.
 //   3. Trailing whitespace — command "ls -la " vs "ls -la"; should NOT match.
 //   4. Meta vs top-level approval_id — only top-level honored by proxy
@@ -282,7 +284,7 @@ func TestAT_B1_Adversarial_ResolvedDeniedReplay(t *testing.T) {
 		t.Fatalf("seed: expected REQUIRE_APPROVAL, got %s", seedResult.Decision)
 	}
 	approvalID := seedResult.ApprovalID
-	if err := srv.approval.Resolve(approvalID, policy.Deny); err != nil {
+	if err := srv.approval.Resolve(approvalID, policy.Deny, "local"); err != nil {
 		t.Fatalf("Resolve DENY: %v", err)
 	}
 
@@ -344,7 +346,7 @@ func TestAT_B1_Adversarial_PendingReplay(t *testing.T) {
 	approvalID := seedResult.ApprovalID
 
 	// Sanity: the queue entry is unresolved.
-	pa, ok := srv.approval.Lookup(approvalID)
+	pa, ok := srv.approval.Lookup(approvalID, "local")
 	if !ok {
 		t.Fatalf("seed: approval %q not in queue", approvalID)
 	}
@@ -387,7 +389,7 @@ func TestAT_B1_Adversarial_PendingReplay(t *testing.T) {
 	// And the original pending entry must STILL be in the queue,
 	// unmodified (the mismatched fall-through must NOT resolve, evict,
 	// or otherwise mutate the pending entry).
-	paAfter, ok := srv.approval.Lookup(approvalID)
+	paAfter, ok := srv.approval.Lookup(approvalID, "local")
 	if !ok {
 		t.Errorf("after mismatched retry: original pending approval %q vanished from queue", approvalID)
 	} else if paAfter.Resolved {

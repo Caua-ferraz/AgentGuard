@@ -66,7 +66,7 @@ func TestParseDollar(t *testing.T) {
 
 		// Invalid values must error (audit fix — was silently returning 0)
 		{"$abc", 0, true},
-		{"$", 0, false},          // just a dollar sign with no number = empty string = 0
+		{"$", 0, false}, // just a dollar sign with no number = empty string = 0
 		{"not_a_number", 0, true},
 		{"$1.2.3", 0, true},
 	}
@@ -531,10 +531,11 @@ func TestSweepSessionCosts_EvictsStale(t *testing.T) {
 	}
 
 	// Backdate "old" so it is older than the TTL window.
+	oldKey := sessionCostKey{tenant: LocalTenantID, session: "old"}
 	engine.mu.Lock()
-	oldEntry := engine.sessionCosts["old"]
+	oldEntry := engine.sessionCosts[oldKey]
 	oldEntry.lastUpdated = time.Now().Add(-2 * time.Hour)
-	engine.sessionCosts["old"] = oldEntry
+	engine.sessionCosts[oldKey] = oldEntry
 	engine.mu.Unlock()
 
 	n := engine.SweepSessionCosts(time.Hour)
@@ -570,10 +571,11 @@ func TestSweepSessionCosts_ZeroOrNegativeIsNoop(t *testing.T) {
 	engine.Check(ActionRequest{Scope: "cost", EstCost: 1.00, SessionID: "s"}, "local")
 
 	// Backdate so the entry would look stale under any positive TTL.
+	sKey := sessionCostKey{tenant: LocalTenantID, session: "s"}
 	engine.mu.Lock()
-	entry := engine.sessionCosts["s"]
+	entry := engine.sessionCosts[sKey]
 	entry.lastUpdated = time.Now().Add(-24 * time.Hour)
-	engine.sessionCosts["s"] = entry
+	engine.sessionCosts[sKey] = entry
 	engine.mu.Unlock()
 
 	if n := engine.SweepSessionCosts(0); n != 0 {

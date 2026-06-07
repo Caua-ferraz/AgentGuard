@@ -51,13 +51,21 @@ type metaEnvelope struct {
 // and does NOT bump the audit schema_version (still 2). See
 // docs/PROXY_ARCHITECTURE.md § "Audit transport tag".
 type Entry struct {
-	Timestamp  time.Time           `json:"timestamp"`
-	SessionID  string              `json:"session_id"`
-	AgentID    string              `json:"agent_id"`
+	Timestamp time.Time `json:"timestamp"`
+	// TenantID is the tenant the action was evaluated against. Empty on the
+	// wire for the default "local" tenant (and for entries written by binaries
+	// predating multi-tenancy) — readers MUST resolve it via EffectiveTenant().
+	// The `omitempty` tag keeps single-tenant ("local") output byte-identical
+	// to pre-v0.6 audit files, so byte-identity fixtures stay green; the field
+	// is additive and does NOT bump the audit schema_version (still 2), exactly
+	// like Transport. See docs/v0.6-ARCHITECTURE-PLAN.md § 3.3–3.4.
+	TenantID   string               `json:"tenant_id,omitempty"`
+	SessionID  string               `json:"session_id"`
+	AgentID    string               `json:"agent_id"`
 	Request    policy.ActionRequest `json:"request"`
-	Result     policy.CheckResult  `json:"result"`
-	DurationMs int64               `json:"duration_ms"`
-	Transport  string              `json:"transport,omitempty"`
+	Result     policy.CheckResult   `json:"result"`
+	DurationMs int64                `json:"duration_ms"`
+	Transport  string               `json:"transport,omitempty"`
 }
 
 // TransportSDK is the canonical transport string for SDK callers
@@ -83,6 +91,17 @@ func (e Entry) EffectiveTransport() string {
 	return e.Transport
 }
 
+// EffectiveTenant returns e.TenantID if set, otherwise the default
+// "local" tenant. Use when reading audit entries that may have been
+// written by a single-tenant binary (no tenant_id on disk) or for the
+// default tenant (which is stored as "" to preserve byte-identity).
+func (e Entry) EffectiveTenant() string {
+	if e.TenantID == "" {
+		return policy.LocalTenantID
+	}
+	return e.TenantID
+}
+
 // Logger is the interface for audit logging.
 type Logger interface {
 	Log(entry Entry) error
@@ -96,6 +115,11 @@ type Logger interface {
 // Offset matching records are discarded, then up to Limit records are
 // collected. A Limit of 0 means "no cap".
 type QueryFilter struct {
+	// TenantID scopes the query to one tenant. Compared against
+	// Entry.EffectiveTenant so entries stored with an empty tenant_id (the
+	// default "local" tenant, and pre-v0.6 entries) match the value "local".
+	// Empty disables the filter (returns all tenants — operator/global view).
+	TenantID  string     `json:"tenant_id,omitempty"`
 	AgentID   string     `json:"agent_id,omitempty"`
 	SessionID string     `json:"session_id,omitempty"`
 	Decision  string     `json:"decision,omitempty"`
@@ -307,6 +331,9 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 }
 
 func matchesFilter(entry Entry, filter QueryFilter) bool {
+	if filter.TenantID != "" && entry.EffectiveTenant() != filter.TenantID {
+		return false
+	}
 	if filter.AgentID != "" && entry.AgentID != filter.AgentID {
 		return false
 	}

@@ -165,9 +165,9 @@ type RateLimitCfg struct {
 
 // CostLimits defines cost guardrails for a scope.
 type CostLimits struct {
-	MaxPerAction    string `yaml:"max_per_action,omitempty"`
-	MaxPerSession   string `yaml:"max_per_session,omitempty"`
-	AlertThreshold  string `yaml:"alert_threshold,omitempty"`
+	MaxPerAction   string `yaml:"max_per_action,omitempty"`
+	MaxPerSession  string `yaml:"max_per_session,omitempty"`
+	AlertThreshold string `yaml:"alert_threshold,omitempty"`
 }
 
 // AgentCfg defines per-agent policy overrides.
@@ -677,6 +677,15 @@ type sessionCostEntry struct {
 	lastUpdated time.Time
 }
 
+// sessionCostKey partitions the cost accumulator by (tenant, session) so two
+// tenants that happen to reuse the same session_id never share a budget
+// (v0.6 multi-tenancy). A struct key is collision-free regardless of what
+// characters tenant/session IDs contain — unlike a concatenated string key.
+type sessionCostKey struct {
+	tenant  string
+	session string
+}
+
 // Engine evaluates actions against a policy. The policy itself is owned
 // by a PolicyProvider (file-backed, static, or a future database-backed
 // impl), not by the Engine. Engine caches the latest *Policy for the local
@@ -694,7 +703,7 @@ type Engine struct {
 	policy       *Policy // cached snapshot for LocalTenantID; refreshed by watchStop
 	watchStop    func()
 	history      HistoryQuerier
-	sessionCosts map[string]sessionCostEntry // session_id -> entry
+	sessionCosts map[sessionCostKey]sessionCostEntry // (tenant, session_id) -> entry
 
 	// lastPolicyLoadAtNs records the unix-nanosecond timestamp of the most
 	// recent successful policy load (initial Get + each Watch callback fire).
@@ -726,7 +735,7 @@ func NewEngine(provider PolicyProvider) (*Engine, error) {
 	e := &Engine{
 		provider:     provider,
 		policy:       pol,
-		sessionCosts: make(map[string]sessionCostEntry),
+		sessionCosts: make(map[sessionCostKey]sessionCostEntry),
 	}
 	// Stamp the load timestamp before Watch wires up so a probe that
 	// races with NewEngine never sees the zero value when a policy is in
@@ -816,46 +825,61 @@ func (e *Engine) SetHistoryQuerier(h HistoryQuerier) {
 	e.history = h
 }
 
-// RecordCost adds the cost of a completed action to the session accumulator.
-// Called by the proxy after a check returns ALLOW for a cost-scoped request.
+// RecordCost adds the cost of a completed action to the local tenant's
+// session accumulator. Called by the proxy after a check returns ALLOW for a
+// cost-scoped request.
 //
 // Note: callers should prefer CheckAndReserve in Check() when possible, which
 // updates the accumulator atomically with the Allow decision. RecordCost is
 // retained for backfill or out-of-band accounting.
+//
+// Backward-compat: this single-tenant signature is preserved for embedders;
+// it resolves to LocalTenantID. Tenant-aware out-of-band accounting uses
+// recordCost directly (the v0.6 Store syncer will expose this when needed).
 func (e *Engine) RecordCost(sessionID string, cost float64) {
+	e.recordCost(LocalTenantID, sessionID, cost)
+}
+
+// recordCost is the tenant-aware accumulator increment shared by RecordCost
+// (local) and any future tenant-scoped caller.
+func (e *Engine) recordCost(tenantID, sessionID string, cost float64) {
 	if sessionID == "" || cost <= 0 {
 		return
 	}
+	key := sessionCostKey{tenant: tenantID, session: sessionID}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	entry := e.sessionCosts[sessionID]
+	entry := e.sessionCosts[key]
 	entry.cost += cost
 	entry.lastUpdated = time.Now()
-	e.sessionCosts[sessionID] = entry
+	e.sessionCosts[key] = entry
 }
 
-// RefundCost subtracts from the session accumulator. Used if a reserved cost
-// is rolled back (e.g. a downstream action failed after the policy allowed it).
+// RefundCost subtracts from the local tenant's session accumulator. Used if a
+// reserved cost is rolled back (e.g. a downstream action failed after the
+// policy allowed it). Preserved single-tenant signature → LocalTenantID.
 func (e *Engine) RefundCost(sessionID string, cost float64) {
 	if sessionID == "" || cost <= 0 {
 		return
 	}
+	key := sessionCostKey{tenant: LocalTenantID, session: sessionID}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	entry := e.sessionCosts[sessionID]
+	entry := e.sessionCosts[key]
 	entry.cost -= cost
 	if entry.cost < 0 {
 		entry.cost = 0
 	}
 	entry.lastUpdated = time.Now()
-	e.sessionCosts[sessionID] = entry
+	e.sessionCosts[key] = entry
 }
 
-// SessionCost returns the accumulated cost for a session (for testing).
+// SessionCost returns the accumulated cost for a session under the local
+// tenant (for testing). Preserved single-tenant signature → LocalTenantID.
 func (e *Engine) SessionCost(sessionID string) float64 {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.sessionCosts[sessionID].cost
+	return e.sessionCosts[sessionCostKey{tenant: LocalTenantID, session: sessionID}].cost
 }
 
 // SweepSessionCosts removes session-cost entries whose last update was more
@@ -872,9 +896,9 @@ func (e *Engine) SweepSessionCosts(maxAge time.Duration) int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	n := 0
-	for id, entry := range e.sessionCosts {
+	for key, entry := range e.sessionCosts {
 		if entry.lastUpdated.Before(cutoff) {
-			delete(e.sessionCosts, id)
+			delete(e.sessionCosts, key)
 			n++
 		}
 	}
@@ -1057,7 +1081,7 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 
 		// Cost scope: evaluate limits instead of pattern rules
 		if rs.Scope == "cost" && rs.Limits != nil {
-			return e.checkCost(rs, req)
+			return e.checkCost(rs, req, tenantID)
 		}
 
 		// Data scope: gates form inputs, browser data exfiltration, and
@@ -1256,10 +1280,14 @@ func mergeRules(base, over []Rule) []Rule {
 // checkCost evaluates cost limits for a request. MUST be called with e.mu
 // held for write, because an Allow decision reserves the cost atomically
 // against the session accumulator.
-func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
+func (e *Engine) checkCost(rs RuleSet, req ActionRequest, tenantID string) CheckResult {
 	if rs.Limits == nil {
 		return CheckResult{Decision: Allow, Reason: "No cost limits configured"}
 	}
+	// Partition the accumulator by (tenant, session) so two tenants reusing
+	// the same session_id keep independent budgets. tenantID is already
+	// normalized to LocalTenantID by Check before this runs.
+	costKey := sessionCostKey{tenant: tenantID, session: req.SessionID}
 
 	// Reject negative cost values — they could bypass limits
 	if req.EstCost < 0 {
@@ -1303,7 +1331,7 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 		}
 	}
 	if req.SessionID != "" && maxPerSession > 0 {
-		cumulative := e.sessionCosts[req.SessionID].cost
+		cumulative := e.sessionCosts[costKey].cost
 		if cumulative+req.EstCost > maxPerSession {
 			return CheckResult{
 				Decision: Deny,
@@ -1333,10 +1361,10 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 
 	// Allow — reserve the cost against the session accumulator atomically.
 	if req.SessionID != "" && req.EstCost > 0 {
-		entry := e.sessionCosts[req.SessionID]
+		entry := e.sessionCosts[costKey]
 		entry.cost += req.EstCost
 		entry.lastUpdated = time.Now()
-		e.sessionCosts[req.SessionID] = entry
+		e.sessionCosts[costKey] = entry
 	}
 
 	return CheckResult{
