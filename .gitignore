@@ -52,4 +52,8 @@ build/
 # Node SDK
 node_modules/
 package-lock.json
+
+# Misc
 CLAUDE.md
+TODO.md
+.claude/
