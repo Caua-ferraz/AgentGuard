@@ -155,18 +155,25 @@ policy_suite() {
 }
 
 python_suite() {
-  if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
+  local PY=""
+
+  if command -v python3 >/dev/null 2>&1 && python3 --version >/dev/null 2>&1; then
+    PY=python3
+  elif command -v python >/dev/null 2>&1 && python --version >/dev/null 2>&1; then
+    PY=python
+  else
     echo "python not installed" >&2
     return 77
   fi
+
   set -e
-  # The E2E test spawns the real binary, so build it first.
   ensure_agentguard_built
-  local PY=python3
-  command -v python3 >/dev/null 2>&1 || PY=python
-  ( cd plugins/python && \
-    "$PY" -m pip install --quiet -e ".[dev]" && \
-    "$PY" -m pytest -v --cov=agentguard )
+
+  (
+    cd plugins/python &&
+    "$PY" -m pip install --quiet -e ".[dev]" &&
+    "$PY" -m pytest -v --cov=agentguard
+  )
 }
 
 ts_suite() {
