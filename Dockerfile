@@ -1,5 +1,6 @@
 # Build stage
-FROM golang:1.25-alpine AS builder
+# 1.25.10 carries GO-2026-5037
+FROM golang:1.25.11-alpine AS builder
 
 WORKDIR /app
 COPY go.mod go.sum* ./

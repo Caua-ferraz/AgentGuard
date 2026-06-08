@@ -349,7 +349,7 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		if err != nil {
 			log.Fatalf("Failed to open store: %v", err)
 		}
-		defer st.Close()
+		defer func() { _ = st.Close() }()
 	} else if persistCfg.AuditBackend == "store" {
 		log.Fatalf("--audit-backend=store requires --persist (the store is disabled)")
 	}
@@ -862,7 +862,7 @@ func runTenant(args []string) {
 		fmt.Fprintf(os.Stderr, "tenant: cannot open store: %v\n", err)
 		os.Exit(1)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	ctx := context.Background()
 
 	switch sub {

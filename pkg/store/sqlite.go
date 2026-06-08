@@ -183,7 +183,7 @@ func (s *SQLiteStore) UpsertApprovals(ctx context.Context, recs []ApprovalRecord
 		if err != nil {
 			return err
 		}
-		defer stmt.Close()
+		defer func() { _ = stmt.Close() }()
 		for _, r := range recs {
 			reqJSON, err := json.Marshal(r.Request)
 			if err != nil {
@@ -268,7 +268,7 @@ func (s *SQLiteStore) UpsertBuckets(ctx context.Context, buckets []BucketState) 
 		if err != nil {
 			return err
 		}
-		defer stmt.Close()
+		defer func() { _ = stmt.Close() }()
 		for _, b := range buckets {
 			if _, err := stmt.ExecContext(ctx,
 				b.TenantID, b.Key, b.Tokens, b.Max, int64(b.Window), fmtTime(b.LastRefill),
@@ -334,7 +334,7 @@ func (s *SQLiteStore) UpsertCosts(ctx context.Context, costs []CostState) error 
 		if err != nil {
 			return err
 		}
-		defer stmt.Close()
+		defer func() { _ = stmt.Close() }()
 		for _, c := range costs {
 			if _, err := stmt.ExecContext(ctx,
 				c.TenantID, c.SessionID, c.Cost, fmtTime(c.LastUpdated),
@@ -392,7 +392,7 @@ func (s *SQLiteStore) AppendAudit(ctx context.Context, entries []audit.Entry) er
 		if err != nil {
 			return err
 		}
-		defer stmt.Close()
+		defer func() { _ = stmt.Close() }()
 		for _, e := range entries {
 			ts := e.Timestamp
 			if ts.IsZero() {

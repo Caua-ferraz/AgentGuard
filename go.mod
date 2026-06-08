@@ -2,6 +2,9 @@ module github.com/Caua-ferraz/AgentGuard
 
 go 1.25.0
 
+// Pin the build toolchain to the patched stdlib release. go1.25.10 carries
+toolchain go1.25.11
+
 require (
 	github.com/fsnotify/fsnotify v1.10.1
 	gopkg.in/yaml.v3 v3.0.1
