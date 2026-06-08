@@ -21,8 +21,10 @@ import (
 	"github.com/Caua-ferraz/AgentGuard/pkg/migrate"
 	_ "github.com/Caua-ferraz/AgentGuard/pkg/migrate/v040_to_v041" // register the v0.4.0 → v0.4.1 audit schema migration
 	"github.com/Caua-ferraz/AgentGuard/pkg/notify"
+	"github.com/Caua-ferraz/AgentGuard/pkg/persist"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 	"github.com/Caua-ferraz/AgentGuard/pkg/proxy"
+	"github.com/Caua-ferraz/AgentGuard/pkg/store"
 )
 
 var (
@@ -74,6 +76,15 @@ func main() {
 	// will not lower behind a flag.
 	debugPprof := serveCmd.Bool("debug-pprof", false, "Expose Go pprof handlers on a separate localhost-only listener (--debug-pprof-port). Off by default; enable for performance investigations only.")
 	debugPprofPort := serveCmd.Int("debug-pprof-port", 6060, "Port for the localhost-only pprof listener. Ignored unless --debug-pprof is set.")
+	// Durable persistence (v0.6). Zero-config by default: runtime state
+	// (approvals, rate-limit buckets, cost accumulators) is written behind to a
+	// SQLite database so it survives restarts. The store is NEVER on the
+	// /v1/check hot path — a background syncer flushes snapshots on a ≥1s tick
+	// and hydrates the in-memory maps on boot. See docs/v0.6-ARCHITECTURE-PLAN.md.
+	persistEnabled := serveCmd.Bool("persist", true, "Persist runtime state (approvals, rate-limit buckets, cost accumulators) to a durable store so it survives restarts. Set false for pure in-memory (pre-v0.6 behavior).")
+	storeDSN := serveCmd.String("store-dsn", "", "Durable store DSN. Empty => zero-config SQLite at <data-dir>/agentguard.db; a sqlite file path is also accepted. (Postgres is future work.)")
+	dataDir := serveCmd.String("data-dir", ".", "Directory for the zero-config SQLite database (agentguard.db). Ignored when --store-dsn is set or --persist=false.")
+	auditBackend := serveCmd.String("audit-backend", "file", `Audit storage: "file" (JSONL, default) or "store" (the SQLite store — unifies state+audit in one DB with indexed queries). "store" requires --persist.`)
 
 	validateCmd := flag.NewFlagSet("validate", flag.ExitOnError)
 	validateFile := validateCmd.String("policy", "configs/default.yaml", "Policy file to validate")
@@ -136,6 +147,11 @@ func main() {
 		}, pprofOpts{
 			Enabled: *debugPprof,
 			Port:    *debugPprofPort,
+		}, persistOpts{
+			Enabled:      *persistEnabled,
+			DSN:          *storeDSN,
+			DataDir:      *dataDir,
+			AuditBackend: *auditBackend,
 		})
 
 	case "validate":
@@ -179,6 +195,9 @@ func main() {
 		// the function is unit-testable from check_cmd_test.go.
 		os.Exit(runCheck(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
 
+	case "tenant":
+		runTenant(os.Args[2:])
+
 	case "version":
 		fmt.Printf("agentguard %s (%s)\n", version, commit)
 
@@ -202,6 +221,7 @@ Commands:
   deny        Deny a pending action by ID
   status      Show connected agents and pending actions
   audit       Query the audit log
+  tenant      Manage per-tenant policies in the store (put|list|rm)
   migrate     Run on-disk schema migrations (see docs/FILE_FORMATS.md)
   version     Print version information
 
@@ -244,7 +264,38 @@ type pprofOpts struct {
 	Port    int
 }
 
-func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts) {
+// persistOpts mirrors the v0.6 persistence CLI flags. Held in a struct so
+// runServe's signature stays bounded.
+type persistOpts struct {
+	Enabled      bool
+	DSN          string
+	DataDir      string
+	AuditBackend string // "file" | "store"
+}
+
+// openStore opens the durable store described by cfg. An empty DSN selects the
+// zero-config embedded SQLite database at <data-dir>/agentguard.db; a non-empty
+// DSN is treated as a SQLite path (Postgres is rejected for now). Returns the
+// concrete *SQLiteStore (which satisfies both store.Store for the syncer/audit
+// AND policy.PolicySource for the multi-tenant provider) plus the resolved
+// path for logging.
+func openStore(cfg persistOpts) (*store.SQLiteStore, string, error) {
+	if strings.HasPrefix(cfg.DSN, "postgres") || strings.HasPrefix(cfg.DSN, "postgresql") {
+		return nil, "", fmt.Errorf("--store-dsn %q: external Postgres DSNs are not supported yet; leave empty for zero-config SQLite", cfg.DSN)
+	}
+	path := cfg.DSN
+	if path == "" {
+		dir := cfg.DataDir
+		if dir == "" {
+			dir = "."
+		}
+		path = filepath.Join(dir, "agentguard.db")
+	}
+	s, err := store.NewSQLiteStore(path)
+	return s, path, err
+}
+
+func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts, persistCfg persistOpts) {
 	if baseURL == "" {
 		baseURL = fmt.Sprintf("http://localhost:%d", port)
 	}
@@ -285,80 +336,138 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 	}
 	log.Printf("Loaded policy: %s (%d rules across %d scopes)", pol.Name, pol.RuleCount(), pol.ScopeCount())
 
-	// Run startup migrations BEFORE opening the audit logger. An in-place
-	// rewrite (e.g. v040_to_v041 prepending a _meta header) has to happen
-	// before we start appending new entries — otherwise the next write
-	// would land in a file the migration is about to rename.
-	migEnv := migrate.Env{
-		AuditLogPath:   auditPath,
-		CheckpointPath: auditPath + audit.CheckpointSuffix,
-	}
-	if err := migrate.RunStartup(context.Background(), migEnv); err != nil {
-		log.Fatalf("Startup migration failed: %v", err)
+	// Open the durable store (v0.6). Zero-config by default: a SQLite database
+	// at <data-dir>/agentguard.db. Deferred Close is registered HERE (early) so
+	// — via Go's LIFO defer order — the store is the LAST thing torn down, after
+	// the syncer's final flush and the buffered audit logger's drain (both
+	// registered later) have written through it.
+	var st *store.SQLiteStore
+	var storePath string
+	storeAudit := persistCfg.Enabled && persistCfg.AuditBackend == "store"
+	if persistCfg.Enabled {
+		st, storePath, err = openStore(persistCfg)
+		if err != nil {
+			log.Fatalf("Failed to open store: %v", err)
+		}
+		defer st.Close()
+	} else if persistCfg.AuditBackend == "store" {
+		log.Fatalf("--audit-backend=store requires --persist (the store is disabled)")
 	}
 
-	// Initialize audit logger.
-	//
-	// Rotation is on by default (100 MiB live cap, 30-day retention,
-	// 5 archives, gzip). Setting --audit-max-size-mb=0 disables rotation
-	// entirely (unbounded growth).
-	rotCfg := audit.RotationConfig{
-		MaxFiles: rotOpts.MaxBackups,
-		Compress: rotOpts.Compress,
+	// Contract rule #1 (Latency is God): a store-backed audit logger writes to
+	// SQLite, which MUST NOT happen synchronously on the /v1/check path. Force
+	// async buffering for the store backend even if the operator passed
+	// --audit-buffered=false (which is fine for the cheap file append, but a DB
+	// write per request would blow the <3ms budget).
+	if storeAudit && !bufOpts.Enabled {
+		log.Printf("WARNING: --audit-backend=store requires async buffering to keep DB writes off the /v1/check hot path; forcing --audit-buffered=true.")
+		bufOpts.Enabled = true
 	}
-	if rotOpts.MaxSizeMB > 0 {
-		rotCfg.MaxSize = int64(rotOpts.MaxSizeMB) * 1024 * 1024
-	}
-	if rotOpts.MaxAgeDays > 0 {
-		rotCfg.MaxAge = time.Duration(rotOpts.MaxAgeDays) * 24 * time.Hour
-	}
-	var fileLogger *audit.FileLogger
-	if rotCfg.MaxSize > 0 || rotCfg.MaxFiles > 0 || rotCfg.MaxAge > 0 {
-		fileLogger, err = audit.NewFileLoggerWithRotation(auditPath, rotCfg)
-	} else {
-		fileLogger, err = audit.NewFileLogger(auditPath)
-	}
-	if err != nil {
-		log.Fatalf("Failed to initialize audit log: %v", err)
-	}
-	// Optionally wrap the FileLogger in a BufferedAsyncLogger so the
-	// /v1/check hot path does not wait on the audit mutex. The wrapper
-	// owns its own goroutines (workers + recovery loop) and a bounded
-	// channel; on saturation, entries spill to a JSON-Lines overflow file
-	// (mode 0600) and a recovery goroutine drains them back into the queue
-	// when capacity returns.
-	//
-	// The wrapper does NOT close the underlying FileLogger — the deferred
-	// FileLogger.Close below owns that lifecycle. We defer the wrapper's
-	// Close FIRST so it fires LAST during teardown, and FileLogger.Close
-	// runs on a fully drained underlying.
-	var auditLogger audit.Logger = fileLogger
-	if bufOpts.Enabled {
-		overflowPath := bufOpts.OverflowPath
-		if overflowPath == "" {
-			overflowPath = auditPath + ".overflow.jsonl"
+
+	// Audit logger selection. The default "file" backend is the JSONL
+	// FileLogger (rotation + startup migration); "store" routes the audit
+	// trail into the SQLite store's indexed audit_entries table (unified
+	// single-file deployment, §2.4). Either way the BufferedAsyncLogger keeps
+	// the /v1/check hot path off the audit write — it only enqueues.
+	var auditLogger audit.Logger
+	if storeAudit {
+		base := store.NewAuditLogger(st)
+		auditLogger = base
+		if bufOpts.Enabled {
+			overflowPath := bufOpts.OverflowPath
+			if overflowPath == "" {
+				overflowPath = auditPath + ".overflow.jsonl"
+			}
+			bufLogger, err := audit.NewBufferedAsyncLogger(base, audit.BufferedAsyncOpts{
+				QueueSize:    bufOpts.QueueSize,
+				Workers:      bufOpts.Workers,
+				OverflowPath: overflowPath,
+			})
+			if err != nil {
+				log.Fatalf("Failed to initialize buffered audit logger: %v", err)
+			}
+			// Drains into the still-open store on shutdown — store.Close was
+			// deferred earlier, so by LIFO it runs after this drain.
+			defer bufLogger.Close()
+			auditLogger = bufLogger
 		}
-		bufLogger, err := audit.NewBufferedAsyncLogger(fileLogger, audit.BufferedAsyncOpts{
-			QueueSize:    bufOpts.QueueSize,
-			Workers:      bufOpts.Workers,
-			OverflowPath: overflowPath,
-		})
+		log.Printf("Audit backend: store (%s)", storePath)
+	} else {
+		// Run startup migrations BEFORE opening the file audit logger. An
+		// in-place rewrite (e.g. v040_to_v041 prepending a _meta header) has to
+		// happen before we start appending new entries — otherwise the next
+		// write would land in a file the migration is about to rename.
+		migEnv := migrate.Env{
+			AuditLogPath:   auditPath,
+			CheckpointPath: auditPath + audit.CheckpointSuffix,
+		}
+		if err := migrate.RunStartup(context.Background(), migEnv); err != nil {
+			log.Fatalf("Startup migration failed: %v", err)
+		}
+
+		// Rotation is on by default (100 MiB live cap, 30-day retention,
+		// 5 archives, gzip). Setting --audit-max-size-mb=0 disables rotation
+		// entirely (unbounded growth).
+		rotCfg := audit.RotationConfig{
+			MaxFiles: rotOpts.MaxBackups,
+			Compress: rotOpts.Compress,
+		}
+		if rotOpts.MaxSizeMB > 0 {
+			rotCfg.MaxSize = int64(rotOpts.MaxSizeMB) * 1024 * 1024
+		}
+		if rotOpts.MaxAgeDays > 0 {
+			rotCfg.MaxAge = time.Duration(rotOpts.MaxAgeDays) * 24 * time.Hour
+		}
+		var fileLogger *audit.FileLogger
+		if rotCfg.MaxSize > 0 || rotCfg.MaxFiles > 0 || rotCfg.MaxAge > 0 {
+			fileLogger, err = audit.NewFileLoggerWithRotation(auditPath, rotCfg)
+		} else {
+			fileLogger, err = audit.NewFileLogger(auditPath)
+		}
 		if err != nil {
-			log.Fatalf("Failed to initialize buffered audit logger: %v", err)
+			log.Fatalf("Failed to initialize audit log: %v", err)
 		}
-		// Defer order matters: FileLogger first, BufferedAsyncLogger second
-		// — so on shutdown the buffered wrapper drains FIRST, then we close
-		// the file. Go runs deferred calls in LIFO order, so this lines up.
-		defer fileLogger.Close()
-		defer bufLogger.Close()
-		auditLogger = bufLogger
-	} else {
-		defer fileLogger.Close()
+		auditLogger = fileLogger
+		if bufOpts.Enabled {
+			overflowPath := bufOpts.OverflowPath
+			if overflowPath == "" {
+				overflowPath = auditPath + ".overflow.jsonl"
+			}
+			bufLogger, err := audit.NewBufferedAsyncLogger(fileLogger, audit.BufferedAsyncOpts{
+				QueueSize:    bufOpts.QueueSize,
+				Workers:      bufOpts.Workers,
+				OverflowPath: overflowPath,
+			})
+			if err != nil {
+				log.Fatalf("Failed to initialize buffered audit logger: %v", err)
+			}
+			// LIFO: bufLogger.Close (drains) runs before fileLogger.Close.
+			defer fileLogger.Close()
+			defer bufLogger.Close()
+			auditLogger = bufLogger
+		} else {
+			defer fileLogger.Close()
+		}
+	}
+
+	// In persistence mode, wrap the file provider (which serves the local
+	// tenant) with a MultiTenantProvider that serves OTHER tenants' policies
+	// from the store (registered via `agentguard tenant put`). Non-local
+	// policies are parsed once and cached in memory, so per-tenant evaluation
+	// never hits the DB on the /v1/check hot path. The file provider's own
+	// Close (deferred above) still owns the watcher lifecycle.
+	var engineProvider policy.PolicyProvider = provider
+	if persistCfg.Enabled {
+		mtp, mtErr := policy.NewMultiTenantProvider(provider, st)
+		if mtErr != nil {
+			log.Fatalf("Failed to initialize multi-tenant policy provider: %v", mtErr)
+		}
+		engineProvider = mtp
 	}
 
 	// Initialize policy engine. The engine subscribes to the provider's
 	// Watch stream so hot-reloads land automatically — no second watcher.
-	engine, err := policy.NewEngine(provider)
+	engine, err := policy.NewEngine(engineProvider)
 	if err != nil {
 		log.Fatalf("Failed to initialize policy engine: %v", err)
 	}
@@ -407,6 +516,33 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		AuditDefaultLimit:        pol.AuditDefaultLimit(),
 		AuditMaxLimit:            pol.AuditMaxLimit(),
 	})
+
+	// Wire the write-behind persistence syncer (v0.6). It hydrates the
+	// in-memory state from the store on boot, then flushes snapshots on a ≥1s
+	// background tick. It NEVER runs on the request path. The deferred Close
+	// performs a final flush; registered AFTER store.Close (defer LIFO) so the
+	// final flush writes through a still-open store.
+	if persistCfg.Enabled {
+		syncer := persist.New(persist.Config{
+			Store:       st,
+			Engine:      engine,
+			Limiter:     srv.Limiter(),
+			Approvals:   srv.ApprovalQueue(),
+			CostTTL:     sessionCostTTL, // matches in-memory sweeper (0 = keep)
+			ApprovalTTL: 24 * time.Hour, // resolved approvals retained 24h
+			BucketTTL:   time.Hour,      // fully-refilled buckets reaped after 1h
+		})
+		hctx, hcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := syncer.Hydrate(hctx); err != nil {
+			log.Printf("WARNING: state hydration failed (%v); starting with empty in-memory state", err)
+		}
+		hcancel()
+		syncer.Start()
+		defer syncer.Close()
+		log.Printf("Persistence: enabled (store=%s, audit-backend=%s)", storePath, persistCfg.AuditBackend)
+	} else {
+		log.Printf("Persistence: disabled (--persist=false); runtime state is in-memory only")
+	}
 
 	// Graceful shutdown
 	stop := make(chan os.Signal, 1)
@@ -692,9 +828,107 @@ func runMigrate(auditPath, checkpointPath, backupDir string, dryRun, list bool, 
 	}
 }
 
+// runTenant implements `agentguard tenant <put|list|rm>` — the operator
+// interface for registering per-tenant policies in the durable store (v0.6
+// multi-tenancy). It opens the store directly (the server need not be running;
+// SQLite WAL permits a concurrent writer, and a running server picks up a new
+// tenant on its next lookup).
+func runTenant(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: agentguard tenant <put|list|rm> [flags]")
+		os.Exit(1)
+	}
+	sub := args[0]
+	rest := args[1:]
+	// Pull a leading positional tenant id so `tenant put acme --policy x` works
+	// despite Go's flag package halting at the first non-flag token; also accept
+	// it trailing (`tenant put --policy x acme`).
+	var tenant string
+	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+		tenant = rest[0]
+		rest = rest[1:]
+	}
+	fs := flag.NewFlagSet("tenant "+sub, flag.ExitOnError)
+	storeDSN := fs.String("store-dsn", "", "Store DSN (empty => <data-dir>/agentguard.db)")
+	dataDir := fs.String("data-dir", ".", "Directory holding agentguard.db")
+	policyPath := fs.String("policy", "", "Policy YAML file to register (put only)")
+	_ = fs.Parse(rest)
+	if tenant == "" && len(fs.Args()) > 0 {
+		tenant = fs.Args()[0]
+	}
+
+	st, path, err := openStore(persistOpts{DSN: *storeDSN, DataDir: *dataDir})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tenant: cannot open store: %v\n", err)
+		os.Exit(1)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	switch sub {
+	case "put":
+		if tenant == "" || *policyPath == "" {
+			fmt.Fprintln(os.Stderr, "Usage: agentguard tenant put <tenant-id> --policy <file.yaml>")
+			os.Exit(1)
+		}
+		// Validate before storing so a malformed policy is never registered.
+		pol, err := policy.LoadFromFile(*policyPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "tenant put: INVALID policy %s: %v\n", *policyPath, err)
+			os.Exit(1)
+		}
+		raw, err := os.ReadFile(*policyPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "tenant put: read %s: %v\n", *policyPath, err)
+			os.Exit(1)
+		}
+		if err := st.PutPolicy(ctx, tenant, raw); err != nil {
+			fmt.Fprintf(os.Stderr, "tenant put: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Registered tenant %q: %s (%d rules across %d scopes) in %s\n",
+			tenant, pol.Name, pol.RuleCount(), pol.ScopeCount(), path)
+
+	case "list":
+		tenants, err := st.ListPolicyTenants(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "tenant list: %v\n", err)
+			os.Exit(1)
+		}
+		if len(tenants) == 0 {
+			fmt.Println("No tenant policies registered. (The 'local' tenant is served from --policy.)")
+			return
+		}
+		fmt.Printf("Registered tenants (%d):\n", len(tenants))
+		for _, t := range tenants {
+			fmt.Printf("  %s\n", t)
+		}
+
+	case "rm":
+		if tenant == "" {
+			fmt.Fprintln(os.Stderr, "Usage: agentguard tenant rm <tenant-id>")
+			os.Exit(1)
+		}
+		ok, err := st.DeletePolicy(ctx, tenant)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "tenant rm: %v\n", err)
+			os.Exit(1)
+		}
+		if ok {
+			fmt.Printf("Removed tenant %q\n", tenant)
+		} else {
+			fmt.Printf("Tenant %q not found\n", tenant)
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown tenant subcommand %q (want put|list|rm)\n", sub)
+		os.Exit(1)
+	}
+}
+
 // filepathDir and filepathJoin wrap path/filepath so runMigrate stays
 // readable without adding another top-level import block rewrite. They are
 // here (rather than in a helpers file) because they are the only uses in
 // main.go today — pulling them into a shared file would be premature.
-func filepathDir(p string) string  { return filepath.Dir(p) }
+func filepathDir(p string) string     { return filepath.Dir(p) }
 func filepathJoin(a, b string) string { return filepath.Join(a, b) }

@@ -254,4 +254,4 @@ The client's `OPENAI_BASE_URL` is missing the `/v1` suffix, or the request is a 
 - Check `/metrics` on the central server AND on each proxy — counters, gauges, histograms, dispatch drops.
 - Response headers on `/v1/check`: `X-AgentGuard-Policy-Ms`, `X-AgentGuard-Audit-Ms`, `X-AgentGuard-Total-Ms` (timings in ms, 3 decimals).
 - Version skew: all three binaries report their version via `agentguard version` / `agentguard-mcp-gateway --version` / `agentguard-llm-proxy --version`. Mismatch is the most common ops-time bug after a partial upgrade.
-- Open an issue with: versions of all binaries, sanitized policy snippet, and the relevant log lines from both the proxy and the central server. Security-sensitive reports go to `cauaferraz@lictorate.com` — not the issue tracker.
+- Open an issue with: versions of all binaries, sanitized policy snippet, and the relevant log lines from both the proxy and the central server. Security-sensitive reports go to `cauaferraz@gmail.com` — not the issue tracker.

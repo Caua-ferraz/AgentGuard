@@ -19,6 +19,8 @@
 #   Makefile                                   — VERSION=X.Y.Z
 #   docs/SETUP.md                              — "version":"X.Y.Z" (curl example output)
 #   docs/API.md                                — "version": "X.Y.Z" (/health response example)
+#   docs/MCP_GATEWAY.md                        — "version": "X.Y.Z" (MCP serverInfo example)
+#   docs/PROXY_ARCHITECTURE.md                 — "version": "X.Y.Z" (/health response example)
 #   docs/POLICY_REFERENCE.md                   — self-label "as of **vX.Y.Z**"
 #
 # Portability: uses perl -i -pe for in-place edit. perl is present on macOS
@@ -67,6 +69,8 @@ REPLACEMENTS=(
   'Makefile|s/(^VERSION=)[0-9]+\.[0-9]+\.[0-9]+$/${1}'"$NEW"'/'
   'docs/SETUP.md|s/("version":")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
   'docs/API.md|s/("version":\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
+  'docs/MCP_GATEWAY.md|s/("version":\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
+  'docs/PROXY_ARCHITECTURE.md|s/("version":\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
   'docs/POLICY_REFERENCE.md|s/(format as of \*\*v)[0-9]+\.[0-9]+\.[0-9]+(\*\*)/${1}'"$NEW"'${2}/'
 )
 
@@ -126,6 +130,8 @@ TRACKED=(
   Makefile
   docs/SETUP.md
   docs/API.md
+  docs/MCP_GATEWAY.md
+  docs/PROXY_ARCHITECTURE.md
   docs/POLICY_REFERENCE.md
 )
 grep -Hn "$OLD" "${TRACKED[@]}" 2>/dev/null || echo "  (none)"
@@ -169,6 +175,8 @@ fi
 check_canonical 'Makefile'                                  "^VERSION=$OLD\$"
 check_canonical 'docs/SETUP.md'                             "\"version\":\"$OLD\""
 check_canonical 'docs/API.md'                               "\"version\":\s*\"$OLD\""
+check_canonical 'docs/MCP_GATEWAY.md'                       "\"version\":\s*\"$OLD\""
+check_canonical 'docs/PROXY_ARCHITECTURE.md'                "\"version\":\s*\"$OLD\""
 check_canonical 'docs/POLICY_REFERENCE.md'                  "format as of \*\*v$OLD\*\*"
 
 if [ "$LEFTOVER" -ne 0 ]; then

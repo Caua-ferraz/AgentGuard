@@ -15,6 +15,7 @@ Commands:
   deny        Deny a pending action by ID
   status      Show server health + pending approvals
   audit       Query the audit log
+  tenant      Manage per-tenant policies in the store (put|list|rm)   (v0.6)
   migrate     Run on-disk schema migrations
   version     Print version information
 
@@ -55,11 +56,26 @@ Start the AgentGuard server. This is the only subcommand that runs a long-lived 
 | `--audit-overflow-path <path>` | `<audit-log>.overflow.jsonl` | Disk-overflow spill file used when the buffered queue saturates. Ignored unless `--audit-buffered`. |
 | `--debug-pprof` | off | Expose Go pprof handlers on a **separate localhost-only** listener (`--debug-pprof-port`). Off by default; enable for performance investigations only. Tunnel via `kubectl port-forward` / `ssh -L` to access remotely — this listener never binds beyond `127.0.0.1`. |
 | `--debug-pprof-port <int>` | `6060` | Port for the localhost-only pprof listener. Ignored unless `--debug-pprof`. |
+| `--persist` | `true` | **(v0.6)** Persist runtime state (approvals, rate-limit buckets, cost accumulators) to a durable store so it survives restarts. Zero-config: auto-creates `agentguard.db` (SQLite). Set `false` for pure in-memory (pre-v0.6 behavior). The store is **never** on the `/v1/check` hot path — a background syncer flushes snapshots on a ≥1 s tick and hydrates memory on boot. See [Persistence & multi-tenancy](#persistence--multi-tenancy-v06). |
+| `--store-dsn <dsn>` | *(empty)* | **(v0.6)** Durable store location. Empty ⇒ zero-config SQLite at `<data-dir>/agentguard.db`; a SQLite file path is also accepted. (Postgres is future work.) Ignored when `--persist=false`. |
+| `--data-dir <path>` | `.` | **(v0.6)** Directory for the zero-config SQLite database (`agentguard.db` + its `-wal`/`-shm` sidecars). Ignored when `--store-dsn` is set or `--persist=false`. |
+| `--audit-backend <file\|store>` | `file` | **(v0.6)** Where the audit trail lives. `file` = JSONL (rotation + migration, the default). `store` = the SQLite store's indexed `audit_entries` table (one-file deployment, indexed `/v1/audit` queries). `store` requires `--persist` and always runs buffered (async) — a synchronous DB write per request would break the <3 ms budget, so buffering is forced. |
 
 ### Bind behavior
 
 - `--api-key` **set**: binds on `0.0.0.0:<port>` (all interfaces).
 - `--api-key` **unset**: binds on `127.0.0.1:<port>` only. A WARNING is logged at startup. Remote agents cannot connect. This is the #1 source of "connection refused" for new users.
+
+### Persistence & multi-tenancy (v0.6)
+
+By default `serve` is now **stateful**: runtime state survives a restart. On a clean run `agentguard serve` creates `agentguard.db` in the working directory (override with `--data-dir`) and:
+
+- **hydrates** the in-memory approval queue, rate-limit buckets, and cost accumulators from the store on boot, then
+- **write-behind syncs** them back on a background ticker (≥ 1 s) and on graceful shutdown.
+
+The store is a *cold-path* component — it is never read or written on the `/v1/check` request path, so the <3 ms p99 budget is unaffected. Disable with `--persist=false` for the legacy pure-in-memory behavior.
+
+**Tenancy.** The `local` tenant's policy comes from `--policy`. Additional tenants are registered in the store with [`agentguard tenant`](#agentguard-tenant-v06) and addressed via the `/v1/t/<tenant>/...` route family; each tenant is evaluated against its **own** policy, with isolated approvals, rate limits, cost accumulators, and audit. A tenant that has no registered policy is denied (`deny:tenant:not_found`).
 
 ### Examples
 
@@ -281,6 +297,40 @@ agentguard audit --decision DENY --scope shell --limit 20
 ```
 
 The CLI uses `/v1/audit?limit=N` directly — pagination (`?offset=`) is supported on the HTTP API but not exposed as a CLI flag yet; use `curl` for paginated exports.
+
+---
+
+## `agentguard tenant` (v0.6)
+
+Manage per-tenant policies in the durable store. Operates directly on the store database (the server need not be running — SQLite WAL permits a concurrent writer, and a running server picks up a new tenant on its next lookup). Requires persistence (the store); these commands open it directly.
+
+```
+agentguard tenant put <tenant-id> --policy <file.yaml> [--store-dsn <dsn>] [--data-dir <dir>]
+agentguard tenant list                                 [--store-dsn <dsn>] [--data-dir <dir>]
+agentguard tenant rm  <tenant-id>                      [--store-dsn <dsn>] [--data-dir <dir>]
+```
+
+| Subcommand | Description |
+|---|---|
+| `put <id> --policy <f>` | Validate `<f>` (same checks as `validate`) and register it as tenant `<id>`'s policy. Re-running replaces it. A malformed policy is rejected and never stored. |
+| `list` | List every registered tenant id (the `local` tenant is served from `--policy`, not the store, so it is not listed). |
+| `rm <id>` | Remove a tenant's policy. Reports whether a row existed. |
+
+`--store-dsn` / `--data-dir` resolve the database exactly like [`serve`](#agentguard-serve) (empty DSN ⇒ `<data-dir>/agentguard.db`).
+
+```bash
+# Register a tenant, then check it via its tenant-aware route.
+agentguard tenant put acme --policy acme-policy.yaml
+agentguard tenant list
+#   Registered tenants (1):
+#     acme
+curl -s -X POST localhost:8080/v1/t/acme/check \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"shell","command":"deploy app"}'
+# → evaluated against acme's policy, independently of the local tenant
+```
+
+> A tenant added while the server is running is loaded lazily on its first `/v1/t/<id>/...` request (one store read, then cached). Tenants present at boot are eager-loaded.
 
 ---
 

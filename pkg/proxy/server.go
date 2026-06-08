@@ -187,6 +187,17 @@ type sseWatcher struct {
 	tenant string // normalized (non-empty); "" is coerced to LocalTenantID
 }
 
+// NewApprovalQueue creates an empty approval queue with the given capacity
+// (maxSize <= 0 falls back to MaxPendingApprovals). Exposed so the persistence
+// syncer and embedders can construct/reference a queue independently of a full
+// Server; NewServer uses it internally too.
+func NewApprovalQueue(maxSize int) *ApprovalQueue {
+	if maxSize <= 0 {
+		maxSize = MaxPendingApprovals
+	}
+	return &ApprovalQueue{pending: make(map[string]*PendingAction), maxSize: maxSize}
+}
+
 // PendingAction is an action waiting for human approval.
 type PendingAction struct {
 	ID string `json:"id"`
@@ -200,6 +211,10 @@ type PendingAction struct {
 	CreatedAt time.Time            `json:"created_at"`
 	Resolved  bool                 `json:"resolved"`
 	Decision  string               `json:"decision,omitempty"`
+	// ResolvedAt is set when Resolve flips Resolved=true. It drives the durable
+	// store's resolved-approval GC (PurgeResolvedApprovals). Zero while pending;
+	// omitempty keeps single-tenant /api/pending payloads byte-stable.
+	ResolvedAt time.Time `json:"resolved_at,omitempty"`
 }
 
 // AuditEvent is sent over SSE to dashboard clients for any check result.
@@ -255,11 +270,8 @@ func NewServer(cfg Config) *Server {
 	}
 
 	s := &Server{
-		cfg: cfg,
-		approval: &ApprovalQueue{
-			pending: make(map[string]*PendingAction),
-			maxSize: MaxPendingApprovals,
-		},
+		cfg:                 cfg,
+		approval:            NewApprovalQueue(MaxPendingApprovals),
 		limiter:             ratelimit.New(),
 		sessions:            NewSessionStoreWithTTL(cfg.SessionTTL),
 		maxRequestBodyBytes: resolveInt64(cfg.MaxRequestBodyBytes, MaxRequestBodySize),
@@ -465,6 +477,15 @@ func (s *Server) Handler() http.Handler {
 	return s.http.Handler
 }
 
+// ApprovalQueue returns the server's in-memory approval queue. Exposed so the
+// persistence syncer can snapshot/restore it; callers must not mutate queue
+// internals directly (use the queue's own methods).
+func (s *Server) ApprovalQueue() *ApprovalQueue { return s.approval }
+
+// Limiter returns the server's in-memory rate limiter, exposed for the
+// persistence syncer's snapshot/restore. Not for request-path use.
+func (s *Server) Limiter() *ratelimit.Limiter { return s.limiter }
+
 // Shutdown gracefully stops the server. Safe to call multiple times.
 func (s *Server) Shutdown() {
 	if s.sweeperDone != nil {
@@ -590,7 +611,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Rate limiting check (before policy evaluation)
-	if rlCfg := s.cfg.Engine.RateLimitConfig(req.Scope, req.AgentID); rlCfg != nil {
+	if rlCfg := s.cfg.Engine.RateLimitConfig(req.Scope, req.AgentID, tenantID); rlCfg != nil {
 		window, err := ratelimit.ParseWindow(rlCfg.Window)
 		if err == nil {
 			// Normalize an empty agent_id so two distinct callers that both
@@ -1377,6 +1398,7 @@ func (q *ApprovalQueue) Resolve(id string, decision policy.Decision, tenantID st
 
 	pa.Resolved = true
 	pa.Decision = string(decision)
+	pa.ResolvedAt = time.Now().UTC()
 
 	// Broadcast resolution to SSE clients of this tenant. Carry the original
 	// transport so dashboard JS keeps the same chip on the "resolved" event as
@@ -1421,6 +1443,38 @@ func (q *ApprovalQueue) PendingCount() int {
 		}
 	}
 	return n
+}
+
+// Snapshot returns a defensive copy of every entry (pending and resolved) for
+// write-behind persistence. Read-locked; intended for the background syncer,
+// never the request path. Callers must not mutate the queue through the copies.
+func (q *ApprovalQueue) Snapshot() []*PendingAction {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	out := make([]*PendingAction, 0, len(q.pending))
+	for _, pa := range q.pending {
+		cp := *pa
+		out = append(out, &cp)
+	}
+	return out
+}
+
+// Restore loads approvals from persistence (boot hydration). It respects
+// maxSize — entries beyond the cap are dropped — and skips any whose ID is
+// already present. Intended to run once, before serving traffic.
+func (q *ApprovalQueue) Restore(actions []*PendingAction) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, pa := range actions {
+		if q.maxSize > 0 && len(q.pending) >= q.maxSize {
+			break
+		}
+		if _, exists := q.pending[pa.ID]; exists {
+			continue
+		}
+		cp := *pa
+		q.pending[pa.ID] = &cp
+	}
 }
 
 // Subscribe registers an SSE watcher that receives only events for tenantID.
@@ -1493,9 +1547,9 @@ func (q *ApprovalQueue) broadcastLocked(event AuditEvent) {
 //     frontends that predate --allowed-origin. It is safe because:
 //     - the API key is NEVER embedded in the dashboard HTML;
 //     - session cookies are SameSite=Strict (cross-origin requests don't
-//       carry them);
+//     carry them);
 //     - state-changing endpoints require a CSRF token that attackers on
-//       other origins cannot read (double-submit cookie pattern).
+//     other origins cannot read (double-submit cookie pattern).
 //
 // `Vary: Origin` is always set to prevent cached responses from leaking
 // cross-origin.

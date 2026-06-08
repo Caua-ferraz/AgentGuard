@@ -129,7 +129,7 @@ YAML is human-friendly for rule lists with comments. JSON is too noisy for neste
 
 ### I think I found a security issue. Where do I report?
 
-Email `cauaferraz@lictorate.com`. Do **not** open a public issue. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the disclosure policy.
+Email `cauaferraz@gmail.com`. Do **not** open a public issue. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the disclosure policy.
 
 ---
 

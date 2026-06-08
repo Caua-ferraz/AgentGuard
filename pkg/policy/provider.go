@@ -72,40 +72,47 @@ type PolicyProvider interface {
 	Close() error
 }
 
-// validatePolicyBytes parses YAML and runs the same validation as
-// LoadFromFile, minus the os.ReadFile step. Factored out so providers can
-// reuse it (FilePolicyProvider for raw-bytes Validate; future DB providers
-// for pre-commit validation in admin endpoints).
-func validatePolicyBytes(data []byte) error {
+// parsePolicyBytes parses YAML and runs the same validation as LoadFromFile,
+// minus the os.ReadFile step, returning the parsed *Policy. Factored out so
+// providers can reuse it (FilePolicyProvider for raw-bytes Validate; the
+// MultiTenantProvider for loading per-tenant policies from a store).
+func parsePolicyBytes(data []byte) (*Policy, error) {
 	var pol Policy
 	if err := yaml.Unmarshal(data, &pol); err != nil {
-		return fmt.Errorf("parsing policy YAML: %w", err)
+		return nil, fmt.Errorf("parsing policy YAML: %w", err)
 	}
 	if pol.Version == "" {
-		return fmt.Errorf("policy missing required 'version' field")
+		return nil, fmt.Errorf("policy missing required 'version' field")
 	}
 	if pol.Name == "" {
-		return fmt.Errorf("policy missing required 'name' field")
+		return nil, fmt.Errorf("policy missing required 'name' field")
 	}
 	if err := validateFilesystemPaths(&pol); err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateRedactionPatterns(&pol); err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateToolScopeMap(&pol); err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateTunables(&pol); err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateRuleDurationsAndCounts(&pol); err != nil {
-		return err
+		return nil, err
 	}
 	if err := errorTimeWindowOnlyConditions(&pol); err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return &pol, nil
+}
+
+// validatePolicyBytes validates raw policy YAML without retaining the parsed
+// document. Thin wrapper over parsePolicyBytes for the Validate() entry points.
+func validatePolicyBytes(data []byte) error {
+	_, err := parsePolicyBytes(data)
+	return err
 }
 
 // FilePolicyProvider serves a single policy loaded from a YAML file. The
@@ -119,13 +126,13 @@ func validatePolicyBytes(data []byte) error {
 type FilePolicyProvider struct {
 	path string
 
-	mu          sync.RWMutex
-	pol         *Policy
-	watcher     *FileWatcher
-	callbacks   map[uint64]func(*Policy)
-	nextID      uint64
-	closeOnce   sync.Once
-	closedFlag  atomic.Bool
+	mu         sync.RWMutex
+	pol        *Policy
+	watcher    *FileWatcher
+	callbacks  map[uint64]func(*Policy)
+	nextID     uint64
+	closeOnce  sync.Once
+	closedFlag atomic.Bool
 }
 
 // NewFilePolicyProvider loads the policy at path, starts a FileWatcher,
