@@ -40,6 +40,44 @@ func (l *Limiter) BucketCount() int {
 	return len(l.buckets)
 }
 
+// BucketSnapshot is a point-in-time copy of one bucket's state, used by the
+// persistence syncer for write-behind and boot restore. It carries the
+// limiter's opaque key ("scope:tenant:agent"); the syncer parses the tenant
+// out of it.
+type BucketSnapshot struct {
+	Key        string
+	Tokens     int
+	Max        int
+	Window     time.Duration
+	LastRefill time.Time
+}
+
+// Snapshot returns a copy of every live bucket. It holds the limiter lock only
+// for the (O(n) struct-copy) duration and is intended for the background
+// persistence syncer — it is never called on the request path, so it cannot
+// affect the proxy's latency budget.
+func (l *Limiter) Snapshot() []BucketSnapshot {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]BucketSnapshot, 0, len(l.buckets))
+	for k, b := range l.buckets {
+		out = append(out, BucketSnapshot{
+			Key: k, Tokens: b.tokens, Max: b.max, Window: b.window, LastRefill: b.lastRefill,
+		})
+	}
+	return out
+}
+
+// Restore loads buckets from a prior Snapshot (boot hydration). Entries with a
+// matching key are overwritten. Intended to run once, before serving traffic.
+func (l *Limiter) Restore(snaps []BucketSnapshot) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, s := range snaps {
+		l.buckets[s.Key] = &bucket{tokens: s.Tokens, max: s.Max, window: s.Window, lastRefill: s.LastRefill}
+	}
+}
+
 // Allow checks whether a request identified by key is within the rate limit.
 // maxRequests is the maximum number of requests allowed in the given window.
 // Returns nil if allowed, or an error describing the limit.
@@ -93,11 +131,13 @@ func (l *Limiter) evictStaleLocked() {
 	}
 }
 
-// scopeFromKey extracts the scope prefix from a limiter key in the
-// "scope:agent_id" format used by the proxy. Unknown formats return
-// "unknown" so the counter stays well-labeled. The scope is the only
-// bounded-cardinality piece of the key, which is why the agent_id side is
-// discarded (millions of agent IDs would blow up Prometheus series).
+// scopeFromKey extracts the scope prefix from a limiter key. The proxy keys
+// buckets as "scope:tenant:agent_id" (tenant added in v0.6); scope is kept
+// first precisely so this extractor stays a single IndexByte with no parser
+// change. Unknown formats return "unknown" so the counter stays well-labeled.
+// The scope is the only bounded-cardinality piece of the key, which is why the
+// tenant and agent_id fields are discarded (millions of tenant/agent IDs would
+// blow up Prometheus series).
 func scopeFromKey(key string) string {
 	if i := strings.IndexByte(key, ':'); i >= 0 {
 		return key[:i]

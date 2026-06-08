@@ -212,7 +212,7 @@ AgentGuard is a policy enforcement and audit layer. It is **not** an OS sandbox.
 - **The SDK layer is opt-in.** The agent must call `guard.check(...)` (directly, via `@guarded`, or via a framework adapter) — that makes it advisory. Use it when the wire-level layers are impractical (offline scripts, custom transports); pair it with the gateway / LLM proxy whenever both apply.
 - **AgentGuard does not sandbox the host or intercept syscalls.** A determined agent that controls its own runtime can bypass AgentGuard by ignoring `OPENAI_BASE_URL`, talking to a different MCP server, or shelling out directly. Combine AgentGuard with OS-level isolation (containers, seccomp, AppArmor, network egress rules) when the threat model includes a hostile agent.
 - **Pattern matching is string-glob, not semantic.** A deny rule for `rm -rf *` matches literal strings; an agent (or a creative human) can substitute equivalents (`find / -delete`, base64 payloads, etc.). Treat policies as a high-signal first filter, not a complete authorization model.
-- **Approval queue and rate-limiter state are in-memory.** Both reset on restart and are not shared across instances. Run `replicas: 1` until persistent state lands.
+- **Persistent state is single-node.** As of v0.6 the approval queue, rate-limiter, and cost accumulators persist to a local SQLite store and survive restarts (write-behind, off the hot path), but they are **not yet shared across instances** — a Postgres backend for multi-node is future work. Run `replicas: 1` for now, or `--persist=false` for the legacy pure-in-memory behavior.
 
 ## Dashboard
 
@@ -274,24 +274,25 @@ Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS deta
 - [x] Core policy engine with YAML rules (deny → require_approval → allow → default deny)
 - [x] Audit logging (JSON lines) with size-triggered rotation, retention, and gzip compression — wired by default *(v0.5)*
 - [x] Shell, filesystem, network, browser, cost, `data`, and `mcp_tool` scopes (string-glob matching — see [Limitations](#limitations--threat-model))
-- [x] Approval queue with Slack/webhook/console notifications (in-memory, not persisted)
+- [x] Approval queue with Slack/webhook/console notifications — persisted to the SQLite store and restored on restart *(v0.6)*
 - [x] Web dashboard (live SSE feed, stats, interactive approve/deny)
-- [x] Token-bucket rate limiting per scope per agent (in-memory)
+- [x] Token-bucket rate limiting per scope per agent — persisted across restarts *(v0.6)*
 - [x] Per-agent policy overrides via `agents:` config
 - [x] Cost guardrails — per-action limits, alert thresholds, and session-level cost tracking
 - [x] Conditional rules — `require_prior` and `time_window` conditions evaluated at check time
 - [x] Python SDK + adapters: LangChain, CrewAI, browser-use, MCP
 - [x] TypeScript/Node.js SDK
-- [x] Full CLI: serve, validate, check, approve, deny, status, audit, migrate, version
+- [x] Full CLI: serve, validate, check, approve, deny, status, audit, tenant, migrate, version
 - [x] Docker support with multi-stage build
 - [x] Policy hot-reload via `--watch`
 - [x] **Data scope** — first-class `data` scope for exfiltration / sensitive-payload checks, wired through policy engine and SDKs *(v0.5)*
 - [x] **MCP Gateway** — wire-level Model Context Protocol proxy with multi-upstream namespacing, capability merging, reconnect-with-backoff, and approval `_meta` round-trip; ships as the `agentguard-mcp-gateway` binary with copy-paste configs for Claude Desktop, Cursor, Cline, Continue, and Zed *(v0.5)*
 - [x] **LLM API Proxy** — drop-in OpenAI / Anthropic-compatible base URL with streaming pause/resume/rewrite, tool-call gating, provider-aware synthetic refusals, and tool→scope mapping; ships as the `agentguard-llm-proxy` binary with copy-paste examples for the OpenAI SDK, Anthropic SDK, LangChain, and CrewAI *(v0.5)*
+- [x] **Persistent state** — approvals, rate-limit buckets, and cost accumulators write-behind to a zero-config SQLite store (`agentguard.db`, WAL) and rehydrate on boot; never on the `/v1/check` hot path *(v0.6)*
+- [x] **Multi-tenant policies** — register per-tenant policies (`agentguard tenant put`) served over `/v1/t/<tenant>/...`, each evaluated against its own policy with isolated approvals/limits/costs/audit; optional SQLite audit backend (`--audit-backend=store`) *(v0.6)*
 
 ### Planned
-- [ ] SQLite/PostgreSQL audit backend
-- [ ] Persistent approval queue
+- [ ] PostgreSQL store backend for multi-node / shared state (the v0.6 SQLite store is single-node)
 - [ ] Policy-as-code (test policies in CI/CD)
 - [ ] Multi-agent session correlation
 - [ ] Session replay in dashboard

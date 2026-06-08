@@ -33,7 +33,11 @@ Thumbs.db
 
 # Audit logs (don't commit real logs)
 *.jsonl
+# SQLite store (v0.6) — the database plus its WAL/SHM sidecars and journal
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
 
 # Docker
 docker-compose.override.yml
@@ -52,4 +56,8 @@ build/
 # Node SDK
 node_modules/
 package-lock.json
+
+# Misc
 CLAUDE.md
+TODO.md
+.claude/

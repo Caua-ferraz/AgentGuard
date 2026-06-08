@@ -16,6 +16,7 @@ package audit
 //	    timestamp  TEXT    NOT NULL,
 //	    session_id TEXT    NOT NULL DEFAULT '',
 //	    agent_id   TEXT    NOT NULL DEFAULT '',
+//	    tenant_id  TEXT    NOT NULL DEFAULT 'local',
 //	    scope      TEXT    NOT NULL DEFAULT '',
 //	    action     TEXT    NOT NULL DEFAULT '',
 //	    command    TEXT    NOT NULL DEFAULT '',
@@ -29,6 +30,7 @@ package audit
 //	);
 //
 //	CREATE INDEX idx_audit_agent    ON audit_entries(agent_id);
+//	CREATE INDEX idx_audit_tenant   ON audit_entries(tenant_id);
 //	CREATE INDEX idx_audit_decision ON audit_entries(decision);
 //	CREATE INDEX idx_audit_scope    ON audit_entries(scope);
 //	CREATE INDEX idx_audit_ts       ON audit_entries(timestamp);
@@ -49,6 +51,7 @@ CREATE TABLE IF NOT EXISTS audit_entries (
     timestamp   TEXT    NOT NULL,
     session_id  TEXT    NOT NULL DEFAULT '',
     agent_id    TEXT    NOT NULL DEFAULT '',
+    tenant_id   TEXT    NOT NULL DEFAULT 'local',
     scope       TEXT    NOT NULL DEFAULT '',
     action      TEXT    NOT NULL DEFAULT '',
     command     TEXT    NOT NULL DEFAULT '',
@@ -61,18 +64,25 @@ CREATE TABLE IF NOT EXISTS audit_entries (
     duration_ms INTEGER NOT NULL DEFAULT 0
 );`
 
+// addTenantColumnSQL is the additive migration for databases created before
+// tenant_id existed. SQLite has no "ADD COLUMN IF NOT EXISTS", so a duplicate-
+// column error is the expected, benign signal that the column already exists
+// (fresh DBs get it from createTableSQL above). See docs/v0.6-ARCHITECTURE-PLAN.md § 3.4.
+const addTenantColumnSQL = `ALTER TABLE audit_entries ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'local'`
+
 const createIndexesSQL = `
 CREATE INDEX IF NOT EXISTS idx_audit_agent    ON audit_entries(agent_id);
+CREATE INDEX IF NOT EXISTS idx_audit_tenant   ON audit_entries(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_audit_decision ON audit_entries(decision);
 CREATE INDEX IF NOT EXISTS idx_audit_scope    ON audit_entries(scope);
 CREATE INDEX IF NOT EXISTS idx_audit_ts       ON audit_entries(timestamp);`
 
 const insertSQL = `
 INSERT INTO audit_entries (
-    timestamp, session_id, agent_id,
+    timestamp, session_id, agent_id, tenant_id,
     scope, action, command, path, domain, url,
     decision, reason, rule, duration_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // SQLiteLogger stores audit entries in a SQLite database for efficient querying.
 // Requires a "database/sql" driver for SQLite to be registered (e.g., modernc.org/sqlite).
@@ -108,6 +118,14 @@ func NewSQLiteLogger(dbPath string) (*SQLiteLogger, error) {
 		return nil, fmt.Errorf("creating audit table: %w", err)
 	}
 
+	// Additive migration: bring pre-v0.6 databases (no tenant_id) up to date.
+	// A "duplicate column name" error means the column is already present
+	// (fresh DBs, or a previous run) and is benign.
+	if _, err := db.Exec(addTenantColumnSQL); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		db.Close()
+		return nil, fmt.Errorf("adding tenant_id column: %w", err)
+	}
+
 	if _, err := db.Exec(createIndexesSQL); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("creating indexes: %w", err)
@@ -129,6 +147,7 @@ func (l *SQLiteLogger) Log(entry Entry) error {
 		entry.Timestamp.Format(time.RFC3339Nano),
 		entry.SessionID,
 		entry.AgentID,
+		entry.EffectiveTenant(),
 		entry.Request.Scope,
 		entry.Request.Action,
 		entry.Request.Command,
@@ -160,6 +179,10 @@ func (l *SQLiteLogger) Query(filter QueryFilter) ([]Entry, error) {
 		conditions = append(conditions, "session_id = ?")
 		args = append(args, filter.SessionID)
 	}
+	if filter.TenantID != "" {
+		conditions = append(conditions, "tenant_id = ?")
+		args = append(args, filter.TenantID)
+	}
 	if filter.Decision != "" {
 		conditions = append(conditions, "decision = ?")
 		args = append(args, filter.Decision)
@@ -173,7 +196,7 @@ func (l *SQLiteLogger) Query(filter QueryFilter) ([]Entry, error) {
 		args = append(args, filter.Since.Format(time.RFC3339Nano))
 	}
 
-	query := "SELECT timestamp, session_id, agent_id, scope, action, command, path, domain, url, decision, reason, rule, duration_ms FROM audit_entries"
+	query := "SELECT timestamp, session_id, agent_id, tenant_id, scope, action, command, path, domain, url, decision, reason, rule, duration_ms FROM audit_entries"
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
@@ -213,6 +236,7 @@ func (l *SQLiteLogger) Query(filter QueryFilter) ([]Entry, error) {
 			&tsStr,
 			&e.SessionID,
 			&e.AgentID,
+			&e.TenantID,
 			&e.Request.Scope,
 			&e.Request.Action,
 			&e.Request.Command,

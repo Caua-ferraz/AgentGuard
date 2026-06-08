@@ -297,7 +297,7 @@ func TestEngineRateLimitConfig(t *testing.T) {
 
 	engine := NewEngineFromPolicy(pol)
 
-	rl := engine.RateLimitConfig("network", "")
+	rl := engine.RateLimitConfig("network", "", LocalTenantID)
 	if rl == nil {
 		t.Fatal("expected rate limit config for network scope")
 	}
@@ -305,7 +305,7 @@ func TestEngineRateLimitConfig(t *testing.T) {
 		t.Errorf("expected 60 max requests, got %d", rl.MaxRequests)
 	}
 
-	rl = engine.RateLimitConfig("shell", "")
+	rl = engine.RateLimitConfig("shell", "", LocalTenantID)
 	if rl != nil {
 		t.Error("expected no rate limit config for shell scope")
 	}

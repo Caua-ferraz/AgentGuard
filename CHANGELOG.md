@@ -4,7 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-> Tracks work in flight on `master` post-v0.5.2. Items here are *not* in any tagged release yet.
+> Tracks work in flight on `master` post-v0.5.2. Items here are *not* in any tagged release yet. The v0.6 milestone is **persistent multi-tenant state**.
+
+### Added
+
+- **Durable persistent state (v0.6).** `agentguard serve` is now stateful by default: the approval queue, rate-limit buckets, and cost accumulators survive a restart. New `pkg/store` (`Store` interface + `SQLiteStore`, pure-Go `modernc.org/sqlite`, WAL) and `pkg/persist` (write-behind syncer). On boot the syncer hydrates the in-memory maps from the store; a background ticker (hard ≥1 s floor) and graceful shutdown flush snapshots back. The store is a **cold-path** component — never read or written on the `/v1/check` request path, so the <3 ms p99 budget is preserved (measured p99 0.53 ms with persistence on). New `serve` flags: `--persist` (default `true`), `--store-dsn`, `--data-dir`, `--audit-backend=file|store`. `--persist=false` restores the legacy pure-in-memory behavior.
+- **Multi-tenant policies (v0.6).** Tenants beyond `local` can be registered (store `policies` table + `policy.MultiTenantProvider`) and are evaluated against their **own** policy through the existing `/v1/t/<tenant>/...` routes, with isolated approvals, rate limits, cost accumulators, and audit. New `agentguard tenant put|list|rm` subcommand manages them. A tenant with no registered policy denies with `deny:tenant:not_found`; an infrastructure (store) failure denies with `deny:tenant:provider_error`. Non-local policies are parsed once and cached in memory, so per-tenant evaluation never hits the DB on the hot path.
+- **Tenant-keyed runtime state + audit `tenant_id` (v0.6).** Every per-request store is partitioned by tenant: rate-limit bucket key `scope:tenant:agent`, session-cost accumulator `(tenant, session)`, and the approval queue's `Lookup`/`Resolve`/`List`/SSE scoped per tenant (a foreign tenant's id returns "not found" — no cross-tenant existence oracle). The audit schema gained an additive `tenant_id` field/column, and `/v1/t/<tenant>/audit` is now scoped to its tenant — **closing a cross-tenant audit-read leak**. Single-tenant (`local`) output stays byte-identical (the local tenant is stored as `""`), so the audit `schema_version` is unchanged.
+
+### Fixed
+
+- **Policy watcher transient-read race** (`pkg/policy/watcher.go`) — an atomic-replace policy edit (write-temp + rename) racing `reload` on Windows leaves the destination briefly locked after `MoveFileEx`, so the reload's open-for-read returns `ERROR_SHARING_VIOLATION`; that failed read was swallowed and, on the event-driven fsnotify path (no periodic tick), the change was lost until the next unrelated event. `reload` now retries transient `*fs.PathError` reads with a small bounded backoff (parse/validation errors surface immediately); the retry runs on the watcher's background goroutine, off the request path. Stabilizes the previously-flaky `TestATIntegration_ProviderReloadE2E` / `TestFilePolicyProvider_WatchCallbackPanicDoesNotKillWatcher` / `TestATFilePolicyProvider_RaceWatchGetMutate`.
+
+### Changed
+
+- **`serve` is stateful by default.** A first run creates `agentguard.db` (+ `-wal`/`-shm` sidecars, now gitignored) in the working directory. This is additive — the wire contract (`schema_version: v1`, the `/v1/t/{tenant}/...` routes) is unchanged, and `--persist=false` reverts to the prior behavior.
 
 ## [0.5.2] — 2026-06-02
 

@@ -165,9 +165,9 @@ type RateLimitCfg struct {
 
 // CostLimits defines cost guardrails for a scope.
 type CostLimits struct {
-	MaxPerAction    string `yaml:"max_per_action,omitempty"`
-	MaxPerSession   string `yaml:"max_per_session,omitempty"`
-	AlertThreshold  string `yaml:"alert_threshold,omitempty"`
+	MaxPerAction   string `yaml:"max_per_action,omitempty"`
+	MaxPerSession  string `yaml:"max_per_session,omitempty"`
+	AlertThreshold string `yaml:"alert_threshold,omitempty"`
 }
 
 // AgentCfg defines per-agent policy overrides.
@@ -677,6 +677,15 @@ type sessionCostEntry struct {
 	lastUpdated time.Time
 }
 
+// sessionCostKey partitions the cost accumulator by (tenant, session) so two
+// tenants that happen to reuse the same session_id never share a budget
+// (v0.6 multi-tenancy). A struct key is collision-free regardless of what
+// characters tenant/session IDs contain — unlike a concatenated string key.
+type sessionCostKey struct {
+	tenant  string
+	session string
+}
+
 // Engine evaluates actions against a policy. The policy itself is owned
 // by a PolicyProvider (file-backed, static, or a future database-backed
 // impl), not by the Engine. Engine caches the latest *Policy for the local
@@ -694,7 +703,7 @@ type Engine struct {
 	policy       *Policy // cached snapshot for LocalTenantID; refreshed by watchStop
 	watchStop    func()
 	history      HistoryQuerier
-	sessionCosts map[string]sessionCostEntry // session_id -> entry
+	sessionCosts map[sessionCostKey]sessionCostEntry // (tenant, session_id) -> entry
 
 	// lastPolicyLoadAtNs records the unix-nanosecond timestamp of the most
 	// recent successful policy load (initial Get + each Watch callback fire).
@@ -726,7 +735,7 @@ func NewEngine(provider PolicyProvider) (*Engine, error) {
 	e := &Engine{
 		provider:     provider,
 		policy:       pol,
-		sessionCosts: make(map[string]sessionCostEntry),
+		sessionCosts: make(map[sessionCostKey]sessionCostEntry),
 	}
 	// Stamp the load timestamp before Watch wires up so a probe that
 	// races with NewEngine never sees the zero value when a policy is in
@@ -816,46 +825,61 @@ func (e *Engine) SetHistoryQuerier(h HistoryQuerier) {
 	e.history = h
 }
 
-// RecordCost adds the cost of a completed action to the session accumulator.
-// Called by the proxy after a check returns ALLOW for a cost-scoped request.
+// RecordCost adds the cost of a completed action to the local tenant's
+// session accumulator. Called by the proxy after a check returns ALLOW for a
+// cost-scoped request.
 //
 // Note: callers should prefer CheckAndReserve in Check() when possible, which
 // updates the accumulator atomically with the Allow decision. RecordCost is
 // retained for backfill or out-of-band accounting.
+//
+// Backward-compat: this single-tenant signature is preserved for embedders;
+// it resolves to LocalTenantID. Tenant-aware out-of-band accounting uses
+// recordCost directly (the v0.6 Store syncer will expose this when needed).
 func (e *Engine) RecordCost(sessionID string, cost float64) {
+	e.recordCost(LocalTenantID, sessionID, cost)
+}
+
+// recordCost is the tenant-aware accumulator increment shared by RecordCost
+// (local) and any future tenant-scoped caller.
+func (e *Engine) recordCost(tenantID, sessionID string, cost float64) {
 	if sessionID == "" || cost <= 0 {
 		return
 	}
+	key := sessionCostKey{tenant: tenantID, session: sessionID}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	entry := e.sessionCosts[sessionID]
+	entry := e.sessionCosts[key]
 	entry.cost += cost
 	entry.lastUpdated = time.Now()
-	e.sessionCosts[sessionID] = entry
+	e.sessionCosts[key] = entry
 }
 
-// RefundCost subtracts from the session accumulator. Used if a reserved cost
-// is rolled back (e.g. a downstream action failed after the policy allowed it).
+// RefundCost subtracts from the local tenant's session accumulator. Used if a
+// reserved cost is rolled back (e.g. a downstream action failed after the
+// policy allowed it). Preserved single-tenant signature → LocalTenantID.
 func (e *Engine) RefundCost(sessionID string, cost float64) {
 	if sessionID == "" || cost <= 0 {
 		return
 	}
+	key := sessionCostKey{tenant: LocalTenantID, session: sessionID}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	entry := e.sessionCosts[sessionID]
+	entry := e.sessionCosts[key]
 	entry.cost -= cost
 	if entry.cost < 0 {
 		entry.cost = 0
 	}
 	entry.lastUpdated = time.Now()
-	e.sessionCosts[sessionID] = entry
+	e.sessionCosts[key] = entry
 }
 
-// SessionCost returns the accumulated cost for a session (for testing).
+// SessionCost returns the accumulated cost for a session under the local
+// tenant (for testing). Preserved single-tenant signature → LocalTenantID.
 func (e *Engine) SessionCost(sessionID string) float64 {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.sessionCosts[sessionID].cost
+	return e.sessionCosts[sessionCostKey{tenant: LocalTenantID, session: sessionID}].cost
 }
 
 // SweepSessionCosts removes session-cost entries whose last update was more
@@ -872,9 +896,9 @@ func (e *Engine) SweepSessionCosts(maxAge time.Duration) int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	n := 0
-	for id, entry := range e.sessionCosts {
+	for key, entry := range e.sessionCosts {
 		if entry.lastUpdated.Before(cutoff) {
-			delete(e.sessionCosts, id)
+			delete(e.sessionCosts, key)
 			n++
 		}
 	}
@@ -887,6 +911,37 @@ func (e *Engine) SessionCostCount() int {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return len(e.sessionCosts)
+}
+
+// CostSnapshot is a point-in-time copy of one session's accumulated cost,
+// used by the persistence syncer. (Tenant, Session) is the partition key.
+type CostSnapshot struct {
+	Tenant      string
+	Session     string
+	Cost        float64
+	LastUpdated time.Time
+}
+
+// SnapshotCosts returns a copy of every session-cost entry. Read-locked and
+// intended for the background persistence syncer — never the request path.
+func (e *Engine) SnapshotCosts() []CostSnapshot {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make([]CostSnapshot, 0, len(e.sessionCosts))
+	for k, v := range e.sessionCosts {
+		out = append(out, CostSnapshot{Tenant: k.tenant, Session: k.session, Cost: v.cost, LastUpdated: v.lastUpdated})
+	}
+	return out
+}
+
+// RestoreCosts loads session-cost entries from a prior snapshot (boot
+// hydration). Intended to run once, before serving traffic.
+func (e *Engine) RestoreCosts(snaps []CostSnapshot) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, s := range snaps {
+		e.sessionCosts[sessionCostKey{tenant: s.Tenant, session: s.Session}] = sessionCostEntry{cost: s.Cost, lastUpdated: s.LastUpdated}
+	}
 }
 
 // Policy returns the currently active policy for the local tenant
@@ -990,18 +1045,20 @@ type ActionRequest struct {
 // concurrent checks on the same session_id cannot collectively exceed the
 // configured max_per_session limit (TOCTOU fix).
 func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
-	// Reject any tenant the provider does not recognise. We consult the
-	// provider rather than just the cached policy because multi-tenant
-	// providers may populate other tenant IDs that this engine has not
-	// yet observed; refusing on cache miss alone would cause a false 404
-	// in those topologies.
 	if tenantID == "" {
 		tenantID = LocalTenantID
 	}
+
+	// Resolve the policy to evaluate against. For a non-local tenant this comes
+	// from the provider — a MultiTenantProvider returns THAT tenant's own
+	// policy (served from its in-memory cache, so no DB on the hot path); the
+	// FilePolicyProvider rejects every non-local tenant with ErrTenantNotFound.
+	// The lookup happens BEFORE e.mu is taken so the engine lock never nests
+	// under the provider lock.
+	var tenantPol *Policy
 	if tenantID != LocalTenantID {
-		// FilePolicyProvider rejects every non-local tenant with
-		// ErrTenantNotFound; future providers may accept others.
-		if _, err := e.provider.Get(tenantID); err != nil {
+		p, err := e.provider.Get(tenantID)
+		if err != nil {
 			if errors.Is(err, ErrTenantNotFound) {
 				return CheckResult{
 					Decision: Deny,
@@ -1009,17 +1066,16 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 					Rule:     "deny:tenant:not_found",
 				}
 			}
-			// A non-ErrTenantNotFound error from the provider is an
-			// internal infrastructure failure (e.g. DB down for a
-			// future DB-backed provider); treat it as default-deny
-			// with a distinct sentinel rule so operators can alert on
-			// it without confusing it with a missing-tenant case.
+			// A non-ErrTenantNotFound error is an infrastructure failure (e.g.
+			// DB down); default-deny with a distinct sentinel so operators can
+			// alert on it separately from a missing-tenant case.
 			return CheckResult{
 				Decision: Deny,
 				Reason:   fmt.Sprintf("policy provider lookup failed for tenant %q: %v", tenantID, err),
 				Rule:     "deny:tenant:provider_error",
 			}
 		}
+		tenantPol = p
 	}
 
 	// Normalize request inputs (Unicode, URL-encoding, null bytes) before
@@ -1029,7 +1085,8 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 
 	// Cost-scoped requests that may write to sessionCosts need the write lock
 	// to make check-and-reserve atomic. For all other scopes a read lock
-	// suffices.
+	// suffices. The lock also guards the e.policy snapshot read below and
+	// e.history reads inside matchConditions.
 	if req.Scope == "cost" {
 		e.mu.Lock()
 		defer e.mu.Unlock()
@@ -1038,8 +1095,14 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 		defer e.mu.RUnlock()
 	}
 
-	if e.policy == nil {
-		// Cache empty — the provider lost its policy between construction
+	// Evaluate against the tenant's policy: the provider-supplied policy for a
+	// non-local tenant, otherwise the engine's cached local snapshot.
+	pol := e.policy
+	if tenantPol != nil {
+		pol = tenantPol
+	}
+	if pol == nil {
+		// Local cache empty — the provider lost its policy between construction
 		// and now. Treat as default-deny rather than panicking.
 		return CheckResult{
 			Decision: Deny,
@@ -1048,7 +1111,7 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 		}
 	}
 
-	rules := e.resolveRules(req.AgentID)
+	rules := resolveRules(pol, req.AgentID)
 
 	for _, rs := range rules {
 		if rs.Scope != req.Scope {
@@ -1057,7 +1120,7 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 
 		// Cost scope: evaluate limits instead of pattern rules
 		if rs.Scope == "cost" && rs.Limits != nil {
-			return e.checkCost(rs, req)
+			return e.checkCost(rs, req, tenantID)
 		}
 
 		// Data scope: gates form inputs, browser data exfiltration, and
@@ -1128,13 +1191,19 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 	}
 }
 
-// RateLimitConfig returns the rate limit config for a given scope, considering
-// per-agent overrides. Returns nil if no rate limit is configured.
-func (e *Engine) RateLimitConfig(scope, agentID string) *RateLimitCfg {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-
-	rules := e.resolveRules(agentID)
+// RateLimitConfig returns the rate limit config for a given scope under a
+// tenant's policy, considering per-agent overrides. Returns nil if no rate
+// limit is configured (or the tenant is unknown). Evaluated against the
+// tenant's policy so a non-local tenant gets ITS OWN rate limits, not local's.
+func (e *Engine) RateLimitConfig(scope, agentID, tenantID string) *RateLimitCfg {
+	// PolicyForTenant snapshots the local policy under e.mu (or fetches the
+	// tenant's from the provider). resolveRules then operates on that immutable
+	// snapshot lock-free.
+	pol, err := e.PolicyForTenant(tenantID)
+	if err != nil || pol == nil {
+		return nil
+	}
+	rules := resolveRules(pol, agentID)
 	for _, rs := range rules {
 		if rs.Scope == scope && rs.RateLimit != nil {
 			return rs.RateLimit
@@ -1161,14 +1230,14 @@ func (e *Engine) RateLimitConfig(scope, agentID string) *RateLimitCfg {
 //
 // Scopes present only in the override are appended to the result regardless
 // of mode. Scopes present only in the base are passed through unchanged.
-func (e *Engine) resolveRules(agentID string) []RuleSet {
-	if agentID == "" || e.policy.Agents == nil {
-		return e.policy.Rules
+func resolveRules(pol *Policy, agentID string) []RuleSet {
+	if agentID == "" || pol.Agents == nil {
+		return pol.Rules
 	}
 
-	agentCfg, ok := e.policy.Agents[agentID]
+	agentCfg, ok := pol.Agents[agentID]
 	if !ok {
-		return e.policy.Rules
+		return pol.Rules
 	}
 
 	// Build a map of overridden scopes
@@ -1186,7 +1255,7 @@ func (e *Engine) resolveRules(agentID string) []RuleSet {
 	var merged []RuleSet
 	seen := make(map[string]bool)
 
-	for _, rs := range e.policy.Rules {
+	for _, rs := range pol.Rules {
 		if override, ok := overridden[rs.Scope]; ok {
 			if mode == OverrideModeReplace {
 				merged = append(merged, override)
@@ -1256,10 +1325,14 @@ func mergeRules(base, over []Rule) []Rule {
 // checkCost evaluates cost limits for a request. MUST be called with e.mu
 // held for write, because an Allow decision reserves the cost atomically
 // against the session accumulator.
-func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
+func (e *Engine) checkCost(rs RuleSet, req ActionRequest, tenantID string) CheckResult {
 	if rs.Limits == nil {
 		return CheckResult{Decision: Allow, Reason: "No cost limits configured"}
 	}
+	// Partition the accumulator by (tenant, session) so two tenants reusing
+	// the same session_id keep independent budgets. tenantID is already
+	// normalized to LocalTenantID by Check before this runs.
+	costKey := sessionCostKey{tenant: tenantID, session: req.SessionID}
 
 	// Reject negative cost values — they could bypass limits
 	if req.EstCost < 0 {
@@ -1303,7 +1376,7 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 		}
 	}
 	if req.SessionID != "" && maxPerSession > 0 {
-		cumulative := e.sessionCosts[req.SessionID].cost
+		cumulative := e.sessionCosts[costKey].cost
 		if cumulative+req.EstCost > maxPerSession {
 			return CheckResult{
 				Decision: Deny,
@@ -1333,10 +1406,10 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest) CheckResult {
 
 	// Allow — reserve the cost against the session accumulator atomically.
 	if req.SessionID != "" && req.EstCost > 0 {
-		entry := e.sessionCosts[req.SessionID]
+		entry := e.sessionCosts[costKey]
 		entry.cost += req.EstCost
 		entry.lastUpdated = time.Now()
-		e.sessionCosts[req.SessionID] = entry
+		e.sessionCosts[costKey] = entry
 	}
 
 	return CheckResult{
@@ -1525,23 +1598,23 @@ func matchRule(rule Rule, req ActionRequest) bool {
 //     - Split on `/`. Each segment except `**` is matched with wildcardMatch.
 //     - `**` matches zero or more whole `/`-delimited segments.
 //     - Therefore `/etc/**` matches both `/etc/passwd` AND `/etc` itself
-//       (the `**` consumes zero segments). Operators who want "at least
-//       one segment under /etc" must spell it `/etc/*/**` or list `/etc`
-//       explicitly in a separate rule.
+//     (the `**` consumes zero segments). Operators who want "at least
+//     one segment under /etc" must spell it `/etc/*/**` or list `/etc`
+//     explicitly in a separate rule.
 //     - The security guarantee: `**/secret/**` does NOT match
-//       `/notsecret/x`. `**` always lands on segment boundaries; it never
-//       substring-matches.
+//     `/notsecret/x`. `**` always lands on segment boundaries; it never
+//     substring-matches.
 //
 //  2. Domain patterns (no `/`):
 //     - Matched with wildcardMatch. `*` matches any chars including `.`.
 //     - Therefore `*.foo.com` matches `api.foo.com` but does NOT match
-//       `foo.com` (the `*` requires at least one character before `.foo.com`).
+//     `foo.com` (the `*` requires at least one character before `.foo.com`).
 //     - To match `foo.com` itself, list it as a separate rule or use the
-//       literal pattern `foo.com`.
+//     literal pattern `foo.com`.
 //
 //  3. Shell-command patterns (no `/`, no `**`):
 //     - Same as domain: wildcardMatch. `*` is greedy across `/`, spaces,
-//       and dots.
+//     and dots.
 //
 // The asymmetry between (1) and (2) is intentional and documented:
 //   - Path `**` is segment-aware (designed for filesystem trees) and
