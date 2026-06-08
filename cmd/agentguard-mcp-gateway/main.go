@@ -42,7 +42,7 @@ import (
 // Versions are injected at link time via -ldflags. Defaults are used
 // for `go run ./cmd/agentguard-mcp-gateway` and `go test`.
 var (
-	version = "0.5.2"
+	version = "0.6.0"
 	commit  = "dev"
 )
 
