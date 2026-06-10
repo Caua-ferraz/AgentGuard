@@ -435,6 +435,22 @@ func (s *Server) runOpenAIStreamLoop(w http.ResponseWriter, flusher http.Flusher
 				}
 			}
 			switch {
+			case result.ProtocolViolation:
+				// Defensive: the OpenAI accumulator does not currently emit
+				// this (its tool_calls all close together at finish_reason, so
+				// there is no interleave window). Handled here so a future
+				// parser change can never silently drop the signal and leak an
+				// ungated call. Fail closed with a synthetic refusal.
+				metrics.IncLLMProxyProtocolViolation("openai")
+				refusal := s.buildRefusal("openai", Decision{
+					Allow:  false,
+					Reason: "upstream tool_call stream is malformed; refused",
+					Rule:   "deny:llm_api_proxy:tool_use_interleaved",
+				}, &RefusalContext{Provider: "openai", AnthropicToolUseIndex: -1})
+				_, _ = w.Write(refusal)
+				flusher.Flush()
+				return
+
 			case result.OverflowBufferBytes:
 				metrics.IncLLMProxyBufferOverflow("openai")
 				refusal := s.buildRefusal("openai", Decision{
@@ -588,6 +604,22 @@ func (s *Server) runAnthropicStreamLoop(w http.ResponseWriter, flusher http.Flus
 				continue
 			}
 			switch {
+			case result.ProtocolViolation:
+				// SECURITY (audit H1/H2): the upstream emitted a structurally
+				// unsafe tool_use stream (interleaved second tool_use, or
+				// start-input conflicting with streamed deltas). We cannot
+				// gate it without risking an ungated call, so we fail closed:
+				// discard the buffered bytes and emit a synthetic refusal.
+				metrics.IncLLMProxyProtocolViolation("anthropic")
+				refusal := s.buildRefusal("anthropic", Decision{
+					Allow:  false,
+					Reason: "upstream tool_use stream is malformed (interleaved or conflicting tool_use blocks); refused",
+					Rule:   "deny:llm_api_proxy:tool_use_interleaved",
+				}, &RefusalContext{Provider: "anthropic", AnthropicToolUseIndex: acc.ActiveToolUseIndex()})
+				_, _ = w.Write(refusal)
+				flusher.Flush()
+				return
+
 			case result.OverflowBufferBytes:
 				metrics.IncLLMProxyBufferOverflow("anthropic")
 				refusal := s.buildRefusal("anthropic", Decision{

@@ -75,6 +75,13 @@ type anthropicBlockState struct {
 	Name      string
 	InputJSON bytes.Buffer
 	Closed    bool
+	// startSeeded is true when the tool_use's arguments were seeded from a
+	// non-empty content_block_start.input (audit H2). A conformant Anthropic
+	// stream never does this (start input is always `{}` and the real
+	// arguments stream via input_json_delta), so if startSeeded is true AND
+	// an input_json_delta later arrives for the same block the two argument
+	// sources conflict — the parser fails closed in that case.
+	startSeeded bool
 }
 
 // AnthropicAccumulator stitches Anthropic streaming events into
@@ -165,14 +172,38 @@ func (a *AnthropicAccumulator) FeedEvent(rawEvent []byte) (FeedResult, error) {
 		// pass through. If it's a text block while a tool_use is
 		// already buffering, keep buffering (preserve order).
 		if env.ContentBlock != nil && env.ContentBlock.Type == "tool_use" {
+			// SECURITY (audit H1): a second tool_use content block must
+			// never open while one is still buffering. Anthropic emits
+			// content blocks serially — each block's content_block_stop
+			// (which gates it and Resets the accumulator) lands before the
+			// next block's start. An interleaved second tool_use would be
+			// buffered here, flushed to the client when the FIRST block's
+			// gate cycle Resets us, and then its remaining deltas/stop would
+			// pass through UNGATED. We cannot gate two blocks in one cycle,
+			// so we fail closed: signal a protocol violation and let the
+			// orchestrator refuse the whole stream.
+			if a.activeToolUseIndex >= 0 {
+				return FeedResult{ProtocolViolation: true}, nil
+			}
 			st := &anthropicBlockState{
 				Index: env.Index,
 				Type:  "tool_use",
 				ID:    env.ContentBlock.ID,
 				Name:  env.ContentBlock.Name,
 			}
-			// Spec: initial input is `{}` placeholder. We ignore it
-			// and accumulate partial_json fragments instead.
+			// Seed arguments from content_block.input when present
+			// (audit H2): a conformant Anthropic stream sends `input:{}` at
+			// start and streams the real arguments via input_json_delta, but
+			// a non-conformant/adversarial upstream can put the real
+			// arguments in the start event and emit no delta. If we ignored
+			// `input` here the gate would evaluate an empty `{}` while the
+			// client SDK, which seeds tool input from the start block,
+			// executes the real arguments. Seed the buffer so the gate sees
+			// what the client will.
+			if seed := bytes.TrimSpace(env.ContentBlock.Input); len(seed) > 0 && !bytes.Equal(seed, []byte("{}")) {
+				st.InputJSON.Write(seed)
+				st.startSeeded = true
+			}
 			a.blocks[env.Index] = st
 			if a.activeToolUseIndex < 0 {
 				a.activeToolUseIndex = env.Index
@@ -208,6 +239,15 @@ func (a *AnthropicAccumulator) FeedEvent(rawEvent []byte) (FeedResult, error) {
 					// precede content_block_delta — but defensive.
 					st = &anthropicBlockState{Index: env.Index, Type: "tool_use"}
 					a.blocks[env.Index] = st
+				}
+				// SECURITY (audit H2): arguments seeded from a non-empty
+				// content_block_start.input must not also be streamed via
+				// input_json_delta — the two sources would concatenate into
+				// invalid JSON and the gate could end up evaluating a
+				// truncated/empty view. A conformant stream never does both;
+				// fail closed.
+				if st.startSeeded {
+					return FeedResult{ProtocolViolation: true}, nil
 				}
 				projected := totalAnthropicArgsLen(a.blocks) + len(env.Delta.PartialJSON)
 				if a.maxBufferBytes > 0 && projected > a.maxBufferBytes {

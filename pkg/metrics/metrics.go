@@ -171,6 +171,38 @@ func LLMProxyNonStreamingOverflowFor(provider string) uint64 {
 	return llmProxyNonStreamingOverflowCount[llmProxyOverflowKey{Provider: provider}]
 }
 
+// LLM-proxy streaming protocol-violation metrics. Security audit finding
+// H1: a structurally unsafe stream (e.g. a second Anthropic tool_use
+// content block opened before the first closed) is refused fail-closed
+// rather than partially gated. Distinct from the overflow counters so
+// operators can alert on a non-conformant or adversarial upstream
+// specifically — a non-zero rate here means the proxy refused a stream
+// whose block ordering could otherwise have smuggled an ungated tool
+// call past the gate. See pkg/llmproxy/streaming.go.
+var (
+	llmProxyProtocolViolationMu    sync.Mutex
+	llmProxyProtocolViolationCount = map[llmProxyOverflowKey]uint64{}
+)
+
+// IncLLMProxyProtocolViolation increments
+// agentguard_llmproxy_protocol_violation_total{provider=...}. Provider
+// MUST be "openai" or "anthropic" so cardinality stays bounded.
+func IncLLMProxyProtocolViolation(provider string) {
+	if provider == "" {
+		provider = "unknown"
+	}
+	llmProxyProtocolViolationMu.Lock()
+	llmProxyProtocolViolationCount[llmProxyOverflowKey{Provider: provider}]++
+	llmProxyProtocolViolationMu.Unlock()
+}
+
+// LLMProxyProtocolViolationFor returns the current count (for tests).
+func LLMProxyProtocolViolationFor(provider string) uint64 {
+	llmProxyProtocolViolationMu.Lock()
+	defer llmProxyProtocolViolationMu.Unlock()
+	return llmProxyProtocolViolationCount[llmProxyOverflowKey{Provider: provider}]
+}
+
 // LLM-proxy global concurrent-stream metrics. The proxy refuses new
 // streaming requests with 503 + Retry-After when the
 // --max-concurrent-streams cap is hit; rejections are visible here so
@@ -707,7 +739,36 @@ func WritePrometheus(w io.Writer) {
 	writeMigrationStatus(w)
 	writeLLMProxyBufferOverflow(w)
 	writeLLMProxyNonStreamingOverflow(w)
+	writeLLMProxyProtocolViolation(w)
 	writeDeprecations(w)
+}
+
+// writeLLMProxyProtocolViolation emits the LLM-proxy streaming
+// protocol-violation counter (audit finding H1). Always emits HELP/TYPE
+// so the series is visible before the first violation happens.
+func writeLLMProxyProtocolViolation(w io.Writer) {
+	const name = "agentguard_llmproxy_protocol_violation_total"
+	const help = "LLM-proxy streams refused fail-closed because the upstream's content-block ordering was structurally unsafe to gate (e.g. an interleaved second tool_use), by provider."
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+	llmProxyProtocolViolationMu.Lock()
+	snap := make(map[llmProxyOverflowKey]uint64, len(llmProxyProtocolViolationCount))
+	for k, v := range llmProxyProtocolViolationCount {
+		snap[k] = v
+	}
+	llmProxyProtocolViolationMu.Unlock()
+	if len(snap) == 0 {
+		return
+	}
+	keys := make([]llmProxyOverflowKey, 0, len(snap))
+	for k := range snap {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return keys[i].Provider < keys[j].Provider
+	})
+	for _, k := range keys {
+		fmt.Fprintf(w, "%s{provider=\"%s\"} %d\n", name, escapeLabel(k.Provider), snap[k])
+	}
 }
 
 // writeLLMProxyBufferOverflow emits the LLM-proxy streaming buffer
