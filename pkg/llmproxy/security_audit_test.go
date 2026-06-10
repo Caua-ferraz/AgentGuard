@@ -196,3 +196,111 @@ func TestAudit_H2_ConformantStreamStillGatesViaDeltas(t *testing.T) {
 		t.Errorf("conformant stream: gate saw %q, want \"ls\"", sawArgs)
 	}
 }
+
+// H3: tool-call arguments containing duplicate JSON keys must be refused
+// fail-closed. Go decodes them last-wins into the map the gate projects from,
+// but the raw bytes replayed on ALLOW could be parsed first-wins by a
+// downstream executor — a parser-differential bypass.
+//
+// Pre-fix: the gate evaluates path="/tmp/ok" (last-wins) → ALLOW → the raw
+// tool_call (carrying both keys) is replayed to the client.
+// Post-fix: runPolicyCheck rejects the duplicate-key arguments before policy.
+func TestAudit_H3_DuplicateKeyArguments_Refused(t *testing.T) {
+	// arguments string has the key "path" twice.
+	const dupKeyStream = `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_dup","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"/etc/shadow\",\"path\":\"/tmp/ok\"}"}}]},"finish_reason":null}]}` + "\n\n" +
+		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n" +
+		"data: [DONE]\n\n"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, dupKeyStream)
+	}))
+	defer upstream.Close()
+
+	hookCalled := false
+	base, teardown := newStreamingTestServer(t, upstream, func(s *Server) {
+		s.PolicyCheck = func(ctx context.Context, tc *ToolCallCheck) (Decision, error) {
+			hookCalled = true // would ALLOW on the last-wins "/tmp/ok"
+			return Decision{Allow: true, Rule: "allow:fs"}, nil
+		}
+	})
+	defer teardown()
+
+	body := `{"model":"gpt-4","messages":[],"stream":true}`
+	req, _ := http.NewRequest("POST", base+"/v1/chat/completions", strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	gotStr := string(got)
+
+	if strings.Contains(gotStr, "call_dup") {
+		t.Errorf("H3 BYPASS: duplicate-key tool_call reached client: %q", gotStr)
+	}
+	if !strings.Contains(gotStr, "AgentGuard denied") {
+		t.Errorf("expected duplicate-key refusal; got %q", gotStr)
+	}
+	if hookCalled {
+		t.Errorf("policy hook was called for duplicate-key args; it must be rejected before policy")
+	}
+}
+
+// H3 unit: the detector must catch duplicates at any nesting depth and not
+// false-positive on legitimate JSON.
+func TestAudit_H3_hasDuplicateJSONKeys(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"empty", "", false},
+		{"flat unique", `{"a":1,"b":2}`, false},
+		{"flat dup", `{"a":1,"a":2}`, true},
+		{"nested dup", `{"outer":{"x":1,"x":2}}`, true},
+		{"array of objs one dup", `[{"a":1},{"b":1,"b":2}]`, true},
+		{"array unique", `[{"a":1},{"b":2}]`, false},
+		{"dup deep in array", `{"k":[1,2,{"z":1,"z":3}]}`, true},
+		{"malformed not flagged", `{"a":1,`, false},
+		{"scalar", `"hello"`, false},
+		{"same key different objects ok", `{"a":{"x":1},"b":{"x":2}}`, false},
+	}
+	for _, tc := range cases {
+		if got := hasDuplicateJSONKeys([]byte(tc.raw)); got != tc.want {
+			t.Errorf("%s: hasDuplicateJSONKeys(%q) = %v, want %v", tc.name, tc.raw, got, tc.want)
+		}
+	}
+}
+
+// M1: the OpenAI accumulator must take the FIRST function name across
+// fragments for a given tool_calls index, matching a spec-conformant
+// (first-wins) client, not the last.
+func TestAudit_M1_OpenAIToolNameFirstWins(t *testing.T) {
+	acc := NewOpenAIToolCallAccumulator(0)
+
+	// Fragment 1: name "read_file".
+	ev1 := []byte(`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":null}]}` + "\n\n")
+	// Fragment 2: a SECOND, different name "bash" for the same index.
+	ev2 := []byte(`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"bash"}}]},"finish_reason":null}]}` + "\n\n")
+	// Finish.
+	ev3 := []byte(`data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n")
+
+	if _, err := acc.FeedEvent(ev1); err != nil {
+		t.Fatalf("ev1: %v", err)
+	}
+	if _, err := acc.FeedEvent(ev2); err != nil {
+		t.Fatalf("ev2: %v", err)
+	}
+	res, err := acc.FeedEvent(ev3)
+	if err != nil {
+		t.Fatalf("ev3: %v", err)
+	}
+	if !res.Completed || len(res.CompletedToolCalls) != 1 {
+		t.Fatalf("expected 1 completed tool call, got %+v", res)
+	}
+	if name := res.CompletedToolCalls[0].ToolName; name != "read_file" {
+		t.Errorf("tool name = %q, want \"read_file\" (first-wins)", name)
+	}
+}

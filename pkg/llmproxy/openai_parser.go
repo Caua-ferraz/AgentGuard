@@ -257,7 +257,15 @@ func (a *OpenAIToolCallAccumulator) FeedEvent(rawEvent []byte) (FeedResult, erro
 				}
 				if tc.Function != nil {
 					st.HasFunction = true
-					if tc.Function.Name != "" {
+					// SECURITY (audit M1): take the FIRST non-empty function
+					// name, not the last. OpenAI emits the name once in the
+					// first fragment for a given tool_calls[i].index; a
+					// non-conformant upstream that sends a second, different
+					// name would otherwise make the gate evaluate the LAST
+					// name while a spec-conformant (first-wins) client SDK
+					// executes the FIRST — a parser-differential. First-wins
+					// here matches the client and removes the ambiguity.
+					if tc.Function.Name != "" && st.Name == "" {
 						st.Name = tc.Function.Name
 					}
 					if tc.Function.Arguments != "" {

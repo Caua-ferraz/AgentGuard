@@ -182,6 +182,20 @@ var errSSEEventTooLarge = errors.New("sse event exceeded buffer cap")
 // nil: ALLOW. This makes the streaming pipe testable without the gate
 // wired and matches the rest of the package's nil-safety pattern.
 func (s *Server) runPolicyCheck(ctx context.Context, tc ToolCallCheck) (Decision, error) {
+	// SECURITY (audit H3): reject tool-call arguments that contain duplicate
+	// JSON keys before evaluating policy. The gate projects from a Go map
+	// (last-wins on duplicates) while the ALLOW path replays the raw argument
+	// bytes; a first-wins downstream executor would then act on a different
+	// value than the one gated — a parser-differential bypass. Fail closed
+	// regardless of the wired PolicyCheck (this is a hard deny, nil error, so
+	// it is not subject to --fail-mode allow).
+	if hasDuplicateJSONKeys(tc.RawArguments) {
+		return Decision{
+			Allow:  false,
+			Reason: "tool call arguments contain duplicate JSON keys (ambiguous to gate; refused)",
+			Rule:   "deny:llm_api_proxy:duplicate_argument_key",
+		}, nil
+	}
 	if s.PolicyCheck == nil {
 		return Decision{Allow: true, Rule: "allow:llm_api_proxy:no_hook"}, nil
 	}
