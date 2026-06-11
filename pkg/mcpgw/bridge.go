@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Caua-ferraz/AgentGuard/pkg/internal/gateclient"
 )
 
 // MetaApprovalIDKey is the reserved `_meta` key MCP clients use to
@@ -105,19 +107,11 @@ type ToolsCallRequest struct {
 	ApprovalID string                 // populated from _meta.dev.agentguard/approval_id if present
 }
 
-// Decision is the verdict returned by PolicyCheck.
-type Decision struct {
-	Allow       bool
-	Reason      string
-	Rule        string
-	ApprovalID  string // set when REQUIRE_APPROVAL
-	ApprovalURL string
-	// RequiresApproval is set when the policy engine returned
-	// REQUIRE_APPROVAL. The bridge surfaces it as an isError=true
-	// content block (per docs/MCP_GATEWAY.md § 6.1) rather than a
-	// JSON-RPC error.
-	RequiresApproval bool
-}
+// Decision is the verdict returned by PolicyCheck. Alias of the shared
+// gateclient.Decision so both proxies speak one verdict shape. The
+// bridge surfaces RequiresApproval as an isError=true content block
+// (per docs/MCP_GATEWAY.md § 6.1) rather than a JSON-RPC error.
+type Decision = gateclient.Decision
 
 // AuditEntry is the bridge-internal shape passed to AuditEmit. A19
 // translates this into the canonical audit.Entry with

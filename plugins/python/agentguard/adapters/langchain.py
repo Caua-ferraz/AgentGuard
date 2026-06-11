@@ -59,6 +59,7 @@ from __future__ import annotations
 from typing import Any, AsyncIterator, Iterator, List, Optional
 
 from agentguard import Guard, CheckResult, DEFAULT_BASE_URL
+from agentguard.adapters._common import extract_check_params
 
 
 # ---------------------------------------------------------------------------
@@ -177,39 +178,7 @@ def _build_guarded_tool_class() -> type:
 
         def _infer_check_params(self, tool_input: Any) -> dict:
             """Extract meaningful parameters from tool input."""
-            params: dict = {}
-            if isinstance(tool_input, str):
-                params["command"] = tool_input
-            elif isinstance(tool_input, dict):
-                if "command" in tool_input or "cmd" in tool_input:
-                    params["command"] = tool_input.get(
-                        "command", tool_input.get("cmd", "")
-                    )
-                if "url" in tool_input:
-                    params["url"] = tool_input["url"]
-                    try:
-                        from urllib.parse import urlparse
-                        parsed = urlparse(tool_input["url"])
-                        if parsed.hostname:
-                            params["domain"] = parsed.hostname
-                    except Exception:
-                        pass
-                if "path" in tool_input or "file_path" in tool_input:
-                    params["path"] = tool_input.get(
-                        "path", tool_input.get("file_path", "")
-                    )
-                    name_lower = self.name.lower() if isinstance(self.name, str) else ""
-                    if "read" in name_lower or "get" in name_lower:
-                        params["action"] = "read"
-                    elif "write" in name_lower or "save" in name_lower or "create" in name_lower:
-                        params["action"] = "write"
-                    elif "delete" in name_lower or "remove" in name_lower:
-                        params["action"] = "delete"
-                if "session_id" in tool_input:
-                    params["session_id"] = tool_input["session_id"]
-                if "est_cost" in tool_input:
-                    params["est_cost"] = tool_input["est_cost"]
-            return params
+            return extract_check_params(tool_input, self.name)
 
         def _infer_scope(self, params: dict) -> str:
             if params.get("domain") or params.get("url"):

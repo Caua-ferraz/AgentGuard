@@ -589,24 +589,6 @@ func TestHTTPPolicyClient_PropagatesApprovalID_DualCheck(t *testing.T) {
 	}
 }
 
-func TestInferFilesystemAction(t *testing.T) {
-	cases := map[string]string{
-		"read_file":   "read",
-		"list_dir":    "read",
-		"get_file":    "read",
-		"write_file":  "write",
-		"edit_file":   "write",
-		"delete_file": "delete",
-		"remove_dir":  "delete",
-		"unknown":     "",
-	}
-	for in, want := range cases {
-		if got := inferFilesystemAction(in); got != want {
-			t.Errorf("inferFilesystemAction(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // TestHTTPPolicyClient_FailMode_DenyVsClosedAudit_DistinctRules pins
 // the B4 fix on the MCP gate side: --fail-mode deny and
 // --fail-mode fail-closed-with-audit must emit DISTINCT rule strings

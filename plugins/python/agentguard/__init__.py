@@ -28,6 +28,28 @@ from typing import Optional
 from urllib import request, error
 from urllib.parse import quote as urlquote
 
+# Public API surface. Everything else in this module is internal.
+__all__ = [
+    "Guard",
+    "CheckResult",
+    "guarded",
+    "AgentGuardError",
+    "AgentGuardDenied",
+    "AgentGuardApprovalRequired",
+    "AgentGuardApprovalTimeout",
+    "AgentGuardAuthError",
+    "DEFAULT_BASE_URL",
+    "DEFAULT_TIMEOUT",
+    "DEFAULT_APPROVAL_TIMEOUT",
+    "DEFAULT_POLL_INTERVAL",
+    "DECISION_ALLOW",
+    "DECISION_DENY",
+    "DECISION_REQUIRE_APPROVAL",
+    "LOCAL_TENANT_ID",
+    "FAIL_MODE_DENY",
+    "FAIL_MODE_ALLOW",
+]
+
 # Module-level logger. Used for non-fatal warnings (HTTP shape mismatches,
 # unexpected content types) where the SDK still returns a CheckResult per
 # the configured fail-mode but operators want visibility into the underlying

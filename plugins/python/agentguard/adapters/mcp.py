@@ -37,6 +37,7 @@ import re
 import sys
 from typing import Any, Callable, Dict, List, Optional
 from agentguard import Guard, CheckResult, DEFAULT_BASE_URL
+from agentguard.adapters._common import extract_check_params
 
 # MCP protocol constants
 MCP_PROTOCOL_VERSION = "2024-11-05"
@@ -77,45 +78,23 @@ def _infer_check_params_for(tool: "ToolDefinition", arguments: dict) -> dict:
     redaction. Defining the logic once at module scope keeps the gateway
     from awkwardly invoking the unbound server method on a non-server
     ``self`` (the gateway is its own class).
+
+    Builds on the shared :func:`extract_check_params` and adds the
+    MCP-specific parts: secret redaction on commands, a synthesised
+    command for shell-scope tools without an explicit one, and a bare
+    ``domain`` argument passthrough.
     """
-    from urllib.parse import urlparse  # local import — only used here
+    params: Dict[str, Any] = extract_check_params(arguments, tool.name)
 
-    params: Dict[str, Any] = {}
-
-    if "command" in arguments or "cmd" in arguments:
-        raw_cmd = arguments.get("command", arguments.get("cmd", ""))
-        params["command"] = _redact(raw_cmd) if isinstance(raw_cmd, str) else raw_cmd
+    if "command" in params:
+        cmd = params["command"]
+        if isinstance(cmd, str):
+            params["command"] = _redact(cmd)
     elif tool.scope == "shell":
         params["command"] = _redact(f"{tool.name} {json.dumps(arguments)}")
 
-    if "url" in arguments:
-        params["url"] = arguments["url"]
-        try:
-            parsed = urlparse(arguments["url"])
-            if parsed.hostname:
-                params["domain"] = parsed.hostname
-        except Exception:
-            # urlparse practically never raises but defensive — a malformed
-            # URL must not crash the policy check.
-            pass
-
-    if "path" in arguments or "file_path" in arguments:
-        params["path"] = arguments.get("path", arguments.get("file_path", ""))
-        name_lower = tool.name.lower()
-        if "read" in name_lower or "get" in name_lower:
-            params["action"] = "read"
-        elif "write" in name_lower or "save" in name_lower:
-            params["action"] = "write"
-        elif "delete" in name_lower or "remove" in name_lower:
-            params["action"] = "delete"
-
     if "domain" in arguments:
         params["domain"] = arguments["domain"]
-
-    if "session_id" in arguments:
-        params["session_id"] = arguments["session_id"]
-    if "est_cost" in arguments:
-        params["est_cost"] = arguments["est_cost"]
 
     return params
 

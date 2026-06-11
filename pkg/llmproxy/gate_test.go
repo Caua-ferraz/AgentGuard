@@ -654,29 +654,6 @@ func TestFormatLLMCommand_UnmappedFallsBackToToolName(t *testing.T) {
 	}
 }
 
-func TestInferLLMFilesystemAction(t *testing.T) {
-	cases := map[string]string{
-		"read_file":   "read",
-		"list_files":  "read",
-		"get_file":    "read",
-		"stat_file":   "read",
-		"cat":         "read",
-		"write_file":  "write",
-		"edit_file":   "write",
-		"create_dir":  "write",
-		"append_file": "write",
-		"delete_file": "delete",
-		"remove_dir":  "delete",
-		"unlink":      "delete",
-		"unknown":     "",
-	}
-	for in, want := range cases {
-		if got := inferLLMFilesystemAction(in); got != want {
-			t.Errorf("inferLLMFilesystemAction(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func TestIsSecretKeyName(t *testing.T) {
 	hits := []string{"password", "Password", "api_token", "AUTH_TOKEN", "GITHUB_TOKEN", "secret", "ApiKey", "apikey", "MY_AUTH"}
 	misses := []string{"path", "command", "url", "name", "x"}

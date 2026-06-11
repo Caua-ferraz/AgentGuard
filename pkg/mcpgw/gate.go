@@ -35,26 +35,21 @@ package mcpgw
 //     down; should NOT be the production setting.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync/atomic"
-	"time"
 
+	"github.com/Caua-ferraz/AgentGuard/pkg/internal/gateclient"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
 // DefaultGuardHTTPTimeout is the per-/v1/check-call timeout the gate
-// applies when the operator does not pass a custom http.Client. Five
-// seconds matches the SDKs and the value documented in
-// docs/PROXY_ARCHITECTURE.md § 6.1.
-const DefaultGuardHTTPTimeout = 5 * time.Second
+// applies when the operator does not pass a custom http.Client.
+const DefaultGuardHTTPTimeout = gateclient.DefaultGuardHTTPTimeout
 
 // FailModeRuleClosed and FailModeRuleClosedAudit are the synthetic Rule
 // strings the gate stamps on fail-closed denials so operators can alert
@@ -70,12 +65,28 @@ const (
 	FailModeRuleClosed      = "deny:gateway:fail_closed"
 	FailModeRuleClosedAudit = "deny:gateway:fail_closed_audit"
 	FailModeRuleOpen        = "allow:gateway:fail_open"
+
+	// InvalidResponseRule is stamped when /v1/check returns an
+	// unrecognised decision string (treated as a hard DENY).
+	InvalidResponseRule = "deny:gateway:invalid_response"
 )
+
+// gatewayFailModeRules feeds the gateway's synthetic-rule contract to
+// the shared gate client.
+var gatewayFailModeRules = gateclient.FailModeRules{
+	Open:        FailModeRuleOpen,
+	Closed:      FailModeRuleClosed,
+	ClosedAudit: FailModeRuleClosedAudit,
+	Invalid:     InvalidResponseRule,
+}
 
 // HTTPPolicyClient calls the central AgentGuard server's /v1/check
 // endpoint and orchestrates the dual-check pattern. One client per
 // gateway process; the underlying http.Client (and its connection
-// pool) is reused.
+// pool) is reused. The /v1/check wire contract and fail-mode
+// translation live in pkg/internal/gateclient (shared with the LLM
+// API proxy); this client adds the gateway-specific dual-check
+// orchestration.
 //
 // Policy is held atomically — the gateway's main.go subscribes to the
 // PolicyProvider's Watch and calls SetPolicy on every reload so the
@@ -242,13 +253,13 @@ func buildMappedActionRequest(req *ToolsCallRequest, mappedScope string) policy.
 	case "filesystem":
 		// Path is the primary signal. Look at common arg names; first
 		// non-empty wins. Action is inferred from the tool-name verb.
-		ar.Path = firstStringArg(req.Arguments, "path", "file_path", "filepath", "target_path", "destination", "src", "dst")
-		ar.Action = inferFilesystemAction(req.ToolName)
+		ar.Path = gateclient.FirstStringArg(req.Arguments, "path", "file_path", "filepath", "target_path", "destination", "src", "dst")
+		ar.Action = gateclient.InferFilesystemAction(req.ToolName)
 		ar.Command = req.FullName
 
 	case "network":
-		ar.URL = firstStringArg(req.Arguments, "url")
-		ar.Domain = firstStringArg(req.Arguments, "domain", "host", "hostname")
+		ar.URL = gateclient.FirstStringArg(req.Arguments, "url")
+		ar.Domain = gateclient.FirstStringArg(req.Arguments, "domain", "host", "hostname")
 		if ar.Domain == "" && ar.URL != "" {
 			if u, err := url.Parse(ar.URL); err == nil {
 				ar.Domain = u.Hostname()
@@ -257,8 +268,8 @@ func buildMappedActionRequest(req *ToolsCallRequest, mappedScope string) policy.
 		ar.Command = req.FullName
 
 	case "browser":
-		ar.URL = firstStringArg(req.Arguments, "url")
-		ar.Domain = firstStringArg(req.Arguments, "domain", "host", "hostname")
+		ar.URL = gateclient.FirstStringArg(req.Arguments, "url")
+		ar.Domain = gateclient.FirstStringArg(req.Arguments, "domain", "host", "hostname")
 		if ar.Domain == "" && ar.URL != "" {
 			if u, err := url.Parse(ar.URL); err == nil {
 				ar.Domain = u.Hostname()
@@ -272,10 +283,10 @@ func buildMappedActionRequest(req *ToolsCallRequest, mappedScope string) policy.
 		// argument, fall back to the namespaced tool name + serialised
 		// args so a "shell:run" with command="rm -rf /" matches a
 		// shell-scope deny on "rm -rf *".
-		cmd := firstStringArg(req.Arguments, "command", "cmd", "script")
+		cmd := gateclient.FirstStringArg(req.Arguments, "command", "cmd", "script")
 		if cmd == "" {
 			cmd = req.FullName
-			if argStr := firstStringArg(req.Arguments, "args"); argStr != "" {
+			if argStr := gateclient.FirstStringArg(req.Arguments, "args"); argStr != "" {
 				cmd = cmd + " " + argStr
 			}
 		}
@@ -284,12 +295,12 @@ func buildMappedActionRequest(req *ToolsCallRequest, mappedScope string) policy.
 	case "data":
 		// Data scope: value being submitted. Tool-name doubles as the
 		// action label so existing data rules can key on it.
-		ar.Command = firstStringArg(req.Arguments, "value", "content", "text", "data")
+		ar.Command = gateclient.FirstStringArg(req.Arguments, "value", "content", "text", "data")
 		if ar.Command == "" {
 			ar.Command = req.FullName
 		}
 		ar.Action = "form_input"
-		ar.URL = firstStringArg(req.Arguments, "url")
+		ar.URL = gateclient.FirstStringArg(req.Arguments, "url")
 		if ar.URL != "" {
 			if u, err := url.Parse(ar.URL); err == nil {
 				ar.Domain = u.Hostname()
@@ -307,168 +318,28 @@ func buildMappedActionRequest(req *ToolsCallRequest, mappedScope string) policy.
 	return ar
 }
 
-// firstStringArg returns the first non-empty string value found in
-// args under any of the supplied keys, or "" if none match.
-func firstStringArg(args map[string]interface{}, keys ...string) string {
-	if len(args) == 0 {
-		return ""
-	}
-	for _, k := range keys {
-		if v, ok := args[k]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				return s
-			}
-		}
-	}
-	return ""
-}
-
-// inferFilesystemAction maps a tool-name verb to the canonical
-// filesystem-scope action ("read"/"write"/"delete"). Best-effort —
-// rules that only match by paths are unaffected.
-func inferFilesystemAction(toolName string) string {
-	tl := strings.ToLower(toolName)
-	switch {
-	case strings.HasPrefix(tl, "read"), strings.HasPrefix(tl, "list"),
-		strings.HasPrefix(tl, "get"), strings.HasPrefix(tl, "stat"):
-		return "read"
-	case strings.HasPrefix(tl, "write"), strings.HasPrefix(tl, "edit"),
-		strings.HasPrefix(tl, "create"), strings.HasPrefix(tl, "append"),
-		strings.HasPrefix(tl, "save"), strings.HasPrefix(tl, "copy"),
-		strings.HasPrefix(tl, "move"):
-		return "write"
-	case strings.HasPrefix(tl, "delete"), strings.HasPrefix(tl, "remove"),
-		strings.HasPrefix(tl, "unlink"), strings.HasPrefix(tl, "rm"):
-		return "delete"
-	}
-	return ""
-}
-
-// callV1Check POSTs an ActionRequest to <GuardURL>/v1/t/<TenantID>/check
-// and decodes the CheckResult into a Decision. Errors are returned for
-// the caller (Check) to translate into the configured fail-mode.
+// callV1Check delegates to the shared gate client with the gateway's
+// identity stamped on the User-Agent.
 func (c *HTTPPolicyClient) callV1Check(ctx context.Context, ar policy.ActionRequest) (Decision, error) {
-	if c.HTTPClient == nil {
-		c.HTTPClient = &http.Client{Timeout: DefaultGuardHTTPTimeout}
+	caller := gateclient.Caller{
+		GuardURL:   c.GuardURL,
+		APIKey:     c.APIKey,
+		TenantID:   c.TenantID,
+		UserAgent:  "agentguard-mcp-gateway/" + GatewayBuildVersion,
+		HTTPClient: c.HTTPClient,
 	}
-
-	tenant := c.TenantID
-	if tenant == "" {
-		tenant = "local"
-	}
-	endpoint := strings.TrimRight(c.GuardURL, "/") + "/v1/t/" + url.PathEscape(tenant) + "/check"
-
-	// Stamp schema_version so the central server's request validator
-	// accepts the body.
-	ar.SchemaVersion = "v1"
-	body, err := json.Marshal(ar)
-	if err != nil {
-		return Decision{}, fmt.Errorf("marshal /v1/check body: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return Decision{}, fmt.Errorf("build /v1/check request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agentguard-mcp-gateway/1.0")
-	if c.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return Decision{}, fmt.Errorf("/v1/check request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Cap the response body so a misbehaving server doesn't OOM the
-	// gateway. /v1/check responses are O(few hundred bytes).
-	const maxResp = 64 * 1024
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResp))
-	if err != nil {
-		return Decision{}, fmt.Errorf("read /v1/check body: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return Decision{}, fmt.Errorf("/v1/check HTTP %d: %s", resp.StatusCode, truncateForError(string(raw)))
-	}
-
-	var cr policy.CheckResult
-	if err := json.Unmarshal(raw, &cr); err != nil {
-		return Decision{}, fmt.Errorf("decode /v1/check response: %w", err)
-	}
-
-	return decisionFromCheckResult(cr), nil
+	return caller.CallV1Check(ctx, ar, gatewayFailModeRules)
 }
 
-// decisionFromCheckResult maps a policy.CheckResult onto the gateway's
-// Decision shape.
-func decisionFromCheckResult(cr policy.CheckResult) Decision {
-	d := Decision{
-		Reason: cr.Reason,
-		Rule:   cr.Rule,
-	}
-	switch cr.Decision {
-	case policy.Allow:
-		d.Allow = true
-	case policy.RequireApproval:
-		d.Allow = false
-		d.RequiresApproval = true
-		d.ApprovalID = cr.ApprovalID
-		d.ApprovalURL = cr.ApprovalURL
-	default: // policy.Deny or any unknown
-		d.Allow = false
-	}
-	return d
-}
-
-// failModeDecision returns the synthetic Decision dictated by the
-// gate's --fail-mode when /v1/check is unreachable.
+// failModeDecision translates a /v1/check failure into the configured
+// fail-mode verdict.
 //
 // TODO(v0.6, #fail-closed-with-audit-local-emit): the
 // "fail-closed-with-audit" branch currently surfaces only via the
 // distinct rule string + metrics + stderr. A local audit entry from
 // the gateway side (without round-tripping the central server) so
 // operators can reconstruct the deny chain when /v1/check is offline
-// is future work. Mirrors pkg/llmproxy/gate.go.
+// is future work.
 func (c *HTTPPolicyClient) failModeDecision(err error) Decision {
-	switch strings.ToLower(c.FailMode) {
-	case "allow":
-		return Decision{
-			Allow:  true,
-			Reason: "fail-mode allow: " + err.Error(),
-			Rule:   FailModeRuleOpen,
-		}
-	case "fail-closed-with-audit":
-		return Decision{
-			Allow:  false,
-			Reason: "central server unreachable: " + err.Error(),
-			Rule:   FailModeRuleClosedAudit,
-		}
-	default: // "deny" or anything unrecognised
-		return Decision{
-			Allow:  false,
-			Reason: "central server unreachable: " + err.Error(),
-			Rule:   FailModeRuleClosed,
-		}
-	}
+	return gateclient.FailModeDecision(c.FailMode, err, gatewayFailModeRules)
 }
-
-// truncateForError caps long /v1/check error bodies so a verbose
-// upstream response doesn't blow up logs.
-func truncateForError(s string) string {
-	const maxLen = 256
-	s = strings.TrimSpace(s)
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
-
-// ErrPolicyNotLoaded is returned by gateway-side helpers when no policy
-// snapshot has been wired into the gate yet. Currently unused inside
-// gate.go (the dual-check fall-through handles nil policy gracefully)
-// but exposed so downstream callers (cmd/agentguard-mcp-gateway/main.go)
-// can sentinel-check.
-var ErrPolicyNotLoaded = errors.New("mcpgw: policy snapshot not loaded")
