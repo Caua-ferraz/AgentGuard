@@ -34,10 +34,10 @@ import (
 // anthropicEventEnvelope is the parsed shape of one event's `data:`
 // payload. Only fields the parser needs are typed.
 type anthropicEventEnvelope struct {
-	Type         string                       `json:"type"`
-	Index        int                          `json:"index,omitempty"`
-	ContentBlock *anthropicContentBlockShape  `json:"content_block,omitempty"`
-	Delta        *anthropicEventDeltaShape    `json:"delta,omitempty"`
+	Type         string                      `json:"type"`
+	Index        int                         `json:"index,omitempty"`
+	ContentBlock *anthropicContentBlockShape `json:"content_block,omitempty"`
+	Delta        *anthropicEventDeltaShape   `json:"delta,omitempty"`
 }
 
 // anthropicContentBlockShape is the start-of-block descriptor

@@ -23,7 +23,7 @@ package llmproxy
 //   3. The TestAT_CapturedFixtures_OpenAI sub-test below will pick it
 //      up automatically.
 //
-// TODO(v0.6, #llm-real-captured-fixtures): include captured fixtures
+// TODO(v0.7, #llm-real-captured-fixtures): include captured fixtures
 // from real OpenAI + Anthropic API calls in the regression suite.
 
 import (
@@ -47,7 +47,7 @@ func TestAT_CapturedFixtures_OpenAI(t *testing.T) {
 		t.Fatalf("glob: %v", err)
 	}
 	if len(files) == 0 {
-		t.Skip("no captured OpenAI streaming fixtures present in testdata/captured/; synthesized fixtures cover spec semantics — see TODO(v0.6, #llm-real-captured-fixtures)")
+		t.Skip("no captured OpenAI streaming fixtures present in testdata/captured/; synthesized fixtures cover spec semantics — see TODO(v0.7, #llm-real-captured-fixtures)")
 	}
 	for _, f := range files {
 		t.Run(filepath.Base(f), func(t *testing.T) {
@@ -103,7 +103,7 @@ func TestAT_CapturedFixtures_Anthropic(t *testing.T) {
 		t.Fatalf("glob: %v", err)
 	}
 	if len(files) == 0 {
-		t.Skip("no captured Anthropic streaming fixtures present in testdata/captured/; synthesized fixtures cover spec semantics — see TODO(v0.6, #llm-real-captured-fixtures)")
+		t.Skip("no captured Anthropic streaming fixtures present in testdata/captured/; synthesized fixtures cover spec semantics — see TODO(v0.7, #llm-real-captured-fixtures)")
 	}
 	for _, f := range files {
 		t.Run(filepath.Base(f), func(t *testing.T) {

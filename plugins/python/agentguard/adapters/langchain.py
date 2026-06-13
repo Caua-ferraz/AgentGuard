@@ -24,8 +24,8 @@ entry point the framework calls is explicitly overridden:
   - ``invoke`` / ``ainvoke`` — overridden anyway so the gate fires
     even if a future framework version short-circuits the parent's
     invoke -> run -> _run chain.
-  - ``stream`` / ``astream`` — gated once at stream open; per-chunk
-    gating is a v0.6 issue.
+  - ``stream`` / ``astream`` — gated at stream open + periodic
+    re-validation (see "Stream gating" below).
   - ``batch`` / ``abatch`` — gate each input independently; first DENY
     raises for the whole batch (whole-batch-fails-on-first-deny).
   - ``run`` / ``arun`` — legacy entries; preserve string-on-deny
@@ -46,20 +46,30 @@ extra. The class definition is wrapped in a builder that resolves
 the ``GuardedTool`` symbol is a callable factory that raises a clear
 ``ImportError`` when constructed.
 
-Stream gating limitation
-========================
+Stream gating
+=============
 
-For ``stream`` / ``astream`` the gate fires **once** at stream open.
-Mid-stream tool calls bypass the gate. TODO(v0.6): per-chunk gating
-in ``stream()`` / ``astream()``.
+``stream`` / ``astream`` gate at stream open and re-validate the
+decision every ``STREAM_REGATE_SECONDS`` (default 10s) while chunks
+flow, so a mid-stream policy revocation cuts the stream off instead of
+riding to completion.
 """
 
 from __future__ import annotations
 
+import time
 from typing import Any, AsyncIterator, Iterator, List, Optional
 
 from agentguard import Guard, CheckResult, DEFAULT_BASE_URL
 from agentguard.adapters._common import extract_check_params
+
+# How often a live stream re-validates its policy decision. Streams gate
+# at open; without re-validation a long-lived stream would ride to
+# completion even after a policy hot-reload revoked the permission.
+# Re-checking costs one local /v1/check HTTP round-trip, so it runs on a
+# wall-clock interval rather than per chunk. Tests shrink this to force
+# a re-check on every chunk.
+STREAM_REGATE_SECONDS = 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -390,12 +400,27 @@ def _build_guarded_tool_class() -> type:
             config: Any = None,
             **kwargs: Any,
         ) -> Iterator[Any]:
-            """Synchronous streaming Runnable entry. Gate fires once at
-            stream open. TODO(v0.6): gate per chunk."""
+            """Synchronous streaming Runnable entry. Gates at stream
+            open, then re-validates every ``STREAM_REGATE_SECONDS``
+            while chunks flow — a policy change mid-stream (permission
+            revoked via hot-reload) cuts the stream off with the same
+            typed ``PermissionError`` instead of riding to completion.
+            """
             result = self._gate(input)
             self._raise_for_modern_api(result, input)
             inner = self._tool
-            return inner.stream(input, config=config, **kwargs)
+
+            def guarded_chunks() -> Iterator[Any]:
+                last_check = time.monotonic()
+                for chunk in inner.stream(input, config=config, **kwargs):
+                    now = time.monotonic()
+                    if now - last_check >= STREAM_REGATE_SECONDS:
+                        recheck = self._gate(input)
+                        self._raise_for_modern_api(recheck, input)
+                        last_check = now
+                    yield chunk
+
+            return guarded_chunks()
 
         async def astream(  # type: ignore[override]
             self,
@@ -403,11 +428,18 @@ def _build_guarded_tool_class() -> type:
             config: Any = None,
             **kwargs: Any,
         ) -> AsyncIterator[Any]:
-            """Async streaming Runnable entry. Same one-shot gate."""
+            """Async streaming Runnable entry. Same open-gate +
+            periodic re-validation contract as :meth:`stream`."""
             result = self._gate(input)
             self._raise_for_modern_api(result, input)
             inner = self._tool
+            last_check = time.monotonic()
             async for chunk in inner.astream(input, config=config, **kwargs):
+                now = time.monotonic()
+                if now - last_check >= STREAM_REGATE_SECONDS:
+                    recheck = self._gate(input)
+                    self._raise_for_modern_api(recheck, input)
+                    last_check = now
                 yield chunk
 
         def batch(  # type: ignore[override]

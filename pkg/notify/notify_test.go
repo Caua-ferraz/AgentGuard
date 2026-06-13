@@ -12,6 +12,8 @@ import (
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
+	"os"
+	"path/filepath"
 )
 
 // countingNotifier is a test-only Notifier that records invocations.
@@ -585,4 +587,101 @@ func TestDispatcher_TimestampFilled(t *testing.T) {
 	if captured.Get().Timestamp.Before(before) {
 		t.Errorf("timestamp was not filled: %v", captured.Get().Timestamp)
 	}
+}
+
+// ---- spool-to-disk (queue overflow durability) -----------------------------
+
+func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for %s", what)
+}
+
+// TestDispatcher_SpoolOnSaturation_ThenRecoveryDelivers: queue-full
+// events land in the spool instead of being dropped, and the recovery
+// loop delivers every one of them once the worker frees up.
+func TestDispatcher_SpoolOnSaturation_ThenRecoveryDelivers(t *testing.T) {
+	spool := filepath.Join(t.TempDir(), "notify-spool.jsonl")
+	droppedBefore := atomic.LoadUint64(&DroppedEvents)
+	spooledBefore := metrics.NotifySpooledTotal()
+
+	d := NewDispatcherWithOptions(policy.NotificationCfg{}, DispatcherOptions{
+		Workers:          1,
+		QueueSize:        1,
+		SpoolPath:        spool,
+		RecoveryInterval: 50 * time.Millisecond,
+	})
+	defer d.Close()
+	counting := &countingNotifier{delay: 150 * time.Millisecond}
+	d.notifiers = append(d.notifiers, counting)
+
+	const total = 6
+	for i := 0; i < total; i++ {
+		d.Send(Event{Type: "denied"})
+	}
+
+	if got := metrics.NotifySpooledTotal() - spooledBefore; got == 0 {
+		t.Fatal("expected at least one event spooled under saturation")
+	}
+	if got := atomic.LoadUint64(&DroppedEvents) - droppedBefore; got != 0 {
+		t.Fatalf("spool enabled: %d events dropped, want 0", got)
+	}
+
+	waitForCondition(t, 20*time.Second, func() bool {
+		counting.mu.Lock()
+		defer counting.mu.Unlock()
+		return counting.calls >= total
+	}, "all spooled events delivered")
+
+	if metrics.NotifyDespooledTotal() == 0 {
+		t.Error("despooled counter never advanced")
+	}
+}
+
+// TestDispatcher_SpoolDisabled_DropsAsBefore pins the legacy contract:
+// without --notify-spool, queue overflow still drops and counts.
+func TestDispatcher_SpoolDisabled_DropsAsBefore(t *testing.T) {
+	droppedBefore := atomic.LoadUint64(&DroppedEvents)
+
+	d := NewDispatcherWithOpts(policy.NotificationCfg{}, 1, 1)
+	defer d.Close()
+	d.notifiers = append(d.notifiers, &countingNotifier{delay: 200 * time.Millisecond})
+
+	for i := 0; i < 6; i++ {
+		d.Send(Event{Type: "denied"})
+	}
+	if got := atomic.LoadUint64(&DroppedEvents) - droppedBefore; got == 0 {
+		t.Error("spool disabled: expected drops under saturation")
+	}
+}
+
+// TestDispatcher_SpoolLeftoverFromPreviousProcessIsDelivered: a spool
+// file written by a previous (crashed/stopped) process is picked up by
+// the next dispatcher with the same path.
+func TestDispatcher_SpoolLeftoverFromPreviousProcessIsDelivered(t *testing.T) {
+	spool := filepath.Join(t.TempDir(), "notify-spool.jsonl")
+	leftover := `{"notifier_index":0,"event":{"type":"denied","timestamp":"2026-06-12T00:00:00Z","request":{"scope":"shell","command":"rm -rf /"},"result":{"decision":"DENY","reason":"left over"}}}` + "\n"
+	if err := os.WriteFile(spool, []byte(leftover), 0o600); err != nil {
+		t.Fatalf("seed spool: %v", err)
+	}
+
+	d := NewDispatcherWithOptions(policy.NotificationCfg{}, DispatcherOptions{
+		Workers:          2,
+		QueueSize:        16,
+		SpoolPath:        spool,
+		RecoveryInterval: 50 * time.Millisecond,
+	})
+	defer d.Close()
+	capt := &capturingNotifier{}
+	d.notifiers = append(d.notifiers, capt)
+
+	waitForCondition(t, 15*time.Second, func() bool {
+		return capt.Get().Result.Reason == "left over"
+	}, "leftover spooled event delivered")
 }

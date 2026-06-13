@@ -29,10 +29,9 @@ package llmproxy
 //     DENY with Rule="deny:llm_api_proxy:fail_closed".
 //   - --fail-mode fail-closed-with-audit: same DENY shape but the
 //     synthetic Rule is "deny:llm_api_proxy:fail_closed_audit" so
-//     dashboards can break out the two failure modes. The failure
-//     is surfaced via metrics + stderr logs today; a local audit
-//     entry from the proxy side is future work. See
-//     TODO(v0.6, #llm-proxy-fail-closed-audit-emit) below.
+//     dashboards can break out the two failure modes, and the denial
+//     is appended to the local --fail-audit-log JSONL file so the
+//     outage window stays reconstructable without the central server.
 //   - --fail-mode allow: /v1/check unreachable → synthetic ALLOW.
 //     Useful for dev / failover scenarios where availability beats
 //     enforcement; NOT a production posture.
@@ -112,6 +111,11 @@ type HTTPPolicyClient struct {
 	// server does its own redaction at notification dispatch but the
 	// audit log itself does not, so the proxy redacts at the source.
 	redactor *notify.Redactor
+
+	// fallback records local audit entries for fail-closed-with-audit
+	// denials made while the central server is unreachable. nil (the
+	// other fail modes, or --fail-audit-log "") records nothing.
+	fallback *gateclient.FallbackAuditWriter
 }
 
 // NewHTTPPolicyClient constructs a gate against cfg + an initial policy
@@ -125,6 +129,9 @@ func NewHTTPPolicyClient(cfg *Config, pol *policy.Policy) *HTTPPolicyClient {
 		FailMode:   cfg.FailMode,
 		HTTPClient: &http.Client{Timeout: DefaultGuardHTTPTimeout},
 		redactor:   notify.DefaultRedactor(),
+	}
+	if cfg.FailMode == "fail-closed-with-audit" {
+		c.fallback = gateclient.NewFallbackAuditWriter(cfg.FailAuditLog)
 	}
 	c.SetPolicy(pol)
 	return c
@@ -192,7 +199,7 @@ func (c *HTTPPolicyClient) Check(ctx context.Context, req *ToolCallCheck) (Decis
 
 	dec, err := c.callV1Check(ctx, ar)
 	if err != nil {
-		return c.failModeDecision(err), err
+		return c.failModeDecision(ar, err), err
 	}
 	return dec, nil
 }
@@ -417,13 +424,11 @@ func (c *HTTPPolicyClient) callV1Check(ctx context.Context, ar policy.ActionRequ
 }
 
 // failModeDecision translates a /v1/check failure into the configured
-// fail-mode verdict.
-//
-// TODO(v0.6, #llm-proxy-fail-closed-audit-emit): the
-// "fail-closed-with-audit" branch currently surfaces only via metrics
-// + stderr. A local audit entry from the proxy side (without round-
-// tripping the central server) so operators can reconstruct the deny
-// chain when /v1/check is offline is future work.
-func (c *HTTPPolicyClient) failModeDecision(err error) Decision {
-	return gateclient.FailModeDecision(c.FailMode, err, llmFailModeRules)
+// fail-mode verdict. In fail-closed-with-audit mode the denial is also
+// recorded locally (--fail-audit-log) so operators can reconstruct the
+// deny chain for the outage window without the central server.
+func (c *HTTPPolicyClient) failModeDecision(ar policy.ActionRequest, err error) Decision {
+	d := gateclient.FailModeDecision(c.FailMode, err, llmFailModeRules)
+	c.fallback.Record(ar, d, "llm_api_proxy", c.TenantID)
+	return d
 }

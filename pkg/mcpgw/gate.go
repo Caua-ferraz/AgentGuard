@@ -26,10 +26,9 @@ package mcpgw
 //     DENY with Rule="deny:gateway:fail_closed".
 //   --fail-mode fail-closed-with-audit: same DENY shape but the
 //     synthetic Rule is "deny:gateway:fail_closed_audit" so dashboards
-//     can break out the two failure modes. The failure is surfaced via
-//     metrics + stderr logs today; a local audit entry from the gateway
-//     side is future work. See TODO(v0.6, #fail-closed-with-audit-
-//     local-emit) below.
+//     can break out the two failure modes, and the denial is appended
+//     to the local --fail-audit-log JSONL file so the outage window
+//     stays reconstructable without the central server.
 //   --fail-mode allow: /v1/check unreachable → synthetic ALLOW. Used
 //     in dev to keep the host responsive when the central server is
 //     down; should NOT be the production setting.
@@ -57,10 +56,8 @@ const DefaultGuardHTTPTimeout = gateclient.DefaultGuardHTTPTimeout
 // contracts — referenced from dashboard + tests.
 //
 // FailModeRuleClosedAudit fires on `--fail-mode fail-closed-with-audit`
-// so dashboards can break out the two failure modes; the failure is
-// surfaced via metrics + stderr only today. A local audit entry from
-// the gateway side is future work. See
-// TODO(v0.6, #fail-closed-with-audit-local-emit) in failModeDecision.
+// so dashboards can break out the two failure modes; the denial is also
+// recorded in the local --fail-audit-log file (see failModeDecision).
 const (
 	FailModeRuleClosed      = "deny:gateway:fail_closed"
 	FailModeRuleClosedAudit = "deny:gateway:fail_closed_audit"
@@ -107,6 +104,11 @@ type HTTPPolicyClient struct {
 	// the hot path doesn't take a lock. nil is safe — a nil policy
 	// just means "no tool_scope_map known yet, skip dual-check".
 	policy atomic.Pointer[policy.Policy]
+
+	// fallback records local audit entries for fail-closed-with-audit
+	// denials made while the central server is unreachable. nil (the
+	// other fail modes, or --fail-audit-log "") records nothing.
+	fallback *gateclient.FallbackAuditWriter
 }
 
 // NewHTTPPolicyClient constructs a gate against cfg + an initial
@@ -120,6 +122,9 @@ func NewHTTPPolicyClient(cfg *Config, pol *policy.Policy) *HTTPPolicyClient {
 		PolicyMode: cfg.PolicyMode,
 		FailMode:   cfg.FailMode,
 		HTTPClient: &http.Client{Timeout: DefaultGuardHTTPTimeout},
+	}
+	if cfg.FailMode == "fail-closed-with-audit" {
+		c.fallback = gateclient.NewFallbackAuditWriter(cfg.FailAuditLog)
 	}
 	c.policy.Store(pol)
 	return c
@@ -162,7 +167,7 @@ func (c *HTTPPolicyClient) Check(ctx context.Context, req *ToolsCallRequest) (De
 	}
 	decMCP, err := c.callV1Check(ctx, mcpAR)
 	if err != nil {
-		return c.failModeDecision(err), nil
+		return c.failModeDecision(mcpAR, err), nil
 	}
 	if !decMCP.Allow {
 		return decMCP, nil
@@ -187,7 +192,7 @@ func (c *HTTPPolicyClient) Check(ctx context.Context, req *ToolsCallRequest) (De
 	mappedAR := buildMappedActionRequest(req, mappedScope)
 	decMapped, err := c.callV1Check(ctx, mappedAR)
 	if err != nil {
-		return c.failModeDecision(err), nil
+		return c.failModeDecision(mappedAR, err), nil
 	}
 	if !decMapped.Allow {
 		// The denying rule wins. Stamp the secondary scope on the
@@ -211,9 +216,9 @@ func (c *HTTPPolicyClient) Check(ctx context.Context, req *ToolsCallRequest) (De
 // (see docs/MCP_GATEWAY.md § 5).
 func buildMcpMeta(req *ToolsCallRequest) map[string]string {
 	out := map[string]string{
-		"namespace":   req.Namespace,
-		"tool_name":   req.ToolName,
-		"transport":   "mcp_gateway",
+		"namespace": req.Namespace,
+		"tool_name": req.ToolName,
+		"transport": "mcp_gateway",
 	}
 	if req.ApprovalID != "" {
 		out["approval_id"] = req.ApprovalID
@@ -332,14 +337,11 @@ func (c *HTTPPolicyClient) callV1Check(ctx context.Context, ar policy.ActionRequ
 }
 
 // failModeDecision translates a /v1/check failure into the configured
-// fail-mode verdict.
-//
-// TODO(v0.6, #fail-closed-with-audit-local-emit): the
-// "fail-closed-with-audit" branch currently surfaces only via the
-// distinct rule string + metrics + stderr. A local audit entry from
-// the gateway side (without round-tripping the central server) so
-// operators can reconstruct the deny chain when /v1/check is offline
-// is future work.
-func (c *HTTPPolicyClient) failModeDecision(err error) Decision {
-	return gateclient.FailModeDecision(c.FailMode, err, gatewayFailModeRules)
+// fail-mode verdict. In fail-closed-with-audit mode the denial is also
+// recorded locally (--fail-audit-log) so operators can reconstruct the
+// deny chain for the outage window without the central server.
+func (c *HTTPPolicyClient) failModeDecision(ar policy.ActionRequest, err error) Decision {
+	d := gateclient.FailModeDecision(c.FailMode, err, gatewayFailModeRules)
+	c.fallback.Record(ar, d, "mcp_gateway", c.TenantID)
+	return d
 }

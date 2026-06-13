@@ -10,12 +10,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
@@ -666,5 +669,53 @@ func TestIsSecretKeyName(t *testing.T) {
 		if isSecretKeyName(k) {
 			t.Errorf("isSecretKeyName(%q) = true, want false", k)
 		}
+	}
+}
+
+// TestHTTPPolicyClient_FailClosedWithAudit_WritesLocalFallback: in
+// fail-closed-with-audit mode, a /v1/check failure must leave a local
+// audit record (--fail-audit-log) so the outage window stays
+// reconstructable without the central server.
+func TestHTTPPolicyClient_FailClosedWithAudit_WritesLocalFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, _ := w.(http.Hijacker)
+		conn, _, _ := hj.Hijack()
+		_ = conn.Close()
+	}))
+	defer srv.Close()
+
+	fallbackPath := filepath.Join(t.TempDir(), "fail-audit.jsonl")
+	cfg := &Config{
+		GuardURL:     srv.URL,
+		TenantID:     "acme",
+		FailMode:     "fail-closed-with-audit",
+		FailAuditLog: fallbackPath,
+	}
+	gate := NewHTTPPolicyClient(cfg, nil)
+	gate.HTTPClient = &http.Client{Timeout: 250 * time.Millisecond}
+
+	dec, err := gate.Check(context.Background(), &ToolCallCheck{
+		ToolName:  "run_command",
+		AgentID:   "agent-x",
+		Arguments: map[string]interface{}{"command": "rm -rf /"},
+	})
+	if err == nil {
+		t.Fatal("expected transport error alongside the fail-mode decision")
+	}
+	if dec.Allow || dec.Rule != FailModeRuleClosedAudit {
+		t.Fatalf("expected audit-variant deny, got %+v", dec)
+	}
+
+	data, rerr := os.ReadFile(fallbackPath)
+	if rerr != nil {
+		t.Fatalf("fallback file not written: %v", rerr)
+	}
+	var entry audit.Entry
+	if jerr := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &entry); jerr != nil {
+		t.Fatalf("fallback line is not a canonical audit.Entry: %v\n%s", jerr, data)
+	}
+	if entry.Transport != "llm_api_proxy" || entry.TenantID != "acme" ||
+		entry.Result.Rule != FailModeRuleClosedAudit || entry.AgentID != "agent-x" {
+		t.Errorf("fallback entry fields wrong: %+v", entry)
 	}
 }

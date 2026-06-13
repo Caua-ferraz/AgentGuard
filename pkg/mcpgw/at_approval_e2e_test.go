@@ -313,4 +313,3 @@ func extractApprovalMeta(t *testing.T, raw json.RawMessage) (id, url string) {
 	}
 	return meta[mcpgw.MetaApprovalIDKey], meta["dev.agentguard/approval_url"]
 }
-

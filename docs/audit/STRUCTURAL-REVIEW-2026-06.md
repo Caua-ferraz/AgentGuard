@@ -44,34 +44,50 @@ modules. Verified: `go build ./...`, `go vet`, full `go test ./...` green
 DecrementsOnRequestEnd`, fails only under full-suite parallel load and passes
 3/3 in isolation — pre-existing); Python suite 334 passed / 1 skipped.
 
-## Deferred (recorded, deliberately not done here)
+## Follow-up hardening (post-0.6.1 patch, second pass)
 
-These are real but are hot-path or API-shape refactors that deserve their own
-approval per the engineering contract (no behaviour change was acceptable
-collateral in a review pass):
+Resolved in the follow-up debt-reduction pass:
 
-1. **`pkg/metrics` globals.** ~30 package-level vars + ~60 free functions; every
-   caller hard-codes `metrics.Inc*()`. No injection seam → tests share global
-   state, backend unswappable. Fix: a `Metrics` interface injected via config,
-   bound to the global registry in `main.go`.
-2. **God files.** `pkg/proxy/server.go` (1,999 lines: routing + approval queue +
-   SSE hub + cost sweeper + Prometheus serialisation + dashboard + audit query)
-   and `pkg/policy/engine.go` (1,799 lines; the glob/pattern matchers are a
-   separable internal package). Mechanical splits, but they churn the two most
-   change-sensitive files in the repo — schedule alongside a quiet cycle.
-3. **Parallel `Config` structs** in llmproxy/mcpgw (shared GuardURL/APIKey/
-   TenantID/FailMode/PolicyPath fields + separate flag parsing). A shared
-   embedded base struct breaks keyed `Config{…}` literals across the test
-   suite, so it needs a deliberate API decision rather than a drive-by.
-4. **Audit backend bifurcation.** `FileLogger` and `SQLiteLogger` re-implement
-   `Query()` filtering separately; backend selection + forced buffering logic
-   lives inline in `cmd/agentguard/main.go:~346–451`.
-5. **`pkg/persist` tier-bridging.** The syncer imports concrete types from
+1. **`pkg/metrics` globals → Registry seam.** All series state now lives in
+   `metrics.Registry`; the package-level functions delegate to `Default`.
+   The exported raw counter vars became same-named accessor functions, the
+   exported histograms became `Observe*Duration` functions, and `Reset()`
+   gives tests isolation. Prometheus output is byte-identical (pinned by
+   `TestRegistry_ResetMatchesFresh`). Five copy-pasted labeled-counter
+   emitters collapsed into one generic `writeLabeledCounter`.
+2. **Parallel `Config` structs → shared `gateclient` config.** The shared
+   gate flags (guard-url, api-key, tenant-id, fail-mode, log-level, policy),
+   the AGENTGUARD_API_KEY env fallback, and the shared validation now live
+   in `pkg/internal/gateclient/config.go`; both proxies register/resolve
+   through it. Side fix: the MCP gateway now validates tenant-id non-empty
+   and rejects non-http(s) guard URLs, matching the LLM proxy.
+3. **Audit wiring + backend parity.** Backend selection, startup migration,
+   rotation, and forced-buffering rules moved from `runServe` into
+   `cmd/agentguard/audit_setup.go` (`buildAuditPipeline`), with the
+   shutdown order explicit in `auditPipeline.Close` instead of defer LIFO.
+   The never-wired `audit.SQLiteLogger` (267 lines, predates v0.5
+   transport tagging; superseded by `store.NewAuditLogger`) was deleted.
+   The two live backends keep their deliberately different mechanisms
+   (Go-side scan vs indexed SQL); their QueryFilter semantics are pinned
+   by `pkg/store/audit_query_parity_test.go`.
+4. **Python `__init__.py` monolith** split into `core.py` (client,
+   exceptions, constants) + `decorators.py` (`@guarded`); the package root
+   re-exports everything, so imports are unchanged.
+5. **Tooling/test health.** `.gitattributes` now forces LF for `*.go`
+   (gofmt is meaningful on Windows again; 20 genuinely misformatted files
+   surfaced and fixed). The streaming-cap tests' poll deadlines are sized
+   for full-suite parallel load (the `MaxConcurrentStreams` flake).
+
+## Still deferred
+
+1. **God files.** `pkg/proxy/server.go` (~2,000 lines: routing + approval
+   queue + SSE hub + cost sweeper + Prometheus serialisation + dashboard +
+   audit query) and `pkg/policy/engine.go` (~1,800 lines; the glob/pattern
+   matchers are a separable internal package). Mechanical splits, but they
+   churn the two most change-sensitive files in the repo — schedule
+   alongside a quiet cycle (0.7+).
+2. **`pkg/persist` tier-bridging.** The syncer imports concrete types from
    `policy`, `proxy`, `ratelimit`, and `store` at once; narrow snapshotter
-   interfaces would decouple it. Off the hot path, so cosmetic for now.
-6. **Python `__init__.py` monolith.** Guard client, exceptions, and decorator
-   in one 635-line module; a `core.py`/`decorators.py` split with re-exports
-   would not break imports.
-7. **`bin/sim/*.py`** mock servers are referenced by no test, doc, Makefile, or
-   CI job — confirm whether they are still used for manual testing; delete or
-   document.
+   interfaces would decouple it. Off the hot path, cosmetic.
+3. **`bin/sim/*.py`** — resolved as a non-issue: the directory is inside the
+   gitignored `/bin/`, i.e. untracked local dev tooling, not shipped code.

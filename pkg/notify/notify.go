@@ -1,12 +1,14 @@
 package notify
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
 	"sync"
 	"sync/atomic"
@@ -65,6 +67,16 @@ type Dispatcher struct {
 	ctx       context.Context
 	cancelCtx context.CancelFunc
 	closeOnce sync.Once
+
+	// Spool-to-disk (optional, --notify-spool). When the queue is full,
+	// Send appends the job to a JSONL spool file instead of dropping;
+	// a recovery goroutine re-enqueues spooled jobs when capacity
+	// returns. Mirrors the audit BufferedAsyncLogger's overflow design.
+	// Leftover spool from a crashed/stopped process is picked up on the
+	// next start (same path). Empty spoolPath disables (drop-on-full,
+	// the pre-v0.7 behaviour).
+	spoolPath string
+	spoolMu   sync.Mutex
 }
 
 type dispatchJob struct {
@@ -80,9 +92,35 @@ func NewDispatcher(cfg policy.NotificationCfg) *Dispatcher {
 	return NewDispatcherWithOpts(cfg, DefaultWorkers, DefaultQueueSize)
 }
 
+// DispatcherOptions tunes NewDispatcherWithOptions. The zero value
+// gives production defaults with the spool disabled.
+type DispatcherOptions struct {
+	Workers   int
+	QueueSize int
+
+	// SpoolPath enables the queue-full spool-to-disk path (JSONL,
+	// mode 0600). Empty disables.
+	SpoolPath string
+
+	// RecoveryInterval is how often the recovery goroutine attempts to
+	// drain the spool back into the queue. Defaults to
+	// DefaultSpoolRecoveryInterval.
+	RecoveryInterval time.Duration
+}
+
+// DefaultSpoolRecoveryInterval matches the audit overflow recovery
+// cadence.
+const DefaultSpoolRecoveryInterval = 5 * time.Second
+
 // NewDispatcherWithOpts allows tuning the worker count and queue size. Used
 // primarily by tests.
 func NewDispatcherWithOpts(cfg policy.NotificationCfg, workers, queueSize int) *Dispatcher {
+	return NewDispatcherWithOptions(cfg, DispatcherOptions{Workers: workers, QueueSize: queueSize})
+}
+
+// NewDispatcherWithOptions is the all-knobs constructor.
+func NewDispatcherWithOptions(cfg policy.NotificationCfg, opts DispatcherOptions) *Dispatcher {
+	workers, queueSize := opts.Workers, opts.QueueSize
 	// Policy load has already validated that extra patterns compile, so any
 	// error here is a programmer mistake (e.g. a caller that skipped
 	// LoadFromFile). Surface it via log rather than silently dropping.
@@ -98,6 +136,7 @@ func NewDispatcherWithOpts(cfg policy.NotificationCfg, workers, queueSize int) *
 		redactor:  redactor,
 		ctx:       ctx,
 		cancelCtx: cancel,
+		spoolPath: opts.SpoolPath,
 	}
 
 	// Resolve the dispatch-level timeout once. Per-target overrides are
@@ -127,6 +166,16 @@ func NewDispatcherWithOpts(cfg policy.NotificationCfg, workers, queueSize int) *
 		// notifier (or a stdlib http.Client.Do edge case) does not take
 		// the whole process down.
 		go workerWithRecover(d)
+	}
+
+	if d.spoolPath != "" {
+		interval := opts.RecoveryInterval
+		if interval <= 0 {
+			interval = DefaultSpoolRecoveryInterval
+		}
+		// The recovery loop also picks up a spool file left behind by a
+		// previous process (crash or shutdown with a backlog).
+		go d.spoolRecoveryLoop(interval)
 	}
 
 	return d
@@ -221,7 +270,7 @@ func (d *Dispatcher) Send(event Event) {
 		event = d.redactor.Redact(event)
 	}
 
-	for _, n := range d.notifiers {
+	for i, n := range d.notifiers {
 		select {
 		case d.queue <- dispatchJob{notifier: n, event: event}:
 			// Sampling the depth right after enqueue gives a
@@ -229,11 +278,130 @@ func (d *Dispatcher) Send(event Event) {
 			// whose purpose is to answer "is the queue filling up?".
 			metrics.SetNotifyQueueDepth(len(d.queue))
 		default:
+			// Queue full. With the spool enabled the event is durable
+			// on disk and retried by the recovery loop; only a spool
+			// failure (or spool disabled) is a real drop.
+			if d.spoolPath != "" {
+				if err := d.spoolJob(i, event); err == nil {
+					metrics.IncNotifySpooled()
+					continue
+				} else {
+					log.Printf("notify: spool append failed: %v (dropping event)", err)
+				}
+			}
 			// Keep the package-level atomic around for anyone already reading
 			// it directly; the Prometheus-labeled counter is the new surface.
 			atomic.AddUint64(&DroppedEvents, 1)
 			metrics.IncNotifyDropped(notifierType(n), metrics.NotifyDroppedQueueFull)
 		}
+	}
+}
+
+// spooledJob is the JSONL record written on queue saturation. The
+// notifier is identified by its index into d.notifiers — stable for the
+// dispatcher's lifetime AND across a restart with the same policy
+// config (the list is built deterministically from the policy's
+// notification targets).
+type spooledJob struct {
+	NotifierIndex int   `json:"notifier_index"`
+	Event         Event `json:"event"`
+}
+
+// spoolJob appends one job to the spool file (mode 0600, O_APPEND).
+// Serialized by spoolMu so concurrent Send callers can't interleave
+// bytes inside a frame.
+func (d *Dispatcher) spoolJob(notifierIndex int, event Event) error {
+	line, err := json.Marshal(spooledJob{NotifierIndex: notifierIndex, Event: event})
+	if err != nil {
+		return err
+	}
+	line = append(line, '\n')
+
+	d.spoolMu.Lock()
+	defer d.spoolMu.Unlock()
+	f, err := os.OpenFile(d.spoolPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(line)
+	return err
+}
+
+// spoolRecoveryLoop periodically drains the spool back into the queue.
+// Exits when the dispatcher closes.
+func (d *Dispatcher) spoolRecoveryLoop(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-d.done:
+			return
+		case <-ticker.C:
+			d.drainSpoolOnce()
+		}
+	}
+}
+
+// drainSpoolOnce atomically renames the spool aside (so concurrent
+// Send spills land in a fresh file), re-enqueues every record
+// non-blockingly, and re-spills records that would have blocked.
+// Corrupt lines and out-of-range notifier indexes (a config change
+// shrank the notifier list across a restart) are logged and skipped —
+// same posture as the audit overflow drain.
+func (d *Dispatcher) drainSpoolOnce() {
+	draining := fmt.Sprintf("%s.draining.%d", d.spoolPath, time.Now().UnixNano())
+
+	d.spoolMu.Lock()
+	err := os.Rename(d.spoolPath, draining)
+	d.spoolMu.Unlock()
+	if err != nil {
+		return // no spool file — nothing to drain
+	}
+
+	f, err := os.Open(draining)
+	if err != nil {
+		log.Printf("notify: open draining spool: %v", err)
+		return
+	}
+
+	var requeued uint64
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var job spooledJob
+		if err := json.Unmarshal(line, &job); err != nil {
+			log.Printf("notify: skipping corrupt spool line: %v", err)
+			continue
+		}
+		if job.NotifierIndex < 0 || job.NotifierIndex >= len(d.notifiers) {
+			log.Printf("notify: skipping spooled event for unknown notifier index %d (config changed?)", job.NotifierIndex)
+			continue
+		}
+		select {
+		case d.queue <- dispatchJob{notifier: d.notifiers[job.NotifierIndex], event: job.Event}:
+			requeued++
+		default:
+			// Still saturated — re-spill for the next tick.
+			if err := d.spoolJob(job.NotifierIndex, job.Event); err != nil {
+				log.Printf("notify: re-spill failed: %v (event lost)", err)
+			}
+		}
+	}
+	scanErr := scanner.Err()
+	f.Close()
+	if scanErr != nil {
+		log.Printf("notify: spool drain scanner: %v", scanErr)
+	}
+	if err := os.Remove(draining); err != nil {
+		log.Printf("notify: remove draining spool: %v", err)
+	}
+	if requeued > 0 {
+		metrics.AddNotifyDespooled(requeued)
 	}
 }
 

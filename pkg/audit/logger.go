@@ -241,10 +241,12 @@ func (l *FileLogger) Log(entry Entry) error {
 //     after we open are simply not seen by this query.
 //   - Scanner discards partial lines implicitly (each line terminated by \n).
 //
-// TODO(v0.6, #audit-perf-mutex): Query scans the full file linearly. For
-// production workloads with large audit logs, replace with a database-backed
-// implementation (SQLite or PostgreSQL). See docs/SLO.md § "Deferred
-// performance work".
+// Performance note: Query scans the full file linearly — acceptable for
+// the file backend's deployment profile. Workloads with large audit logs
+// should run the indexed store backend instead (`--persist
+// --audit-backend=store`, SQL-side filtering on audit_entries); the two
+// backends' QueryFilter semantics are pinned by
+// pkg/store/audit_query_parity_test.go.
 func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 	l.mu.Lock()
 	path := l.file.Name()

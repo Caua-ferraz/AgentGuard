@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // minimalPolicy is the smallest YAML that exercises every decision the
@@ -531,5 +533,178 @@ func TestExitForDecision(t *testing.T) {
 	}
 	if exitForDecision("UNKNOWN") != exitError {
 		t.Error("UNKNOWN should map to error")
+	}
+}
+
+// ---- --watch mode ----------------------------------------------------------
+
+// syncBuffer is a goroutine-safe bytes.Buffer: the watch tests poll the
+// output while executeCheck writes from its own goroutine.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func appendLine(t *testing.T, path, line string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("open watch file: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(line + "\n"); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+}
+
+func waitForOutput(t *testing.T, buf *syncBuffer, substr string) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(buf.String(), substr) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for output %q; got:\n%s", substr, buf.String())
+}
+
+// TestExecuteCheck_WatchFollowsAppends: one policy load verdicts both the
+// pre-existing line and lines appended while the watcher is live; the
+// exit code on stop is the worst decision seen.
+func TestExecuteCheck_WatchFollowsAppends(t *testing.T) {
+	dir := t.TempDir()
+	watchPath := filepath.Join(dir, "actions.jsonl")
+	if err := os.WriteFile(watchPath, []byte(`{"scope":"shell","command":"ls"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("seed watch file: %v", err)
+	}
+
+	stop := make(chan struct{})
+	out := &syncBuffer{}
+	f := &checkCmdFlags{
+		PolicyPath: writePolicy(t),
+		Watch:      watchPath,
+		OutputFmt:  "text",
+		watchPoll:  10 * time.Millisecond,
+		watchStop:  stop,
+	}
+
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- executeCheck(f, strings.NewReader(""), out, &syncBuffer{}) }()
+
+	waitForOutput(t, out, "ALLOW")
+
+	appendLine(t, watchPath, `{"scope":"shell","command":"rm -rf /tmp"}`)
+	waitForOutput(t, out, "DENY")
+
+	close(stop)
+	select {
+	case code := <-codeCh:
+		if code != exitDeny {
+			t.Errorf("exit code = %d, want %d (worst decision was DENY)", code, exitDeny)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("watch loop did not stop")
+	}
+}
+
+// TestExecuteCheck_WatchBuffersPartialLines: a torn mid-append read (no
+// trailing newline yet) must not be parsed; completing the line later
+// produces exactly one verdict.
+func TestExecuteCheck_WatchBuffersPartialLines(t *testing.T) {
+	dir := t.TempDir()
+	watchPath := filepath.Join(dir, "actions.jsonl")
+	if err := os.WriteFile(watchPath, []byte(nil), 0o600); err != nil {
+		t.Fatalf("seed watch file: %v", err)
+	}
+
+	stop := make(chan struct{})
+	out := &syncBuffer{}
+	errOut := &syncBuffer{}
+	f := &checkCmdFlags{
+		PolicyPath: writePolicy(t),
+		Watch:      watchPath,
+		OutputFmt:  "text",
+		watchPoll:  10 * time.Millisecond,
+		watchStop:  stop,
+	}
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- executeCheck(f, strings.NewReader(""), out, errOut) }()
+
+	// Write half a JSON object with no newline; give the poller time to
+	// see it. It must neither verdict nor error.
+	half := `{"scope":"shell","com`
+	fh, err := os.OpenFile(watchPath, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := fh.WriteString(half); err != nil {
+		t.Fatalf("write half: %v", err)
+	}
+	fh.Close()
+	time.Sleep(100 * time.Millisecond)
+	if got := out.String(); got != "" {
+		t.Fatalf("partial line produced output: %q", got)
+	}
+	if got := errOut.String(); got != "" {
+		t.Fatalf("partial line produced error: %q", got)
+	}
+
+	appendLine(t, watchPath, `mand":"ls"}`)
+	waitForOutput(t, out, "ALLOW")
+
+	close(stop)
+	if code := <-codeCh; code != exitAllow {
+		t.Errorf("exit code = %d, want %d", code, exitAllow)
+	}
+}
+
+// TestExecuteCheck_WatchMalformedLineAborts mirrors --batch's posture:
+// a bad line is an infrastructure error (exit 3), not a policy verdict.
+func TestExecuteCheck_WatchMalformedLineAborts(t *testing.T) {
+	dir := t.TempDir()
+	watchPath := filepath.Join(dir, "actions.jsonl")
+	if err := os.WriteFile(watchPath, []byte("{not json}\n"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	f := &checkCmdFlags{
+		PolicyPath: writePolicy(t),
+		Watch:      watchPath,
+		OutputFmt:  "text",
+		watchPoll:  10 * time.Millisecond,
+		watchStop:  make(chan struct{}),
+	}
+	var out, errOut bytes.Buffer
+	if code := executeCheck(f, strings.NewReader(""), &out, &errOut); code != exitError {
+		t.Errorf("exit code = %d, want %d; stderr=%s", code, exitError, errOut.String())
+	}
+}
+
+// TestExecuteCheck_WatchMutuallyExclusive: --watch cannot combine with
+// the other input modes.
+func TestExecuteCheck_WatchMutuallyExclusive(t *testing.T) {
+	f := &checkCmdFlags{
+		PolicyPath: writePolicy(t),
+		Watch:      "x.jsonl",
+		Batch:      true,
+	}
+	var out, errOut bytes.Buffer
+	if code := executeCheck(f, strings.NewReader(""), &out, &errOut); code != exitError {
+		t.Errorf("exit code = %d, want %d", code, exitError)
+	}
+	if !strings.Contains(errOut.String(), "mutually exclusive") {
+		t.Errorf("stderr missing exclusivity message: %s", errOut.String())
 	}
 }

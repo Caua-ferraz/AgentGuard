@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -86,7 +85,7 @@ func TestRotation_IncrementsRotationCounter(t *testing.T) {
 	}
 	defer logger.Close()
 
-	before := atomic.LoadUint64(&metrics.AuditRotationsTotal)
+	before := metrics.AuditRotationsTotal()
 
 	for i := 0; i < 20; i++ {
 		if err := logger.Log(logBlob("bot")); err != nil {
@@ -94,7 +93,7 @@ func TestRotation_IncrementsRotationCounter(t *testing.T) {
 		}
 	}
 
-	after := atomic.LoadUint64(&metrics.AuditRotationsTotal)
+	after := metrics.AuditRotationsTotal()
 	if after <= before {
 		t.Errorf("rotation counter did not advance: before=%d after=%d", before, after)
 	}

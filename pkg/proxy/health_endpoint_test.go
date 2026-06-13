@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
+	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 	"github.com/Caua-ferraz/AgentGuard/pkg/notify"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
@@ -29,6 +30,11 @@ import (
 // the tenant-aware path /v1/t/{tenant}/health flows through the mux.
 func newHealthTestServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
+
+	// Health is partly metrics-derived (process-global registry); reset
+	// so spills/drops counted by earlier tests in this binary don't leak
+	// warnings into these assertions.
+	metrics.Reset()
 
 	dir := t.TempDir()
 	logger, err := audit.NewFileLogger(filepath.Join(dir, "audit.jsonl"))
@@ -379,5 +385,50 @@ func TestHealthV1_LegacyHealthUnchanged(t *testing.T) {
 	}
 	if _, has := body["last_request_at"]; has {
 		t.Errorf("legacy /health leaked last_request_at")
+	}
+}
+
+// TestHealthV1_MetricsDerivedSignals: corrupt audit lines and dropped
+// notifications surface as warnings; an audit overflow backlog (spilled
+// entries not yet drained back) flips status to "degraded" while the
+// HTTP code stays 200 so liveness probes don't flap.
+func TestHealthV1_MetricsDerivedSignals(t *testing.T) {
+	_, ts := newHealthTestServer(t)
+
+	metrics.IncAuditCorruptLine()
+	metrics.IncAuditCorruptLine()
+	metrics.IncAuditBufferedDroppedToOverflow()
+	metrics.IncAuditBufferedDroppedToOverflow()
+	metrics.IncAuditBufferedDroppedToOverflow()
+	metrics.AddAuditBufferedDrainedFromOverflow(1) // backlog of 2 remains
+	metrics.IncNotifyDropped("webhook", metrics.NotifyDroppedQueueFull)
+
+	code, body := healthBody(t, ts.URL+"/v1/health")
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 even when degraded, got %d", code)
+	}
+	if body["status"] != "degraded" {
+		t.Errorf("status: want degraded (overflow backlog), got %v", body["status"])
+	}
+	warnings, _ := body["warnings"].([]any)
+	joined := ""
+	for _, w := range warnings {
+		joined += w.(string) + "\n"
+	}
+	for _, want := range []string{
+		"2 corrupt line(s)",
+		"2 entry(ies) in buffered overflow backlog",
+		"1 notification(s) dropped",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("warnings missing %q; got:\n%s", want, joined)
+		}
+	}
+
+	// Backlog cleared -> status returns to ok; informational warnings stay.
+	metrics.AddAuditBufferedDrainedFromOverflow(2)
+	_, body = healthBody(t, ts.URL+"/v1/health")
+	if body["status"] != "ok" {
+		t.Errorf("status after backlog drained: want ok, got %v", body["status"])
 	}
 }

@@ -22,7 +22,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,7 +37,7 @@ import (
 func TestATSmoke_FullServerHappyPath(t *testing.T) {
 	// Capture metrics baseline first so the assertion below is robust to
 	// other tests in the same `go test` run.
-	checksBefore := atomic.LoadUint64(&metrics.ChecksTotal)
+	checksBefore := metrics.ChecksTotal()
 
 	dir := t.TempDir()
 	auditPath := filepath.Join(dir, "audit.jsonl")
@@ -131,7 +130,7 @@ func TestATSmoke_FullServerHappyPath(t *testing.T) {
 		t.Errorf("/metrics missing agentguard_checks_total; got first 200 chars:\n%s",
 			body[:min(len(body), 200)])
 	}
-	checksAfter := atomic.LoadUint64(&metrics.ChecksTotal)
+	checksAfter := metrics.ChecksTotal()
 	if got := checksAfter - checksBefore; got < 2 {
 		t.Errorf("ChecksTotal delta = %d, want >= 2", got)
 	}

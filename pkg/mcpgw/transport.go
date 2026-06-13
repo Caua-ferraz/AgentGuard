@@ -108,6 +108,11 @@ type StdioUpstream struct {
 	// callers don't interleave bytes inside a single JSON frame.
 	writeMu sync.Mutex
 
+	// onNotification, when non-nil, receives the method of every
+	// unsolicited notification frame from the upstream. Dispatched on
+	// a fresh goroutine by the stdout reader.
+	onNotification func(method string)
+
 	// Lifecycle channels.
 	closeOnce sync.Once
 	done      chan struct{} // closed by Close to signal supervisor exit
@@ -161,6 +166,13 @@ type StdioUpstreamOptions struct {
 	Backoff        []time.Duration
 	CommandFactory CommandFactory
 	Logger         *transportLogger
+
+	// OnNotification is invoked (on its own goroutine, so a slow
+	// consumer cannot stall the stdout reader) for every unsolicited
+	// notification frame the upstream emits. The bridge uses it to
+	// forward notifications/tools/list_changed to the host. nil drops
+	// notifications, the pre-v0.7 behaviour.
+	OnNotification func(method string)
 }
 
 // NewStdioUpstreamWithOptions is NewStdioUpstream with all knobs
@@ -187,6 +199,7 @@ func NewStdioUpstreamWithOptions(spec UpstreamSpec, opts StdioUpstreamOptions) *
 		done:           make(chan struct{}),
 		backoff:        backoff,
 		commandFactory: factory,
+		onNotification: opts.OnNotification,
 	}
 }
 
@@ -303,9 +316,18 @@ func (u *StdioUpstream) readLoop(r io.Reader) {
 			}
 			continue
 		}
-		// Treat as notification or unsolicited message; we log and
-		// discard. (Future: route notifications/* to the bridge's
-		// notification channel.)
+		// Unsolicited frame: a notification (no id) or garbage. Parse
+		// the method and hand notifications to the bridge's callback;
+		// anything else is logged and dropped.
+		var note Notification
+		if err := json.Unmarshal(line, &note); err == nil && note.Method != "" {
+			if u.onNotification != nil {
+				go u.onNotification(note.Method)
+				continue
+			}
+			u.logger.Debugf("upstream %q: notification %q dropped (no sink)", u.spec.Namespace, note.Method)
+			continue
+		}
 		u.logger.Debugf("upstream %q: unsolicited frame dropped: %s", u.spec.Namespace, string(line))
 	}
 	if err := scanner.Err(); err != nil {
@@ -720,5 +742,7 @@ func (l *transportLogger) write(level, format string, args ...interface{}) {
 	fmt.Fprintf(l.w, "%s %s mcpgw: %s\n", ts, level, fmt.Sprintf(format, args...))
 }
 
-func (l *transportLogger) Infof(format string, args ...interface{})  { l.write("info", format, args...) }
-func (l *transportLogger) Debugf(format string, args ...interface{}) { l.write("debug", format, args...) }
+func (l *transportLogger) Infof(format string, args ...interface{}) { l.write("info", format, args...) }
+func (l *transportLogger) Debugf(format string, args ...interface{}) {
+	l.write("debug", format, args...)
+}

@@ -60,10 +60,10 @@ const UnmappedScope = "unmapped"
 //   - network:    web_search, fetch_url, http_request, ...
 //   - browser:    playwright_*, browser_*, chrome_*, firefox_*, ...
 //   - data:       (no defaults — operators map fill_form / submit_form
-//                  here for PII gating against `data` scope rules)
+//     here for PII gating against `data` scope rules)
 //   - cost:       (no defaults — model-cost gating is its own scope
-//                  with different field semantics; operators wire it
-//                  via SDK est_cost rather than via tool-name mapping)
+//     with different field semantics; operators wire it
+//     via SDK est_cost rather than via tool-name mapping)
 var DefaultLLMToolScopeMap = []policy.ToolScopeMapping{
 	// --- Shell / command execution ---
 	{Pattern: "bash", Scope: "shell"},

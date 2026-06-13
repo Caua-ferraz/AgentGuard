@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Caua-ferraz/AgentGuard/pkg/internal/gateclient"
 )
 
 // newTestServer builds a Server pointed at the given upstream test
@@ -621,8 +623,8 @@ func TestServer_TestServerURLValidates(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer upstream.Close()
-	if err := validateBaseURL("--upstream-openai", upstream.URL); err != nil {
-		t.Errorf("validateBaseURL: %v", err)
+	if err := gateclient.ValidateBaseURL("--upstream-openai", upstream.URL); err != nil {
+		t.Errorf("ValidateBaseURL: %v", err)
 	}
 	// And the parsed URL should have a host and scheme.
 	u, _ := url.Parse(upstream.URL)

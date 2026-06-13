@@ -27,9 +27,12 @@
 //     including synthetic deny:gateway:fail_closed entries when the
 //     gate falls back due to /v1/check unreachable.
 //
-// TODO(v0.6, #mcp-gateway-events): operator-grade gateway-level audit
+// TODO(v0.7, #mcp-gateway-events): operator-grade gateway-level audit
 // endpoint. Current best guess is a small `/v1/operator/event` endpoint
 // scoped to notify-class events (degraded upstream, frame error,
 // startup failure) with its own retention + auth posture distinct from
-// the policy-decision audit log.
+// the policy-decision audit log. Needs a product design decision (new
+// endpoint, auth, retention) before implementation; in the meantime
+// --fail-audit-log records fail-mode denials locally and stderr carries
+// upstream-crash events.
 package mcpgw

@@ -42,6 +42,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 )
 
 // Defaults for BufferedAsyncOpts. Tuned for "ten or so RPS sustained, bursts
@@ -170,28 +172,28 @@ func (b *BufferedAsyncLogger) Log(e Entry) error {
 		if err := b.appendOverflow(e); err != nil {
 			return fmt.Errorf("buffered audit: closed and overflow append failed: %w", err)
 		}
-		atomic.AddUint64(&b.droppedToOverflow, 1)
+		b.noteDroppedToOverflow()
 		return nil
 	default:
 	}
 
 	select {
 	case b.queue <- e:
-		atomic.AddInt64(&b.queueDepthHint, 1)
+		b.noteQueueDepth(1)
 		return nil
 	case <-b.closed:
 		// Lost a race with Close after the first guard. Spill to disk.
 		if err := b.appendOverflow(e); err != nil {
 			return fmt.Errorf("buffered audit: closed and overflow append failed: %w", err)
 		}
-		atomic.AddUint64(&b.droppedToOverflow, 1)
+		b.noteDroppedToOverflow()
 		return nil
 	default:
 		// Saturation. Persist to disk; never block.
 		if err := b.appendOverflow(e); err != nil {
 			return fmt.Errorf("buffered audit: queue full and overflow append failed: %w", err)
 		}
-		atomic.AddUint64(&b.droppedToOverflow, 1)
+		b.noteDroppedToOverflow()
 		return nil
 	}
 }
@@ -248,6 +250,19 @@ func (b *BufferedAsyncLogger) DrainedFromOverflow() uint64 {
 	return atomic.LoadUint64(&b.drainedFromOverflow)
 }
 
+// noteQueueDepth adjusts the queue-depth hint and mirrors the new value
+// to the agentguard_audit_buffered_queue_depth gauge.
+func (b *BufferedAsyncLogger) noteQueueDepth(delta int64) {
+	metrics.SetAuditBufferedQueueDepth(atomic.AddInt64(&b.queueDepthHint, delta))
+}
+
+// noteDroppedToOverflow counts a spill on both the instance counter and
+// the agentguard_audit_buffered_dropped_to_overflow_total series.
+func (b *BufferedAsyncLogger) noteDroppedToOverflow() {
+	atomic.AddUint64(&b.droppedToOverflow, 1)
+	metrics.IncAuditBufferedDroppedToOverflow()
+}
+
 // workerLoop drains the queue into the underlying logger. On underlying
 // failure it falls back to the overflow path so the entry is still
 // durable; this is the same recovery guarantee Log() makes for queue
@@ -263,14 +278,14 @@ func (b *BufferedAsyncLogger) workerLoop() {
 	for {
 		select {
 		case entry := <-b.queue:
-			atomic.AddInt64(&b.queueDepthHint, -1)
+			b.noteQueueDepth(-1)
 			b.processEntry(entry)
 		case <-b.closed:
 			// Drain anything still in the channel, then exit.
 			for {
 				select {
 				case entry := <-b.queue:
-					atomic.AddInt64(&b.queueDepthHint, -1)
+					b.noteQueueDepth(-1)
 					b.processEntry(entry)
 				default:
 					return
@@ -290,7 +305,7 @@ func (b *BufferedAsyncLogger) processEntry(entry Entry) {
 			log.Printf("ERROR audit buffered: underlying log AND overflow append failed: underlying=%v overflow=%v", err, oerr)
 			return
 		}
-		atomic.AddUint64(&b.droppedToOverflow, 1)
+		b.noteDroppedToOverflow()
 	}
 }
 
@@ -387,7 +402,7 @@ func (b *BufferedAsyncLogger) tryDrainOverflow() {
 
 		select {
 		case b.queue <- entry:
-			atomic.AddInt64(&b.queueDepthHint, 1)
+			b.noteQueueDepth(1)
 			requeued++
 		default:
 			// Queue full again. Re-spill into a fresh overflow file. We do
@@ -442,6 +457,7 @@ func (b *BufferedAsyncLogger) tryDrainOverflow() {
 
 	if requeued > 0 {
 		atomic.AddUint64(&b.drainedFromOverflow, requeued)
+		metrics.AddAuditBufferedDrainedFromOverflow(requeued)
 	}
 	if respilled > 0 {
 		log.Printf("INFO audit buffered: re-spilled %d entries (queue still saturated)", respilled)
@@ -522,11 +538,5 @@ func (b *BufferedAsyncLogger) flushOverflowOnce(timeout time.Duration) {
 	}
 }
 
-// TODO(v0.6): expose BufferedAsyncLogger counters via pkg/metrics
-// (audit_buffered_dropped_to_overflow_total,
-//  audit_buffered_drained_from_overflow_total,
-//  audit_buffered_queue_depth gauge). The getters above
-//  (DroppedToOverflow / DrainedFromOverflow / QueueDepth) are the seams.
-//
-// TODO(v0.6): notifier-side spool-to-disk. pkg/notify drops on queue
-// full today; mirror this overflow path for the dispatcher.
+// The notifier-side counterpart of this overflow design lives in
+// pkg/notify (DispatcherOptions.SpoolPath / --notify-spool).

@@ -14,11 +14,11 @@ import (
 // fakeMigration is a test double. Each field controls one observable
 // behavior so tests can exercise the framework without real on-disk work.
 type fakeMigration struct {
-	id        string
-	from, to  string
-	desc      string
-	detectOk  bool
-	detectErr error
+	id         string
+	from, to   string
+	desc       string
+	detectOk   bool
+	detectErr  error
 	migrateErr error
 	verifyErr  error
 

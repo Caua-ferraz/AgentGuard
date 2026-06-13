@@ -1,9 +1,9 @@
-# Service Level Objectives — AgentGuard v0.5
+# Service Level Objectives — AgentGuard v0.7
 
 **Status:** baseline established. Targets below are operational expectations
 for a single-replica deployment running the in-process file-backed audit
-logger; revisit when `SQLiteLogger` ships or when horizontal scale-out
-becomes a thing.
+logger; revisit when deployments adopt the v0.6 store-backed audit
+(`--audit-backend=store`) or when horizontal scale-out becomes a thing.
 
 ## Service in scope
 
@@ -57,7 +57,8 @@ v0.6 follow-up.
 - **`require_prior` audit-history scan.** When a rule has a `require_prior`
   condition, the engine queries the audit log via `HistoryQuerier`, which
   walks the JSONL file linearly. p99 here scales with audit-log size.
-  Deferred to v0.6 (`SQLiteLogger` would land before we publish a target).
+  Deferred (the v0.6 store backend's indexed `audit_entries` table is the
+  intended fix before we publish a target).
 - **Startup replay.** `NewServer` re-reads the audit log to seed in-memory
   decision counters. A multi-GiB log delays the first accurate `/metrics`
   scrape; this is documented in `CLAUDE.md` and not part of the steady-state

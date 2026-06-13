@@ -17,7 +17,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
 	"github.com/Caua-ferraz/AgentGuard/pkg/migrate"
 	_ "github.com/Caua-ferraz/AgentGuard/pkg/migrate/v040_to_v041" // register the v0.4.0 → v0.4.1 audit schema migration
 	"github.com/Caua-ferraz/AgentGuard/pkg/notify"
@@ -28,7 +27,7 @@ import (
 )
 
 var (
-	version = "0.6.0"
+	version = "0.7.0"
 	commit  = "dev"
 )
 
@@ -85,6 +84,7 @@ func main() {
 	storeDSN := serveCmd.String("store-dsn", "", "Durable store DSN. Empty => zero-config SQLite at <data-dir>/agentguard.db; a sqlite file path is also accepted. (Postgres is future work.)")
 	dataDir := serveCmd.String("data-dir", ".", "Directory for the zero-config SQLite database (agentguard.db). Ignored when --store-dsn is set or --persist=false.")
 	auditBackend := serveCmd.String("audit-backend", "file", `Audit storage: "file" (JSONL, default) or "store" (the SQLite store — unifies state+audit in one DB with indexed queries). "store" requires --persist.`)
+	notifySpool := serveCmd.String("notify-spool", "", "Path to a JSONL spool file for notification events that overflow the dispatch queue (retried by a recovery loop instead of dropped). Empty disables (drop-on-full).")
 
 	validateCmd := flag.NewFlagSet("validate", flag.ExitOnError)
 	validateFile := validateCmd.String("policy", "configs/default.yaml", "Policy file to validate")
@@ -152,7 +152,7 @@ func main() {
 			DSN:          *storeDSN,
 			DataDir:      *dataDir,
 			AuditBackend: *auditBackend,
-		})
+		}, *notifySpool)
 
 	case "validate":
 		_ = validateCmd.Parse(os.Args[2:])
@@ -295,7 +295,7 @@ func openStore(cfg persistOpts) (*store.SQLiteStore, string, error) {
 	return s, path, err
 }
 
-func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts, persistCfg persistOpts) {
+func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts, persistCfg persistOpts, notifySpoolPath string) {
 	if baseURL == "" {
 		baseURL = fmt.Sprintf("http://localhost:%d", port)
 	}
@@ -354,101 +354,26 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		log.Fatalf("--audit-backend=store requires --persist (the store is disabled)")
 	}
 
-	// Contract rule #1 (Latency is God): a store-backed audit logger writes to
-	// SQLite, which MUST NOT happen synchronously on the /v1/check path. Force
-	// async buffering for the store backend even if the operator passed
-	// --audit-buffered=false (which is fine for the cheap file append, but a DB
-	// write per request would blow the <3ms budget).
-	if storeAudit && !bufOpts.Enabled {
-		log.Printf("WARNING: --audit-backend=store requires async buffering to keep DB writes off the /v1/check hot path; forcing --audit-buffered=true.")
-		bufOpts.Enabled = true
+	// Audit pipeline. The default "file" backend is the JSONL FileLogger
+	// (rotation + startup migration); "store" routes the audit trail into
+	// the SQLite store's indexed audit_entries table (unified single-file
+	// deployment, §2.4). Either way the BufferedAsyncLogger keeps the
+	// /v1/check hot path off the audit write — it only enqueues. See
+	// buildAuditPipeline (audit_setup.go) for the construction + forced-
+	// buffering rules.
+	pipeline, err := buildAuditPipeline(auditPath, storeAudit, st, rotOpts, bufOpts)
+	if err != nil {
+		log.Fatalf("Failed to initialize audit pipeline: %v", err)
 	}
-
-	// Audit logger selection. The default "file" backend is the JSONL
-	// FileLogger (rotation + startup migration); "store" routes the audit
-	// trail into the SQLite store's indexed audit_entries table (unified
-	// single-file deployment, §2.4). Either way the BufferedAsyncLogger keeps
-	// the /v1/check hot path off the audit write — it only enqueues.
-	var auditLogger audit.Logger
+	// Registered after the store's deferred Close, so by LIFO the pipeline
+	// drains and closes BEFORE the store goes away. The internal cleanup
+	// order (buffer drain, then base logger) is explicit in
+	// auditPipeline.Close.
+	defer pipeline.Close()
 	if storeAudit {
-		base := store.NewAuditLogger(st)
-		auditLogger = base
-		if bufOpts.Enabled {
-			overflowPath := bufOpts.OverflowPath
-			if overflowPath == "" {
-				overflowPath = auditPath + ".overflow.jsonl"
-			}
-			bufLogger, err := audit.NewBufferedAsyncLogger(base, audit.BufferedAsyncOpts{
-				QueueSize:    bufOpts.QueueSize,
-				Workers:      bufOpts.Workers,
-				OverflowPath: overflowPath,
-			})
-			if err != nil {
-				log.Fatalf("Failed to initialize buffered audit logger: %v", err)
-			}
-			// Drains into the still-open store on shutdown — store.Close was
-			// deferred earlier, so by LIFO it runs after this drain.
-			defer bufLogger.Close()
-			auditLogger = bufLogger
-		}
 		log.Printf("Audit backend: store (%s)", storePath)
-	} else {
-		// Run startup migrations BEFORE opening the file audit logger. An
-		// in-place rewrite (e.g. v040_to_v041 prepending a _meta header) has to
-		// happen before we start appending new entries — otherwise the next
-		// write would land in a file the migration is about to rename.
-		migEnv := migrate.Env{
-			AuditLogPath:   auditPath,
-			CheckpointPath: auditPath + audit.CheckpointSuffix,
-		}
-		if err := migrate.RunStartup(context.Background(), migEnv); err != nil {
-			log.Fatalf("Startup migration failed: %v", err)
-		}
-
-		// Rotation is on by default (100 MiB live cap, 30-day retention,
-		// 5 archives, gzip). Setting --audit-max-size-mb=0 disables rotation
-		// entirely (unbounded growth).
-		rotCfg := audit.RotationConfig{
-			MaxFiles: rotOpts.MaxBackups,
-			Compress: rotOpts.Compress,
-		}
-		if rotOpts.MaxSizeMB > 0 {
-			rotCfg.MaxSize = int64(rotOpts.MaxSizeMB) * 1024 * 1024
-		}
-		if rotOpts.MaxAgeDays > 0 {
-			rotCfg.MaxAge = time.Duration(rotOpts.MaxAgeDays) * 24 * time.Hour
-		}
-		var fileLogger *audit.FileLogger
-		if rotCfg.MaxSize > 0 || rotCfg.MaxFiles > 0 || rotCfg.MaxAge > 0 {
-			fileLogger, err = audit.NewFileLoggerWithRotation(auditPath, rotCfg)
-		} else {
-			fileLogger, err = audit.NewFileLogger(auditPath)
-		}
-		if err != nil {
-			log.Fatalf("Failed to initialize audit log: %v", err)
-		}
-		auditLogger = fileLogger
-		if bufOpts.Enabled {
-			overflowPath := bufOpts.OverflowPath
-			if overflowPath == "" {
-				overflowPath = auditPath + ".overflow.jsonl"
-			}
-			bufLogger, err := audit.NewBufferedAsyncLogger(fileLogger, audit.BufferedAsyncOpts{
-				QueueSize:    bufOpts.QueueSize,
-				Workers:      bufOpts.Workers,
-				OverflowPath: overflowPath,
-			})
-			if err != nil {
-				log.Fatalf("Failed to initialize buffered audit logger: %v", err)
-			}
-			// LIFO: bufLogger.Close (drains) runs before fileLogger.Close.
-			defer fileLogger.Close()
-			defer bufLogger.Close()
-			auditLogger = bufLogger
-		} else {
-			defer fileLogger.Close()
-		}
 	}
+	auditLogger := pipeline.Logger
 
 	// In persistence mode, wrap the file provider (which serves the local
 	// tenant) with a MultiTenantProvider that serves OTHER tenants' policies
@@ -475,7 +400,13 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 
 	// Initialize notifier from policy config. The dispatcher owns background
 	// worker goroutines and MUST be Close()'d on shutdown to stop them.
-	notifier := notify.NewDispatcher(pol.Notifications)
+	// --notify-spool adds queue-overflow durability (events spill to a
+	// JSONL file and are retried instead of dropped).
+	notifier := notify.NewDispatcherWithOptions(pol.Notifications, notify.DispatcherOptions{
+		Workers:   notify.DefaultWorkers,
+		QueueSize: notify.DefaultQueueSize,
+		SpoolPath: notifySpoolPath,
+	})
 	defer notifier.Close()
 
 	// Hot-reload: log every successful provider update. The engine's own

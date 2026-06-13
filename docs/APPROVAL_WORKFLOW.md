@@ -42,7 +42,7 @@ Three policy paths lead here:
 
 - **Explicit `require_approval:` rule match** in the relevant scope.
 - **Cost alert threshold**: an `est_cost` above `alert_threshold` but not above `max_per_action` returns `require_approval:cost:alert_threshold`. Important: **no reservation** is made against `sessionCosts` at this point — the cost is only reserved when the approved action re-runs `/v1/check`.
-- **(Future)** Condition-based approvals (e.g., `require_prior` not satisfied yielding approval instead of deny) — still not implemented as of v0.5.1.
+- **(Future)** Condition-based approvals (e.g., `require_prior` not satisfied yielding approval instead of deny) — still not implemented as of v0.7.0.
 
 The response body:
 

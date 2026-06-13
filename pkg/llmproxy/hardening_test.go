@@ -184,9 +184,19 @@ func TestServer_RecoverPanic_RoutesWired(t *testing.T) {
 // emits a single SSE event then BLOCKS on a release channel. That lets
 // the test hold streams open while another request is fired against
 // the cap.
-func streamingProxyHelper(t *testing.T, mutators ...func(*Config)) (proxyURL string, release chan struct{}, teardown func()) {
+func streamingProxyHelper(t *testing.T, mutators ...func(*Config)) (proxyURL string, release chan struct{}, admitted chan struct{}, teardown func()) {
 	t.Helper()
 	release = make(chan struct{})
+	// admitted carries one signal per request that reaches the upstream.
+	// A request only reaches the upstream AFTER the proxy's admitStream
+	// has incremented the active-streams gauge and forwarded it (a
+	// capped-out request gets a 503 and never arrives here), so draining
+	// N signals is a deterministic "N streams are now active" barrier —
+	// far more robust than polling the gauge against a wall-clock
+	// deadline, which starves under full-suite parallel load. Buffer is
+	// generous so the non-blocking send below never drops a signal for
+	// the fan-outs these tests fire.
+	admitted = make(chan struct{}, 64)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -197,6 +207,13 @@ func streamingProxyHelper(t *testing.T, mutators ...func(*Config)) (proxyURL str
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":null}]}\n\n"))
 		if flusher != nil {
 			flusher.Flush()
+		}
+		// Signal that this stream has been admitted + forwarded.
+		// Non-blocking so a slow/undrained test can never stall the
+		// upstream handler.
+		select {
+		case admitted <- struct{}{}:
+		default:
 		}
 		// Block until release OR client disconnect.
 		select {
@@ -245,7 +262,23 @@ func streamingProxyHelper(t *testing.T, mutators ...func(*Config)) (proxyURL str
 		httpSrv.Close()
 		upstream.Close()
 	}
-	return httpSrv.URL, release, teardown
+	return httpSrv.URL, release, admitted, teardown
+}
+
+// waitForAdmitted blocks until n streams have reached the upstream
+// (i.e. been admitted + forwarded by the proxy), or fails the test.
+// Deterministic replacement for polling LLMProxyStreamsActive against a
+// wall-clock deadline. The safety-net timeout is generous because it
+// only trips on a real hang, never on scheduler starvation.
+func waitForAdmitted(t *testing.T, admitted <-chan struct{}, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		select {
+		case <-admitted:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("timeout: only %d of %d streams reached the upstream", i, n)
+		}
+	}
 }
 
 // fireStreamingRequest fires a single streaming request and returns
@@ -280,7 +313,7 @@ func drainAndClose(rc io.ReadCloser) {
 func TestServer_MaxConcurrentStreams_RejectsOverflow(t *testing.T) {
 	rejectedBefore := metrics.LLMProxyStreamsRejectedTotal()
 
-	base, release, teardown := streamingProxyHelper(t, func(c *Config) {
+	base, release, admitted, teardown := streamingProxyHelper(t, func(c *Config) {
 		c.MaxConcurrentStreams = 2
 	})
 	defer teardown()
@@ -309,13 +342,9 @@ func TestServer_MaxConcurrentStreams_RejectsOverflow(t *testing.T) {
 		}()
 	}
 
-	// Wait until both succeeded streams have actually entered the
-	// admission gate (i.e. streamingActive ≥ 2). Polling the public
-	// metric is sufficient and avoids exposing internals.
-	deadline := time.Now().Add(3 * time.Second)
-	for metrics.LLMProxyStreamsActive() < 2 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
+	// Wait until both streams have been admitted + forwarded (the gauge
+	// has incremented to 2) before firing the overflow request.
+	waitForAdmitted(t, admitted, 2)
 	if got := metrics.LLMProxyStreamsActive(); got < 2 {
 		t.Fatalf("streamingActive = %d, want ≥ 2 before firing overflow", got)
 	}
@@ -388,7 +417,7 @@ func TestServer_MaxConcurrentStreams_RejectsOverflow(t *testing.T) {
 // TestServer_MaxConcurrentStreams_ZeroDisablesCap fires 10 concurrent
 // streams with MaxConcurrentStreams=0; all should succeed.
 func TestServer_MaxConcurrentStreams_ZeroDisablesCap(t *testing.T) {
-	base, release, teardown := streamingProxyHelper(t, func(c *Config) {
+	base, release, admitted, teardown := streamingProxyHelper(t, func(c *Config) {
 		c.MaxConcurrentStreams = 0
 	})
 	defer teardown()
@@ -422,13 +451,10 @@ func TestServer_MaxConcurrentStreams_ZeroDisablesCap(t *testing.T) {
 		}()
 	}
 
-	// Wait until all 10 are active in the proxy gauge before
-	// declaring success — proves the cap really is disabled, not
-	// just slow to fire the 11th.
-	deadline := time.Now().Add(5 * time.Second)
-	for metrics.LLMProxyStreamsActive() < int64(fanout) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
+	// Wait until all 10 have been admitted + forwarded — proves the cap
+	// really is disabled, not just slow to fire the 11th. Deterministic
+	// barrier (one signal per admitted stream), not a gauge poll.
+	waitForAdmitted(t, admitted, fanout)
 	if got := metrics.LLMProxyStreamsActive(); got < int64(fanout) {
 		t.Errorf("streamingActive = %d, want ≥ %d under disabled cap", got, fanout)
 	}
@@ -449,7 +475,7 @@ func TestServer_MaxConcurrentStreams_ZeroDisablesCap(t *testing.T) {
 // streams with cap=2, wait for them to complete, fire a 3rd, assert
 // it succeeds because the slots have been released.
 func TestServer_MaxConcurrentStreams_DecrementsOnRequestEnd(t *testing.T) {
-	base, release, teardown := streamingProxyHelper(t, func(c *Config) {
+	base, release, admitted, teardown := streamingProxyHelper(t, func(c *Config) {
 		c.MaxConcurrentStreams = 2
 	})
 	defer teardown()
@@ -474,10 +500,9 @@ func TestServer_MaxConcurrentStreams_DecrementsOnRequestEnd(t *testing.T) {
 		}()
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
-	for metrics.LLMProxyStreamsActive() < 2 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
+	// Both streams admitted + forwarded (gauge == 2) — deterministic
+	// barrier, not a wall-clock gauge poll.
+	waitForAdmitted(t, admitted, 2)
 	if got := metrics.LLMProxyStreamsActive(); got < 2 {
 		t.Fatalf("streamingActive = %d, want 2 before release", got)
 	}
@@ -493,14 +518,16 @@ func TestServer_MaxConcurrentStreams_DecrementsOnRequestEnd(t *testing.T) {
 				t.Errorf("held stream status = %d, want 200", r.status)
 			}
 			drainAndClose(r.body)
-		case <-time.After(5 * time.Second):
+		case <-time.After(20 * time.Second):
 			t.Fatalf("timeout waiting for streams to drain")
 		}
 	}
 
 	// Wait until streamingActive returns to 0 (proxy goroutine has
-	// hit the defer s.releaseStream()).
-	deadline = time.Now().Add(3 * time.Second)
+	// hit the defer s.releaseStream()). This is the release path —
+	// bounded and fast once both bodies are drained above — so a short
+	// poll with a safety-net deadline is fine.
+	deadline := time.Now().Add(15 * time.Second)
 	for metrics.LLMProxyStreamsActive() > 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -595,4 +622,3 @@ func TestConfig_MaxConcurrentStreams_DefaultAndValidation(t *testing.T) {
 		t.Errorf("Validate rejected MaxConcurrentStreams=100; want allow: %v", err)
 	}
 }
-

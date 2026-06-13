@@ -264,8 +264,6 @@ Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS deta
 | Migration from earlier versions | [`docs/MIGRATION.md`](docs/MIGRATION.md) |
 | Deprecations | [`docs/DEPRECATIONS.md`](docs/DEPRECATIONS.md) |
 | File formats + migrations | [`docs/FILE_FORMATS.md`](docs/FILE_FORMATS.md) |
-| Migration guide | [`docs/MIGRATION.md`](docs/MIGRATION.md) |
-| Deprecations | [`docs/DEPRECATIONS.md`](docs/DEPRECATIONS.md) |
 | Contributing | [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) |
 
 ## Roadmap
@@ -290,6 +288,12 @@ Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS deta
 - [x] **LLM API Proxy** — drop-in OpenAI / Anthropic-compatible base URL with streaming pause/resume/rewrite, tool-call gating, provider-aware synthetic refusals, and tool→scope mapping; ships as the `agentguard-llm-proxy` binary with copy-paste examples for the OpenAI SDK, Anthropic SDK, LangChain, and CrewAI *(v0.5)*
 - [x] **Persistent state** — approvals, rate-limit buckets, and cost accumulators write-behind to a zero-config SQLite store (`agentguard.db`, WAL) and rehydrate on boot; never on the `/v1/check` hot path *(v0.6)*
 - [x] **Multi-tenant policies** — register per-tenant policies (`agentguard tenant put`) served over `/v1/t/<tenant>/...`, each evaluated against its own policy with isolated approvals/limits/costs/audit; optional SQLite audit backend (`--audit-backend=store`) *(v0.6)*
+- [x] **Cross-transport verdict consistency** — one shared `/v1/check` gate client and one shared check-param inference across the MCP Gateway, LLM API Proxy, and Python adapters, so the same tool call gets the same verdict on every integration path *(v0.7)*
+- [x] **Outage-proof enforcement trail** — `--fail-mode fail-closed-with-audit` writes denials to a local fallback audit file (`--fail-audit-log`) while the central server is unreachable; notification overflow spools to disk and is redelivered (`--notify-spool`) *(v0.7)*
+- [x] **`agentguard check --watch`** — follow a JSONL file (tail -f) and verdict each appended request with a single policy load; built for CI plans and local agent harnesses *(v0.7)*
+- [x] **MCP `tools/list_changed` forwarding** — the gateway relays upstream tool-set changes to the host and advertises `listChanged: true` *(v0.7)*
+- [x] **Operator-grade health + observability** — `/v1/health` turns `"degraded"` on audit overflow backlog; new Prometheus series for buffered-audit and notify-spool durability *(v0.7)*
+- [x] **Mid-stream policy revocation** — LangChain `stream`/`astream` re-validate the decision every 10 s, so revoking a permission cuts live streams off *(v0.7)*
 
 ### Planned
 - [ ] PostgreSQL store backend for multi-node / shared state (the v0.6 SQLite store is single-node)

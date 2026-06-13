@@ -35,12 +35,12 @@ import (
 // central. The model emits a tool_call; the central returns DENY
 // with a specific rule. The test asserts:
 //
-//   1. The client sees a synthetic refusal with the central's rule
-//      string (not a hardcoded streaming-side rule).
-//   2. The central recorder shows exactly one /v1/check request,
-//      tagged with `transport: "llm_api_proxy"`.
-//   3. The central recorder's recorded request uses the gate's
-//      build path (provider=openai, mapped_scope set).
+//  1. The client sees a synthetic refusal with the central's rule
+//     string (not a hardcoded streaming-side rule).
+//  2. The central recorder shows exactly one /v1/check request,
+//     tagged with `transport: "llm_api_proxy"`.
+//  3. The central recorder's recorded request uses the gate's
+//     build path (provider=openai, mapped_scope set).
 func TestAT_FullStack_StreamingDenyPath_TransportTaggedAudit(t *testing.T) {
 	// Upstream emits a streaming response with a complete tool_call.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

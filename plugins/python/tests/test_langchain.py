@@ -564,3 +564,94 @@ class TestLegacyRunArun:
         assert isinstance(out, str)
         assert "denied" in out.lower()
         assert calls == []
+
+
+class TestStreamRegating:
+    """stream()/astream() gate at open and re-validate periodically so a
+    mid-stream policy revocation cuts the stream off."""
+
+    class _FlippingGuard:
+        """Allows the first N checks, denies afterwards."""
+
+        def __init__(self, allow_first: int):
+            self.allow_first = allow_first
+            self.calls = 0
+
+        def check(self, scope, **params):
+            from agentguard import CheckResult, DECISION_ALLOW, DECISION_DENY
+            self.calls += 1
+            if self.calls <= self.allow_first:
+                return CheckResult(decision=DECISION_ALLOW, reason="ok")
+            return CheckResult(decision=DECISION_DENY, reason="revoked mid-stream")
+
+    class _StreamingTool:
+        name = "streaming_tool"
+        description = "yields three chunks"
+
+        def stream(self, input, config=None, **kwargs):  # noqa: A002
+            yield "chunk-1"
+            yield "chunk-2"
+            yield "chunk-3"
+
+        async def astream(self, input, config=None, **kwargs):  # noqa: A002
+            for c in ("chunk-1", "chunk-2", "chunk-3"):
+                yield c
+
+        def _run(self, *a, **k):
+            return "done"
+
+    def test_stream_cut_off_on_mid_stream_revocation(self, monkeypatch):
+        from agentguard.adapters import langchain as lc_mod
+        from agentguard.adapters.langchain import GuardedTool
+
+        # Re-validate on every chunk so the revocation lands deterministically.
+        monkeypatch.setattr(lc_mod, "STREAM_REGATE_SECONDS", 0.0)
+
+        guard = self._FlippingGuard(allow_first=1)  # open-gate passes, first re-check denies
+        gt = GuardedTool(self._StreamingTool(), guard, scope="shell")
+
+        it = gt.stream("run")
+        with pytest.raises(PermissionError, match="revoked mid-stream"):
+            list(it)
+        assert guard.calls >= 2  # open gate + at least one re-check
+
+    def test_stream_completes_when_policy_stays_allowed(self, monkeypatch):
+        from agentguard.adapters import langchain as lc_mod
+        from agentguard.adapters.langchain import GuardedTool
+
+        monkeypatch.setattr(lc_mod, "STREAM_REGATE_SECONDS", 0.0)
+        guard = self._FlippingGuard(allow_first=10**9)
+        gt = GuardedTool(self._StreamingTool(), guard, scope="shell")
+
+        assert list(gt.stream("run")) == ["chunk-1", "chunk-2", "chunk-3"]
+        assert guard.calls >= 4  # open gate + one re-check per chunk
+
+    def test_astream_cut_off_on_mid_stream_revocation(self, monkeypatch):
+        import asyncio
+
+        from agentguard.adapters import langchain as lc_mod
+        from agentguard.adapters.langchain import GuardedTool
+
+        monkeypatch.setattr(lc_mod, "STREAM_REGATE_SECONDS", 0.0)
+        guard = self._FlippingGuard(allow_first=1)
+        gt = GuardedTool(self._StreamingTool(), guard, scope="shell")
+
+        async def consume():
+            chunks = []
+            async for c in gt.astream("run"):
+                chunks.append(c)
+            return chunks
+
+        with pytest.raises(PermissionError, match="revoked mid-stream"):
+            asyncio.run(consume())
+
+    def test_default_interval_does_not_recheck_fast_streams(self):
+        from agentguard.adapters.langchain import GuardedTool
+
+        guard = self._FlippingGuard(allow_first=1)  # any re-check would deny
+        gt = GuardedTool(self._StreamingTool(), guard, scope="shell")
+
+        # With the default 10s interval a sub-second stream never re-gates,
+        # so the hot path costs exactly one check.
+        assert list(gt.stream("run")) == ["chunk-1", "chunk-2", "chunk-3"]
+        assert guard.calls == 1
