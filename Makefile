@@ -1,4 +1,4 @@
-.PHONY: build build-mcp-gateway build-llm-proxy test test-all lint run clean docker validate validate-examples bench help
+.PHONY: build build-mcp-gateway build-llm-proxy test test-all lint run clean docker validate validate-examples bench dep-audit help
 
 # Binary name
 BINARY=agentguard
@@ -75,6 +75,15 @@ install-python-sdk:
 ## install-ts-sdk: Build the TypeScript SDK
 install-ts-sdk:
 	cd plugins/typescript && npm install && npm run build
+
+## ----- Dependency audit -----
+
+## dep-audit: Audit every dependency (Go/Python/TS) for known vulns + perf regressions
+dep-audit:
+	@echo "Dependency safety gate (security + performance)..."
+	@go test -run '^TestDependencyAudit_Gate$$' -count=1 ./pkg/depaudit
+	@echo "Dependency audit report (current vs latest)..."
+	@DEPAUDIT_ONLINE=1 go test -run '^TestDependencyAudit_Report$$' -count=1 -v ./pkg/depaudit
 
 ## ----- Benchmarks -----
 

@@ -99,6 +99,69 @@ jobs:
       - name: Run govulncheck
         run: govulncheck ./...
 
+  # Unified dependency safety audit across all three ecosystems (Go module,
+  # Python SDK, TypeScript SDK). Complements `vulncheck` above:
+  #   - govulncheck = live, reachability-based Go *security* gate.
+  #   - dep-audit   = cross-ecosystem security (live OSV.dev per pinned version)
+  #                   + *performance-regression* gate (perf has no automated DB,
+  #                   so a curated registry is the source of truth) + one report.
+  # A dependency passes if it is on the latest version OR behind-but-clean; it
+  # fails ONLY when its current version has a known security vuln or perf
+  # regression that an available upgrade resolves. Registry: pkg/depaudit/
+  # advisories.json (see advisories.md).
+  dep-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.11'
+
+      # Blocking gate. Security is verified live against OSV.dev per exact
+      # pinned version (DEPAUDIT_ONLINE=1); performance comes from the in-repo
+      # registry. OSV findings *add* failures but a network/OSV outage degrades
+      # to registry-only rather than flaking, so the gate never goes red on
+      # infrastructure. Fails the build on a known-vulnerable or perf-regressed
+      # pin with an available fix.
+      - name: Dependency safety gate (OSV.dev + registry)
+        env:
+          DEPAUDIT_ONLINE: '1'
+        run: go test -run '^TestDependencyAudit_Gate$' -count=1 -v ./pkg/depaudit
+
+      # Canary: proves the live OSV.dev integration actually flags known-bad
+      # versions, so a green gate means "checked & clean" and never "silently
+      # not checking". Fails only if OSV responds but our query/parser misses a
+      # known vuln; skips (does not flake) when OSV is unreachable.
+      - name: OSV.dev integration canary
+        env:
+          DEPAUDIT_ONLINE: '1'
+        run: go test -run '^TestDependencyAudit_OSVCanary$' -count=1 -v ./pkg/depaudit
+
+      # Informational report: current vs latest, safe?, reason — for every
+      # dependency. Live lookups (Go proxy / PyPI / npm + OSV.dev) populate the
+      # "latest" column and the verification source; failures degrade gracefully
+      # without failing the step.
+      - name: Dependency audit report (current vs latest)
+        env:
+          DEPAUDIT_ONLINE: '1'
+        run: go test -run '^TestDependencyAudit_Report$' -count=1 -v ./pkg/depaudit
+
+      # Live npm advisory discovery for the TS SDK (dev-only deps, lockfile
+      # present). Non-blocking: surfaces new advisories to triage into the
+      # registry without gating an unrelated transitive bump. The blocking
+      # teeth are the Go gate above + govulncheck.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: npm audit (TypeScript SDK, informational)
+        working-directory: plugins/typescript
+        continue-on-error: true
+        run: npm audit --omit=optional
+
   python-test:
     runs-on: ubuntu-latest
     strategy:
