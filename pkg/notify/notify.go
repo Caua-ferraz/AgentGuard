@@ -106,6 +106,15 @@ type DispatcherOptions struct {
 	// drain the spool back into the queue. Defaults to
 	// DefaultSpoolRecoveryInterval.
 	RecoveryInterval time.Duration
+
+	// extraNotifiers is appended to the notifier list during construction,
+	// before any worker or recovery goroutine starts. Unexported test-only
+	// seam: it lets in-process Notifier fakes be injected without mutating
+	// d.notifiers after the background goroutines are already reading it
+	// (which -race correctly flags). Production callers wire notifiers
+	// through the policy NotificationCfg; d.notifiers is built-once at
+	// construction and read lock-free thereafter.
+	extraNotifiers []Notifier
 }
 
 // DefaultSpoolRecoveryInterval matches the audit overflow recovery
@@ -157,6 +166,10 @@ func NewDispatcherWithOptions(cfg policy.NotificationCfg, opts DispatcherOptions
 	for _, t := range cfg.OnDeny {
 		d.notifiers = append(d.notifiers, targetToNotifier(t, "denied", dispatchTimeout, ctx))
 	}
+	// Append any injected (test-only) notifiers here, while we are still on
+	// the constructing goroutine and before the workers/recovery loop below
+	// start reading d.notifiers. nil in production, so a no-op append.
+	d.notifiers = append(d.notifiers, opts.extraNotifiers...)
 
 	if workers < 1 {
 		workers = 1

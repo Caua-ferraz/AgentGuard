@@ -671,15 +671,19 @@ func TestDispatcher_SpoolLeftoverFromPreviousProcessIsDelivered(t *testing.T) {
 		t.Fatalf("seed spool: %v", err)
 	}
 
+	// Inject capt via extraNotifiers so d.notifiers is fully built before the
+	// spool-recovery goroutine starts reading it. Appending after construction
+	// races with drainSpoolOnce (the seeded spool gives the loop work on its
+	// first tick) — see DispatcherOptions.extraNotifiers.
+	capt := &capturingNotifier{}
 	d := NewDispatcherWithOptions(policy.NotificationCfg{}, DispatcherOptions{
 		Workers:          2,
 		QueueSize:        16,
 		SpoolPath:        spool,
 		RecoveryInterval: 50 * time.Millisecond,
+		extraNotifiers:   []Notifier{capt},
 	})
 	defer d.Close()
-	capt := &capturingNotifier{}
-	d.notifiers = append(d.notifiers, capt)
 
 	waitForCondition(t, 15*time.Second, func() bool {
 		return capt.Get().Result.Reason == "left over"

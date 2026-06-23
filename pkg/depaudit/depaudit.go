@@ -720,7 +720,8 @@ func escapeGoModule(path string) string {
 
 func safeReason(d Dependency, latest string, osvChecked bool) string {
 	// sec describes how thoroughly the security dimension was checked.
-	sec := "no known advisory in the registry"
+	// Always assigned by the exhaustive if/else below before it is read.
+	var sec string
 	if osvChecked {
 		sec = "no known vulnerability (verified live via OSV.dev) and no performance regression in the registry"
 	} else {
