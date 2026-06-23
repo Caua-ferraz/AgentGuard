@@ -712,8 +712,8 @@ func TestBridge_StripAgentGuardMeta(t *testing.T) {
 		{
 			name: "mixed -> only non-agentguard",
 			in: map[string]interface{}{
-				MetaApprovalIDKey:    "ap_x",
-				"trace-id":           "t-123",
+				MetaApprovalIDKey: "ap_x",
+				"trace-id":        "t-123",
 			},
 			want: map[string]interface{}{
 				"trace-id": "t-123",
@@ -737,10 +737,10 @@ func TestBridge_StripAgentGuardMeta(t *testing.T) {
 
 func TestBridge_SplitNamespacedName(t *testing.T) {
 	cases := []struct {
-		in    string
-		ns    string
-		tool  string
-		ok    bool
+		in   string
+		ns   string
+		tool string
+		ok   bool
 	}{
 		{in: "fs:read_file", ns: "fs", tool: "read_file", ok: true},
 		{in: "github:create_issue", ns: "github", tool: "create_issue", ok: true},
@@ -771,4 +771,28 @@ func mustMarshal(t *testing.T, v interface{}) json.RawMessage {
 		t.Fatalf("marshal: %v", err)
 	}
 	return data
+}
+
+// TestBridge_ForwardsListChangedToHost: only tools/list_changed is
+// re-emitted to the host (one frame, newline-terminated, valid JSON);
+// other upstream notifications stay gateway-internal.
+func TestBridge_ForwardsListChangedToHost(t *testing.T) {
+	var out bytes.Buffer
+	b := NewBridge(&Config{LogLevel: "info"}, io.Discard, "test")
+	b.output = &out
+
+	b.onUpstreamNotification("fs", "notifications/progress")
+	if out.Len() != 0 {
+		t.Fatalf("non-list_changed notification must not be forwarded; got %q", out.String())
+	}
+
+	b.onUpstreamNotification("fs", NotificationToolsListChanged)
+	line := strings.TrimSpace(out.String())
+	var note Notification
+	if err := json.Unmarshal([]byte(line), &note); err != nil {
+		t.Fatalf("forwarded frame is not valid JSON: %v (%q)", err, line)
+	}
+	if note.JSONRPC != JSONRPCVersion || note.Method != NotificationToolsListChanged {
+		t.Errorf("frame = %+v, want jsonrpc=%q method=%q", note, JSONRPCVersion, NotificationToolsListChanged)
+	}
 }

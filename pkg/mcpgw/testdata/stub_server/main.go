@@ -11,12 +11,14 @@
 // Behaviour is configurable via flags so tests can probe edge
 // conditions:
 //
-//   --name           name advertised in serverInfo (default "stub")
-//   --tool           name of the single tool advertised (default "echo")
-//   --proto-version  protocol version returned on initialize (default
-//                    matches the test's negotiated version)
-//   --crash-after-n  exit non-zero after handling N requests
-//                    (default 0 = never crash)
+//	--name           name advertised in serverInfo (default "stub")
+//	--tool           name of the single tool advertised (default "echo")
+//	--proto-version  protocol version returned on initialize (default
+//	                 matches the test's negotiated version)
+//	--crash-after-n  exit non-zero after handling N requests
+//	                 (default 0 = never crash)
+//	--notify-list-changed-on-call  emit notifications/tools/list_changed
+//	                 after each tools/call response
 //
 // The stub reads newline-delimited JSON from stdin; writes
 // newline-delimited JSON to stdout; logs to stderr. Per MCP spec.
@@ -38,6 +40,7 @@ func main() {
 	tool := flag.String("tool", "echo", "single tool advertised")
 	protoVersion := flag.String("proto-version", "2025-11-25", "protocolVersion to return on initialize")
 	crashAfterN := flag.Int("crash-after-n", 0, "exit non-zero after handling N requests; 0 = never")
+	notifyListChanged := flag.Bool("notify-list-changed-on-call", false, "emit notifications/tools/list_changed after each tools/call response")
 	flag.Parse()
 
 	logf := func(format string, args ...interface{}) {
@@ -136,6 +139,13 @@ func main() {
 				"isError": false,
 			}
 			writeResponse(out, probe.ID, result, nil, logf)
+			if *notifyListChanged {
+				// Unsolicited notification after the response — the
+				// transport's reader must route it to OnNotification
+				// rather than dropping it.
+				fmt.Fprintln(out, `{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}`)
+				out.Flush()
+			}
 
 		case "ping":
 			if !isNotification {

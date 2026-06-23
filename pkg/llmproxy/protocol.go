@@ -86,9 +86,9 @@ type ChatCompletionMessage struct {
 // string holding JSON) per the OpenAI spec. The proxy preserves it
 // as-is so re-parsing happens at the policy-gate boundary.
 type ChatCompletionToolCallEcho struct {
-	ID       string                  `json:"id"`
-	Type     string                  `json:"type"`
-	Function ChatCompletionToolEcho  `json:"function"`
+	ID       string                 `json:"id"`
+	Type     string                 `json:"type"`
+	Function ChatCompletionToolEcho `json:"function"`
 }
 
 // ChatCompletionToolEcho is the (name, JSON-string-arguments) pair.

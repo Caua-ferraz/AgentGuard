@@ -18,14 +18,14 @@ Every operational endpoint is exposed at **both** of these paths:
 | Legacy | `/v1/<suffix>` | Always evaluates against tenant `local`. Wire-compatible with v0.4.x clients. |
 | Tenant-aware | `/v1/t/{tenant}/<suffix>` | `{tenant}` is extracted from the URL and validated by the engine's `PolicyProvider`. |
 
-In v0.5 the only valid `{tenant}` value is `local`; sending any other value returns `404` with body `{"error":"tenant not found"}`. Both `/v1/check` and `/v1/t/local/check` produce identical responses, identical audit-log entries, and identical wire-protocol headers — `/v1/t/local/...` exists in v0.5 so SDKs and CLIs can adopt the tenant-aware URL builder now and ride the same wire when v0.6 swaps in a database-backed multi-tenant `PolicyProvider`.
+Since v0.6, `{tenant}` is validated against the policy registry: `local` is always recognised (the bundled file policy), and additional tenants are registered with `agentguard tenant put <id> --policy <yaml>` (requires `--persist`). An unregistered tenant returns `404` with body `{"error":"tenant not found"}`; a store infrastructure failure during tenant resolution returns `500 {"error":"policy provider error"}`. `/v1/check` and `/v1/t/local/check` remain identical in responses, audit entries, and headers.
 
-**Tenant ID format constraints (v0.5):**
+**Tenant ID format constraints:**
 - Non-empty after URL-decoding.
 - URL-safe characters only — SDKs `URL-encode` the value before building the path, so reserved characters (`/`, spaces, etc.) are escaped to `%XX`.
-- v0.5 only recognises `local`. v0.6 will validate `{tenant}` against a configured registry.
+- Must be registered (or `local`) — unknown tenants 404.
 
-**Approval queue, audit log, SSE bus, and rate limiter are NOT yet sharded by tenant in v0.5.** They are single-tenant data structures that the tenant ID is plumbed *toward*; v0.6 will partition them. Until then, the practical effect of `/v1/t/local/...` versus `/v1/...` is the URL string only.
+**Runtime state is partitioned by tenant (v0.6+).** Each tenant gets isolated approvals (no cross-tenant existence oracle), rate-limit buckets (`scope:tenant:agent` keys), session-cost accumulators, SSE feeds, and tenant-scoped audit reads — `/v1/t/<tenant>/audit` only returns that tenant's entries.
 
 The wire format ([`docs/WIRE_PROTOCOL.md`](WIRE_PROTOCOL.md)) does **not** change between families: the same request body and response shape (`schema_version: "v1"`) flow through both.
 
@@ -223,7 +223,7 @@ Poll for approval resolution. This is what `guard.wait_for_approval` / `guard.wa
 
 ## `GET /v1/audit` · tenant-aware mirror
 
-Tenant-aware mirror: `GET /v1/t/{tenant}/audit`. Auth posture and query parameters are identical. v0.5 returns the same audit entries from both URLs (single-tenant log); v0.6 will partition by tenant.
+Tenant-aware mirror: `GET /v1/t/{tenant}/audit`. Auth posture and query parameters are identical. Since v0.6 the tenant-aware URL is scoped to its tenant's entries; the legacy `/v1/audit` serves the `local` tenant.
 
 Query the audit log.
 
@@ -321,7 +321,7 @@ Returns `200` with no body. Safe to call with no session (no-op).
 ## `GET /health`
 
 ```json
-{ "status": "ok", "version": "0.5.1" }
+{ "status": "ok", "version": "0.9.0" }
 ```
 
 Always `200` once the HTTP server is accepting connections. Use for liveness probes (see [`DEPLOYMENT.md`](DEPLOYMENT.md)). The legacy `/health` body shape is unchanged in v0.5 — for the richer operator probe see `/v1/health` below.
@@ -337,7 +337,7 @@ Operator-grade health endpoint introduced in v0.5. Richer than `/health`: includ
 ```json
 {
   "status": "ok",
-  "version": "0.5.1",
+  "version": "0.9.0",
   "tenant": "local",
   "last_request_at": "2026-05-05T19:04:54.646Z",
   "last_policy_load_at": "2026-05-05T19:04:53.549Z",
@@ -348,18 +348,18 @@ Operator-grade health endpoint introduced in v0.5. Richer than `/health`: includ
 
 | Field | Notes |
 |---|---|
-| `status` | Always `"ok"` in v0.5; v0.6 will flip to `"degraded"` for audit-write or notifier saturation. |
+| `status` | `"ok"` or `"degraded"` *(v0.7)*. Degraded means the process serves but a durability signal is unhealthy — currently an audit buffered-overflow backlog (entries durable on disk but not yet queryable). The HTTP code stays `200` either way so liveness probes don't flap; act on the field, not the code. |
 | `tenant` | Echoes the resolved tenant — `"local"` on `/v1/health`, `{tenant}` from the path on the tenant-aware variant. |
 | `last_request_at` | RFC 3339 with millisecond precision; omitted (`undefined`) when no traffic since boot. |
 | `last_policy_load_at` | RFC 3339 with millisecond precision; stamped by the engine on every successful provider load. |
-| `warnings` | `"no traffic in 5m+"` and/or `"policy not reloaded in 24h+"` when the corresponding thresholds are exceeded. |
+| `warnings` | `"no traffic in 5m+"`, `"policy not reloaded in 24h+"`, plus metrics-derived signals *(v0.7)*: `"audit: N corrupt line(s) skipped during queries"`, `"audit: N entry(ies) in buffered overflow backlog"`, `"notify: N notification(s) dropped (queue_full)"`. The metrics-derived signals are process-wide, not per-tenant. |
 
 ### Status codes
 
 | Code | Meaning |
 |---|---|
 | `200` | Tenant resolved; body returned. |
-| `404` | Tenant unknown (only on the `/v1/t/{tenant}/health` variant; v0.5 only `local` is recognised). Body: `{"error":"tenant not found"}`. |
+| `404` | Tenant unknown (only on the `/v1/t/{tenant}/health` variant; the tenant must be `local` or registered via `agentguard tenant put`). Body: `{"error":"tenant not found"}`. |
 
 ---
 
@@ -483,7 +483,7 @@ Safe because session cookies are `SameSite=Strict` and state-changing endpoints 
 Most error responses are `text/plain` from `http.Error` (e.g. `"Method not allowed\n"`). The structured JSON envelope is used by:
 
 - Tenant-routing 404 (`/v1/t/<unknown>/<any>`): `{"error":"tenant not found"}`
-- Tenant-routing 500 (provider infrastructure failure, v0.6+): `{"error":"policy provider error"}`
+- Tenant-routing 500 (provider infrastructure failure): `{"error":"policy provider error"}`
 - Health 404 (`/v1/t/<unknown>/health`): `{"error":"tenant not found"}`
 - Recovered panic 500: `{"error":"internal server error"}`
 - `/v1/check` schema mismatch 400: `{"error":"unsupported schema_version; expected v1","received":"v2"}`
@@ -498,7 +498,7 @@ Other error responses (auth 401/403, `/v1/check` 400 for bad JSON, audit 400 for
 |---|---|---|
 | `401` on every gated endpoint | Server has `--api-key`; client sending none. | Set `Authorization: Bearer …` or log in. |
 | `403` on POST approve/deny from dashboard | Session valid, CSRF missing. | Echo `document.cookie['ag_csrf']` as `X-CSRF-Token`. |
-| `404` on every `/v1/t/<x>/...` | Tenant `<x>` not registered. v0.5 only allows `local`. | Use `/v1/...` (legacy) or `/v1/t/local/...`. |
+| `404` on every `/v1/t/<x>/...` | Tenant `<x>` not registered. | Register it (`agentguard tenant put <x> --policy <yaml>`, requires `--persist`) or use `/v1/...` / `/v1/t/local/...`. |
 | `413` on `/v1/check` | Body > 1 MB. | Trim `meta` payloads or raise `proxy.request.max_body_bytes`. |
 | `503` on `/auth/login` | 1024 concurrent sessions. | Probing bot; firewall it. |
 | SSE connection drops every minute | Idle proxy timeout upstream. | Set `proxy_read_timeout 3600s` on reverse proxy. |

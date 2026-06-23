@@ -35,7 +35,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
@@ -91,7 +90,7 @@ func TestAT_B1_Adversarial_TenantIDDoesntCount(t *testing.T) {
 	approvalID := seedReplayApproval(t, srv,
 		`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a"}`)
 
-	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+	mismatchBefore := metrics.ApprovalReplayMismatchTotal()
 
 	// Retry via the tenant-aware /v1/t/local/check route. Same logical
 	// tenant; if any future tenant-scoping work lands and tenants are
@@ -114,11 +113,11 @@ func TestAT_B1_Adversarial_TenantIDDoesntCount(t *testing.T) {
 		t.Errorf("v0.5 documented behavior: matching-shape retry across legacy and tenant-aware routes short-circuits to allow:approved; got rule=%q decision=%s. If matchesOriginalRequest now compares tenant id, update this test.",
 			result.Rule, result.Decision)
 	}
-	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got != mismatchBefore {
+	if got := metrics.ApprovalReplayMismatchTotal(); got != mismatchBefore {
 		t.Errorf("ApprovalReplayMismatchTotal incremented (got %d, want %d) — fields match; counter must NOT bump", got, mismatchBefore)
 	}
 
-	// Document for the v0.6 worker: TODO(v0.6, #tenant-scoped-approval-lookup)
+	// Document for the v0.6 worker: TODO(v0.7, #tenant-scoped-approval-lookup)
 	// — when ActionRequest gains a TenantID field (or
 	// ApprovalQueue.Lookup grows a tenant arg), extend
 	// matchesOriginalRequest and flip this test to assert that an
@@ -137,7 +136,7 @@ func TestAT_B1_Adversarial_CaseSensitivity(t *testing.T) {
 	approvalID := seedReplayApproval(t, srv,
 		`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a"}`)
 
-	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+	mismatchBefore := metrics.ApprovalReplayMismatchTotal()
 
 	// Same shape but agent_id case-flipped.
 	body := fmt.Sprintf(
@@ -146,19 +145,19 @@ func TestAT_B1_Adversarial_CaseSensitivity(t *testing.T) {
 	)
 	result, _ := retryCheck(t, srv, body)
 	assertNotShortCircuited(t, result)
-	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got <= mismatchBefore {
+	if got := metrics.ApprovalReplayMismatchTotal(); got <= mismatchBefore {
 		t.Errorf("ApprovalReplayMismatchTotal not incremented on agent_id case-flip (got %d, want > %d)", got, mismatchBefore)
 	}
 
 	// And command case-flipped.
-	mismatchBefore = atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+	mismatchBefore = metrics.ApprovalReplayMismatchTotal()
 	body = fmt.Sprintf(
 		`{"scope":"shell","command":"SUDO APT INSTALL VIM","agent_id":"agent_a","approval_id":%q}`,
 		approvalID,
 	)
 	result, _ = retryCheck(t, srv, body)
 	assertNotShortCircuited(t, result)
-	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got <= mismatchBefore {
+	if got := metrics.ApprovalReplayMismatchTotal(); got <= mismatchBefore {
 		t.Errorf("ApprovalReplayMismatchTotal not incremented on command case-flip (got %d, want > %d)", got, mismatchBefore)
 	}
 }
@@ -173,7 +172,7 @@ func TestAT_B1_Adversarial_TrailingWhitespace(t *testing.T) {
 	approvalID := seedReplayApproval(t, srv,
 		`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a"}`)
 
-	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+	mismatchBefore := metrics.ApprovalReplayMismatchTotal()
 
 	// Trailing space on the command.
 	body := fmt.Sprintf(
@@ -182,19 +181,19 @@ func TestAT_B1_Adversarial_TrailingWhitespace(t *testing.T) {
 	)
 	result, _ := retryCheck(t, srv, body)
 	assertNotShortCircuited(t, result)
-	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got <= mismatchBefore {
+	if got := metrics.ApprovalReplayMismatchTotal(); got <= mismatchBefore {
 		t.Errorf("ApprovalReplayMismatchTotal not incremented on trailing-whitespace mutation")
 	}
 
 	// Leading space.
-	mismatchBefore = atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+	mismatchBefore = metrics.ApprovalReplayMismatchTotal()
 	body = fmt.Sprintf(
 		`{"scope":"shell","command":" sudo apt install vim","agent_id":"agent_a","approval_id":%q}`,
 		approvalID,
 	)
 	result, _ = retryCheck(t, srv, body)
 	assertNotShortCircuited(t, result)
-	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got <= mismatchBefore {
+	if got := metrics.ApprovalReplayMismatchTotal(); got <= mismatchBefore {
 		t.Errorf("ApprovalReplayMismatchTotal not incremented on leading-whitespace mutation")
 	}
 }
@@ -215,7 +214,7 @@ func TestAT_B1_Adversarial_MetaApprovalID_LiteralVsTopLevel(t *testing.T) {
 	approvalID := seedReplayApproval(t, srv,
 		`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a"}`)
 
-	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+	mismatchBefore := metrics.ApprovalReplayMismatchTotal()
 
 	// Same shape, but the approval_id sits ONLY in meta. Proxy must
 	// ignore it (no short-circuit) and run fresh policy.
@@ -238,7 +237,7 @@ func TestAT_B1_Adversarial_MetaApprovalID_LiteralVsTopLevel(t *testing.T) {
 	}
 	// Counter must NOT have incremented — there was no top-level
 	// approval_id to look up; the validator never ran.
-	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got != mismatchBefore {
+	if got := metrics.ApprovalReplayMismatchTotal(); got != mismatchBefore {
 		t.Errorf("ApprovalReplayMismatchTotal incremented on meta-only approval_id (got %d, want %d) — meta-only ids must not even reach the validator", got, mismatchBefore)
 	}
 
@@ -250,7 +249,7 @@ func TestAT_B1_Adversarial_MetaApprovalID_LiteralVsTopLevel(t *testing.T) {
 	)
 	result, _ = retryCheck(t, srv, body)
 	assertNotShortCircuited(t, result)
-	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got <= mismatchBefore {
+	if got := metrics.ApprovalReplayMismatchTotal(); got <= mismatchBefore {
 		t.Errorf("ApprovalReplayMismatchTotal not incremented when top-level approval_id mismatched (got %d, want > %d)", got, mismatchBefore)
 	}
 }
@@ -304,7 +303,7 @@ func TestAT_B1_Adversarial_ResolvedDeniedReplay(t *testing.T) {
 	// Now mismatched shape: same id, different command. Fall-through
 	// to fresh policy. The new command "ls -la" is allowed by the
 	// test policy (Allow Pattern: "ls *").
-	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+	mismatchBefore := metrics.ApprovalReplayMismatchTotal()
 	bodyMismatch := fmt.Sprintf(
 		`{"scope":"shell","command":"ls -la","agent_id":"agent_a","approval_id":%q}`,
 		approvalID,
@@ -314,7 +313,7 @@ func TestAT_B1_Adversarial_ResolvedDeniedReplay(t *testing.T) {
 	if result.Decision != policy.Allow {
 		t.Errorf("mismatched retry of DENY-resolved approval: decision=%s rule=%q reason=%q; want ALLOW (fresh evaluation of ls -la against test policy)", result.Decision, result.Rule, result.Reason)
 	}
-	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got <= mismatchBefore {
+	if got := metrics.ApprovalReplayMismatchTotal(); got <= mismatchBefore {
 		t.Errorf("ApprovalReplayMismatchTotal not incremented on mismatched DENY-resolved replay")
 	}
 }
@@ -372,7 +371,7 @@ func TestAT_B1_Adversarial_PendingReplay(t *testing.T) {
 	// Mismatched-shape retry of a pending id: must fall through to
 	// fresh policy. Different command — "rm -rf /" denies under the
 	// test policy.
-	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+	mismatchBefore := metrics.ApprovalReplayMismatchTotal()
 	bodyMismatch := fmt.Sprintf(
 		`{"scope":"shell","command":"rm -rf /","agent_id":"agent_a","approval_id":%q}`,
 		approvalID,
@@ -382,7 +381,7 @@ func TestAT_B1_Adversarial_PendingReplay(t *testing.T) {
 	if result.Decision != policy.Deny {
 		t.Errorf("mismatched retry of pending: decision=%s rule=%q; want DENY (rm -rf * is denied)", result.Decision, result.Rule)
 	}
-	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got <= mismatchBefore {
+	if got := metrics.ApprovalReplayMismatchTotal(); got <= mismatchBefore {
 		t.Errorf("ApprovalReplayMismatchTotal not incremented on pending+mismatched-shape replay")
 	}
 

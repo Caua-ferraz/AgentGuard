@@ -32,6 +32,9 @@ curl -s http://127.0.0.1:8080/metrics
 | `agentguard_sse_events_dropped_total` | `reason` | SSE broadcasts dropped before reaching a subscriber. Reason currently `slow_consumer`. |
 | `agentguard_audit_replay_entries_total` | — | Audit entries re-read at startup to seed counters. |
 | `agentguard_audit_rotations_total` | — | Live audit file rotations triggered by size threshold. |
+| `agentguard_audit_buffered_dropped_to_overflow_total` | — | Audit entries spilled to the buffered logger's overflow file (durable, not lost). |
+| `agentguard_audit_buffered_drained_from_overflow_total` | — | Spilled audit entries re-enqueued by the recovery loop. |
+| `agentguard_audit_buffered_queue_depth` | — | Entries waiting in the buffered audit queue (gauge). |
 | `agentguard_audit_corrupt_lines_total` | — | Audit lines that failed JSON parse during `Query()` and were skipped. |
 | `agentguard_deprecations_used_total` | `feature` | Times a deprecated feature was exercised. Keys match `docs/DEPRECATIONS.md`. |
 
@@ -43,6 +46,8 @@ curl -s http://127.0.0.1:8080/metrics
 | `agentguard_ratelimit_buckets` | — | Currently tracked rate-limit token buckets. |
 | `agentguard_sse_subscribers` | — | Live `/api/stream` subscribers. |
 | `agentguard_notify_queue_depth` | — | Length of the shared notify dispatch queue (sampled at last enqueue). |
+| `agentguard_notify_spooled_to_disk_total` | — | Notification events spilled to the `--notify-spool` file on queue overflow (retried, not dropped). |
+| `agentguard_notify_despooled_total` | — | Spooled notification events re-enqueued for dispatch. |
 | `agentguard_audit_replay_duration_seconds` | — | Wall-clock duration of the most recent startup audit replay. |
 | `agentguard_audit_migration_status` | `from`, `to`, `status` | 1 = current outcome of an audit-schema migration; 0 for non-current statuses of the same `(from, to)`. Status ∈ {`ran`,`skipped`,`failed`}. |
 

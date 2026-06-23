@@ -1,0 +1,37 @@
+{
+  "_comment": [
+    "AgentGuard dependency safety registry — the source of truth for the",
+    "TestDependencyAudit_Gate check. A dependency fails the gate only when its",
+    "current version falls inside an advisory's affected range AND a fixed",
+    "release exists (an upgrade would resolve it).",
+    "",
+    "kind = security  -> a known CVE / GHSA / Go vuln.",
+    "kind = performance -> a regression an upgrade fixes, evidenced by upstream",
+    "                      release notes or a benchmark (no automated DB exists",
+    "                      for these, which is exactly why this registry does).",
+    "",
+    "affected[].introduced  first affected version ('0' = from the beginning).",
+    "affected[].fixed        first version that resolves it ('' / omitted = no",
+    "                        fix yet; reported as a note, does NOT fail the gate).",
+    "",
+    "How to maintain: see advisories.md. Add an entry when govulncheck,",
+    "pip-audit, npm audit, or upstream notes surface an issue affecting a",
+    "version this project ships; remove it once every manifest has moved past",
+    "the fixed release.",
+    "",
+    "Entries below are real and historical; the project's pinned versions are",
+    "already past every 'fixed' boundary, so the gate is green. They exercise",
+    "the matcher end-to-end and document the schema."
+  ],
+  "advisories": [
+    {
+      "id": "GO-2022-0433 (CVE-2022-28948)",
+      "ecosystem": "go",
+      "package": "gopkg.in/yaml.v3",
+      "kind": "security",
+      "summary": "Denial of service: unmarshalling crafted YAML panics on a nil dereference.",
+      "reference": "https://pkg.go.dev/vuln/GO-2022-0433",
+      "affected": [{ "introduced": "0", "fixed": "v3.0.0" }]
+    }
+  ]
+}

@@ -74,7 +74,7 @@ go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@latest
 
 ```bash
 curl http://localhost:8080/health
-# {"status":"ok","version":"0.5.1"}
+# {"status":"ok","version":"0.9.0"}
 ```
 
 Open `http://localhost:8080/dashboard` in your browser to see the live dashboard.

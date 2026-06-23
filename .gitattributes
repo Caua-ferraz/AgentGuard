@@ -6,3 +6,7 @@ pkg/proxy/schema/v1/testdata/*.json text eol=lf
 
 # JSON Schema spec — keep canonical too.
 pkg/proxy/schema/v1/schema.json text eol=lf
+
+# Go sources — keep LF on every checkout so gofmt and any byte-compare
+# checks behave the same on Windows working trees as in CI.
+*.go text eol=lf

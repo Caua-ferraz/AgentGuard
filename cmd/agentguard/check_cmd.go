@@ -7,18 +7,26 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 	schemav1 "github.com/Caua-ferraz/AgentGuard/pkg/proxy/schema/v1"
 )
 
+// defaultWatchPoll is how often --watch re-polls the followed file for
+// appended bytes once it has caught up to EOF.
+const defaultWatchPoll = 200 * time.Millisecond
+
 // Exit codes for `agentguard check`. Stable contract — scripts pin on these.
 //
-//   0 = ALLOW (single) or every entry ALLOW (batch)
-//   1 = DENY (single) or any entry DENY (batch)
-//   2 = REQUIRE_APPROVAL (single) or any entry REQUIRE_APPROVAL with no DENY
-//   3 = error (file missing, malformed JSON, invalid policy, flag misuse)
+//	0 = ALLOW (single) or every entry ALLOW (batch)
+//	1 = DENY (single) or any entry DENY (batch)
+//	2 = REQUIRE_APPROVAL (single) or any entry REQUIRE_APPROVAL with no DENY
+//	3 = error (file missing, malformed JSON, invalid policy, flag misuse)
 //
 // Precedence in batch mode: error > deny > approval > allow.
 //
@@ -43,7 +51,15 @@ type checkCmdFlags struct {
 	RequestStr string
 	Stdin      bool
 	Batch      bool
+	Watch      string
 	OutputFmt  string
+
+	// watchStop ends a --watch loop (tests close it; production wires
+	// SIGINT in runCheck). nil means "run until interrupted".
+	watchStop <-chan struct{}
+	// watchPoll is the tail-poll interval; tests shrink it. Zero means
+	// defaultWatchPoll.
+	watchPoll time.Duration
 
 	// Per-field flags. These build a single ActionRequest when the caller
 	// chooses the flag-based input mode (no --request, --stdin, or --batch).
@@ -79,6 +95,9 @@ Input modes (mutually exclusive):
   --request <json>     Single check from a JSON string
   --stdin              Single check from one JSON object on stdin
   --batch              Batch check from JSONL (one JSON object per line) on stdin
+  --watch <file>       Follow a JSONL file (tail -f) and verdict each appended
+                       request with ONE policy load for the whole stream; the
+                       policy file hot-reloads on edit. Runs until interrupted.
   (default)            Single check built from per-field flags
 
 Flags:
@@ -99,6 +118,7 @@ Exit codes:
 	fs.StringVar(&f.RequestStr, "request", "", "JSON request string for single check")
 	fs.BoolVar(&f.Stdin, "stdin", false, "Read a single JSON request object from stdin")
 	fs.BoolVar(&f.Batch, "batch", false, "Read JSONL (one request per line) from stdin")
+	fs.StringVar(&f.Watch, "watch", "", "Follow a JSONL file (tail -f) and verdict each appended request")
 	fs.StringVar(&f.OutputFmt, "output", "text", "Output format: text | json")
 
 	fs.StringVar(&f.Scope, "scope", "", "Request scope (shell, filesystem, network, ...)")
@@ -111,6 +131,21 @@ Exit codes:
 	fs.StringVar(&f.SessionID, "session-id", "", "Session identifier (for cost accumulators)")
 	fs.Float64Var(&f.EstCost, "est-cost", 0, "Estimated cost (cost scope)")
 	fs.StringVar(&f.Meta, "meta", "", "Comma-separated k=v pairs (e.g. \"team=ml,prio=high\")")
+
+	// --watch runs until interrupted; wire SIGINT/SIGTERM so Ctrl-C
+	// returns the aggregate exit code instead of killing the process
+	// mid-verdict.
+	if i := indexOfWatchFlag(args); i >= 0 {
+		stop := make(chan struct{})
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			<-sigCh
+			signal.Stop(sigCh)
+			close(stop)
+		}()
+		f.watchStop = stop
+	}
 
 	if err := fs.Parse(args); err != nil {
 		// `-h` / `-help` returns flag.ErrHelp; the FlagSet has already
@@ -198,6 +233,8 @@ func executeCheck(f *checkCmdFlags, stdin io.Reader, stdout, stderr io.Writer) i
 		return runSingle(engine, req, tenantID, f.OutputFmt, stdout)
 	case inputModeBatch:
 		return runBatch(engine, stdin, tenantID, f.OutputFmt, stdout, stderr)
+	case inputModeWatch:
+		return runWatch(engine, f, tenantID, stdout, stderr)
 	default:
 		// Unreachable — selectInputMode either returns a known mode or an
 		// error. Defensive default-deny so a future enum addition can't
@@ -214,11 +251,12 @@ const (
 	inputModeRequest
 	inputModeStdin
 	inputModeBatch
+	inputModeWatch
 )
 
 // selectInputMode enforces the documented mutual-exclusion contract:
-// at most one of --request, --stdin, --batch may be set; the per-field
-// flags are only consulted when none of those three is set.
+// at most one of --request, --stdin, --batch, --watch may be set; the
+// per-field flags are only consulted when none of those is set.
 func selectInputMode(f *checkCmdFlags) (inputMode, error) {
 	chosen := 0
 	if f.RequestStr != "" {
@@ -230,8 +268,11 @@ func selectInputMode(f *checkCmdFlags) (inputMode, error) {
 	if f.Batch {
 		chosen++
 	}
+	if f.Watch != "" {
+		chosen++
+	}
 	if chosen > 1 {
-		return 0, errors.New("--request, --stdin, and --batch are mutually exclusive")
+		return 0, errors.New("--request, --stdin, --batch, and --watch are mutually exclusive")
 	}
 	if f.RequestStr != "" {
 		return inputModeRequest, nil
@@ -241,6 +282,9 @@ func selectInputMode(f *checkCmdFlags) (inputMode, error) {
 	}
 	if f.Batch {
 		return inputModeBatch, nil
+	}
+	if f.Watch != "" {
+		return inputModeWatch, nil
 	}
 	return inputModeFlags, nil
 }
@@ -493,7 +537,88 @@ func writeResultText(w io.Writer, req policy.ActionRequest, res policy.CheckResu
 	return err
 }
 
-// TODO(v0.6, #N): support `agentguard check --watch <jsonl-file>` for
-//                 streaming stdin without paying the policy load cost on
-//                 each invocation. Current shape is one-shot — every CI
-//                 step that wants to gate N actions pays one policy load.
+// indexOfWatchFlag reports whether args select --watch (so runCheck can
+// wire signal handling before parsing). Handles the four spellings the
+// flag package accepts: -watch v, --watch v, -watch=v, --watch=v.
+func indexOfWatchFlag(args []string) int {
+	for i, a := range args {
+		if a == "-watch" || a == "--watch" ||
+			strings.HasPrefix(a, "-watch=") || strings.HasPrefix(a, "--watch=") {
+			return i
+		}
+	}
+	return -1
+}
+
+// runWatch follows a JSONL file (tail -f semantics): existing lines are
+// verdicted immediately, then the file is polled for appended requests.
+// One policy load serves the whole stream, and the FilePolicyProvider's
+// watcher keeps the engine hot-reloaded on policy edits — the original
+// motivation: a CI plan or local agent harness gating N actions should
+// not pay N policy loads.
+//
+// Only newline-terminated lines are processed; a partial line at EOF is
+// buffered until the writer finishes it, so a torn mid-append read can't
+// produce a bogus parse error. Malformed lines abort with exitError
+// (same posture as --batch — skipping would silently mask requests).
+// The loop ends when f.watchStop closes (SIGINT/SIGTERM in production,
+// the test harness otherwise) and returns the worst exit code seen.
+func runWatch(engine *policy.Engine, f *checkCmdFlags, tenantID string, stdout, stderr io.Writer) int {
+	file, err := os.Open(f.Watch)
+	if err != nil {
+		fmt.Fprintf(stderr, "check: --watch: %v\n", err)
+		return exitError
+	}
+	defer file.Close()
+
+	poll := f.watchPoll
+	if poll <= 0 {
+		poll = defaultWatchPoll
+	}
+
+	reader := bufio.NewReader(file)
+	var partial []byte
+	worst := exitAllow
+	processed := 0
+
+	for {
+		chunk, err := reader.ReadBytes('\n')
+		partial = append(partial, chunk...)
+
+		if err == nil {
+			line := strings.TrimSpace(string(partial))
+			partial = partial[:0]
+			if line == "" {
+				continue
+			}
+			processed++
+			req, derr := decodeRequest([]byte(line))
+			if derr != nil {
+				fmt.Fprintf(stderr, "check: watch line %d: %v\n", processed, derr)
+				return exitError
+			}
+			res := engine.Check(req, tenantID)
+			res.SchemaVersion = schemav1.Version
+			if werr := writeResult(stdout, req, res, f.OutputFmt); werr != nil {
+				fmt.Fprintf(stderr, "check: write error: %v\n", werr)
+				return exitError
+			}
+			if code := exitForDecision(res.Decision); severityRank(code) > severityRank(worst) {
+				worst = code
+			}
+			continue
+		}
+
+		if !errors.Is(err, io.EOF) {
+			fmt.Fprintf(stderr, "check: --watch read: %v\n", err)
+			return exitError
+		}
+
+		// Caught up. Wait for more bytes or the stop signal.
+		select {
+		case <-f.watchStop:
+			return worst
+		case <-time.After(poll):
+		}
+	}
+}

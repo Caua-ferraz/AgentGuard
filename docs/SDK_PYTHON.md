@@ -4,7 +4,7 @@ Companion to the short [`plugins/python/README.md`](../plugins/python/README.md)
 
 Package on PyPI: `agentguardproxy`. Import name: `agentguard`.
 
-Source: `plugins/python/agentguard/__init__.py` (core) and `plugins/python/agentguard/adapters/*.py` (framework integrations).
+Source: `plugins/python/agentguard/core.py` (Guard client, exceptions, constants), `plugins/python/agentguard/decorators.py` (`@guarded`), and `plugins/python/agentguard/adapters/*.py` (framework integrations). The package `__init__.py` re-exports the public surface — always import from the package root.
 
 ---
 

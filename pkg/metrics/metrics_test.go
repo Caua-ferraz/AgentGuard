@@ -3,7 +3,6 @@ package metrics
 import (
 	"bytes"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,10 +57,7 @@ func TestWritePrometheus_NoDeprecationsEmitsHeaderOnly(t *testing.T) {
 // exposition still includes HELP/TYPE so a scraper picks up the series
 // definition. No label lines should appear.
 func TestWritePrometheus_NotifyDroppedHeaderOnly(t *testing.T) {
-	// Isolate: flush whatever previous test ran.
-	notifyDroppedMu.Lock()
-	notifyDroppedCount = map[notifyDroppedKey]uint64{}
-	notifyDroppedMu.Unlock()
+	Reset() // isolate from whatever previous test ran
 
 	var buf bytes.Buffer
 	WritePrometheus(&buf)
@@ -79,9 +75,7 @@ func TestWritePrometheus_NotifyDroppedHeaderOnly(t *testing.T) {
 // (notifier, reason) label pair and in sorted order for stable scrape
 // output.
 func TestWritePrometheus_NotifyDroppedLabels(t *testing.T) {
-	notifyDroppedMu.Lock()
-	notifyDroppedCount = map[notifyDroppedKey]uint64{}
-	notifyDroppedMu.Unlock()
+	Reset()
 
 	IncNotifyDropped("webhook", NotifyDroppedQueueFull)
 	IncNotifyDropped("webhook", NotifyDroppedQueueFull)
@@ -111,9 +105,7 @@ func TestWritePrometheus_NotifyDroppedLabels(t *testing.T) {
 // the exposition still includes HELP/TYPE so a scraper picks up the series
 // definition. No label lines should appear.
 func TestWritePrometheus_ApprovalEvictedHeaderOnly(t *testing.T) {
-	approvalEvictedMu.Lock()
-	approvalEvictedCount = map[string]uint64{}
-	approvalEvictedMu.Unlock()
+	Reset()
 
 	var buf bytes.Buffer
 	WritePrometheus(&buf)
@@ -132,9 +124,7 @@ func TestWritePrometheus_ApprovalEvictedHeaderOnly(t *testing.T) {
 // (lru_resolved, queue_full) must be present so operators can distinguish
 // "need a bigger queue" from "need more approvers".
 func TestWritePrometheus_ApprovalEvictedLabels(t *testing.T) {
-	approvalEvictedMu.Lock()
-	approvalEvictedCount = map[string]uint64{}
-	approvalEvictedMu.Unlock()
+	Reset()
 
 	IncApprovalEvicted(ApprovalEvictedLRUResolved)
 	IncApprovalEvicted(ApprovalEvictedLRUResolved)
@@ -184,9 +174,7 @@ func TestWritePrometheus_RateLimitBucketsGauge(t *testing.T) {
 // TestWritePrometheus_RateLimitEvictedHeaderOnly: with nothing evicted,
 // still emit HELP/TYPE and no label lines.
 func TestWritePrometheus_RateLimitEvictedHeaderOnly(t *testing.T) {
-	rateLimitEvictedMu.Lock()
-	rateLimitEvictedCount = map[string]uint64{}
-	rateLimitEvictedMu.Unlock()
+	Reset()
 
 	var buf bytes.Buffer
 	WritePrometheus(&buf)
@@ -203,9 +191,7 @@ func TestWritePrometheus_RateLimitEvictedHeaderOnly(t *testing.T) {
 // TestWritePrometheus_RateLimitEvictedLabels: counters are emitted with the
 // scope label and in sorted order for stable scrape output.
 func TestWritePrometheus_RateLimitEvictedLabels(t *testing.T) {
-	rateLimitEvictedMu.Lock()
-	rateLimitEvictedCount = map[string]uint64{}
-	rateLimitEvictedMu.Unlock()
+	Reset()
 
 	IncRateLimitBucketEvicted("shell")
 	IncRateLimitBucketEvicted("shell")
@@ -236,9 +222,7 @@ func TestWritePrometheus_RateLimitEvictedLabels(t *testing.T) {
 // series are present (header + value) so scrapers can index them from the
 // first scrape, even when replay has not yet run.
 func TestWritePrometheus_AuditReplayAndRotations(t *testing.T) {
-	atomic.StoreUint64(&AuditReplayEntriesTotal, 0)
-	atomic.StoreUint64(&AuditRotationsTotal, 0)
-	SetAuditReplayDuration(0)
+	Reset()
 
 	AddAuditReplayEntries(1234)
 	IncAuditRotation()
@@ -285,5 +269,106 @@ func TestEscapeLabel(t *testing.T) {
 		if got := escapeLabel(c.in); got != c.want {
 			t.Errorf("escapeLabel(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// -- Registry seam ---------------------------------------------------------------
+
+// TestRegistry_Isolation: two registries never share series state — the
+// whole point of the Registry seam. The package-level functions only touch
+// Default.
+func TestRegistry_Isolation(t *testing.T) {
+	a := NewRegistry()
+	b := NewRegistry()
+
+	a.IncDecision("ALLOW")
+	a.IncDecision("DENY")
+	a.IncApprovalEvicted(ApprovalEvictedQueueFull)
+	a.ObserveRequestDuration(1.5)
+	a.SetPendingApprovals(7)
+
+	if got := a.ChecksTotal(); got != 2 {
+		t.Errorf("a.ChecksTotal = %d, want 2", got)
+	}
+	if got := b.ChecksTotal(); got != 0 {
+		t.Errorf("b.ChecksTotal = %d, want 0 (registries must not share state)", got)
+	}
+	if got := b.ApprovalEvictedFor(ApprovalEvictedQueueFull); got != 0 {
+		t.Errorf("b eviction count = %d, want 0", got)
+	}
+
+	var bufA, bufB bytes.Buffer
+	a.WritePrometheus(&bufA)
+	b.WritePrometheus(&bufB)
+	if !strings.Contains(bufA.String(), "agentguard_checks_total 2") {
+		t.Errorf("a output missing counted checks:\n%s", bufA.String())
+	}
+	if !strings.Contains(bufB.String(), "agentguard_checks_total 0") {
+		t.Errorf("b output should be zeroed:\n%s", bufB.String())
+	}
+	if !strings.Contains(bufA.String(), "agentguard_pending_approvals 7") {
+		t.Errorf("a gauge missing:\n%s", bufA.String())
+	}
+}
+
+// TestRegistry_ResetMatchesFresh: a populated-then-Reset registry produces
+// byte-identical exposition output to a brand-new one (modulo the shared
+// deprecation series, which Reset documents as out of scope).
+func TestRegistry_ResetMatchesFresh(t *testing.T) {
+	deprecation.Reset()
+
+	r := NewRegistry()
+	r.IncDecision("ALLOW")
+	r.IncRateLimited()
+	r.IncApprovalReplayMismatch()
+	r.IncRequestRejected(RejectedBodyTooLarge)
+	r.IncApprovalEvicted(ApprovalEvictedLRUResolved)
+	r.IncRateLimitBucketEvicted("shell")
+	r.IncSSEEventDropped(SSEDroppedSlowConsumer)
+	r.IncNotifyDropped("webhook", NotifyDroppedQueueFull)
+	r.IncLLMProxyBufferOverflow("openai")
+	r.IncLLMProxyNonStreamingOverflow("anthropic")
+	r.IncLLMProxyProtocolViolation("openai")
+	r.SetLLMProxyStreamsActive(3)
+	r.IncLLMProxyStreamsRejected()
+	r.IncAuditCorruptLine()
+	r.AddAuditReplayEntries(10)
+	r.IncAuditRotation()
+	r.SetAuditReplayDuration(time.Second)
+	r.SetMigrationStatus("v0.4.0", "v0.4.1", MigrationStatusRan, 1)
+	r.SetNotifyQueueDepth(5)
+	r.ObserveNotifyDispatch("webhook", 0.2)
+	r.IncSSESubscribers()
+	r.SetRateLimitBuckets(9)
+	r.SetPendingApprovals(2)
+	r.ObserveRequestDuration(1)
+	r.ObservePolicyEvalDuration(0.5)
+	r.ObserveAuditWriteDuration(0.25)
+
+	r.Reset()
+
+	var got, want bytes.Buffer
+	r.WritePrometheus(&got)
+	NewRegistry().WritePrometheus(&want)
+	if got.String() != want.String() {
+		t.Errorf("Reset() output differs from a fresh registry:\n--- got ---\n%s\n--- want ---\n%s",
+			got.String(), want.String())
+	}
+}
+
+// TestDefaultShims_HitDefaultRegistry: the package-level functions and the
+// Default registry are the same state.
+func TestDefaultShims_HitDefaultRegistry(t *testing.T) {
+	Reset()
+	IncDecision("ALLOW")
+	if got := Default.ChecksTotal(); got != 1 {
+		t.Errorf("Default.ChecksTotal = %d after package-level IncDecision, want 1", got)
+	}
+	if got := AllowedTotal(); got != 1 {
+		t.Errorf("AllowedTotal() = %d, want 1", got)
+	}
+	Reset()
+	if got := ChecksTotal(); got != 0 {
+		t.Errorf("ChecksTotal after Reset = %d, want 0", got)
 	}
 }

@@ -287,8 +287,8 @@ func NewServer(cfg Config) *Server {
 	// restarts. A large audit file rescanned from scratch on every boot can
 	// stall startup and delay /metrics accuracy, so when the Logger is a
 	// FileLogger we persist a byte-offset checkpoint and resume from there.
-	// Other Logger implementations (e.g. SQLiteLogger) fall back to a full
-	// Query() — their scan cost is their own concern.
+	// Other Logger implementations (e.g. the store-backed logger) fall back
+	// to a full Query() — their scan cost is their own concern.
 	type pathReporter interface{ Path() string }
 	replayStart := time.Now()
 	var replayed uint64
@@ -651,7 +651,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	// that sharding is the next step — see pkg/proxy/tenant.go.
 	result := s.cfg.Engine.Check(req, tenantID)
 	evalMs := float64(time.Since(evalStart).Microseconds()) / 1000.0
-	metrics.PolicyEvalDuration.Observe(evalMs)
+	metrics.ObservePolicyEvalDuration(evalMs)
 
 	// If approval required, queue it
 	if result.Decision == policy.RequireApproval {
@@ -737,21 +737,16 @@ func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, 
 	if tenantID != "" && tenantID != policy.LocalTenantID {
 		entry.TenantID = tenantID
 	}
+	// policyMs is the policy-decision cost (request decode → here, i.e. the
+	// Engine.Check path). It is also what the audit entry records as DurationMs.
+	policyMs := float64(duration.Microseconds()) / 1000.0
+
 	auditStart := time.Now()
 	if err := s.cfg.Logger.Log(entry); err != nil {
 		log.Printf("Audit log error: %v", err)
 	}
 	auditMs := float64(time.Since(auditStart).Microseconds()) / 1000.0
-	metrics.AuditWriteDuration.Observe(auditMs)
-
-	totalMs := float64(duration.Microseconds()) / 1000.0
-	metrics.RequestDuration.Observe(totalMs)
-	metrics.IncDecision(string(result.Decision))
-
-	// Expose per-phase timing as response headers for easy curl inspection.
-	w.Header().Set("X-AgentGuard-Policy-Ms", fmt.Sprintf("%.3f", totalMs-auditMs))
-	w.Header().Set("X-AgentGuard-Audit-Ms", fmt.Sprintf("%.3f", auditMs))
-	w.Header().Set("X-AgentGuard-Total-Ms", fmt.Sprintf("%.3f", totalMs))
+	metrics.ObserveAuditWriteDuration(auditMs)
 
 	// Push to SSE watchers. The transport is stamped on the event so
 	// dashboard JS can render the chip without re-deriving from meta.
@@ -763,6 +758,23 @@ func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, 
 		Request:   req,
 		Result:    result,
 	})
+
+	// Total is measured AFTER the policy decision, the audit write, and the
+	// notify/SSE enqueue, so it is the true end-to-end server processing time —
+	// the only work left is serializing the response body below. Measuring it
+	// here (not from the pre-audit `duration`) keeps the
+	// agentguard_request_duration_ms SLO histogram and the X-AgentGuard-Total-Ms
+	// header honest: a slow synchronous audit backend now shows up in Total
+	// instead of being silently dropped. Headers must be set before the first
+	// body write below.
+	totalMs := float64(time.Since(start).Microseconds()) / 1000.0
+	metrics.ObserveRequestDuration(totalMs)
+	metrics.IncDecision(string(result.Decision))
+
+	// Expose per-phase timing as response headers for easy curl inspection.
+	w.Header().Set("X-AgentGuard-Policy-Ms", fmt.Sprintf("%.3f", policyMs))
+	w.Header().Set("X-AgentGuard-Audit-Ms", fmt.Sprintf("%.3f", auditMs))
+	w.Header().Set("X-AgentGuard-Total-Ms", fmt.Sprintf("%.3f", totalMs))
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(result); err != nil {
@@ -1112,9 +1124,12 @@ func (s *Server) handleHealthV1Tenant(w http.ResponseWriter, r *http.Request) {
 // /v1/t/{tenant}/health. Returns 404 with a structured error body when
 // the tenant is unknown; otherwise 200 with the full healthResponse.
 //
-// TODO(v0.6): integrate /v1/health with metrics-derived health (audit
-// failures, dispatcher saturation, etc.); status is unconditionally
-// "ok" today and operators alert on the warnings array.
+// Status semantics: "ok" or "degraded". Degraded means the process is
+// serving but a durability signal is unhealthy (audit entries parked in
+// the buffered overflow backlog). The HTTP code stays 200 either way so
+// liveness probes don't flap on degradation; orchestrators that want to
+// act on it read the status field. The metrics-derived signals are
+// process-wide, not per-tenant.
 func (s *Server) handleHealthV1(w http.ResponseWriter, r *http.Request, tenant string) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -1160,6 +1175,28 @@ func (s *Server) handleHealthV1(w http.ResponseWriter, r *http.Request, tenant s
 		}
 	}
 
+	// Metrics-derived signals (process-wide). Corrupt audit lines and
+	// dropped notifications are warnings — the data is already degraded
+	// or best-effort by design. An audit overflow backlog flips status
+	// to degraded: entries are durable on disk but not yet queryable,
+	// and a growing backlog means audit writes can't keep up.
+	if n := metrics.AuditCorruptLinesTotal(); n > 0 {
+		resp.Warnings = append(resp.Warnings, fmt.Sprintf("audit: %d corrupt line(s) skipped during queries", n))
+	}
+	dropped := metrics.AuditBufferedDroppedToOverflowTotal()
+	drained := metrics.AuditBufferedDrainedFromOverflowTotal()
+	if dropped > drained {
+		resp.Status = "degraded"
+		resp.Warnings = append(resp.Warnings, fmt.Sprintf("audit: %d entry(ies) in buffered overflow backlog", dropped-drained))
+	}
+	var notifyDrops uint64
+	for _, v := range metrics.NotifyDroppedSnapshot() {
+		notifyDrops += v
+	}
+	if notifyDrops > 0 {
+		resp.Warnings = append(resp.Warnings, fmt.Sprintf("notify: %d notification(s) dropped (queue_full)", notifyDrops))
+	}
+
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
@@ -1182,10 +1219,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]uint64{
-		"total":     atomic.LoadUint64(&metrics.ChecksTotal),
-		"allowed":   atomic.LoadUint64(&metrics.AllowedTotal),
-		"denied":    atomic.LoadUint64(&metrics.DeniedTotal),
-		"approvals": atomic.LoadUint64(&metrics.ApprovalTotal),
+		"total":     metrics.ChecksTotal(),
+		"allowed":   metrics.AllowedTotal(),
+		"denied":    metrics.DeniedTotal(),
+		"approvals": metrics.ApprovalTotal(),
 	})
 }
 
