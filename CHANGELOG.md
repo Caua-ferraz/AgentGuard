@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.0] — 2026-06-22
+
+> **Surface-stabilization release — the step before a validated v1.0.** AgentGuard's public surface is now stabilized: all three enforcement paths (MCP Gateway, LLM API Proxy, SDK / `/v1/check`) are verified end-to-end, the test suite is green, and v0.9 locks in the surfaces it intends to freeze at 1.0 while correcting one honesty defect. There are **no new features** and **no breaking changes** — the `/v1/check` wire protocol and the audit JSONL are byte-compatible with v0.7 (no schema bump). See [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) for the stabilized surfaces and the additive-only intent (a hard guarantee from 1.0). v0.9 ships only after additional testing and validation.
+
+### Added
+- **[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) — the surface-stabilization contract.** Declares the surfaces v0.9 stabilizes and intends to freeze at 1.0 — the policy YAML schema (`version: "1"`), the `/v1/check` + `/v1/t/{tenant}/...` wire protocol, the audit `schema_version: 2` format, and the CLI flags/subcommands — and the additive-only intent (no field, route, flag, or schema version removed or renamed; breaking changes would be a major-version event). Linked from the README docs table.
+- **CI hot-path p99 latency gate.** New `TestEngineCheck_P99LatencyGate` (`pkg/policy`) runs `policy.Engine.Check` with the persistence syncer active and **fails if p99 crosses the 3 ms budget** (measured baseline ≪0.1 ms for the bare engine; ~0.53 ms for the full HTTP `/v1/check` path). Wired as a dedicated step in `.github/workflows/ci.yml` alongside the existing HTTP-path persistence-on latency check (`TestIntegration_HotPathLatencyWithPersistence`), so a regression that lands blocking I/O on the hot path breaks the build.
+
+### Changed
+- **Audit "tamper-evident" claim corrected (the one real defect).** The README and FAQ marketed the audit log as "tamper-evident," but the code provides an **append-only** JSON-Lines log with no cryptographic integrity chain. The wording is now accurate: AgentGuard writes an append-only audit trail, and **tamper-evidence is achieved by forwarding it to append-only / WORM storage** (S3 Object Lock, a SIEM, or syslog) — AgentGuard does not seal the log itself. No code or on-disk format changed; this is a documentation correction only. (Closes internal-audit finding **L4** by truth-up, not by crypto — in-process hash-chaining / Merkle checkpoints were evaluated and deferred out of core scope.)
+- **`/v1/check` latency telemetry corrected.** `X-AgentGuard-Total-Ms` and the `agentguard_request_duration_ms` SLO histogram are now measured end-to-end (after the audit enqueue), matching their documented "end-to-end" definition; previously they were captured before the audit write and understated a slow audit backend. Response-header / metric change only — no wire-format or gating change.
+- **Single-node posture stated plainly.** README Limitations now declares single-node (`replicas: 1`) the **supported, stable topology**, with PostgreSQL / multi-node explicitly a v1.0 requirement (post-v0.9). No behavior change.
+- **Version set to 0.9.0** across all three binaries (`agentguard`, `agentguard-mcp-gateway`, `agentguard-llm-proxy`) and both SDKs (`agentguardproxy` on PyPI, `@agentguard/sdk` on npm).
+- **Planning-doc cleanup.** The stale `docs/v0.8-DESIGN.md` (a rejected crypto/RBAC/Merkle plan) was removed; `TODO.md` now carries the v0.9 stabilization checklist, the v1.0 roadmap (Postgres/multi-node + validation hardening), and a "post-v1, only if needed" note for the deferred RBAC / secret-redaction / audit-crypto work.
+
+### Compatibility
+- **No migration required.** The `/v1/check` request/response shapes, the audit `schema_version: 2` JSONL format, the policy schema (`version: "1"`), and every CLI flag/subcommand are unchanged from v0.7. Upgrading is a binary/SDK swap. See [`MIGRATION.md`](docs/MIGRATION.md) § v0.7.0 → v0.9.0.
+
 ## [0.7.0] — 2026-06-12
 
 > The consistency + durability release. Three workstreams land together (v0.6.0 was never tagged — its milestone ships here):

@@ -41,7 +41,7 @@ AgentGuard is the wire-level checkpoint that sits between your agent and everyth
 
 - **Policy-gated tool calls.** Every shell command, file write, network call, browser action, or model spend evaluated against a YAML policy before it runs.
 - **Human-in-the-loop approvals.** Risky actions pause, ping Slack/webhooks, surface on a live dashboard, and resume only after a human says yes.
-- **Tamper-evident audit trail.** JSON-Lines log of every decision with agent ID, scope, command, timestamp, and reasoning — queryable by CLI, dashboard, or Prometheus metrics.
+- **Append-only audit trail.** JSON-Lines log of every decision with agent ID, scope, command, timestamp, and reasoning — queryable by CLI, dashboard, or Prometheus metrics. For tamper-evidence, forward it to append-only / WORM storage (S3 Object Lock, a SIEM, or syslog) — AgentGuard does not cryptographically seal the log itself.
 - **Per-agent, per-environment, per-tool scoping.** One policy file, finely overridable for each agent identity.
 
 ## Quickstart
@@ -212,7 +212,7 @@ AgentGuard is a policy enforcement and audit layer. It is **not** an OS sandbox.
 - **The SDK layer is opt-in.** The agent must call `guard.check(...)` (directly, via `@guarded`, or via a framework adapter) — that makes it advisory. Use it when the wire-level layers are impractical (offline scripts, custom transports); pair it with the gateway / LLM proxy whenever both apply.
 - **AgentGuard does not sandbox the host or intercept syscalls.** A determined agent that controls its own runtime can bypass AgentGuard by ignoring `OPENAI_BASE_URL`, talking to a different MCP server, or shelling out directly. Combine AgentGuard with OS-level isolation (containers, seccomp, AppArmor, network egress rules) when the threat model includes a hostile agent.
 - **Pattern matching is string-glob, not semantic.** A deny rule for `rm -rf *` matches literal strings; an agent (or a creative human) can substitute equivalents (`find / -delete`, base64 payloads, etc.). Treat policies as a high-signal first filter, not a complete authorization model.
-- **Persistent state is single-node.** As of v0.6 the approval queue, rate-limiter, and cost accumulators persist to a local SQLite store and survive restarts (write-behind, off the hot path), but they are **not yet shared across instances** — a Postgres backend for multi-node is future work. Run `replicas: 1` for now, or `--persist=false` for the legacy pure-in-memory behavior.
+- **Single-node (`replicas: 1`) is the supported topology.** The approval queue, rate-limiter, and cost accumulators persist to a local SQLite store and survive restarts (write-behind, off the hot path), but they are **per-instance — not shared across replicas**. This is a deliberate, stable posture for v0.9: run one replica and scale vertically. A PostgreSQL backend for multi-node / shared state is a **v1.0 requirement** (see [Roadmap](#roadmap) and [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md)). Set `--persist=false` for the legacy pure-in-memory behavior.
 
 ## Dashboard
 
@@ -261,6 +261,7 @@ Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS deta
 | Troubleshooting | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) |
 | FAQ | [`docs/FAQ.md`](docs/FAQ.md) |
 | Config schema | [`docs/CONFIG.md`](docs/CONFIG.md) |
+| Compatibility & stability (v0.9 surface stabilization) | [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) |
 | Migration from earlier versions | [`docs/MIGRATION.md`](docs/MIGRATION.md) |
 | Deprecations | [`docs/DEPRECATIONS.md`](docs/DEPRECATIONS.md) |
 | File formats + migrations | [`docs/FILE_FORMATS.md`](docs/FILE_FORMATS.md) |

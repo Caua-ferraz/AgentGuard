@@ -33,7 +33,7 @@ first, exactly as the brief instructs.
 | L1 | **Low** | Streaming | Unbounded per-event/cumulative buffer when `--max-buffer-bytes=0` | TODO / document |
 | L2 | **Low** | Server/network | SSRF via operator-supplied notify webhook URLs | Accepted risk — documented |
 | L3 | **Low** | Policy engine | Glob matchers are O(n·m) backtracking (not exponential); patterns operator-trusted | Note only |
-| L4 | **Low** | Audit | "tamper-evident" claim unbacked by code (no hash chain) | **Phase 2** |
+| L4 | **Low** | Audit | "tamper-evident" claim unbacked by code (no hash chain) | **v0.9: truth-up + WORM** |
 | L5 | **Low** | Server | Approval IDs (capability tokens) appear in request-path access logs | Note / document |
 | P1 | *positive* | Audit | No log injection — every field serialized via `encoding/json` | Verified clean |
 | P2 | *positive* | Stores | All SQL parameterized — no injection | Verified clean |
@@ -296,7 +296,7 @@ completeness.
 
 ---
 
-## L4 — "tamper-evident" audit claim is unbacked (Low → addressed by Phase 2)
+## L4 — "tamper-evident" audit claim is unbacked (Low → addressed in v0.9 by truth-up)
 
 **Files:** README "tamper-evident" claim; [pkg/audit/checkpoint.go](../../pkg/audit/checkpoint.go)
 (replay-offset only — no hash chain).
@@ -304,9 +304,18 @@ completeness.
 The README markets the audit log as "tamper-evident," but the code has no
 integrity chain: an attacker with write access to the JSONL/SQLite store can edit
 or delete entries undetectably (`checkpoint.go` is a byte-offset for replay, not a
-MAC). This is a truth-in-advertising gap. **Resolved by Phase 2** (real SHA-256
-`prev_hash`/`entry_hash` chain + `audit verify` CLI) and the Phase 4 README truth
-pass.
+MAC). This is a truth-in-advertising gap.
+
+**Resolved in v0.9 by truth-up, not by crypto.** The original plan was a SHA-256
+`prev_hash`/`entry_hash` chain (or batched Merkle checkpoints) plus an `audit
+verify` CLI. That was evaluated and **deferred out of the v0.9 core scope**:
+tamper-evidence is better delivered by forwarding the append-only JSONL log to
+external WORM storage (S3 Object Lock, a SIEM, or syslog), which the product does
+not need to re-implement. v0.9 instead corrects the wording — the README and FAQ
+now describe an **append-only** audit log and point operators at WORM forwarding
+for tamper-evidence. See [`../COMPATIBILITY.md`](../COMPATIBILITY.md) for the
+frozen audit `schema_version: 2` surface. In-process cryptographic sealing remains
+a candidate for a post-v1 release only if a concrete requirement arises.
 
 ---
 

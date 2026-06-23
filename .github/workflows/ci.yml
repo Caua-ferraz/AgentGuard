@@ -34,6 +34,17 @@ jobs:
       - name: Test
         run: go test -v -race -coverprofile=coverage.out ./...
 
+      # Hot-path p99 latency gate (CLAUDE.md: "Latency is God", <3ms p99).
+      # Run the focused Engine.Check gate (with the persistence syncer active)
+      # plus the full HTTP /v1/check persistence-on latency check as a named,
+      # standalone step so a latency regression breaks CI with an obvious
+      # signal instead of hiding inside the broad `go test ./...` run above.
+      # No -race here: the race detector's instrumentation distorts timing.
+      - name: Hot-path p99 latency gate
+        run: |
+          go test -run '^TestEngineCheck_P99LatencyGate$' -count=1 -v ./pkg/policy
+          go test -run '^TestIntegration_HotPathLatencyWithPersistence$' -count=1 -v ./pkg/persist
+
       - name: Upload coverage
         uses: actions/upload-artifact@v4
         with:
@@ -162,18 +173,21 @@ jobs:
   # framework extra and runs only its targeted integration test file —
   # keeps install time bounded and isolates per-framework breakage.
   #
-  # Non-blocking on PRs (`continue-on-error: true`) for the v0.5 cycle.
-  # Decision recorded in .audit/v05_decisions.md under "Integration-tests
-  # CI job non-blocking". v0.6 follow-up issue title:
-  #   "ci: make integration-tests job a required check after one full
-  #    week of green"
+  # Non-blocking (`continue-on-error: true`) BY DESIGN — reaffirmed for v1.0.
+  # These tests pin to LIVE upstream framework releases (langchain, crewai,
+  # browser-use), so a red leg usually means upstream drift, not an AgentGuard
+  # regression; gating PR merges on it would let an unrelated framework release
+  # block every merge. Failures still surface (the red leg + the weekly cron
+  # run), and the per-framework matrix isolates which one broke. The
+  # AgentGuard-owned contract is covered by the BLOCKING `python-test` job's
+  # adapter unit tests; this job is the higher-fidelity, lower-stability coupon.
   #
   # The browser-use leg additionally requires Chromium binaries via
   # `playwright install`; if that step fails (network flake, missing
   # libs), only that matrix row goes red.
   integration-tests:
     runs-on: ubuntu-latest
-    # Non-blocking for v0.5; weekly cron + manual review surface failures.
+    # Non-blocking by design (see header); weekly cron + PR annotation surface failures.
     continue-on-error: true
     strategy:
       fail-fast: false

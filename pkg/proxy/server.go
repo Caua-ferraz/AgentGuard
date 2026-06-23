@@ -737,21 +737,16 @@ func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, 
 	if tenantID != "" && tenantID != policy.LocalTenantID {
 		entry.TenantID = tenantID
 	}
+	// policyMs is the policy-decision cost (request decode → here, i.e. the
+	// Engine.Check path). It is also what the audit entry records as DurationMs.
+	policyMs := float64(duration.Microseconds()) / 1000.0
+
 	auditStart := time.Now()
 	if err := s.cfg.Logger.Log(entry); err != nil {
 		log.Printf("Audit log error: %v", err)
 	}
 	auditMs := float64(time.Since(auditStart).Microseconds()) / 1000.0
 	metrics.ObserveAuditWriteDuration(auditMs)
-
-	totalMs := float64(duration.Microseconds()) / 1000.0
-	metrics.ObserveRequestDuration(totalMs)
-	metrics.IncDecision(string(result.Decision))
-
-	// Expose per-phase timing as response headers for easy curl inspection.
-	w.Header().Set("X-AgentGuard-Policy-Ms", fmt.Sprintf("%.3f", totalMs-auditMs))
-	w.Header().Set("X-AgentGuard-Audit-Ms", fmt.Sprintf("%.3f", auditMs))
-	w.Header().Set("X-AgentGuard-Total-Ms", fmt.Sprintf("%.3f", totalMs))
 
 	// Push to SSE watchers. The transport is stamped on the event so
 	// dashboard JS can render the chip without re-deriving from meta.
@@ -763,6 +758,23 @@ func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, 
 		Request:   req,
 		Result:    result,
 	})
+
+	// Total is measured AFTER the policy decision, the audit write, and the
+	// notify/SSE enqueue, so it is the true end-to-end server processing time —
+	// the only work left is serializing the response body below. Measuring it
+	// here (not from the pre-audit `duration`) keeps the
+	// agentguard_request_duration_ms SLO histogram and the X-AgentGuard-Total-Ms
+	// header honest: a slow synchronous audit backend now shows up in Total
+	// instead of being silently dropped. Headers must be set before the first
+	// body write below.
+	totalMs := float64(time.Since(start).Microseconds()) / 1000.0
+	metrics.ObserveRequestDuration(totalMs)
+	metrics.IncDecision(string(result.Decision))
+
+	// Expose per-phase timing as response headers for easy curl inspection.
+	w.Header().Set("X-AgentGuard-Policy-Ms", fmt.Sprintf("%.3f", policyMs))
+	w.Header().Set("X-AgentGuard-Audit-Ms", fmt.Sprintf("%.3f", auditMs))
+	w.Header().Set("X-AgentGuard-Total-Ms", fmt.Sprintf("%.3f", totalMs))
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(result); err != nil {

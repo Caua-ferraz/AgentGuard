@@ -170,4 +170,36 @@ The only behavioural difference an operator might notice: v0.5.0 Python SDK on C
 
 ---
 
+## v0.7.0 → v0.9.0
+
+### What happens automatically
+
+- **Nothing.** v0.9.0 is a stabilization release, not a feature or format change. There is no file rewrite, no policy-schema change, no wire-protocol change, and no audit-format change.
+- The `/v1/check` request/response shapes, the audit log (`schema_version: 2` JSONL), the policy schema (`version: "1"`), and every CLI flag/subcommand are **byte-for-byte compatible** with v0.7. Existing audit logs replay cleanly; existing policies load unchanged; existing SDK clients and proxies interoperate without changes.
+
+### What changed
+
+- **The audit "tamper-evident" wording was corrected — documentation only.** The audit log was always an append-only JSON-Lines log with no cryptographic sealing, and that is now what the README and FAQ say. No code path or on-disk byte changed. If your compliance posture relied on the word "tamper-evident," achieve it the way the docs now describe: forward the audit log to append-only / WORM storage (S3 Object Lock, a SIEM, or syslog).
+- **The v0.9 surface stabilization is now documented** in [`COMPATIBILITY.md`](COMPATIBILITY.md): the policy schema, wire protocol, audit format, and CLI are stabilized (the freeze targets for 1.0), with additive-only becoming the hard rule from 1.0. This is intent, not a behavior change.
+
+### What you should do
+
+1. **Swap the binaries and SDKs to 0.9.0.** No config or data changes are required.
+
+   ```bash
+   go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@v0.9.0
+   go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-mcp-gateway@v0.9.0
+   go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@v0.9.0
+   pip install --upgrade "agentguardproxy==0.9.0"
+   npm install @agentguard/sdk@0.9.0
+   ```
+
+2. **(Optional) Forward your audit log to WORM storage** if you want tamper-evidence — see the README audit bullet and [`COMPATIBILITY.md`](COMPATIBILITY.md).
+
+### Rollback to v0.7.0
+
+Trivial. v0.9.0 introduces no on-disk state, no schema bumps, and no wire-protocol changes — reinstall the v0.7.0 binaries/SDKs and start. No data migration is required either way.
+
+---
+
 _Migration guides for prior releases live in the git history of this file._

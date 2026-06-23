@@ -6,7 +6,7 @@ Questions that come up often in issues and conversations. For symptom-keyed debu
 
 ### What is AgentGuard, exactly?
 
-**A wire-level checkpoint** that sits between an AI agent and everything it touches — shell, files, network, browser, MCP servers, the model itself. Every action is evaluated against a YAML policy and resolved as `ALLOW` / `DENY` / `REQUIRE_APPROVAL`, with a tamper-evident audit log and a human-in-the-loop approval queue behind it.
+**A wire-level checkpoint** that sits between an AI agent and everything it touches — shell, files, network, browser, MCP servers, the model itself. Every action is evaluated against a YAML policy and resolved as `ALLOW` / `DENY` / `REQUIRE_APPROVAL`, with an append-only audit log and a human-in-the-loop approval queue behind it.
 
 The checkpoint runs at three layers, all sharing one policy + audit + approval queue:
 

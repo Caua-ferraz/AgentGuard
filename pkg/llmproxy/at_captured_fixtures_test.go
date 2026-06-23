@@ -36,18 +36,29 @@ import (
 	"testing"
 )
 
-// TestAT_CapturedFixtures_OpenAI replays every captured OpenAI
-// streaming fixture through OpenAIToolCallAccumulator and asserts at
-// least one ToolCallCheck reassembles. Skipped when no captures are
-// present (the synthesized fixtures cover spec semantics; this test
-// is the higher-fidelity coupon for when captures land).
+// TestAT_CapturedFixtures_OpenAI replays every captured OpenAI streaming
+// fixture through OpenAIToolCallAccumulator and asserts at least one
+// ToolCallCheck reassembles. When no real captures are committed yet, it falls
+// back to the committed synthesized fixtures so the capture→replay→reassemble
+// pipeline still runs in CI instead of skipping silently; real captures dropped
+// under testdata/captured/ take precedence.
 func TestAT_CapturedFixtures_OpenAI(t *testing.T) {
 	files, err := filepath.Glob("testdata/captured/openai_streaming_*.txt")
 	if err != nil {
 		t.Fatalf("glob: %v", err)
 	}
 	if len(files) == 0 {
-		t.Skip("no captured OpenAI streaming fixtures present in testdata/captured/; synthesized fixtures cover spec semantics — see TODO(v0.7, #llm-real-captured-fixtures)")
+		// Fall back to the committed synthesized fixtures (honestly labelled as
+		// synthesized via their provenance header) so the replay path is
+		// exercised on every run. See TODO(v0.7, #llm-real-captured-fixtures).
+		files, err = filepath.Glob("testdata/openai_streaming_*.txt")
+		if err != nil {
+			t.Fatalf("glob synthesized fallback: %v", err)
+		}
+		if len(files) == 0 {
+			t.Fatal("no OpenAI streaming fixtures present (captured or synthesized)")
+		}
+		t.Logf("no captured fixtures; replaying %d synthesized fixture(s) as the fallback coupon", len(files))
 	}
 	for _, f := range files {
 		t.Run(filepath.Base(f), func(t *testing.T) {
@@ -95,15 +106,25 @@ func TestAT_CapturedFixtures_OpenAI(t *testing.T) {
 	}
 }
 
-// TestAT_CapturedFixtures_Anthropic mirrors the OpenAI variant for
-// captured Anthropic /v1/messages streaming traces.
+// TestAT_CapturedFixtures_Anthropic mirrors the OpenAI variant for captured
+// Anthropic /v1/messages streaming traces, with the same synthesized-fixture
+// fallback so the replay path runs in CI rather than skipping silently.
 func TestAT_CapturedFixtures_Anthropic(t *testing.T) {
 	files, err := filepath.Glob("testdata/captured/anthropic_streaming_*.txt")
 	if err != nil {
 		t.Fatalf("glob: %v", err)
 	}
 	if len(files) == 0 {
-		t.Skip("no captured Anthropic streaming fixtures present in testdata/captured/; synthesized fixtures cover spec semantics — see TODO(v0.7, #llm-real-captured-fixtures)")
+		// Fall back to the committed synthesized fixtures so the replay path is
+		// exercised on every run. See TODO(v0.7, #llm-real-captured-fixtures).
+		files, err = filepath.Glob("testdata/anthropic_streaming_*.txt")
+		if err != nil {
+			t.Fatalf("glob synthesized fallback: %v", err)
+		}
+		if len(files) == 0 {
+			t.Fatal("no Anthropic streaming fixtures present (captured or synthesized)")
+		}
+		t.Logf("no captured fixtures; replaying %d synthesized fixture(s) as the fallback coupon", len(files))
 	}
 	for _, f := range files {
 		t.Run(filepath.Base(f), func(t *testing.T) {
