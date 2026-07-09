@@ -1,3 +1,12 @@
+//go:build !race
+
+// Build tag: this is a wall-clock p99 budget gate. The race detector's
+// instrumentation inflates per-access latency by ~5–10×, which can push the
+// measured p99 past the 3ms budget for reasons unrelated to a real regression.
+// CI runs this gate in a dedicated step WITHOUT -race (see .github/workflows/
+// ci.yml); excluding it from the broad `go test -race ./...` run keeps that
+// dedicated step the single, trustworthy source of truth.
+
 package policy
 
 import (
