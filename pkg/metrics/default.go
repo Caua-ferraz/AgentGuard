@@ -67,10 +67,11 @@ func IncLLMProxyProtocolViolation(provider string) {
 func LLMProxyProtocolViolationFor(provider string) uint64 {
 	return Default.LLMProxyProtocolViolationFor(provider)
 }
-func SetLLMProxyStreamsActive(n int64)     { Default.SetLLMProxyStreamsActive(n) }
-func IncLLMProxyStreamsRejected()          { Default.IncLLMProxyStreamsRejected() }
-func LLMProxyStreamsActive() int64         { return Default.LLMProxyStreamsActive() }
-func LLMProxyStreamsRejectedTotal() uint64 { return Default.LLMProxyStreamsRejectedTotal() }
+func SetLLMProxyStreamsActive(n int64)       { Default.SetLLMProxyStreamsActive(n) }
+func AddLLMProxyStreamsActive(d int64) int64 { return Default.AddLLMProxyStreamsActive(d) }
+func IncLLMProxyStreamsRejected()            { Default.IncLLMProxyStreamsRejected() }
+func LLMProxyStreamsActive() int64           { return Default.LLMProxyStreamsActive() }
+func LLMProxyStreamsRejectedTotal() uint64   { return Default.LLMProxyStreamsRejectedTotal() }
 
 // -- Audit series --
 

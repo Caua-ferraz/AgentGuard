@@ -498,6 +498,14 @@ func (r *Registry) SetLLMProxyStreamsActive(n int64) {
 	atomic.StoreInt64(&r.llmProxyStreamsActive, n)
 }
 
+// AddLLMProxyStreamsActive applies a delta (+1 admit, -1 release) to the
+// active-streams gauge. Preferred over SetLLMProxyStreamsActive on concurrent
+// paths: deltas compose atomically, while storing a captured snapshot lets a
+// slower admit clobber a newer value and under-report live streams.
+func (r *Registry) AddLLMProxyStreamsActive(delta int64) int64 {
+	return atomic.AddInt64(&r.llmProxyStreamsActive, delta)
+}
+
 // IncLLMProxyStreamsRejected bumps
 // agentguard_llmproxy_streams_rejected_total. Called once per
 // streaming request that was refused with 503 because the global
