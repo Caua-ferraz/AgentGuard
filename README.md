@@ -148,7 +148,7 @@ docker run -d -p 8080:8080 \
   agentguard:latest
 ```
 
-Prerequisites: Go 1.22+, Python 3.10+ (optional, for the SDK; 3.8 and 3.9 are unsupported — upstream EOL October 2024 and October 2025). See [`docs/SETUP.md`](docs/SETUP.md) for details.
+Prerequisites: Go 1.25+, Python 3.10+ (optional, for the SDK; 3.8 and 3.9 are unsupported — upstream EOL October 2024 and October 2025). See [`docs/SETUP.md`](docs/SETUP.md) for details.
 
 ### Minimal policy
 

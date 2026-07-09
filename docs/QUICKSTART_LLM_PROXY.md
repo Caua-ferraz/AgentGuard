@@ -13,7 +13,7 @@ shows up live on a dashboard you can approve / deny from.
 - **Python 3.10+** with the OpenAI SDK: `pip install "openai>=1.0"`
 - A valid `OPENAI_API_KEY` (the proxy forwards it verbatim to
   `api.openai.com`)
-- **Go 1.22+** for `go install`: <https://go.dev/dl/>
+- **Go 1.25+** for `go install`: <https://go.dev/dl/>
 
 This walkthrough uses the OpenAI SDK. The same pattern works for
 Anthropic, LangChain, and CrewAI — see [`examples/`](../examples/)

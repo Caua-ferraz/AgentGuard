@@ -41,12 +41,8 @@
 
   <!-- Subtitle -->
   <text x="280" y="118" font-family="'SF Mono', 'Fira Code', 'Cascadia Code', monospace" font-size="13" fill="#4ade80" letter-spacing="3" opacity="0.9">
-    THE FIREWALL FOR AI AGENTS
+    POLICY GUARDRAILS FOR AI AGENTS
   </text>
-
-  <!-- Version badge -->
-  <rect x="280" y="132" width="48" height="20" rx="10" fill="#1a2e1a" opacity="0.8"/>
-  <text x="304" y="146" font-family="'SF Mono', monospace" font-size="10" fill="#4ade80" text-anchor="middle">v0.1</text>
 
   <!-- Border -->
   <rect width="720" height="200" rx="12" fill="none" stroke="#222" stroke-width="1"/>
