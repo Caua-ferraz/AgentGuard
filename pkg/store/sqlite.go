@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -31,7 +32,31 @@ type SQLiteStore struct {
 // NewSQLiteStore opens (creating if absent) the SQLite database at path, sets
 // WAL + a busy timeout, and runs the schema migration. A ":memory:" path (or
 // any modernc in-memory DSN) yields an ephemeral store, used by tests.
+//
+// The database file and its -wal/-shm sidecars are held at mode 0600: they
+// carry the full audit trail plus approval/cost/bucket state, and the security
+// brief requires owner-only access (audit 2026-06, M2). The file is pre-created
+// 0600 so SQLite inherits that mode for the sidecars it creates, and existing
+// files from pre-fix versions are tightened on every open.
 func NewSQLiteStore(path string) (*SQLiteStore, error) {
+	if !isMemoryDSN(path) {
+		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("store: create %q: %w", path, err)
+		}
+		_ = f.Close()
+		// Tighten files created by older versions under the process umask,
+		// including sidecars left over from a previous run. Chmod failures are
+		// non-fatal (e.g. filesystems without POSIX modes): the pre-create
+		// above already guarantees new deployments are 0600.
+		_ = os.Chmod(path, 0o600)
+		for _, sidecar := range []string{path + "-wal", path + "-shm"} {
+			if _, err := os.Stat(sidecar); err == nil {
+				_ = os.Chmod(sidecar, 0o600)
+			}
+		}
+	}
+
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %q: %w", path, err)
@@ -60,6 +85,13 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// isMemoryDSN reports whether path selects an ephemeral in-memory database
+// (":memory:" or any modernc DSN carrying mode=memory), which has no on-disk
+// file to permission.
+func isMemoryDSN(path string) bool {
+	return strings.Contains(path, ":memory:") || strings.Contains(path, "mode=memory")
 }
 
 // Path returns the database path (for logging / health).

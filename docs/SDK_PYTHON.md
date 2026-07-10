@@ -20,10 +20,6 @@ Source: `plugins/python/agentguard/core.py` (Guard client, exceptions, constants
 - [Exception hierarchy](#exception-hierarchy)
 - [`@guarded` decorator](#guarded-decorator)
 - [Adapters](#adapters)
-  - [LangChain](#langchain)
-  - [CrewAI](#crewai)
-  - [browser-use](#browser-use)
-  - [MCP](#mcp)
 - [Testing against a fake proxy](#testing-against-a-fake-proxy)
 
 ---
@@ -167,7 +163,7 @@ CheckResult(decision="ALLOW", reason="AgentGuard unreachable (allow): <original 
 
 **Pick `timeout` higher than your human-SLA.** If approvers need 15 minutes on average, `timeout=300` will fire false negatives.
 
-**Restart kills in-flight approvals.** The approval queue is in-memory; a proxy restart loses every pending ID. Your poll loop will keep retrying against a queue that no longer has the entry. Resolve this either by catching the timeout and re-issuing the `check` call (which will create a new approval ID) or by not restarting the proxy while approvals are outstanding.
+**Restarts pause approvals; they no longer kill them.** Since v0.6 the server persists the approval queue by default (`--persist`), so pending IDs survive a restart and your poll loop picks up where it left off. The exceptions: a server running `--persist=false` loses every pending ID on restart, and an entry created in the final ≥1 s store-sync window before a hard crash may be gone. In either case the poll loop retries against a queue that no longer has the entry — catch the timeout and re-issue the `check` call (which creates a new approval ID).
 
 ---
 
@@ -246,99 +242,16 @@ Any `**check_kwargs` you pass are forwarded verbatim to `Guard.check()`. Useful 
 
 All adapters import lazily — the extras you do not install are never imported and never crash the core SDK.
 
-### LangChain
+| Framework | Entry point | One-liner |
+|---|---|---|
+| LangChain | `agentguard.adapters.langchain` — `GuardedTool`, `GuardedToolkit` | Wrap a tool list; every `run`/`arun` is policy-checked. |
+| CrewAI | `agentguard.adapters.crewai` — `GuardedCrewTool`, `guard_crew_tools` | Same, hooking both `run` and `_run`. |
+| browser-use | `agentguard.adapters.browseruse` — `GuardedBrowser` | Gate navigation, actions, and form input; `wrap_page` enforces `goto` transparently. |
+| MCP | `agentguard.adapters.mcp` — `GuardedMCPServer` (or `python -m agentguard.adapters.mcp`) | A guarded stdio MCP server; every `tools/call` is checked first. |
 
-```python
-from agentguard.adapters.langchain import GuardedTool, GuardedToolkit
-
-toolkit = GuardedToolkit(
-    tools=my_tools,
-    guard_url="http://localhost:8080",
-    agent_id="research-agent",
-)
-
-agent = create_react_agent(llm, toolkit.tools, prompt)
-```
-
-- Wraps each tool's `run` (sync) and `arun` (async).
-- Default scope per tool is inferred from `tool.name + tool.description` keywords:
-  - `http`, `api`, `fetch`, `request` → `network`
-  - `file`, `path`, `read`, `write` → `filesystem`
-  - `browser`, `navigate`, `click` → `browser`
-  - `shell`, `exec`, `command` → `shell`
-  - fallback → `data`
-- At call time, if the tool input is a dict containing `url` or `domain` → scope upgraded to `network`; `path` or `file_path` → `filesystem`.
-
-Pass `scope=` to `GuardedTool` to override inference manually.
-
-### CrewAI
-
-```python
-from agentguard.adapters.crewai import GuardedCrewTool, guard_crew_tools
-
-guarded_tools = guard_crew_tools(
-    tools=my_crew_tools,
-    guard_url="http://localhost:8080",
-    agent_id="crew-agent",
-)
-```
-
-Hooks **both** `run` and `_run` because CrewAI sometimes invokes tools through the private `_run` path. Scope inference mirrors the LangChain adapter.
-
-### browser-use
-
-```python
-from agentguard.adapters.browseruse import GuardedBrowser
-
-browser = GuardedBrowser(guard_url="http://localhost:8080",
-                         agent_id="scraper")
-
-result = browser.check_navigation("https://news.ycombinator.com")
-if result.allowed:
-    await page.goto(result.url)
-
-# Action-level check
-browser.check_action("click", "#login-btn")
-
-# Form input uses the `data` scope (useful if policy distinguishes PII entry)
-browser.check_form_input("https://example.com/signup",
-                         field="email", value="user@corp.com")
-
-# Or wrap the page so goto() is enforced transparently
-guarded_page = browser.wrap_page(page)
-await guarded_page.goto("https://news.ycombinator.com")   # PermissionError on deny
-```
-
-`GuardedPage.goto` raises `PermissionError` (specifically `AgentGuardDenied` or `AgentGuardApprovalRequired`) if the check fails.
-
-### MCP
-
-```python
-from agentguard.adapters.mcp import GuardedMCPServer
-
-server = GuardedMCPServer(guard_url="http://localhost:8080",
-                         agent_id="mcp-server")
-server.add_tool("search_web", "Search the web", handler=search_handler)
-server.add_tool("read_file",  "Read a local file", handler=read_handler)
-server.run()   # blocks; stdio JSON-RPC
-```
-
-Or drop-in:
-
-```bash
-python -m agentguard.adapters.mcp --guard-url http://localhost:8080
-```
-
-Implements `initialize`, `tools/list`, `tools/call`, and the `notifications/initialized` notification. The adapter pins `MCP_PROTOCOL_VERSION = "2024-11-05"`. The Python adapter warns (does not error) on protocol-version mismatches from the client; for hard-fail behaviour, multi-upstream namespacing, and capability merging, use the v0.5 Go binary `agentguard-mcp-gateway` (see [`MCP_GATEWAY.md`](MCP_GATEWAY.md)) instead.
-
-Tool-call scope inference (from the tool's argument names):
-
-- `command` or `cmd` → `shell`
-- `url` → `network`
-- `path` or `file_path` → `filesystem`
-- fallback → `data`
-
-Tool-call failures are returned as MCP content blocks with `isError: true`.
+Per-framework usage, scope-inference rules (keyword tables, runtime
+upgrades, `default_scope` fallback), version pins, and deny/approval
+return semantics are documented once in [`ADAPTERS.md`](ADAPTERS.md).
 
 ---
 

@@ -1,5 +1,12 @@
 # AgentGuard — Project Documentation
 
+> **Historical document — superseded (pre-v0.5 snapshot).** This early design
+> doc predates the MCP Gateway, the LLM API Proxy (v0.5), and the persistence
+> / multi-tenancy milestone (v0.6); its tech-stack, architecture diagram,
+> directory tree, and TODO lists no longer match the codebase. It is kept
+> as-is for historical context only. For current documentation start at the
+> [README](../../README.md) and [`docs/`](../).
+
 ## Project Overview
 
 AgentGuard is a **policy enforcement and audit-logging proxy for autonomous AI agents**. It acts as a firewall between an AI agent and the real world: before an agent executes any sensitive action (run a shell command, write a file, call an API, browse the web), it must first ask AgentGuard for permission. AgentGuard evaluates the request against a declarative YAML policy, then returns `ALLOW`, `DENY`, or `REQUIRE_APPROVAL`. All decisions are logged to an audit trail.

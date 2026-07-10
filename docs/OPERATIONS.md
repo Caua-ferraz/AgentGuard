@@ -61,11 +61,11 @@ Historical audit queries then become a two-tier lookup: recent entries from the 
 
 ## Multi-instance deployments
 
-Two in-memory state stores do **not** propagate across replicas:
+Two state stores do **not** propagate across replicas (v0.6 persistence makes them survive a *restart*, but each replica still keeps its own working copy — there is no shared state):
 
 ### Rate-limit buckets (`pkg/ratelimit/ratelimit.go`)
 
-- Key: `"<scope>:<agent_id>"`.
+- Key: `"<scope>:<tenant>:<agent_id>"` (tenant-aware since v0.6).
 - An agent hitting two replicas round-robin gets up to `2 × max_requests` per window.
 - `MaxBuckets = 10000` buckets per instance; stale buckets evicted on insertion pressure.
 
@@ -95,7 +95,7 @@ Behavior at capacity:
 
 - New approvals bulk-evict any **resolved** entries from the queue (`evictResolvedLocked`) before inserting. Unresolved pendings are never evicted.
 - If every entry is unresolved, `/v1/check` calls that would require approval get `503 Service Unavailable` with `Retry-After: 5`.
-- Approvals are **lost on restart.** There is no disk persistence. Agents polling `/v1/status/{id}` after a restart will poll forever (their SDK will hit its wall-clock timeout).
+- Approvals **survive restarts** since v0.6 — `--persist` (default `true`) snapshots the queue to the SQLite store and rehydrates it on boot. Only with `--persist=false`, or for entries created inside the final ≥1 s store-sync window before a hard crash, are pending approvals lost (agents polling `/v1/status/{id}` then hit their SDK wall-clock timeout). See [`CLI.md`](CLI.md#persistence--multi-tenancy-v06).
 
 Operational guidance:
 
@@ -111,7 +111,7 @@ Operational guidance:
 | Constant | Value | Source |
 |---|---|---|
 | `SessionTTL` | `1h` | `pkg/proxy/auth.go` (default, overridable via `policy.proxy.session.ttl`) |
-| `MaxSessions` | `1024` | `pkg/proxy/auth.go` (still hardcoded as of v0.5.x) |
+| `MaxSessions` | `1024` | `pkg/proxy/auth.go` (still hardcoded as of v0.9) |
 
 At capacity, the oldest-by-expiry session is evicted. Under pathological login bursts you can see `503` with `Retry-After: 5` from `/auth/login`.
 
@@ -176,8 +176,8 @@ Trade-off: a short TTL resets session totals mid-run if an agent goes idle longe
 
 Both wire-level enforcement points are **stateless** — they fan every gated request out to the AgentGuard server. Restart freely, no audit replay on boot.
 
-- **Health:** `GET /health` on the proxy's listen port. Use as the readiness probe.
-- **Metrics:** `GET /metrics`. Proxy-specific series listed in [`OBSERVABILITY.md`](OBSERVABILITY.md#wire-level-proxy-metrics-v05) — watch `agentguard_llmproxy_buffer_overflow_total` and `agentguard_mcpgw_upstream_reconnects_total`.
+- **Health:** the LLM API Proxy serves `GET /healthz` on its listen port — use it as the readiness probe. The MCP Gateway is a stdio bridge with no HTTP listener; probe the process, not a port.
+- **Metrics:** neither proxy binary exposes `/metrics` — the central `agentguard serve` does. See [`OBSERVABILITY.md`](OBSERVABILITY.md#mcp-gateway--llm-api-proxy-metrics-v05) for what is and isn't observable at the proxies.
 - **Shutdown:** the LLM API Proxy buffers tool calls inside streaming responses; give it 30 s graceful drain (`TimeoutStopSec=30s` / `terminationGracePeriodSeconds: 30`). A hard kill truncates the client's response.
 - **Version skew:** keep all binaries on the same `0.x.y`. The wire protocol is stable within a minor line; cross-minor mixing is unsupported. Upgrade the server first, then the proxies.
 - **Topology:** prefer per-agent sidecars — shared proxies couple every agent's lifecycle.
@@ -186,12 +186,13 @@ Both wire-level enforcement points are **stateless** — they fan every gated re
 
 ## Backups
 
-Two things are worth backing up:
+Three things are worth backing up:
 
 1. **Policy files** (`configs/*.yaml`) — version control them. Every change should land through a commit and, if possible, a CI `agentguard validate` check.
 2. **Audit log archive** — whatever your shipper lands in S3 / object storage. The local `audit.jsonl` is the working copy; the archive is truth. Retain per your compliance requirements.
+3. **The durable store** (v0.6) — `agentguard.db` plus its `-wal`/`-shm` sidecars in `--data-dir`. It holds pending approvals, rate-limit buckets, cost accumulators, and (with `--audit-backend=store`) the audit trail. Snapshot it with the process stopped, or use SQLite-aware tooling (`sqlite3 .backup`) on a live file — copying `agentguard.db` alone mid-write can produce a torn backup.
 
-Do **not** try to back up the approval queue or session store — they are ephemeral by design.
+The dashboard session store is the one piece that stays ephemeral by design — don't back it up.
 
 ---
 
@@ -199,7 +200,7 @@ Do **not** try to back up the approval queue or session store — they are ephem
 
 Before a scheduled restart in production:
 
-- [ ] No approvals pending (`curl .../api/pending`) or acceptable to lose them.
+- [ ] Pending approvals checked (`curl .../api/pending`) — with `--persist` (default) they survive the restart but sit unresolvable while the process is down; with `--persist=false` they are lost.
 - [ ] Agents are either idle or configured with a generous `wait_for_approval` / `waitForApproval` timeout.
 - [ ] Audit log recently archived, so replay latency on boot is bounded.
 - [ ] You know how to roll back the binary if the new version fails (`agentguard version`).

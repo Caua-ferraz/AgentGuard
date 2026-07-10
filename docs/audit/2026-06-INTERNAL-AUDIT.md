@@ -1,5 +1,20 @@
 # AgentGuard Internal Security Audit — 2026-06
 
+> **Resolution status (as of v0.9.0, 2026-07):** this document is the
+> point-in-time Phase-0 record; the statuses in the summary table below are
+> what was *planned* at audit time, not what is open today. Since then:
+> **H1, H2** fixed (`6c87334`, Anthropic streaming gating bypasses — now
+> refused fail-closed, counted by `agentguard_llmproxy_protocol_violation_total`);
+> **H3, M1** fixed (`51e7b76`, duplicate-key and first-wins tool-name
+> differentials); **M3** fixed (control-byte stripping wired into
+> `normalizeRequest`); **L4** closed in v0.9 by truth-up (append-only claim +
+> WORM forwarding guidance — see `CHANGELOG.md` § 0.9.0); **M2** fixed
+> post-v0.9.0 (`pkg/store/sqlite.go` now creates the DB 0600 and tightens
+> pre-existing files/sidecars on every open, with Unix-gated regression
+> tests). **M4** (redactor coverage of `path`/`domain`/`action` fields) is
+> **still open** as of v0.9.0. L1/L2/L3/L5 stand as documented/accepted
+> risks.
+
 **Scope:** wire-level firewall runtime — MCP gateway, LLM API proxy, policy engine,
 central proxy server, audit log, persistence store.
 **Method:** read-only source review of the eight surfaces enumerated in the v0.6
@@ -197,7 +212,7 @@ name the spec-conformant client would act on.
 ## M2 — SQLite store files not mode 0600 (Medium)
 
 **Files:** [pkg/store/sqlite.go:34-63](../../pkg/store/sqlite.go#L34-L63),
-[pkg/audit/sqlite_logger.go:104-135](../../pkg/audit/sqlite_logger.go#L104-L135),
+`pkg/audit/sqlite_logger.go:104-135` (prototype since removed from the tree),
 [cmd/agentguard/main.go:282-296](../../cmd/agentguard/main.go#L282-L296).
 
 `NewSQLiteStore`/`NewSQLiteLogger` call `sql.Open("sqlite", path)`, which creates
@@ -345,7 +360,7 @@ the same 0600 handling.
   `command`, `reason`, `rule`.
 - **P2 — No SQL injection.** Every query in
   [pkg/store/sqlite.go](../../pkg/store/sqlite.go) and
-  [pkg/audit/sqlite_logger.go](../../pkg/audit/sqlite_logger.go) uses `?`
+  `pkg/audit/sqlite_logger.go` (prototype since removed) uses `?`
   placeholders; the only string concatenation builds **static** column-name
   predicates (`"agent_id = ?"`), never user data. `LIMIT`/`OFFSET` are
   parameterized.

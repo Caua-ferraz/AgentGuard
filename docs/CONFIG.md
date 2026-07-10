@@ -1,8 +1,8 @@
 # AgentGuard Policy Configuration Reference
 
-This document enumerates every tunable key in an AgentGuard policy YAML file and documents its default, validation rules, and runtime effect. Rule-level fields (`scope`, `allow`, `deny`, `require_approval`, `pattern`, `paths`, `domain`, `action`, `conditions`, `rate_limit`, `limits`) are covered in the policy tutorial and examples under `configs/`; this file focuses on the **non-rule** keys introduced in v0.4.1.
+This document is the reference for the **non-rule** keys in an AgentGuard policy YAML file — the `proxy:` and `notifications:` server-side tunables — with each key's default, validation rules, and runtime effect. Rule-level fields (`scope`, `allow`, `deny`, `require_approval`, `pattern`, `paths`, `domain`, `action`, `conditions`, `rate_limit`, `limits`, `tool_scope_map`) are covered in [`POLICY_REFERENCE.md`](POLICY_REFERENCE.md) and the examples under `configs/`.
 
-Every key listed here is optional. An operator who upgrades from v0.4.0 without changing their policy file gets the same runtime behavior they had before — each unset key falls back to a compile-time default that matches v0.4.0.
+Every key listed here is optional — each unset key falls back to a compile-time default, so a policy file that only contains rules is always valid. [`TUNING.md`](TUNING.md) covers when to change these; this file covers what they do.
 
 ## Quick reference
 

@@ -19,7 +19,7 @@ The version pins live in [`plugins/python/pyproject.toml`](../plugins/python/pyp
 
 | AgentGuard | LangChain | CrewAI | browser-use | MCP |
 |---|---|---|---|---|
-| 0.5.x | `langchain >=0.3,<2.0`, `langchain-core >=0.3,<2.0` | `crewai >=0.80,<2.0` | `browser-use >=0.4,<1.0`, `playwright >=1.40` | `mcp >=0.9,<2.0` |
+| 0.5.x – 0.9.x | `langchain >=0.3,<2.0`, `langchain-core >=0.3,<2.0` | `crewai >=0.80,<2.0` | `browser-use >=0.4,<1.0`, `playwright >=1.40` | `mcp >=0.9,<2.0` |
 | 0.4.x | `>=0.1` (no upper bound — silent rot) | `>=0.1` | `>=0.1` (`goto` only) | wire protocol `2024-11-05` |
 
 The 0.5 floors cover the API surface AgentGuard's adapters were built and hardened against (LangChain 0.3+'s split `langchain-core` package, CrewAI 0.80+'s Runnable BaseTool, browser-use 0.4+'s stable Page surface). The ceilings cover the latest upstream majors verified against the integration suite.
@@ -45,7 +45,7 @@ The 0.5 line introduces upper bounds because the prior `>=0.1` floor allowed sil
 
 The job runs against the real upstream framework. A transient PyPI / CDN failure during `pip install` or `playwright install` should not block a PR that didn't change any adapter code. The weekly cron run still surfaces those failures asynchronously; the job will be promoted to required once stability data accumulates.
 
-Authors of adapter changes are still expected to drive the integration job to green locally before merging — see `make integration-test`.
+Authors of adapter changes are still expected to drive the integration job to green locally before merging: from `plugins/python`, run `pytest -v -m integration tests/integration/test_real_<framework>.py` (the same invocation CI uses).
 
 All adapters share the same philosophy: **decide via policy first, call the wrapped callable only if `ALLOW`**. On `DENY` or `REQUIRE_APPROVAL` the adapter either returns a marker string (for LangChain/CrewAI, whose tools must return text to the LLM) or raises `PermissionError` (for browser-use, whose async page methods have no other return channel). The MCP adapter returns a JSON-RPC result with `isError: true`.
 

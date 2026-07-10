@@ -127,67 +127,11 @@ export AGENTGUARD_API_KEY=YOUR_SECRET
 ./agentguard serve --policy configs/default.yaml --dashboard
 ```
 
-With an API key configured:
-
-| Endpoint | Who can call it |
-|---|---|
-| `POST /v1/check` | Anyone — the policy answer isn't sensitive. |
-| `POST /v1/approve/{id}`, `POST /v1/deny/{id}` | Bearer token **or** dashboard session + `X-CSRF-Token`. |
-| `GET /v1/status/{id}`, `GET /v1/audit` | Bearer token **or** dashboard session. |
-| `GET /dashboard`, `GET /api/*` | Dashboard session only (serves login page otherwise). |
-| `POST /auth/login`, `POST /auth/logout` | Unauthenticated (login validates the key; logout destroys the session). |
-| `GET /health`, `GET /metrics` | Unauthenticated. |
-
-### Dashboard login flow
-
-1. Visit `http://<server>/dashboard` — if not logged in, you get a login form.
-2. Enter the API key — the server issues an HTTP-only `ag_session` cookie
-   plus a JS-readable `ag_csrf` cookie (same token, double-submit pattern).
-3. Approve/deny buttons now work; the dashboard JS attaches `X-CSRF-Token`
-   automatically. The API key is **never** embedded in the HTML.
-4. `POST /auth/logout` destroys the session.
-
-### From `curl` with Bearer auth
-
-```bash
-export AGENTGUARD_API_KEY=YOUR_SECRET
-
-# Approve an action
-curl -X POST "http://localhost:8080/v1/approve/ap_abc123" \
-  -H "Authorization: Bearer $AGENTGUARD_API_KEY"
-
-# Query the audit log
-curl "http://localhost:8080/v1/audit?agent_id=my-bot&limit=20" \
-  -H "Authorization: Bearer $AGENTGUARD_API_KEY"
-```
-
-### From `curl` with session cookies
-
-```bash
-# 1. Login — capture cookies into a jar.
-curl -c /tmp/cj -X POST "http://localhost:8080/auth/login" \
-  -H "Content-Type: application/json" \
-  -d "{\"api_key\": \"$AGENTGUARD_API_KEY\"}"
-
-# 2. Use cookies on subsequent calls. Writes also need X-CSRF-Token
-#    (same value as the ag_csrf cookie).
-CSRF=$(awk '/ag_csrf/ {print $7}' /tmp/cj)
-curl -b /tmp/cj -X POST "http://localhost:8080/v1/approve/ap_abc123" \
-  -H "X-CSRF-Token: $CSRF"
-```
-
-### CORS for browser clients on other origins
-
-By default (no `--allowed-origin`), AgentGuard accepts CORS requests from
-any `http://localhost:*` or `http://127.0.0.1:*` origin. For production
-deployments where a specific frontend needs to talk to AgentGuard:
-
-```bash
-./agentguard serve --api-key YOUR_SECRET \
-  --allowed-origin https://console.your-company.com
-```
-
-Exact-match only — no wildcards, no subdomains.
+Which endpoints the key gates (and which stay open), the dashboard
+login/CSRF flow, Bearer-vs-session `curl` recipes, and CORS
+(`--allowed-origin`) are documented once in
+[`DEPLOYMENT.md`](DEPLOYMENT.md) with the endpoint table in
+[`API.md`](API.md).
 
 ---
 
@@ -215,111 +159,20 @@ pip install -e ".[dev]"
 ```python
 from agentguard import Guard
 
-# Both `base_url` and `api_key` fall back to environment variables if not
-# passed explicitly:
-#   AGENTGUARD_URL      → base_url (default: http://localhost:8080)
-#   AGENTGUARD_API_KEY  → api_key  (required when the server has --api-key)
+# base_url / api_key fall back to AGENTGUARD_URL / AGENTGUARD_API_KEY.
 guard = Guard("http://localhost:8080", agent_id="my-agent", api_key="YOUR_SECRET")
 
-# --- Plain check ---
 result = guard.check("shell", command="ls -la")
-print(result.decision)  # "ALLOW"
-print(result.allowed)   # True
-
-# --- Approval flow ---
-result = guard.check("shell", command="rm -rf /tmp/data")
-if result.needs_approval:
-    print(f"Visit {result.approval_url} or approve via CLI/SDK")
-
-    # Block until a human resolves it (or timeout → DENY).
-    resolved = guard.wait_for_approval(
-        result.approval_id, timeout=300, poll_interval=2,
-    )
-    if resolved.allowed:
-        run(command)
-
-# --- Programmatic approve / deny (needs api_key) ---
-guard.approve("ap_abc123")   # → True on success
-guard.deny("ap_abc123")      # → True on success
-
-# --- Cost guardrails ---
-r = guard.check(
-    "cost",
-    command="llm-call",
-    session_id="user-123",
-    est_cost=0.42,   # $0.42 for this action
-)
-# Engine atomically reserves the cost against max_per_session when allowed.
-
-# --- Auto-check every invocation with the @guarded decorator ---
-from agentguard import guarded
-
-@guarded("shell", guard=guard)
-def run_command(cmd: str):
-    os.system(cmd)
-
-run_command("ls -la")      # allowed → executes
-run_command("rm -rf /")    # denied → raises PermissionError
-```
-
-### LangChain Integration
-
-```python
-from langchain.agents import create_react_agent
-from agentguard.adapters.langchain import GuardedToolkit
-
-toolkit = GuardedToolkit(
-    tools=my_tools,
-    guard_url="http://localhost:8080",
-    agent_id="research-bot",
-)
-
-agent = create_react_agent(llm, toolkit.tools, prompt)
-# All tool calls now flow through AgentGuard
-```
-
-### CrewAI Integration
-
-```python
-from crewai import Agent, Task, Crew
-from agentguard.adapters.crewai import guard_crew_tools
-
-guarded_tools = guard_crew_tools(
-    tools=my_tools,
-    guard_url="http://localhost:8080",
-    agent_id="crew-agent",
-)
-
-agent = Agent(role="Researcher", tools=guarded_tools)
-```
-
-### browser-use Integration
-
-```python
-from agentguard.adapters.browseruse import GuardedBrowser
-
-browser = GuardedBrowser(guard_url="http://localhost:8080")
-
-# Check before navigating
-result = browser.check_navigation("https://example.com")
 if result.allowed:
-    await page.goto("https://example.com")
+    run_it()
 ```
 
-### MCP Integration
-
-Add to your MCP client config (e.g., Claude Desktop):
-
-```json
-{
-  "mcpServers": {
-    "agentguard": {
-      "command": "python",
-      "args": ["-m", "agentguard.adapters.mcp", "--guard-url", "http://localhost:8080"]
-    }
-  }
-}
-```
+That's the whole core loop. The rest of the SDK surface — the approval
+flow (`wait_for_approval`), programmatic approve/deny, cost guardrails,
+the `@guarded` decorator, failure modes, and testing recipes — is
+documented once in [`SDK_PYTHON.md`](SDK_PYTHON.md). The framework
+adapters (LangChain, CrewAI, browser-use, MCP) with their scope-inference
+rules and per-framework gotchas live in [`ADAPTERS.md`](ADAPTERS.md).
 
 ---
 
@@ -336,43 +189,23 @@ npm run build
 ### Usage
 
 ```typescript
-import { AgentGuard, guarded } from '@agentguard/sdk';
+import { AgentGuard } from '@agentguard/sdk';
 
 const guard = new AgentGuard({
   baseUrl: 'http://localhost:8080',
   agentId: 'my-bot',
   apiKey: process.env.AGENTGUARD_API_KEY,
-  // failMode: 'deny' (default) — if the server is unreachable, check()
-  // returns DENY. Set to 'allow' only if you know what you're doing.
+  // failMode: 'deny' (default) — server unreachable ⇒ check() returns DENY.
 });
 
-// Plain check
 const result = await guard.check('shell', { command: 'ls -la' });
 if (result.allowed) { /* proceed */ }
-
-// Approval flow
-const r = await guard.check('shell', { command: 'sudo restart' });
-if (r.needsApproval) {
-  const resolved = await guard.waitForApproval(r.approvalId!, 300_000, 2_000);
-  if (resolved.allowed) { /* proceed */ }
-}
-
-// Programmatic approve / deny (needs apiKey)
-await guard.approve('ap_abc123');
-await guard.deny('ap_abc123');
-
-// Cost guardrails
-await guard.check('cost', {
-  command: 'llm-call',
-  sessionId: 'user-123',
-  estCost: 0.42,
-});
-
-// Higher-order wrapper — every invocation goes through AgentGuard
-const safeExec = guarded(guard, 'shell', (cmd: string) => execAsync(cmd));
-await safeExec('ls -la');    // allowed → resolves
-await safeExec('rm -rf /');  // denied  → throws
 ```
+
+The TypeScript surface mirrors the Python one — `waitForApproval`,
+`approve`/`deny`, cost checks, and the `guarded` higher-order wrapper.
+See the package README in
+[`plugins/typescript/`](../plugins/typescript/) for the full API.
 
 ---
 
@@ -402,20 +235,10 @@ agentguard audit --agent my-bot --decision DENY --limit 20 --api-key YOUR_SECRET
 agentguard version
 ```
 
-### `serve` flags reference
-
-| Flag | Default | Purpose |
-|---|---|---|
-| `--policy` | `configs/default.yaml` | Policy YAML file. |
-| `--port` | `8080` | Listen port. |
-| `--dashboard` | off | Enable `/dashboard` + `/api/*`. |
-| `--watch` | off | Hot-reload the policy on mtime change. |
-| `--audit-log` | `audit.jsonl` | JSON-lines audit log path. In Docker, defaults to `/var/lib/agentguard/audit.jsonl`. |
-| `--api-key` | unset (`AGENTGUARD_API_KEY` env) | Bearer token gating approve/deny/audit/status/dashboard. |
-| `--base-url` | `http://localhost:<port>` | External URL used to build `approval_url` values (e.g. when behind a reverse proxy). |
-| `--allowed-origin` | unset | Exact CORS origin to allow. Empty = permissive-localhost. |
-
-Full flag list (audit rotation, buffered async logger, pprof, session-cost TTL): `agentguard serve -h`. Reference page: [`CLI.md`](CLI.md).
+The full `serve` flag table (persistence, audit rotation, buffered async
+logger, session-cost TTL, base-url/CORS) lives in
+[`CLI.md`](CLI.md#agentguard-serve); `agentguard serve -h` prints the same
+list.
 
 ### Wire-level enforcement points
 
@@ -428,33 +251,19 @@ Two additional binaries enforce at the wire. Both need `--guard-url` pointing at
 
 ## Using Docker
 
-### Build
-
 ```bash
 docker build -t agentguard:latest .
-```
 
-### Run
-
-```bash
-# With default policy (baked into the image). Mount a named volume for the
-# audit log so it survives container restarts.
+# Default policy is baked in; mount a named volume so the audit log
+# survives container restarts.
 docker run -d -p 8080:8080 --name agentguard \
   -v agentguard-audit:/var/lib/agentguard \
   agentguard:latest
-
-# With a custom policy — mount your YAML over the baked-in default file.
-# Do NOT mount the whole /etc/agentguard directory; that hides the default.
-docker run -d -p 8080:8080 --name agentguard \
-  -v $(pwd)/configs/my-policy.yaml:/etc/agentguard/default.yaml:ro \
-  -v agentguard-audit:/var/lib/agentguard \
-  agentguard:latest
-
-# The container runs as the non-root user agentguard (uid 10001). If you
-# bind-mount a host directory for the audit log, make sure it's writable
-# by uid 10001:
-#   sudo chown -R 10001:10001 /path/on/host
 ```
+
+Custom-policy mounts, the non-root uid-10001 volume-permission gotcha,
+Compose, and Kubernetes manifests are in
+[`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ---
 
@@ -478,62 +287,14 @@ Start with `--watch` to reload policies on file change without restarting:
 agentguard serve --policy configs/default.yaml --watch
 ```
 
-### Per-Agent Overrides
+### Everything else in the policy file
 
-Define agent-specific rules in your policy file:
-
-```yaml
-agents:
-  research-bot:
-    extends: "default"
-    override:
-      - scope: network
-        allow:
-          - domain: "scholar.google.com"
-          - domain: "*.arxiv.org"
-```
-
-### Notifications
-
-Configure webhook/Slack notifications in your policy:
-
-```yaml
-notifications:
-  approval_required:
-    - type: slack
-      url: "https://example.invalid/REPLACE_ME_BEFORE_DEPLOY"
-    - type: console
-  on_deny:
-    - type: webhook
-      url: "https://your-server.com/alerts"
-    - type: log
-      level: warn
-```
-
-### Rate Limiting
-
-Rate limits are enforced per-scope per-agent:
-
-```yaml
-rules:
-  - scope: network
-    rate_limit:
-      max_requests: 60
-      window: "1m"
-```
-
-### Cost Guardrails
-
-The cost scope evaluates `est_cost` from the request:
-
-```yaml
-rules:
-  - scope: cost
-    limits:
-      max_per_action: "$0.50"
-      max_per_session: "$10.00"
-      alert_threshold: "$5.00"
-```
+Per-agent overrides (`agents:`), notifications (Slack / webhook /
+console), per-scope rate limits, cost guardrails, conditional rules, and
+the `tool_scope_map` are all part of the policy YAML — the schema with
+examples for each lives in
+[`POLICY_REFERENCE.md`](POLICY_REFERENCE.md); server-side tunables
+(session TTL, body caps, audit query limits) in [`CONFIG.md`](CONFIG.md).
 
 ---
 
@@ -610,7 +371,7 @@ agentguard/
 │   └── examples/
 ├── examples/                        # MCP-client + SDK config snippets ready to copy
 ├── docs/                            # Documentation
-├── Dockerfile                       # Multi-binary image
+├── Dockerfile                       # Image shipping the `agentguard` server binary
 ├── Makefile                         # build / test / test-all / docker / …
 └── README.md
 ```

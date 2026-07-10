@@ -61,14 +61,21 @@ Size-triggered rotation via the logger. Each rotated file carries the same schem
 
 Default path: `<audit-log-path>.v040-backup`. Created by the v0.4.0 → v0.4.1 migration with mode `0600`. A byte-for-byte copy of the pre-migration headerless audit file, kept so an operator can downgrade to v0.4.0 by restoring this file over the migrated one.
 
-Lifecycle: written on migration, left untouched during v0.4.1 and v0.4.2 operation, deleted alongside the migration code in v0.4.3. Tracked in `docs/DEPRECATIONS.md` as `audit.backup.v040`. Operators who want to keep the backup for longer should copy it off the server before upgrading past v0.4.2.
+Lifecycle: written on migration and left untouched afterwards. The removal originally scheduled for v0.4.3 never shipped — the migration (and this backup convention) is still in the binary as of v0.9. Tracked in `docs/DEPRECATIONS.md` as `audit.backup.v040`. Operators who want to keep the backup long-term should still copy it off the server.
+
+### `agentguard.db` (+ `-wal` / `-shm` sidecars) — durable runtime store (v0.6+)
+
+Default path: `<data-dir>/agentguard.db` (CLI `--data-dir`, default `.`; or an explicit `--store-dsn`). SQLite in WAL mode, created automatically on first run unless `--persist=false`. Mode `0600` — the file and its sidecars are created owner-only, and files created looser by pre-fix versions are tightened on every open (audit 2026-06, M2).
+
+Tables (`pkg/store/sqlite.go`): `approvals`, `rate_buckets`, `session_costs`, `policies` — all tenant-keyed — plus `audit_entries` when running `--audit-backend=store`. A background syncer flushes in-memory state on a ≥1 s tick and rehydrates it on boot; the store is never on the `/v1/check` hot path.
+
+Schema management differs from the JSONL artifacts above: there is no `_meta`/`schema_version` record — `SQLiteStore.Migrate` applies idempotent `CREATE TABLE IF NOT EXISTS` DDL at open. Back up the file with the process stopped or via `sqlite3 .backup`; copying `agentguard.db` alone mid-write (without its `-wal` sidecar) can produce a torn snapshot.
 
 ## Items intentionally NOT on disk
 
-- **Session tokens.** Stored in memory only (`pkg/proxy/auth.go`). Server restart invalidates all sessions.
-- **Approval queue.** In-memory; a restart loses pending approvals. This is documented and intentional.
-- **Rate-limit buckets.** In-memory, per-process. Not shared across instances. No on-disk format to version.
-- **Session cost accounting.** In-memory map in the engine. Volatile by design.
+- **Session tokens.** Stored in memory only (`pkg/proxy/auth.go`). Server restart invalidates all dashboard sessions.
+
+The approval queue, rate-limit buckets, and session-cost accounting were on this list before v0.6; they now live in `agentguard.db` (above) whenever `--persist` is on (the default). With `--persist=false` they revert to in-memory, per-process, lost on restart.
 
 ## Non-version identifiers that look like version strings
 

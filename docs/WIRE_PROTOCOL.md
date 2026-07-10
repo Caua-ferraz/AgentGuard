@@ -67,7 +67,7 @@ Fields are JSON-encoded; only `scope` is required.
 | Field            | Type              | Required | Description |
 |------------------|-------------------|----------|-------------|
 | `schema_version` | string (`"v1"`)   | optional | Wire-format version. Empty → defaulted to `"v1"`; any other value → 400. |
-| `scope`          | string            | **required** | Policy rule scope. Built-ins: `filesystem`, `shell`, `network`, `browser`, `cost`, `data`. Custom scopes are valid if defined in policy. |
+| `scope`          | string            | **required** | Policy rule scope. Built-ins: `filesystem`, `shell`, `network`, `browser`, `cost`, `data`, `mcp_tool` (v0.5+, used by the MCP gateway's dual-check). Custom scopes are valid if defined in policy. |
 | `action`         | string            | optional | Action verb for action-style scopes (e.g. `read`, `write`, `delete` on `filesystem`). |
 | `command`        | string            | optional | Shell command string for the `shell` scope. Matched against rule `pattern`. |
 | `path`           | string            | optional | Filesystem path. The server URL-decodes `%HH` once, then rejects any `..` segment after `filepath.Clean`. |

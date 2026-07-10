@@ -55,7 +55,7 @@ The dashboard is a single HTML page (`dashboardHTML` in `pkg/proxy/server.go`) t
 
 1. Fetches `/api/stats` once on page load.
 2. Fetches `/api/pending` once on page load.
-3. Fetches `/v1/audit?limit=200` once on page load (server clamps to `auditMaxLimit`, typically 200).
+3. Fetches `/v1/audit?limit=200` once on page load (server clamps to `auditMaxLimit`, default 1000, so 200 passes through unclamped).
 4. Subscribes to `/api/stream` for live deltas.
 
 Sections you'll see:
@@ -85,7 +85,7 @@ If the fetch returns `401`/`403`, `agFetch` (the dashboard's helper) redirects t
 
 Shows timestamp, decision, scope, agent, and the action's key identifier (command / path / domain). Click an entry to expand JSON details (if built into your dashboard build) or `curl` the audit API for the full record.
 
-Dashboard always requests `limit=200`; the server clamps at `auditMaxLimit` (default 200, configurable via `proxy.audit.max_limit`). The dashboard does not paginate — for deep historical queries use the CLI or `curl /v1/audit?offset=...`.
+Dashboard always requests `limit=200`; the server clamps at `auditMaxLimit` (default 1000, configurable via `proxy.audit.max_limit`). The dashboard does not paginate — for deep historical queries use the CLI or `curl /v1/audit?offset=...`.
 
 ---
 

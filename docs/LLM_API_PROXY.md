@@ -88,6 +88,7 @@ agentguard-llm-proxy \
 | `--fail-mode`            | `deny` / `allow` / `fail-closed-with-audit`               | `deny`                       |
 | `--fail-audit-log`       | local JSONL fallback audit for `fail-closed-with-audit` denials (empty disables) | `agentguard-fail-audit.jsonl` |
 | `--max-buffer-bytes`     | per-stream tool-call buffer cap (see § 6)                 | `1048576` (1 MiB)            |
+| `--max-concurrent-streams` | cap on simultaneously open streaming responses; excess requests are rejected (`agentguard_llmproxy_streams_rejected_total`) | `100` |
 | `--policy`               | path to AgentGuard policy YAML; loaded only for `tool_scope_map` operator overrides. Without it, the proxy falls back to `DefaultLLMToolScopeMap` and logs a WARN at startup. | unset |
 | `--log-level`            | stderr verbosity                                          | `info`                       |
 
@@ -188,12 +189,16 @@ var defaultLLMToolScopeMap = []toolScopePattern{
 
 ### 4.2 Policy-YAML override
 
+`tool_scope_map` is a **top-level list** in the policy YAML (same level as `rules:`) — there is no separate `llm:` section; the LLM proxy and the MCP gateway share the one key (see [`POLICY_REFERENCE.md`](POLICY_REFERENCE.md#tool_scope_map)):
+
 ```yaml
-llm:
-  tool_scope_map:
-    custom_db_query:    network
-    deploy_lambda:      shell
-    "*_secret":         data
+tool_scope_map:
+  - pattern: custom_db_query
+    scope: network
+  - pattern: deploy_lambda
+    scope: shell
+  - pattern: "*_secret"
+    scope: data
 ```
 
 Merge: policy entries **before** built-ins, first match wins. Same
@@ -717,27 +722,16 @@ constructor isn't overriding `base_url` from elsewhere.
 
 ### 11.3 Common gotchas
 
-**Both binaries must be running.** The proxy alone does not gate
-anything — every tool call triggers a callback to the central
-server's `/v1/check`. If the central server is down, the proxy's
-`--fail-mode` controls behaviour: `deny` (default), `allow`, or
-`fail-closed-with-audit`. `fail-closed-with-audit` denies with the
-distinct Rule `deny:llm_api_proxy:fail_closed_audit` and appends the
-denial to the local `--fail-audit-log` JSONL file (default
-`agentguard-fail-audit.jsonl`) so the outage window is auditable
-without the central server. See
-[`docs/PROXY_ARCHITECTURE.md`](./PROXY_ARCHITECTURE.md) § 6.1 for the
-full table.
+**Both binaries must be running.** The proxy alone gates nothing —
+every tool call calls back to the central server's `/v1/check`, and
+`--fail-mode` decides what happens when that server is down (full
+table: [`PROXY_ARCHITECTURE.md`](./PROXY_ARCHITECTURE.md) § 6.1).
 
-**Two API keys, two purposes.** `OPENAI_API_KEY` /
-`ANTHROPIC_API_KEY` flows through the proxy verbatim to the upstream;
-the proxy never reads it. `AGENTGUARD_API_KEY` is the central
-server's bearer for `/v1/check` — the proxy uses it only on the
-side-channel call. The optional `--proxy-api-key` is a third,
-independent thing: a bearer the proxy itself enforces on inbound
-requests via the `X-AgentGuard-Proxy-Auth` header (separate from
-`Authorization` so the upstream's bearer can pass through
-unmodified). Don't confuse the three.
+**Three API keys, three purposes.** Provider key (forwarded verbatim,
+never read), `AGENTGUARD_API_KEY` (the `/v1/check` side-channel
+bearer), and the optional inbound `--proxy-api-key`
+(`X-AgentGuard-Proxy-Auth`) — the header split is spelled out in § 3.1
+and § 8.1.
 
 **Anthropic's path convention.** `ANTHROPIC_BASE_URL` should be
 `http://127.0.0.1:8081` — no `/v1` suffix. The Anthropic SDK appends
@@ -762,19 +756,10 @@ operator clicks approve, user re-prompts, model emits the tool call
 again, AgentGuard sees the approved id and short-circuits to
 `ALLOW`.
 
-**Streaming vs non-streaming.** The proxy's pause/resume/rewrite
-mechanism (§ 5) runs on the streaming path (`stream=True` for
-OpenAI; `messages.stream(...)` for Anthropic). Non-streaming
-requests are buffered in full (capped by `--max-buffer-bytes`), and
-tool calls are gated before the response body is forwarded. Both
-work; streaming is the recommended path for interactive UIs (lower
-TTFT) and the default for most modern agent frameworks.
-
-**Concurrency safety.** Each request gets its own `streamGater`
-struct with isolated parser state. Concurrent SDK calls from a
-single process are safe — there is no shared mutable state across
-streams (§ 6). The upstream HTTP client is shared (per-host
-connection pool), but per-request response readers are independent.
+**Streaming vs non-streaming both work.** Streaming goes through the
+pause/resume/rewrite gater (§ 5); non-streaming responses are buffered
+in full (capped by `--max-buffer-bytes`) and gated before forwarding.
+Concurrent calls are safe — per-request parser state is isolated (§ 6).
 
 **Custom tool names need a `tool_scope_map:` entry.** AgentGuard
 ships a default mapping for ~17 common tool names (see

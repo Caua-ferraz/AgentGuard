@@ -38,7 +38,7 @@ Start the AgentGuard server. This is the only subcommand that runs a long-lived 
 | `--policy <path>` | `configs/default.yaml` | Path to policy YAML. Rejected at startup if missing or invalid. |
 | `--port <int>` | `8080` | TCP port. See bind behavior below. |
 | `--dashboard` | off | Serve `/dashboard` HTML + `/api/stream` SSE. Required for human approval UI. |
-| `--watch` | off | Poll the policy file every 2 s; hot-reload on mtime change. No restart needed. |
+| `--watch` | off | Log policy hot-reload activity. Hot-reload itself is always on (fsnotify events, with a 2 s mtime poll as fallback); no restart needed after policy edits. |
 | `--audit-log <path>` | `audit.jsonl` | Append-only JSON Lines file. Mode `0600`. Rotation is on by default; configurable via `--audit-max-size-mb`, `--audit-max-backups`, `--audit-max-age-days`, `--audit-compress`. Operators following older guidance should NOT also configure logrotate against `audit.jsonl` — the dual-rotator chain corrupts the rotation index. See [`OPERATIONS.md`](OPERATIONS.md#audit-log-rotation). |
 | `--api-key <key>` | *(empty)* | Bearer token for gated endpoints. **If empty, the server binds to `127.0.0.1` only** (localhost-only). |
 | `--base-url <url>` | `http://localhost:<port>` | External URL used when constructing `approval_url` in check responses. Set this behind a reverse proxy. |
@@ -292,7 +292,7 @@ Query `/v1/audit` for recent decisions. All filters are optional and AND-combine
 | `--decision <D>` | *(none)* | `ALLOW`, `DENY`, or `REQUIRE_APPROVAL`. |
 | `--scope <name>` | *(none)* | `shell`, `filesystem`, `network`, `browser`, `cost`, `data`, `mcp_tool`. |
 | `--transport <name>` | *(none)* | Filter by audit `transport` tag. One of `sdk`, `mcp_gateway`, `llm_api_proxy`. Pre-v0.5 entries are excluded when set. |
-| `--limit <int>` | `100` | Max entries. Server clamps silently above configured ceiling (default 1000). |
+| `--limit <int>` | `50` | Max entries. Server clamps silently above configured ceiling (default 1000). |
 | `--api-key <key>` | `$AGENTGUARD_API_KEY` | Bearer token. |
 
 ```bash
@@ -370,7 +370,7 @@ Startup migrations run automatically inside `agentguard serve` before the audit 
 
 ```bash
 agentguard version
-# agentguard 0.5.1 (abc1234)
+# agentguard 0.9.0 (abc1234)
 ```
 
 The `version` string is baked in at build time via `-ldflags "-X main.version=... -X main.commit=..."` (see `Makefile`).
@@ -380,7 +380,7 @@ The `version` string is baked in at build time via `-ldflags "-X main.version=..
 Every subcommand kicks off an async best-effort check against the GitHub Releases API at startup (800 ms budget). If a newer release exists, one line lands on stderr before subcommand output; otherwise silent.
 
 ```
-Notice: agentguard v0.5.1 is deprecated, version v0.5.2 available — https://github.com/Caua-ferraz/AgentGuard/releases/latest
+Notice: agentguard v0.9.0 is deprecated, version v0.9.1 available — https://github.com/Caua-ferraz/AgentGuard/releases/latest
 ```
 
 Skipped when the binary was built with `commit=dev`, when `AGENTGUARD_NO_UPDATE_CHECK` is set, or when the HTTP request fails. Never touches stdout, never affects exit codes.

@@ -60,14 +60,15 @@ the central server packages.
 ### 2.1 Policy via `pkg/policy.PolicyProvider`
 
 Both proxies hold a `*policy.Engine` constructed from a
-`policy.PolicyProvider`. AgentGuard wires `FilePolicyProvider`; future
-multi-tenant providers drop in via the same interface (`Get` / `Watch` /
-`Validate` / `Close`, see `pkg/policy/provider.go`).
+`policy.PolicyProvider`. AgentGuard wires `FilePolicyProvider`; since
+v0.6 the store-backed multi-tenant provider drops in via the same
+interface (`Get` / `Watch` / `Validate` / `Close`, see
+`pkg/policy/provider.go`).
 
 Each tool/API call resolves to **one** `Engine.Check(req, tenantID)` call.
-The `tenantID` is `"local"` in single-tenant deployments; the proxies
-plumb it via the existing `pkg/proxy/tenant.go` `WithTenantID` /
-`TenantIDFromContext` contract.
+The `tenantID` defaults to `"local"` (the proxies' `--tenant-id` flag);
+the proxies plumb it via the existing `pkg/proxy/tenant.go`
+`WithTenantID` / `TenantIDFromContext` contract.
 
 ### 2.2 Audit via `pkg/audit.BufferedAsyncLogger`
 
@@ -230,25 +231,13 @@ packages.
 
 ### 4.2 Why not subcommands of `agentguard`?
 
-| factor                | subcommands     | two binaries (chosen)        |
-|-----------------------|-----------------|------------------------------|
-| Lifecycle             | one process     | three independent processes  |
-| Deployment            | one container   | three containers / sidecars  |
-| Failure isolation     | crash blast = all 3 | crash blast = 1          |
-| Binary size           | one fat binary  | three slim binaries          |
-| Versioning            | trivially synced| `bump-version.sh` updates all|
-| MCP gateway lifecycle | conflict — Claude Desktop spawns it as `command:` and keeps stdin open; `agentguard serve` is a long-running HTTP daemon. Same process can't be both. | clean separation |
-
-The MCP gateway in particular **must** be a separate binary because MCP
-clients spawn it via `claude_desktop_config.json`'s `command` field with
-stdin/stdout reserved for JSON-RPC. Mixing that with an HTTP server in
-the same process is a recipe for stdout corruption.
-
-The LLM API proxy *could* live as `agentguard llm-proxy`, but: (a) it
-does not need the policy/audit/notify/dashboard code in its memory image
-when it runs as a sidecar, and (b) deployments that scale the proxy
-horizontally don't want to redeploy the central server every time they
-ship a proxy fix.
+Settled decision: three separate binaries. The MCP gateway **must** be
+one — MCP clients spawn it via `claude_desktop_config.json`'s `command`
+field with stdin/stdout reserved for JSON-RPC, which cannot coexist with
+a long-running HTTP daemon in the same process. The LLM proxy is
+separate for failure isolation and so sidecar deployments can ship proxy
+fixes without redeploying the central server. Versions stay synced via
+`bump-version.sh` (§ 4.3).
 
 ### 4.3 Versioning
 
@@ -304,17 +293,20 @@ on the same host or on agent-facing hosts pointing at the central
 server's `/v1/check` over the network. Set `--api-key` on the central
 server and pass it to every gateway/proxy via `--api-key`.
 
-### 5.3 Distributed (multi-tenant, planned)
+### 5.3 Multi-tenant (shipped in v0.6, single-node)
 
-Multi-tenant deployment is not yet supported, but the architecture does
-not preclude it:
+Multi-tenancy is supported on a single central server since v0.6:
 
-- a multi-tenant `PolicyProvider` plugs into `Engine.Check` unchanged,
-- tenant URL routing already exists in `pkg/proxy/tenant.go`,
-- the proxies plumb tenant ID via the same context-key.
+- per-tenant policies live in the durable store, managed via
+  `agentguard tenant put/list/rm` (see [`CLI.md`](CLI.md#agentguard-tenant-v06)),
+- tenant URL routing (`/v1/t/{tenant}/…`) is live in `pkg/proxy/tenant.go`,
+- the approval queue, rate limiter, cost accounting, and audit query are
+  all sharded by tenant ID,
+- the proxies stamp their tenant via `--tenant-id` (default `local`).
 
-The remaining work — sharding `ApprovalQueue`, SSE bus, audit query,
-and rate limiter by tenant ID — is tracked alongside `pkg/proxy/tenant.go`.
+What remains out of scope is *distributed* multi-tenancy — multiple
+replicas sharing tenant state. The store is single-node
+(see [`COMPATIBILITY.md`](COMPATIBILITY.md)); run one replica.
 
 ---
 
@@ -426,12 +418,14 @@ Per-request gating metrics are emitted on the **central server's**
 | `agentguard_checks_total`                                    | central server                    |
 | `agentguard_request_duration_ms`                             | central server                    |
 | `agentguard_llmproxy_buffer_overflow_total`                  | LLM API Proxy (process-local)     |
-| `agentguard_llmproxy_active_streams`                         | LLM API Proxy (process-local)     |
+| `agentguard_llmproxy_streams_active`                         | LLM API Proxy (process-local)     |
 
-Process-local LLM-proxy counters are written to the proxy's stderr log
-on a periodic tick rather than scraped over HTTP. Operators who need
-Prometheus-shape scrapes for the proxy itself should run the proxy
-behind a sidecar exporter that parses the stderr stream.
+Process-local LLM-proxy series (`agentguard_llmproxy_*`) are recorded in
+the proxy's in-process registry but are **not exported anywhere yet** —
+no `/metrics` endpoint, no periodic log dump. Until an export path
+ships, treat them as internal counters; observable proxy behaviour
+(denials, overflows surfacing as denials) lands in the central server's
+audit stream and metrics.
 
 The MCP gateway has no scrape surface; its decisions surface in the
 central server's audit stream via `Entry.Transport == "mcp_gateway"`.
@@ -464,24 +458,7 @@ the proxy-specific docs cover the full detail.
 
 ## 10. References (external)
 
-- **MCP spec, v2025-11-25** — current revision as of 2026-05-06.
-  - Specification overview: <https://modelcontextprotocol.io/specification/>
-  - Base protocol: <https://modelcontextprotocol.io/specification/2025-11-25/basic>
-  - Lifecycle: <https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle>
-  - Transports: <https://modelcontextprotocol.io/specification/2025-11-25/basic/transports>
-  - Tools: <https://modelcontextprotocol.io/specification/2025-11-25/server/tools>
-  - Older revision still in the field: `2024-11-05` (the original v1, what the Python SDK adapter pins to). Streamable HTTP (`2025-03-26`+) supersedes the deprecated HTTP+SSE transport.
-
-- **Anthropic Messages API** — verified 2026-05-06.
-  - Reference: <https://platform.claude.com/docs/en/api/messages>
-
-- **OpenAI Chat Completions API** — verified 2026-05-06.
-  - Reference: <https://platform.openai.com/docs/api-reference/chat/create>
-  - Streaming reference: <https://platform.openai.com/docs/api-reference/chat/streaming>. The streaming wire shape captured in `LLM_API_PROXY.md` § 5.1 is cross-checked against the OpenAI Python SDK source tree.
-
-- **Prior art (architectural reference, not feature copying)**:
-  - `mcp-proxy` (sparfenyuk): <https://github.com/sparfenyuk/mcp-proxy> — stdio↔HTTP bridge.
-  - MCP Inspector: <https://github.com/modelcontextprotocol/inspector> — debugging tool.
-  - LiteLLM: <https://github.com/BerriAI/litellm> — LLM-proxy structural reference. AgentGuard does not import router, fallback, or cost-analytics features from LiteLLM.
-  - mitmproxy: <https://github.com/mitmproxy/mitmproxy> — Python interception proxy.
-  - go-mitmproxy: <https://github.com/lqqyt2423/go-mitmproxy> — Go equivalent. Confirms streaming-response interception is a tractable Go problem (verified 2026-05-06).
+- **MCP spec** — <https://modelcontextprotocol.io/specification/> (gateway targets `2025-11-25`; the Python SDK adapter pins the older `2024-11-05`).
+- **Anthropic Messages API** — <https://platform.claude.com/docs/en/api/messages>.
+- **OpenAI Chat Completions API** — <https://platform.openai.com/docs/api-reference/chat/create> (streaming wire shape cross-checked in `LLM_API_PROXY.md` § 5.1).
+- **Prior art consulted** (architectural reference only): sparfenyuk/mcp-proxy, MCP Inspector, LiteLLM, mitmproxy, go-mitmproxy.

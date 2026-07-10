@@ -34,8 +34,9 @@ curl -s http://127.0.0.1:8080/metrics
 | `agentguard_audit_rotations_total` | — | Live audit file rotations triggered by size threshold. |
 | `agentguard_audit_buffered_dropped_to_overflow_total` | — | Audit entries spilled to the buffered logger's overflow file (durable, not lost). |
 | `agentguard_audit_buffered_drained_from_overflow_total` | — | Spilled audit entries re-enqueued by the recovery loop. |
-| `agentguard_audit_buffered_queue_depth` | — | Entries waiting in the buffered audit queue (gauge). |
 | `agentguard_audit_corrupt_lines_total` | — | Audit lines that failed JSON parse during `Query()` and were skipped. |
+| `agentguard_notify_spooled_to_disk_total` | — | Notification events spilled to the `--notify-spool` file on queue overflow (retried, not dropped). |
+| `agentguard_notify_despooled_total` | — | Spooled notification events re-enqueued for dispatch. |
 | `agentguard_deprecations_used_total` | `feature` | Times a deprecated feature was exercised. Keys match `docs/DEPRECATIONS.md`. |
 
 ### Gauges
@@ -46,8 +47,7 @@ curl -s http://127.0.0.1:8080/metrics
 | `agentguard_ratelimit_buckets` | — | Currently tracked rate-limit token buckets. |
 | `agentguard_sse_subscribers` | — | Live `/api/stream` subscribers. |
 | `agentguard_notify_queue_depth` | — | Length of the shared notify dispatch queue (sampled at last enqueue). |
-| `agentguard_notify_spooled_to_disk_total` | — | Notification events spilled to the `--notify-spool` file on queue overflow (retried, not dropped). |
-| `agentguard_notify_despooled_total` | — | Spooled notification events re-enqueued for dispatch. |
+| `agentguard_audit_buffered_queue_depth` | — | Entries waiting in the buffered audit queue. |
 | `agentguard_audit_replay_duration_seconds` | — | Wall-clock duration of the most recent startup audit replay. |
 | `agentguard_audit_migration_status` | `from`, `to`, `status` | 1 = current outcome of an audit-schema migration; 0 for non-current statuses of the same `(from, to)`. Status ∈ {`ran`,`skipped`,`failed`}. |
 
@@ -78,29 +78,21 @@ Bucket boundaries are treated as a stable contract. Re-bucketing invalidates his
 
 ## MCP Gateway / LLM API Proxy metrics (v0.5+)
 
-Each enforcement-point binary exposes its own `/metrics` on its listen port. The series below are emitted only by those binaries.
+**Neither proxy binary exposes `/metrics`.** The LLM API Proxy serves only its API routes plus `GET /healthz`; the MCP Gateway is a stdio bridge with no HTTP surface at all. Per-request gating metrics for both flow through the **central server's** `/metrics`, distinguished in the audit stream by `Entry.Transport` (`llm_api_proxy` / `mcp_gateway`). See [`PROXY_ARCHITECTURE.md`](PROXY_ARCHITECTURE.md) §8.
 
-**LLM API Proxy:**
+The LLM proxy additionally records these series in its process-local registry (`pkg/metrics`). They are **not exported anywhere yet** — no scrape endpoint, no log dump — so today they matter only to code embedding the proxy in-process (they are listed here so the names stay reserved):
 
-| Name | Labels | Meaning |
-|---|---|---|
-| `agentguard_llmproxy_streams_active` | `provider` | Gauge: open streaming responses. |
-| `agentguard_llmproxy_streams_rejected_total` | `provider`, `reason` | Concurrent-stream cap hit, etc. |
-| `agentguard_llmproxy_buffer_overflow_total` | `provider` | Per-stream tool-call buffer hit its ceiling. |
-| `agentguard_llmproxy_non_streaming_overflow_total` | `provider` | Same, for non-streaming responses. |
-| `agentguard_llmproxy_stream_duration_seconds` | `provider` | Histogram; use p99 to size graceful-shutdown windows. |
-| `agentguard_llmproxy_tool_calls_total` | `provider`, `decision` | Tool calls parsed from provider responses. |
+| Name | Type | Labels | Meaning |
+|---|---|---|---|
+| `agentguard_llmproxy_streams_active` | gauge | — | Open streaming responses (bounded by `--max-concurrent-streams`). |
+| `agentguard_llmproxy_streams_rejected_total` | counter | — | Streaming requests refused with 503 at the concurrent-stream cap. |
+| `agentguard_llmproxy_buffer_overflow_total` | counter | `provider` | Streaming tool-call buffer exceeded `--max-buffer-bytes`; converted to a synthetic refusal. |
+| `agentguard_llmproxy_non_streaming_overflow_total` | counter | `provider` | Same, for non-streaming responses. |
+| `agentguard_llmproxy_protocol_violation_total` | counter | `provider` | Streams refused fail-closed because the upstream's content-block ordering was unsafe to gate. |
 
-**MCP Gateway:**
+The MCP gateway emits no metrics of its own; its decisions surface in the central server's audit stream and counters.
 
-| Name | Labels | Meaning |
-|---|---|---|
-| `agentguard_mcpgw_upstream_reconnects_total` | `upstream` | Subprocess re-dials. |
-| `agentguard_mcpgw_upstream_calls_total` | `upstream`, `decision` | `tools/call` requests handled. |
-| `agentguard_mcpgw_approval_meta_roundtrips_total` | `outcome` | Approval round-trips via MCP `_meta`. |
-| `agentguard_mcpgw_call_duration_seconds` | `upstream` | Per-call end-to-end latency. |
-
-**Approval-id replay defense (server + LLM proxy):** `agentguard_approval_replay_mismatch_total` — non-zero is a security alert.
+**Approval-id replay defense (central server):** `agentguard_approval_replay_mismatch_total` — non-zero is a security alert.
 
 ---
 

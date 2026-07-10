@@ -55,7 +55,7 @@ Technically yes, practically be careful. Rate-limit buckets and session-cost acc
 
 ### My approval queue is empty after a restart. Where did the approvals go?
 
-The approval queue is **in-memory**. Restart loses every pending entry — by design. Agents polling across a restart will eventually hit their SDK timeout and receive a fail-deny response. Set SDK `wait_for_approval` timeouts shorter than the restart-to-timeout window if this matters.
+Since v0.6 it shouldn't be — the queue is **persistent by default**. `--persist` (default `true`) snapshots approvals, rate-limit buckets, and session-cost accumulators to the SQLite store (`agentguard.db`) and rehydrates them on boot. If your queue is empty after a restart, check that you aren't running `--persist=false` (the pre-v0.6 in-memory mode) and that the process can write its `--data-dir`. Note the store syncs on a ≥1 s tick, so approvals created in the final second before a crash can still be lost — agents polling across that window hit their SDK timeout and receive a fail-deny response. See [`CLI.md`](CLI.md#persistence--multi-tenancy-v06).
 
 ### Does the audit log rotate?
 
@@ -70,7 +70,7 @@ Standard glob semantics — `*.foo.com` requires at least one character + `.` be
 - domain: "*.foo.com"
 ```
 
-See [`POLICY_REFERENCE.md`](POLICY_REFERENCE.md#wildcards) for the full pattern table.
+See [`POLICY_REFERENCE.md`](POLICY_REFERENCE.md#pattern-matching-semantics-read-this) for the full pattern table.
 
 ### Can I use `time_window` without `require_prior`?
 
@@ -91,11 +91,11 @@ Yes — since v0.6 it ships as the durable-store backend: run with `--persist --
 
 ### Where's the admin API for managing approvers / RBAC?
 
-There isn't one. v0.5.x has **one API key** — anyone with it has full access to approve/deny/audit/status and the dashboard. Multi-user, multi-tenant, and RBAC are on the v0.6 roadmap (the v0.5 architecture moved the URL plumbing — `/v1/t/{tenant}/...` — into place; the data-structure sharding is what's left). For now, treat the API key like a root password.
+There isn't one. As of v0.9 there is still **one API key** — anyone with it has full access to approve/deny/audit/status and the dashboard. Multi-tenant policy and state isolation shipped in v0.6 (`/v1/t/{tenant}/...` routes plus the `agentguard tenant` CLI — see [`API.md`](API.md) and [`CLI.md`](CLI.md#agentguard-tenant-v06)), but per-approver identities and RBAC did not. For now, treat the API key like a root password.
 
 ### Can I edit policies from the dashboard?
 
-No. Policies are YAML files; edit them on disk and use `--watch` for hot-reload (2 s mtime poll). A dashboard-side policy editor is on the roadmap.
+No. Policies are YAML files; edit them on disk — the server hot-reloads on change (fsnotify events, with a 2 s mtime poll as fallback). A dashboard-side policy editor is on the roadmap.
 
 ### Does AgentGuard support streaming responses / LLM output filtering?
 
