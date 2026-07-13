@@ -90,6 +90,7 @@ agentguard-mcp-gateway \
 | `--log-level`       | no         | stderr verbosity. Default `info`.               |
 | `--upstream-timeout`| no         | per-frame upstream-response timeout. Default `30s`. |
 | `--reconnect-cap`   | no         | upper bound on reconnect backoff. Default `60s`. |
+| `--version`         | no         | print version and exit. Checked before any other flag is parsed, so it works without `--upstream`. |
 
 Stdout is reserved for JSON-RPC. All logging goes to stderr — the MCP
 spec explicitly permits this (the host MAY capture or ignore it).
@@ -385,8 +386,8 @@ rules:
       - pattern: "fs:write_file"
         conditions:
           # require_prior so an explicit allow of read_file qualifies write
-          require_prior: "fs:read_*"
-          time_window: 5m
+          - require_prior: "fs:read_*"
+            time_window: "5m"
     require_approval:
       - pattern: "*:execute_*"
     allow:

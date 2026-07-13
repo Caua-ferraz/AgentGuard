@@ -59,6 +59,15 @@ type ApprovalRecord struct {
 	Resolved   bool
 	Decision   string
 	ResolvedAt time.Time
+	// ConsumedAt persists the one-shot consumption stamp so a restart can
+	// never resurrect an already-spent ALLOW as replayable. Zero while
+	// unconsumed.
+	ConsumedAt time.Time
+	// ResolvedVia / ResolvedFrom persist the resolution actor stamp
+	// ("bearer" / "session" / "open" + peer host) for incident
+	// reconstruction. Empty while pending.
+	ResolvedVia  string
+	ResolvedFrom string
 }
 
 // BucketState is one token-bucket's persisted state. Key is the limiter's

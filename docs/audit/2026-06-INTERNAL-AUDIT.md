@@ -11,9 +11,13 @@
 > WORM forwarding guidance — see `CHANGELOG.md` § 0.9.0); **M2** fixed
 > post-v0.9.0 (`pkg/store/sqlite.go` now creates the DB 0600 and tightens
 > pre-existing files/sidecars on every open, with Unix-gated regression
-> tests). **M4** (redactor coverage of `path`/`domain`/`action` fields) is
-> **still open** as of v0.9.0. L1/L2/L3/L5 stand as documented/accepted
-> risks.
+> tests); **M4** fixed post-v0.9.0 (`Redactor.Redact` now also scrubs
+> `Request.Path`/`Domain`/`Action`, covering all notifier outputs including
+> the Slack display action, with webhook/Slack regression tests); **L1**
+> hardened post-v0.9.0 (`absoluteMaxBufferBytes`, a built-in 64 MiB
+> ceiling in `pkg/llmproxy/streaming.go`, now bounds the streaming
+> buffers even when `MaxBufferBytes` is 0 — the stream is refused
+> fail-closed past it). L2/L3/L5 stand as documented/accepted risks.
 
 **Scope:** wire-level firewall runtime — MCP gateway, LLM API proxy, policy engine,
 central proxy server, audit log, persistence store.
@@ -281,6 +285,17 @@ Production default is non-zero, so this is operator-self-inflicted.
 **Fix / mitigation:** document that `0` disables the safety cap and is
 non-production; optionally enforce a hard absolute ceiling regardless. Logged as a
 TODO in this doc; not a Phase-1 blocker.
+
+**Status (post-v0.9.0): fixed.** `absoluteMaxBufferBytes`
+(`pkg/llmproxy/streaming.go`, 64 MiB = `MaxConfigurableBufferBytes`) now
+bounds both the per-event read and the accumulator cap whenever the
+computed cap is `<= 0`; the stream is refused fail-closed with the
+canonical buffer-overflow refusal. Positive operator-configured caps are
+untouched. `readSSEEvent` was additionally moved from `ReadBytes` to a
+`ReadSlice` loop so the cap is enforced every few KiB *within* a line —
+previously a single newline-free blob was buffered whole before the cap
+check ran, bypassing every cap (including the default 1 MiB) regardless
+of this finding's `0` case.
 
 ---
 

@@ -121,7 +121,8 @@ cd AgentGuard && go build -o agentguard ./cmd/agentguard
 # Or via Go install
 go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@latest
 
-# Or Docker
+# Or Docker (build the image from the repo's Dockerfile first)
+docker build -t agentguard:latest .
 docker run -d -p 8080:8080 \
   -v agentguard-audit:/var/lib/agentguard \
   agentguard:latest

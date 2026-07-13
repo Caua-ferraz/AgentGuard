@@ -51,6 +51,7 @@ func main() {
 	tlsTerminated := serveCmd.Bool("tls-terminated-upstream", false, "Issue session cookies with Secure regardless of r.TLS — set when behind a TLS-terminating reverse proxy that does not forward X-Forwarded-Proto")
 	sessionCostTTL := serveCmd.Duration("session-cost-ttl", 0, "If > 0, evict session-cost accumulator entries idle longer than this duration (e.g. 24h). Zero disables eviction (entries never expire).")
 	sessionCostSweep := serveCmd.Duration("session-cost-sweep-interval", 0, "How often to run the session-cost sweeper. Defaults to max(session-cost-ttl/4, 1m).")
+	approvalValidity := serveCmd.Duration("approval-validity", 5*time.Minute, "How long a resolved approval is honored by the /v1/check approval-id retry, measured from resolution. Past the window the retry re-enters the approval flow under a new id. 0 disables the bound. Default matches the SDKs' wait_for_approval poll window.")
 	// Audit log rotation. Defaults aim at production-friendly bounds:
 	// 100 MiB live-file ceiling, 30-day retention, 5 archives kept (older
 	// archives pruned by oldest-first lex order on the timestamp suffix),
@@ -85,21 +86,95 @@ func main() {
 	dataDir := serveCmd.String("data-dir", ".", "Directory for the zero-config SQLite database (agentguard.db). Ignored when --store-dsn is set or --persist=false.")
 	auditBackend := serveCmd.String("audit-backend", "file", `Audit storage: "file" (JSONL, default) or "store" (the SQLite store — unifies state+audit in one DB with indexed queries). "store" requires --persist.`)
 	notifySpool := serveCmd.String("notify-spool", "", "Path to a JSONL spool file for notification events that overflow the dispatch queue (retried by a recovery loop instead of dropped). Empty disables (drop-on-full).")
+	serveCmd.Usage = func() {
+		fmt.Fprintf(os.Stderr, `Usage: agentguard serve [flags]
+
+Start the AgentGuard server: policy engine, approval queue, audit log,
+and (with --dashboard) the web dashboard. Agents reach it through the
+SDKs, the MCP gateway, or the LLM API proxy — all of which call this
+server's /v1/check endpoint.
+
+Flags:
+`)
+		serveCmd.PrintDefaults()
+		fmt.Fprintf(os.Stderr, `
+Environment:
+  AGENTGUARD_API_KEY   Used when --api-key is not set.
+`)
+	}
 
 	validateCmd := flag.NewFlagSet("validate", flag.ExitOnError)
 	validateFile := validateCmd.String("policy", "configs/default.yaml", "Policy file to validate")
+	validateCmd.Usage = func() {
+		fmt.Fprintf(os.Stderr, `Usage: agentguard validate [flags]
+
+Validate a policy YAML file: load it, check rule syntax, and print the
+rule/scope counts. Exits non-zero when the policy does not load.
+
+Flags:
+`)
+		validateCmd.PrintDefaults()
+	}
 
 	approveCmd := flag.NewFlagSet("approve", flag.ExitOnError)
 	approveURL := approveCmd.String("url", "http://localhost:8080", "AgentGuard server URL")
 	approveKey := approveCmd.String("api-key", "", "Bearer token (overrides AGENTGUARD_API_KEY)")
+	approveCmd.Usage = func() {
+		fmt.Fprintf(os.Stderr, `Usage: agentguard approve [flags] <approval-id>
+
+Approve a pending action by ID on a running AgentGuard server. Approval
+IDs appear in notifications, 'agentguard status', and the dashboard.
+
+Positional arguments:
+  <approval-id>   ID of the pending approval to resolve (required)
+
+Flags:
+`)
+		approveCmd.PrintDefaults()
+		fmt.Fprintf(os.Stderr, `
+Environment:
+  AGENTGUARD_API_KEY   Used when --api-key is not set.
+`)
+	}
 
 	denyCmd := flag.NewFlagSet("deny", flag.ExitOnError)
 	denyURL := denyCmd.String("url", "http://localhost:8080", "AgentGuard server URL")
 	denyKey := denyCmd.String("api-key", "", "Bearer token (overrides AGENTGUARD_API_KEY)")
+	denyCmd.Usage = func() {
+		fmt.Fprintf(os.Stderr, `Usage: agentguard deny [flags] <approval-id>
+
+Deny a pending action by ID on a running AgentGuard server. Approval
+IDs appear in notifications, 'agentguard status', and the dashboard.
+
+Positional arguments:
+  <approval-id>   ID of the pending approval to resolve (required)
+
+Flags:
+`)
+		denyCmd.PrintDefaults()
+		fmt.Fprintf(os.Stderr, `
+Environment:
+  AGENTGUARD_API_KEY   Used when --api-key is not set.
+`)
+	}
 
 	statusCmd := flag.NewFlagSet("status", flag.ExitOnError)
 	statusURL := statusCmd.String("url", "http://localhost:8080", "AgentGuard server URL")
 	statusKey := statusCmd.String("api-key", "", "Bearer token (overrides AGENTGUARD_API_KEY)")
+	statusCmd.Usage = func() {
+		fmt.Fprintf(os.Stderr, `Usage: agentguard status [flags]
+
+Show the health of a running AgentGuard server and its pending-approval
+queue.
+
+Flags:
+`)
+		statusCmd.PrintDefaults()
+		fmt.Fprintf(os.Stderr, `
+Environment:
+  AGENTGUARD_API_KEY   Used when --api-key is not set.
+`)
+	}
 
 	auditCmd := flag.NewFlagSet("audit", flag.ExitOnError)
 	auditQueryURL := auditCmd.String("url", "http://localhost:8080", "AgentGuard server URL")
@@ -109,6 +184,20 @@ func main() {
 	auditTransport := auditCmd.String("transport", "", "Filter by integration path (sdk|mcp_gateway|llm_api_proxy)")
 	auditLimit := auditCmd.Int("limit", 50, "Max entries to return")
 	auditKey := auditCmd.String("api-key", "", "Bearer token (overrides AGENTGUARD_API_KEY)")
+	auditCmd.Usage = func() {
+		fmt.Fprintf(os.Stderr, `Usage: agentguard audit [flags]
+
+Query the audit log of a running AgentGuard server (newest first),
+optionally filtered by agent, decision, scope, or transport.
+
+Flags:
+`)
+		auditCmd.PrintDefaults()
+		fmt.Fprintf(os.Stderr, `
+Environment:
+  AGENTGUARD_API_KEY   Used when --api-key is not set.
+`)
+	}
 
 	migrateCmd := flag.NewFlagSet("migrate", flag.ExitOnError)
 	migrateAuditPath := migrateCmd.String("audit-log", "audit.jsonl", "Path to audit log file")
@@ -118,6 +207,17 @@ func main() {
 	migrateList := migrateCmd.Bool("list", false, "List registered migrations and exit")
 	migrateID := migrateCmd.String("id", "", "Run only the named migration (operator override; runs even if Detect=false)")
 	migrateReset := migrateCmd.Bool("reset-checkpoint", false, "Delete the replay checkpoint before running (forces full replay on next start)")
+	migrateCmd.Usage = func() {
+		fmt.Fprintf(os.Stderr, `Usage: agentguard migrate [flags]
+
+Run on-disk schema migrations against the audit log (see
+docs/FILE_FORMATS.md). Registered migrations that detect an old format
+are applied in order; --list shows them without running anything.
+
+Flags:
+`)
+		migrateCmd.PrintDefaults()
+	}
 
 	if len(os.Args) < 2 {
 		printUsage()
@@ -134,7 +234,7 @@ func main() {
 	case "serve":
 		_ = serveCmd.Parse(os.Args[2:]) // flag.ExitOnError handles errors
 		// Fall back to AGENTGUARD_API_KEY env if --api-key not supplied.
-		runServe(*policyFile, *port, *dashboard, *watch, *auditPath, resolveAPIKey(*apiKey), *baseURL, *allowedOrigin, *tlsTerminated, *sessionCostTTL, *sessionCostSweep, auditRotationOpts{
+		runServe(*policyFile, *port, *dashboard, *watch, *auditPath, resolveAPIKey(*apiKey), *baseURL, *allowedOrigin, *tlsTerminated, *sessionCostTTL, *sessionCostSweep, *approvalValidity, auditRotationOpts{
 			MaxSizeMB:  *auditMaxSizeMB,
 			MaxBackups: *auditMaxBackups,
 			MaxAgeDays: *auditMaxAgeDays,
@@ -225,6 +325,13 @@ Commands:
   migrate     Run on-disk schema migrations (see docs/FILE_FORMATS.md)
   version     Print version information
 
+Environment:
+  AGENTGUARD_API_KEY          Bearer token fallback for every command that
+                              takes --api-key (serve, approve, deny, status,
+                              audit).
+  AGENTGUARD_NO_UPDATE_CHECK  Set to any value other than "0" to disable the
+                              background check for newer releases.
+
 Run 'agentguard <command> -h' for details on each command.
 `)
 }
@@ -295,7 +402,7 @@ func openStore(cfg persistOpts) (*store.SQLiteStore, string, error) {
 	return s, path, err
 }
 
-func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts, persistCfg persistOpts, notifySpoolPath string) {
+func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, approvalValidity time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts, persistCfg persistOpts, notifySpoolPath string) {
 	if baseURL == "" {
 		baseURL = fmt.Sprintf("http://localhost:%d", port)
 	}
@@ -442,6 +549,7 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		TLSTerminatedUpstream:    tlsTerminatedUpstream,
 		SessionCostTTL:           sessionCostTTL,
 		SessionCostSweepInterval: sessionCostSweep,
+		ApprovalValidity:         approvalValidity,
 		SessionTTL:               pol.SessionTTL(),
 		MaxRequestBodyBytes:      pol.MaxRequestBodyBytes(),
 		AuditDefaultLimit:        pol.AuditDefaultLimit(),
@@ -765,8 +873,15 @@ func runMigrate(auditPath, checkpointPath, backupDir string, dryRun, list bool, 
 // SQLite WAL permits a concurrent writer, and a running server picks up a new
 // tenant on its next lookup).
 func runTenant(args []string) {
+	// The dispatcher owns -h/--help/help: Go's flag package never sees the
+	// subcommand token, so without this branch `tenant -h` would fall
+	// through to the unknown-subcommand error (after opening the store).
+	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help" || args[0] == "help") {
+		printTenantUsage()
+		return
+	}
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: agentguard tenant <put|list|rm> [flags]")
+		printTenantUsage()
 		os.Exit(1)
 	}
 	sub := args[0]
@@ -783,6 +898,42 @@ func runTenant(args []string) {
 	storeDSN := fs.String("store-dsn", "", "Store DSN (empty => <data-dir>/agentguard.db)")
 	dataDir := fs.String("data-dir", ".", "Directory holding agentguard.db")
 	policyPath := fs.String("policy", "", "Policy YAML file to register (put only)")
+	fs.Usage = func() {
+		switch sub {
+		case "put":
+			fmt.Fprintf(os.Stderr, `Usage: agentguard tenant put <tenant-id> --policy <file.yaml> [flags]
+
+Validate a policy YAML file and register it for a tenant in the durable
+store. The tenant id may come before or after the flags.
+
+Positional arguments:
+  <tenant-id>   Tenant to register the policy under (required)
+
+Flags:
+`)
+		case "list":
+			fmt.Fprintf(os.Stderr, `Usage: agentguard tenant list [flags]
+
+List tenant IDs with a policy registered in the durable store. (The
+"local" tenant is always served from the server's --policy file.)
+
+Flags:
+`)
+		case "rm":
+			fmt.Fprintf(os.Stderr, `Usage: agentguard tenant rm <tenant-id> [flags]
+
+Remove a tenant's policy from the durable store.
+
+Positional arguments:
+  <tenant-id>   Tenant whose policy to remove (required)
+
+Flags:
+`)
+		default:
+			fmt.Fprintf(os.Stderr, "Usage: agentguard tenant %s [flags]\n\nFlags:\n", sub)
+		}
+		fs.PrintDefaults()
+	}
 	_ = fs.Parse(rest)
 	if tenant == "" && len(fs.Args()) > 0 {
 		tenant = fs.Args()[0]
@@ -855,6 +1006,24 @@ func runTenant(args []string) {
 		fmt.Fprintf(os.Stderr, "unknown tenant subcommand %q (want put|list|rm)\n", sub)
 		os.Exit(1)
 	}
+}
+
+// printTenantUsage is the `agentguard tenant` dispatcher-level help —
+// the per-subcommand FlagSets print their own (see fs.Usage in runTenant).
+func printTenantUsage() {
+	fmt.Fprintf(os.Stderr, `Usage: agentguard tenant <put|list|rm> [flags]
+
+Manage per-tenant policies in the durable store (multi-tenancy). The
+server need not be running; a running server picks up changes on its
+next lookup.
+
+Subcommands:
+  put <tenant-id> --policy <file.yaml>   Validate and register a tenant policy
+  list                                   List registered tenant IDs
+  rm <tenant-id>                         Remove a tenant policy
+
+Run 'agentguard tenant <subcommand> -h' for details on each subcommand.
+`)
 }
 
 // filepathDir and filepathJoin wrap path/filepath so runMigrate stays

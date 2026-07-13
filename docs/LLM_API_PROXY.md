@@ -87,10 +87,11 @@ agentguard-llm-proxy \
 | `--tenant-id`            | tenant header value                                       | `local`                      |
 | `--fail-mode`            | `deny` / `allow` / `fail-closed-with-audit`               | `deny`                       |
 | `--fail-audit-log`       | local JSONL fallback audit for `fail-closed-with-audit` denials (empty disables) | `agentguard-fail-audit.jsonl` |
-| `--max-buffer-bytes`     | per-stream tool-call buffer cap (see § 6)                 | `1048576` (1 MiB)            |
+| `--max-buffer-bytes`     | per-stream tool-call buffer cap (see § 6). The flag accepts 1 byte – 64 MiB; a config carrying `0` ("operator cap disabled", reachable only by embedding the package — the flag rejects `0`) is still bounded by a built-in 64 MiB absolute ceiling, past which the stream is refused fail-closed. | `1048576` (1 MiB)            |
 | `--max-concurrent-streams` | cap on simultaneously open streaming responses; excess requests are rejected (`agentguard_llmproxy_streams_rejected_total`) | `100` |
 | `--policy`               | path to AgentGuard policy YAML; loaded only for `tool_scope_map` operator overrides. Without it, the proxy falls back to `DefaultLLMToolScopeMap` and logs a WARN at startup. | unset |
 | `--log-level`            | stderr verbosity                                          | `info`                       |
+| `--version`              | print version and exit (checked before any other flag is parsed) | —                     |
 
 If `--api-key` is unset and `--listen` is non-loopback (`0.0.0.0:` or
 external IP), the proxy logs WARN and refuses to start in production
@@ -428,7 +429,7 @@ Algorithm (Anthropic): identical structure, but:
 When DENY (or REQUIRE_APPROVAL with a URL):
 
 ```
-data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"[AgentGuard] Tool call denied: <reason>"},"finish_reason":"stop"}]}
+data: {"choices":[{"delta":{"content":"AgentGuard denied this action.\n\nReason: <reason>\nRule: <rule>","role":"assistant"},"finish_reason":"stop","index":0}],"created":0,"id":"agentguard-refusal","object":"chat.completion.chunk"}
 
 data: [DONE]
 ```
@@ -468,7 +469,7 @@ data: { "type": "content_block_start", "index": <same>,
 event: content_block_delta
 data: { "type": "content_block_delta", "index": <same>,
         "delta": { "type": "text_delta",
-                   "text": "[AgentGuard] Tool call denied: <reason>" } }
+                   "text": "AgentGuard denied this action.\n\nReason: <reason>\nRule: <rule>" } }
 
 event: content_block_stop
 data: { "type": "content_block_stop", "index": <same> }
@@ -504,7 +505,7 @@ gating a single tool call. Rationale:
   e.g., a `write_file` with a multi-megabyte payload) hit this cap.
 - Above the cap, the proxy emits a synthetic refusal: "tool call too
   large to gate (> N bytes); rejected by AgentGuard". Operators see a
-  metric (`agentguard_llm_stream_overflow_total`) and can raise the
+  metric (`agentguard_llmproxy_buffer_overflow_total`) and can raise the
   limit if their use case needs it.
 
 Why 1 MiB:
@@ -713,7 +714,7 @@ Once the proxy is running and your code points at it:
    `rm -rf *` under `scope: shell` (or use the bundled one). Prompt
    the model to `rm -rf /etc`. The dashboard logs `DENY`; your code
    receives a synthetic assistant text starting with
-   `[AgentGuard] Tool call denied:` instead of any tool-call deltas.
+   `AgentGuard denied this action.` instead of any tool-call deltas.
 
 If actions never reach AgentGuard, the SDK is probably still talking
 to the real upstream — verify the env var is set for the process

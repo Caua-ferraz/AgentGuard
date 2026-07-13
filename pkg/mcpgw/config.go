@@ -117,6 +117,31 @@ func ParseConfig(args []string) (*Config, error) {
 func ParseConfigWithOutput(args []string, errOut io.Writer) (*Config, error) {
 	fs := flag.NewFlagSet("agentguard-mcp-gateway", flag.ContinueOnError)
 	fs.SetOutput(errOut)
+	fs.Usage = func() {
+		fmt.Fprintf(errOut, `Usage: agentguard-mcp-gateway --upstream "<ns>:<cmd>" [flags]
+
+agentguard-mcp-gateway is a stdio JSON-RPC bridge spawned by an MCP
+client (Claude Desktop, Cursor, IDE plugins): it sits between the host
+and one or more downstream MCP servers and gates every tools/call
+through a central AgentGuard server's /v1/check endpoint. stdin/stdout
+carry JSON-RPC frames; all logging goes to stderr.
+
+Example (as the "command" in an MCP client configuration):
+  agentguard-mcp-gateway \
+      --upstream "fs:npx -y @modelcontextprotocol/server-filesystem /tmp" \
+      --guard-url http://127.0.0.1:8080 \
+      --policy /etc/agentguard/policy.yaml
+
+Flags:
+`)
+		fs.PrintDefaults()
+		fmt.Fprintf(errOut, `  -version
+    	Print version and exit (checked before any other flag is parsed)
+
+Environment:
+  AGENTGUARD_API_KEY   Used when --api-key is not set.
+`)
+	}
 
 	var upstreams stringSliceFlag
 	fs.Var(&upstreams, "upstream", `Downstream MCP server. Format: "<ns>:<cmd>" or "<cmd>" (ns defaults to first command word). Repeatable.`)

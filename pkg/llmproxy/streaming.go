@@ -147,20 +147,33 @@ func (s *Server) streamingForwardError(w http.ResponseWriter, err error) {
 //
 // We do NOT use bufio.Scanner per docs/LLM_API_PROXY.md § 6 — events
 // can be larger than the scanner's default 64 KiB and multiline data
-// fields require more state than a tokenizer.
+// fields require more state than a tokenizer. We also do NOT use
+// ReadBytes: it accumulates an entire line before returning, so a
+// malicious upstream sending one giant newline-free blob would grow
+// memory unboundedly BEFORE the cap check ever ran. ReadSlice hands
+// back at most the reader's buffer size per call (ErrBufferFull on a
+// long line), so the cap is enforced every few KiB regardless of
+// where — or whether — newlines appear.
 //
 // Returns io.EOF at end of stream. A partial trailing event (file
 // ended before blank line) is returned with err=io.EOF and the
 // accumulated bytes; callers should still attempt to dispatch it.
 func readSSEEvent(r *bufio.Reader, maxEventBytes int) ([]byte, error) {
 	var buf bytes.Buffer
+	atLineStart := true
 	for {
-		line, err := r.ReadBytes('\n')
-		if len(line) > 0 {
-			buf.Write(line)
+		chunk, err := r.ReadSlice('\n')
+		if len(chunk) > 0 {
+			buf.Write(chunk)
 			if maxEventBytes > 0 && buf.Len() > maxEventBytes {
 				return buf.Bytes(), errSSEEventTooLarge
 			}
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			// Mid-line: the current line is longer than the reader's
+			// buffer; keep draining it before line-boundary logic.
+			atLineStart = false
+			continue
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) && buf.Len() > 0 {
@@ -168,15 +181,41 @@ func readSSEEvent(r *bufio.Reader, maxEventBytes int) ([]byte, error) {
 			}
 			return buf.Bytes(), err
 		}
-		// Blank line terminates the event. SSE spec: a blank line is
-		// just "\n" or "\r\n".
-		if bytes.Equal(line, []byte("\n")) || bytes.Equal(line, []byte("\r\n")) {
+		// chunk ends with '\n' — the current line just completed.
+		// Blank line terminates the event (SSE spec: "\n" or "\r\n"),
+		// but only when the chunk IS the whole line: the trailing
+		// fragment of an over-length line can be exactly "\n" without
+		// being a blank line.
+		wasLineStart := atLineStart
+		atLineStart = true
+		if wasLineStart && (bytes.Equal(chunk, []byte("\n")) || bytes.Equal(chunk, []byte("\r\n"))) {
 			return buf.Bytes(), nil
 		}
 	}
 }
 
 var errSSEEventTooLarge = errors.New("sse event exceeded buffer cap")
+
+// absoluteMaxBufferBytes is the hard safety ceiling on the streaming
+// buffers (audit L1). ParseConfig rejects --max-buffer-bytes <= 0, but a
+// Config built directly (tests, embedders) can carry MaxBufferBytes == 0
+// meaning "no operator-configured cap" — without a ceiling, an upstream
+// that never terminates an SSE event would grow the per-event read
+// buffer and the tool-call accumulator without bound (memory DoS). The
+// ceiling is a safety floor on top of the operator cap, never a
+// replacement: any positive cap behaves exactly as before. Value matches
+// MaxConfigurableBufferBytes, the largest cap Validate accepts.
+const absoluteMaxBufferBytes = MaxConfigurableBufferBytes
+
+// hardCappedBufferBytes resolves a computed per-stream cap against the
+// absolute ceiling: <= 0 ("cap disabled") falls back to
+// absoluteMaxBufferBytes so streaming stays bounded fail-closed.
+func hardCappedBufferBytes(computed int) int {
+	if computed <= 0 {
+		return absoluteMaxBufferBytes
+	}
+	return computed
+}
 
 // runPolicyCheck invokes Server.PolicyCheck. Default behaviour when
 // nil: ALLOW. This makes the streaming pipe testable without the gate
@@ -413,11 +452,11 @@ func (s *Server) handleStreamingAnthropicMessages(w http.ResponseWriter, r *http
 // events from upstream, branches on FeedResult, and either flushes
 // (PassThrough or ALLOW-path replay) or refuses (DENY / overflow).
 func (s *Server) runOpenAIStreamLoop(w http.ResponseWriter, flusher http.Flusher, r *http.Request, body io.Reader) {
-	acc := NewOpenAIToolCallAccumulator(s.cfg.MaxBufferBytes)
+	acc := NewOpenAIToolCallAccumulator(hardCappedBufferBytes(s.cfg.MaxBufferBytes))
 	reader := bufio.NewReader(body)
 
 	for {
-		event, err := readSSEEvent(reader, s.cfg.MaxBufferBytes*2)
+		event, err := readSSEEvent(reader, hardCappedBufferBytes(s.cfg.MaxBufferBytes*2))
 		isEOF := errors.Is(err, io.EOF)
 		isTooLarge := errors.Is(err, errSSEEventTooLarge)
 
@@ -592,11 +631,11 @@ func fallbackFailModeRule(failMode string) string {
 // The shape difference is captured inside the accumulator; the loop
 // itself is structurally identical.
 func (s *Server) runAnthropicStreamLoop(w http.ResponseWriter, flusher http.Flusher, r *http.Request, body io.Reader) {
-	acc := NewAnthropicAccumulator(s.cfg.MaxBufferBytes)
+	acc := NewAnthropicAccumulator(hardCappedBufferBytes(s.cfg.MaxBufferBytes))
 	reader := bufio.NewReader(body)
 
 	for {
-		event, err := readSSEEvent(reader, s.cfg.MaxBufferBytes*2)
+		event, err := readSSEEvent(reader, hardCappedBufferBytes(s.cfg.MaxBufferBytes*2))
 		isEOF := errors.Is(err, io.EOF)
 		isTooLarge := errors.Is(err, errSSEEventTooLarge)
 

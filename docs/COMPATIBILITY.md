@@ -138,5 +138,6 @@ PostgreSQL / multi-node backend is a **v1.0 requirement**; see the README
 
 Out of scope for v0.9 and deliberately not on the stabilization: in-process
 cryptographic audit sealing (hash-chaining / Merkle checkpoints — use external
-WORM instead), RBAC / multi-key auth, audit secret-redaction, and PostgreSQL /
-multi-node / distributed rate-limiting.
+WORM instead), RBAC / multi-key auth, and audit secret-redaction. (PostgreSQL /
+multi-node is **not** in this list — it is a v1.0 requirement; see
+[Topology](#topology) above.)

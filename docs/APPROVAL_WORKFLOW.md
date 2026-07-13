@@ -92,7 +92,7 @@ Redactor (in `pkg/notify/notify.go` — `DefaultRedactor`) scrubs:
 - `xox[baprs]-…` (Slack)
 - `(secret|token|password|api_key)=<value>`
 
-Redaction runs on `Command`, `URL`, `Reason`, and every `Meta` value.
+Redaction runs on `Command`, `Path`, `Domain`, `Action`, `URL`, `Reason`, and every `Meta` value.
 
 ### Slack payload (what approvers actually see)
 
@@ -132,7 +132,7 @@ The SDKs wrap this in `wait_for_approval` (Python) / `waitForApproval` (TypeScri
 
 - Poll every 2 s (`pollIntervalMs: 2_000` / `poll_interval=2`).
 - Send the Bearer token on every poll — `/v1/status` is auth-gated.
-- Stop on either `resolved: true` **or** wall-clock timeout.
+- Stop on either `status: "resolved"` **or** wall-clock timeout.
 
 ### Timeouts
 
@@ -199,11 +199,41 @@ See [`API.md`](API.md#post-v1approveid--post-v1denyid--tenant-aware-mirrors).
 
 `ApprovalQueue.Resolve(id, decision)`:
 
-1. Locks, flips `Resolved=true`, stamps `Decision`.
-2. Broadcasts a `resolved` SSE event (dashboard updates in real time).
-3. Returns.
+1. Locks; if the entry is already resolved, either no-ops (same decision —
+   idempotent for retried requests) or rejects with a `409` conflict
+   (opposite decision — resolutions are **write-once**; a DENY can never be
+   flipped to ALLOW after the fact, or vice versa).
+2. Otherwise flips `Resolved=true`, stamps `Decision`, `ResolvedAt`, and
+   the actor (`resolved_via`: `bearer`/`session`/`open` + peer host).
+3. Broadcasts a `resolved` SSE event (dashboard updates in real time) —
+   exactly once per approval; retries do not re-broadcast.
+4. Returns.
 
 It does **not** unblock any waiter — the agent's SDK learns about the resolution on its next poll (within ≤ 2 s).
+
+### One-shot consumption and validity
+
+A resolved **ALLOW** is a single-use, time-boxed capability:
+
+- The first `/v1/check` retry carrying the `approval_id` (and matching the
+  original request shape) is honored with `matched_rule: "allow:approved"`
+  and **consumes** the approval. Any further replay of the same id falls
+  through to fresh policy evaluation and re-enters the approval flow under
+  a new id — one human click authorizes at most one execution.
+- Honoring is bounded by `--approval-validity` (default `5m`, matching the
+  SDKs' `wait_for_approval` window; `0` disables): a resolution older than
+  the window is no longer replayable.
+- A resolved **DENY** stays sticky within the validity window (a retrying
+  model gets an immediate deny instead of spawning fresh approval
+  requests) and is never "consumed".
+- `GET /v1/status/{id}` is read-only — SDK poll loops and dashboards never
+  spend the capability.
+- Refused replays are visible as
+  `agentguard_approval_replay_refused_total{reason="consumed"|"expired"}`;
+  a rising `consumed` count means something is trying to reuse one
+  approval for multiple executions.
+- Consumption survives restarts (persisted with the approval), so a
+  restart cannot resurrect a spent ALLOW.
 
 ---
 

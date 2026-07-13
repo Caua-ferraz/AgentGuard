@@ -171,6 +171,31 @@ func ParseConfig(args []string) (*Config, error) {
 func ParseConfigWithOutput(args []string, errOut io.Writer) (*Config, error) {
 	fs := flag.NewFlagSet("agentguard-llm-proxy", flag.ContinueOnError)
 	fs.SetOutput(errOut)
+	fs.Usage = func() {
+		fmt.Fprintf(errOut, `Usage: agentguard-llm-proxy [flags]
+
+agentguard-llm-proxy is a drop-in OpenAI/Anthropic base URL: it speaks
+the OpenAI Chat Completions and Anthropic Messages wire formats,
+forwards traffic to the real upstreams, and gates every tool call the
+model emits through a central AgentGuard server's /v1/check endpoint.
+
+Example:
+  agentguard-llm-proxy --guard-url http://127.0.0.1:8080 \
+      --policy /etc/agentguard/policy.yaml
+  # then point the agent's SDK at the proxy:
+  #   OPENAI_BASE_URL=http://127.0.0.1:8081/v1
+  #   ANTHROPIC_BASE_URL=http://127.0.0.1:8081
+
+Flags:
+`)
+		fs.PrintDefaults()
+		fmt.Fprintf(errOut, `  -version
+    	Print version and exit (checked before any other flag is parsed)
+
+Environment:
+  AGENTGUARD_API_KEY   Used when --api-key is not set.
+`)
+	}
 
 	gate := gateclient.RegisterGateFlags(fs,
 		"Path to policy YAML for tool→scope mapping; empty falls back to DefaultLLMToolScopeMap with no operator overrides")

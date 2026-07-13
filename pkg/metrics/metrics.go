@@ -98,6 +98,8 @@ type Registry struct {
 	approvalTotal                uint64 // REQUIRE_APPROVAL decisions
 	rateLimitedTotal             uint64 // rate-limit denies
 	approvalReplayMismatchTotal  uint64
+	approvalReplayConsumedTotal  uint64 // replays refused: ALLOW already spent (one-shot)
+	approvalReplayExpiredTotal   uint64 // replays refused: past --approval-validity
 	auditCorruptLinesTotal       uint64
 	auditReplayEntriesTotal      uint64
 	auditRotationsTotal          uint64
@@ -184,6 +186,8 @@ func (r *Registry) Reset() {
 	atomic.StoreUint64(&r.approvalTotal, 0)
 	atomic.StoreUint64(&r.rateLimitedTotal, 0)
 	atomic.StoreUint64(&r.approvalReplayMismatchTotal, 0)
+	atomic.StoreUint64(&r.approvalReplayConsumedTotal, 0)
+	atomic.StoreUint64(&r.approvalReplayExpiredTotal, 0)
 	atomic.StoreUint64(&r.auditCorruptLinesTotal, 0)
 	atomic.StoreUint64(&r.auditReplayEntriesTotal, 0)
 	atomic.StoreUint64(&r.auditRotationsTotal, 0)
@@ -299,6 +303,36 @@ func (r *Registry) RateLimitedTotal() uint64 {
 }
 func (r *Registry) ApprovalReplayMismatchTotal() uint64 {
 	return atomic.LoadUint64(&r.approvalReplayMismatchTotal)
+}
+
+// IncApprovalReplayRefused increments
+// agentguard_approval_replay_refused_total{reason=...}. Called from
+// pkg/proxy.handleCheck when an approval-id round-trip matched the original
+// request shape but the short-circuit was refused by the one-shot /
+// validity state machine: reason "consumed" means the resolved ALLOW was
+// already spent by an earlier replay; reason "expired" means the
+// resolution is older than the --approval-validity window. Refusals are
+// NOT errors on the wire — the request falls through to fresh policy
+// evaluation — but a rising "consumed" count is the signal that something
+// is trying to reuse one human approval for multiple executions.
+// The reason set is closed; unknown strings land in the "consumed" bucket
+// rather than growing label cardinality.
+func (r *Registry) IncApprovalReplayRefused(reason string) {
+	switch reason {
+	case "expired":
+		atomic.AddUint64(&r.approvalReplayExpiredTotal, 1)
+	default:
+		atomic.AddUint64(&r.approvalReplayConsumedTotal, 1)
+	}
+}
+
+// ApprovalReplayRefusedTotal returns the count for one refusal reason
+// ("consumed" or "expired"). Test accessor, mirroring the other counters.
+func (r *Registry) ApprovalReplayRefusedTotal(reason string) uint64 {
+	if reason == "expired" {
+		return atomic.LoadUint64(&r.approvalReplayExpiredTotal)
+	}
+	return atomic.LoadUint64(&r.approvalReplayConsumedTotal)
 }
 
 // -- Labeled counters ------------------------------------------------------------
@@ -823,6 +857,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeCounter(w, "agentguard_approval_replay_mismatch_total",
 		"approval_id round-trips whose retry request shape did not match the original PendingAction.Request and therefore fell through to fresh policy evaluation. Non-zero values indicate either a buggy gateway or an attempted replay attack — see audit B1.",
 		atomic.LoadUint64(&r.approvalReplayMismatchTotal))
+	r.writeApprovalReplayRefused(w)
 
 	writeGauge(w, "agentguard_pending_approvals",
 		"Current number of actions waiting for human approval.",
@@ -987,6 +1022,17 @@ func (r *Registry) writeNotifyDispatchDuration(w io.Writer) {
 // writeNotifyDropped emits agentguard_notify_events_dropped_total with the
 // two-dimensional (notifier, reason) label. Always emits HELP/TYPE so a
 // Prometheus scraper sees the metric even when no drops have happened.
+// writeApprovalReplayRefused emits agentguard_approval_replay_refused_total
+// with its closed two-value reason label. Both series are always emitted
+// (even at zero) so alert rules on either reason never see a missing metric.
+func (r *Registry) writeApprovalReplayRefused(w io.Writer) {
+	const name = "agentguard_approval_replay_refused_total"
+	const help = "approval_id round-trips that matched the original request shape but were refused by the approval state machine and fell through to fresh policy evaluation: reason=\"consumed\" (resolved ALLOW already spent — approvals are one-shot) or reason=\"expired\" (resolution older than --approval-validity)."
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+	fmt.Fprintf(w, "%s{reason=\"consumed\"} %d\n", name, atomic.LoadUint64(&r.approvalReplayConsumedTotal))
+	fmt.Fprintf(w, "%s{reason=\"expired\"} %d\n", name, atomic.LoadUint64(&r.approvalReplayExpiredTotal))
+}
+
 func (r *Registry) writeNotifyDropped(w io.Writer) {
 	const name = "agentguard_notify_events_dropped_total"
 	const help = "Notifier events dropped before delivery, by notifier type and reason (e.g. queue_full)."

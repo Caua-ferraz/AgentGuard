@@ -30,6 +30,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -60,6 +61,11 @@ func main() {
 
 	cfg, err := mcpgw.ParseConfig(args)
 	if err != nil {
+		// -h/--help already printed the FlagSet's usage; exit 0 like the
+		// core agentguard subcommands (flag.ExitOnError convention).
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
 		// flag.ContinueOnError already wrote usage on parse errors;
 		// for our own validation errors we add a one-line summary.
 		if !errors.Is(err, errFlagAlreadyHandled) {

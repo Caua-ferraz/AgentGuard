@@ -661,9 +661,12 @@ func (r *Redactor) WithExtraPatterns(extras []string) (*Redactor, error) {
 }
 
 // Redact returns a copy of the event with sensitive substrings replaced by
-// "[REDACTED]" in the command, URL, and reason fields.
+// "[REDACTED]" in the command, path, domain, action, URL, and reason fields.
 func (r *Redactor) Redact(e Event) Event {
 	e.Request.Command = r.redactString(e.Request.Command)
+	e.Request.Path = r.redactString(e.Request.Path)
+	e.Request.Domain = r.redactString(e.Request.Domain)
+	e.Request.Action = r.redactString(e.Request.Action)
 	e.Request.URL = r.redactString(e.Request.URL)
 	e.Result.Reason = r.redactString(e.Result.Reason)
 	if e.Request.Meta != nil {
