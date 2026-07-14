@@ -127,6 +127,27 @@ CREATE TABLE IF NOT EXISTS policies (
     policy_yaml TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS rate_consumption (
+    tenant_id    TEXT    NOT NULL,
+    key          TEXT    NOT NULL,
+    window_epoch TEXT    NOT NULL,
+    node_id      TEXT    NOT NULL,
+    consumed     INTEGER NOT NULL,
+    updated_at   TEXT    NOT NULL,
+    PRIMARY KEY (tenant_id, key, window_epoch, node_id)
+);
+CREATE INDEX IF NOT EXISTS idx_rate_consumption_updated ON rate_consumption(updated_at);
+
+CREATE TABLE IF NOT EXISTS cost_consumption (
+    tenant_id  TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    node_id    TEXT NOT NULL,
+    consumed   REAL NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, session_id, node_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cost_consumption_updated ON cost_consumption(updated_at);
 `
 
 // Migrate creates the schema. Idempotent (CREATE ... IF NOT EXISTS), so it is
@@ -528,6 +549,166 @@ func rowsAffected(res sql.Result) int {
 		return 0
 	}
 	return int(n)
+}
+
+// --- multi-node reconciliation (v1.0) ---
+//
+// RateConsumption and CostConsumption back multi-node rate-limit / session-cost
+// reconciliation. They are DELIBERATELY NOT part of the exported store.Store
+// interface (CLAUDE.md §4 v1.0 lock: store.Store gains no methods). The concrete
+// *SQLiteStore and *PostgresStore carry the six Upsert/Load/Purge methods, and
+// pkg/persist reaches them through an unexported capability interface (mirroring
+// cmd/agentguard's persistentStore pattern). Everything here is cold-path,
+// written and read only by the background reconcile syncer.
+
+// RateConsumption is one node's ABSOLUTE cumulative consumption of a rate-limit
+// bucket within a fixed window (epoch). Rows are summed per (tenant, key, epoch)
+// across nodes to derive cluster-wide consumption; each node upserts only its own
+// (…, node_id) row, so writes are idempotent last-writer-wins with no
+// read-modify-write race. The tenant_id is part of the PK (zero-trust §3).
+type RateConsumption struct {
+	TenantID    string
+	Key         string
+	WindowEpoch time.Time
+	NodeID      string
+	Consumed    int
+	UpdatedAt   time.Time
+}
+
+// CostConsumption is one node's ABSOLUTE cumulative cost reservation for a
+// (tenant, session). Session cost is monotonic within a session, so no window is
+// needed. tenant_id is part of the PK (zero-trust §3).
+type CostConsumption struct {
+	TenantID  string
+	SessionID string
+	NodeID    string
+	Consumed  float64
+	UpdatedAt time.Time
+}
+
+func (s *SQLiteStore) UpsertRateConsumption(ctx context.Context, rows []RateConsumption) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	for i := range rows {
+		if rows[i].TenantID == "" {
+			return ErrTenantRequired
+		}
+	}
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		stmt, err := tx.PrepareContext(ctx, `
+			INSERT INTO rate_consumption (tenant_id, key, window_epoch, node_id, consumed, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT(tenant_id, key, window_epoch, node_id) DO UPDATE SET
+				consumed=excluded.consumed, updated_at=excluded.updated_at`)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = stmt.Close() }()
+		for _, r := range rows {
+			if _, err := stmt.ExecContext(ctx,
+				r.TenantID, r.Key, fmtTime(r.WindowEpoch), r.NodeID, r.Consumed, fmtTime(r.UpdatedAt),
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (s *SQLiteStore) LoadRateConsumption(ctx context.Context) ([]RateConsumption, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT tenant_id, key, window_epoch, node_id, consumed, updated_at FROM rate_consumption`)
+	if err != nil {
+		return nil, fmt.Errorf("store: load rate_consumption: %w", err)
+	}
+	defer rows.Close()
+
+	var out []RateConsumption
+	for rows.Next() {
+		var (
+			r              RateConsumption
+			epoch, updated string
+		)
+		if err := rows.Scan(&r.TenantID, &r.Key, &epoch, &r.NodeID, &r.Consumed, &updated); err != nil {
+			return out, fmt.Errorf("store: scan rate_consumption: %w", err)
+		}
+		r.WindowEpoch = parseTime(epoch)
+		r.UpdatedAt = parseTime(updated)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) PurgeRateConsumption(ctx context.Context, cutoff time.Time) (int, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM rate_consumption WHERE updated_at != '' AND updated_at < ?`, fmtTime(cutoff))
+	if err != nil {
+		return 0, fmt.Errorf("store: purge rate_consumption: %w", err)
+	}
+	return rowsAffected(res), nil
+}
+
+func (s *SQLiteStore) UpsertCostConsumption(ctx context.Context, rows []CostConsumption) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	for i := range rows {
+		if rows[i].TenantID == "" {
+			return ErrTenantRequired
+		}
+	}
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		stmt, err := tx.PrepareContext(ctx, `
+			INSERT INTO cost_consumption (tenant_id, session_id, node_id, consumed, updated_at)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(tenant_id, session_id, node_id) DO UPDATE SET
+				consumed=excluded.consumed, updated_at=excluded.updated_at`)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = stmt.Close() }()
+		for _, r := range rows {
+			if _, err := stmt.ExecContext(ctx,
+				r.TenantID, r.SessionID, r.NodeID, r.Consumed, fmtTime(r.UpdatedAt),
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (s *SQLiteStore) LoadCostConsumption(ctx context.Context) ([]CostConsumption, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT tenant_id, session_id, node_id, consumed, updated_at FROM cost_consumption`)
+	if err != nil {
+		return nil, fmt.Errorf("store: load cost_consumption: %w", err)
+	}
+	defer rows.Close()
+
+	var out []CostConsumption
+	for rows.Next() {
+		var (
+			r       CostConsumption
+			updated string
+		)
+		if err := rows.Scan(&r.TenantID, &r.SessionID, &r.NodeID, &r.Consumed, &updated); err != nil {
+			return out, fmt.Errorf("store: scan cost_consumption: %w", err)
+		}
+		r.UpdatedAt = parseTime(updated)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) PurgeCostConsumption(ctx context.Context, cutoff time.Time) (int, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM cost_consumption WHERE updated_at != '' AND updated_at < ?`, fmtTime(cutoff))
+	if err != nil {
+		return 0, fmt.Errorf("store: purge cost_consumption: %w", err)
+	}
+	return rowsAffected(res), nil
 }
 
 // Verify SQLiteStore satisfies the full Store interface at compile time.

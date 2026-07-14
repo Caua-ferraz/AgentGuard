@@ -944,6 +944,64 @@ func (e *Engine) RestoreCosts(snaps []CostSnapshot) {
 	}
 }
 
+// costApplyChunk bounds how many CostDelta entries ApplyCostDeltas processes
+// under a single write-lock acquisition. checkCost also takes e.mu for write;
+// holding it for a whole O(n) reconcile pass would serialize cost-scoped checks
+// behind reconcile and threaten the hot-path budget (CLAUDE.md §1). We acquire,
+// apply K, release, repeat.
+const costApplyChunk = 128
+
+// CostDelta is a background adjustment to one (tenant, session) cost
+// accumulator. CostAdjust is signed; a POSITIVE value adds other nodes' spend
+// into this node's local accumulator so the max_per_session compare in checkCost
+// sees the approximate cluster-wide session cost (multi-node reconcile). It is
+// applied by ApplyCostDeltas, never on the request path.
+type CostDelta struct {
+	Tenant     string
+	Session    string
+	CostAdjust float64
+}
+
+// ApplyCostDeltas folds background cost adjustments into the session-cost
+// accumulator in bounded, chunked write-lock acquisitions. It is the write half
+// of multi-node cost reconciliation and runs ONLY on the background syncer
+// goroutine — never on the /v1/check hot path.
+//
+// Semantics (CLAUDE.md §1/§3/§4 safe):
+//   - Partitioned by (tenant, session): a delta for tenant A can never move
+//     tenant B's budget (the same zero-trust key used by checkCost).
+//   - Chunked locking: at most costApplyChunk (K≈128) entries per lock hold, so
+//     a concurrent cost Check blocks for O(K), not O(n).
+//   - Zero-adjust deltas are skipped, so a no-change reconcile cycle (e.g. the
+//     single-node case where other-node spend is always zero) leaves lastUpdated
+//     untouched and is behavior-identical to reconcile being disabled.
+//   - Clamped >= 0 so a (refund-driven) negative adjust cannot push a session
+//     cost below zero.
+func (e *Engine) ApplyCostDeltas(deltas []CostDelta) {
+	now := time.Now()
+	for i := 0; i < len(deltas); i += costApplyChunk {
+		end := i + costApplyChunk
+		if end > len(deltas) {
+			end = len(deltas)
+		}
+		e.mu.Lock()
+		for _, d := range deltas[i:end] {
+			if d.CostAdjust == 0 {
+				continue
+			}
+			key := sessionCostKey{tenant: d.Tenant, session: d.Session}
+			entry := e.sessionCosts[key]
+			entry.cost += d.CostAdjust
+			if entry.cost < 0 {
+				entry.cost = 0
+			}
+			entry.lastUpdated = now
+			e.sessionCosts[key] = entry
+		}
+		e.mu.Unlock()
+	}
+}
+
 // Policy returns the currently active policy for the local tenant
 // (thread-safe). Returns nil only if the provider's most recent Get
 // surfaced ErrTenantNotFound for the local tenant; this should not

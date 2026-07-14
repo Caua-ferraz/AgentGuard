@@ -1477,6 +1477,107 @@ func (q *ApprovalQueue) Restore(actions []*PendingAction) {
 	}
 }
 
+// remoteApplyChunk bounds how many remote approval records ApplyRemote merges
+// under a single q.mu write-lock acquisition. The hot-path Lookup takes
+// q.mu.RLock; holding the write lock for a whole O(n) re-hydrate pass would
+// stall every concurrent Lookup (CLAUDE.md §1). We acquire, merge ≤K, release,
+// repeat — mirroring ratelimit.applyChunk and policy.costApplyChunk (K=128).
+const remoteApplyChunk = 128
+
+// ApplyRemote merges remote approval records (loaded from the shared durable
+// store by the background reconcile goroutine) into the local queue. It is the
+// write half of multi-node approval cross-node visibility (v1.0) and runs ONLY
+// on that background goroutine — NEVER on the /v1/check hot path, so it adds no
+// request-path latency. The hot-path Lookup stays a pure in-memory RLock read
+// and is unchanged.
+//
+// Each element is a remote view of one entry, tenant-normalized exactly as the
+// queue stores it (the local tenant as ""), so the effective merge key is
+// (tenant, ID) and a remote row for tenant X can only ever touch entry (X, ID)
+// — no cross-tenant surfacing (CLAUDE.md §3).
+//
+// Locking: at most remoteApplyChunk (K=128) records are merged per write-lock
+// hold, so a concurrent Lookup blocks for O(K) map ops, not O(n).
+//
+// Per-key merge rules (fail-closed — the security crux). For each remote record
+// r the CURRENT local entry l is re-read UNDER the write lock (never from a
+// stale snapshot), so a concurrent local Resolve remains authoritative:
+//
+//   - l absent:                     INSERT r (respecting maxSize, like Restore).
+//   - l pending, r resolved:        adopt r (copy Decision+ResolvedAt+Result) — the visibility goal.
+//   - l resolved, r pending:        KEEP l — never resurrect a resolved action.
+//   - both resolved, diff decision: DENY wins, regardless of ResolvedAt (a deny is never overwritten by a remote allow).
+//   - both resolved, same decision: KEEP l — ResolvedAt is a tiebreak only; state is identical.
+//   - both pending:                 KEEP l — nothing to surface yet.
+//
+// A record whose ID is absent from `remote` is never passed here, so an
+// unflushed local-only pending survives untouched (the no-clobber guarantee).
+func (q *ApprovalQueue) ApplyRemote(remote []*PendingAction) {
+	for i := 0; i < len(remote); i += remoteApplyChunk {
+		end := i + remoteApplyChunk
+		if end > len(remote) {
+			end = len(remote)
+		}
+		q.mu.Lock()
+		for _, r := range remote[i:end] {
+			if r == nil {
+				continue
+			}
+			l, ok := q.pending[r.ID]
+			if !ok {
+				// exists remote, not local => INSERT, honoring the cap exactly as
+				// Restore does (drop when full — never evict a live entry here).
+				if q.maxSize > 0 && len(q.pending) >= q.maxSize {
+					continue
+				}
+				cp := *r
+				q.pending[r.ID] = &cp
+				continue
+			}
+			// A local entry sharing r's raw ID but owned by a DIFFERENT tenant
+			// must never be rewritten by r (CLAUDE.md §3). The store PKs approvals
+			// on (tenant_id, id), so two tenants can legitimately share a raw ID;
+			// the local map is keyed by ID alone, so guard here. Mismatch => leave
+			// the local entry alone (r is dropped rather than surfaced cross-tenant).
+			if !tenantsMatch(l.TenantID, r.TenantID) {
+				continue
+			}
+			mergeRemoteLocked(l, r)
+		}
+		q.mu.Unlock()
+	}
+}
+
+// mergeRemoteLocked applies the per-key merge rules for one remote record r
+// whose tenant already matches the live local entry l. Caller holds q.mu.Lock.
+// It mutates l in place; it never resurrects a resolved action and never lets a
+// remote allow overwrite a local deny (fail-closed).
+func mergeRemoteLocked(l, r *PendingAction) {
+	switch {
+	case !l.Resolved && r.Resolved:
+		// local pending, remote resolved => adopt the remote resolution.
+		l.Resolved = true
+		l.Decision = r.Decision
+		l.ResolvedAt = r.ResolvedAt
+		l.Result = r.Result
+	case l.Resolved && r.Resolved && l.Decision != r.Decision:
+		// Conflicting resolutions => DENY wins, regardless of ResolvedAt. Canonical
+		// decisions are only ALLOW/DENY, so a differing pair is exactly one of
+		// each; adopt the remote ONLY when it is the deny (local already-deny, or a
+		// non-canonical remote, is kept — never downgraded to a remote allow).
+		if l.Decision != string(policy.Deny) && r.Decision == string(policy.Deny) {
+			l.Resolved = true
+			l.Decision = r.Decision
+			l.ResolvedAt = r.ResolvedAt
+			l.Result = r.Result
+		}
+	default:
+		// l resolved & r pending           => keep l (never resurrect).
+		// both resolved, same decision       => keep l (identical state).
+		// both pending                        => keep l (nothing to surface).
+	}
+}
+
 // Subscribe registers an SSE watcher that receives only events for tenantID.
 // The legacy /api/stream route subscribes as LocalTenantID.
 func (q *ApprovalQueue) Subscribe(tenantID string) chan AuditEvent {

@@ -85,6 +85,14 @@ func main() {
 	storeDSN := serveCmd.String("store-dsn", "", "Durable store DSN. Empty => zero-config SQLite at <data-dir>/agentguard.db; a sqlite file path is also accepted. (Postgres is future work.)")
 	dataDir := serveCmd.String("data-dir", ".", "Directory for the zero-config SQLite database (agentguard.db). Ignored when --store-dsn is set or --persist=false.")
 	auditBackend := serveCmd.String("audit-backend", "file", `Audit storage: "file" (JSONL, default) or "store" (the SQLite store — unifies state+audit in one DB with indexed queries). "store" requires --persist.`)
+	// Multi-node reconciliation (v1.0). When multiple AgentGuard nodes share a
+	// durable store, a background reconcile loop converges each node's local
+	// rate-limit / session-cost view toward the cluster-wide total (bounded
+	// overshoot ~= reconcile-interval x rate x nodes). It is off the /v1/check hot
+	// path (Snapshot-diff + chunked write-back). On a single node the "others"
+	// sum is always zero, so this is a behavioral no-op regardless of interval.
+	nodeID := serveCmd.String("node-id", defaultNodeID(), "Stable identifier for THIS node in multi-node reconciliation. Defaults to the OS hostname. Each node MUST have a distinct id; an empty value disables reconciliation.")
+	reconcileInterval := serveCmd.Duration("reconcile-interval", 2*time.Second, "Cadence of the background multi-node rate-limit/cost reconciliation loop. Takes effect ONLY with a Postgres --store-dsn (multi-node topology); on the zero-config single-node SQLite backend reconciliation never starts regardless of this value. 0 disables it.")
 
 	validateCmd := flag.NewFlagSet("validate", flag.ExitOnError)
 	validateFile := validateCmd.String("policy", "configs/default.yaml", "Policy file to validate")
@@ -148,10 +156,12 @@ func main() {
 			Enabled: *debugPprof,
 			Port:    *debugPprofPort,
 		}, persistOpts{
-			Enabled:      *persistEnabled,
-			DSN:          *storeDSN,
-			DataDir:      *dataDir,
-			AuditBackend: *auditBackend,
+			Enabled:           *persistEnabled,
+			DSN:               *storeDSN,
+			DataDir:           *dataDir,
+			AuditBackend:      *auditBackend,
+			NodeID:            *nodeID,
+			ReconcileInterval: *reconcileInterval,
 		})
 
 	case "validate":
@@ -271,17 +281,60 @@ type persistOpts struct {
 	DSN          string
 	DataDir      string
 	AuditBackend string // "file" | "store"
+
+	// Multi-node reconciliation (v1.0). NodeID identifies this node; empty or a
+	// zero ReconcileInterval disables reconciliation (single-node behavior).
+	NodeID            string
+	ReconcileInterval time.Duration
 }
 
-// openStore opens the durable store described by cfg. An empty DSN selects the
-// zero-config embedded SQLite database at <data-dir>/agentguard.db; a non-empty
-// DSN is treated as a SQLite path (Postgres is rejected for now). Returns the
-// concrete *SQLiteStore (which satisfies both store.Store for the syncer/audit
-// AND policy.PolicySource for the multi-tenant provider) plus the resolved
-// path for logging.
-func openStore(cfg persistOpts) (*store.SQLiteStore, string, error) {
-	if strings.HasPrefix(cfg.DSN, "postgres") || strings.HasPrefix(cfg.DSN, "postgresql") {
-		return nil, "", fmt.Errorf("--store-dsn %q: external Postgres DSNs are not supported yet; leave empty for zero-config SQLite", cfg.DSN)
+// defaultNodeID returns the OS hostname as the default multi-node node id,
+// falling back to "node" when the hostname is unavailable. Operators override it
+// with --node-id; each node in a cluster MUST have a distinct value.
+func defaultNodeID() string {
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "node"
+}
+
+// persistentStore is the internal backend contract openStore returns: the
+// durable store.Store PLUS the tenant-policy methods its consumers depend on —
+// policy.PolicySource (for the MultiTenantProvider) and PutPolicy/DeletePolicy
+// (for the `tenant` CLI). Both *store.SQLiteStore and *store.PostgresStore
+// satisfy it. This is an UNEXPORTED, package-main type and NOT part of the
+// frozen v1.0 surface; the exported store.Store interface is unchanged. The
+// PolicySource methods (GetPolicyYAML/ListPolicyTenants) come in via the
+// embedded policy.PolicySource and are not re-declared here.
+type persistentStore interface {
+	store.Store
+	policy.PolicySource
+	PutPolicy(ctx context.Context, tenantID string, policyYAML []byte) error
+	DeletePolicy(ctx context.Context, tenantID string) (bool, error)
+}
+
+// openStore opens the durable store described by cfg. A DSN whose scheme is
+// postgres:// or postgresql:// selects the multi-node PostgresStore; an empty
+// DSN selects the zero-config embedded SQLite database at
+// <data-dir>/agentguard.db; any other DSN is treated as a SQLite path. Returns
+// a persistentStore (store.Store for the syncer/audit AND the tenant-policy
+// methods for the multi-tenant provider / CLI) plus the resolved DSN/path for
+// logging.
+// isPostgresDSN reports whether dsn selects the multi-node PostgresStore (a
+// postgres:// / postgresql:// URL). Used both to pick the backend in openStore
+// and to gate multi-node reconciliation, which is a Postgres-only feature: the
+// zero-config single-node SQLite default must stay I/O-identical to pre-1-R.
+func isPostgresDSN(dsn string) bool {
+	return strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://")
+}
+
+func openStore(cfg persistOpts) (persistentStore, string, error) {
+	if isPostgresDSN(cfg.DSN) {
+		s, err := store.NewPostgresStore(cfg.DSN)
+		if err != nil {
+			return nil, "", err
+		}
+		return s, cfg.DSN, nil
 	}
 	path := cfg.DSN
 	if path == "" {
@@ -292,7 +345,10 @@ func openStore(cfg persistOpts) (*store.SQLiteStore, string, error) {
 		path = filepath.Join(dir, "agentguard.db")
 	}
 	s, err := store.NewSQLiteStore(path)
-	return s, path, err
+	if err != nil {
+		return nil, "", err
+	}
+	return s, path, nil
 }
 
 func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts, persistCfg persistOpts) {
@@ -341,7 +397,7 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 	// — via Go's LIFO defer order — the store is the LAST thing torn down, after
 	// the syncer's final flush and the buffered audit logger's drain (both
 	// registered later) have written through it.
-	var st *store.SQLiteStore
+	var st persistentStore
 	var storePath string
 	storeAudit := persistCfg.Enabled && persistCfg.AuditBackend == "store"
 	if persistCfg.Enabled {
@@ -523,6 +579,17 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 	// performs a final flush; registered AFTER store.Close (defer LIFO) so the
 	// final flush writes through a still-open store.
 	if persistCfg.Enabled {
+		// Multi-node reconciliation is a POSTGRES-ONLY feature (v1.0). The
+		// zero-config single-node SQLite backend is the locked, supported default
+		// and must stay I/O-identical to pre-1-R — so we force the interval to 0
+		// for SQLite, which trips the syncer's `ReconcileInterval>0` gate and the
+		// reconcile ticker never starts (no consumption-table writes, no GC).
+		// Tests arm reconcile on SQLite by setting Config.ReconcileInterval
+		// directly; only this production wiring is gated.
+		reconcileInterval := persistCfg.ReconcileInterval
+		if !isPostgresDSN(persistCfg.DSN) {
+			reconcileInterval = 0
+		}
 		syncer := persist.New(persist.Config{
 			Store:       st,
 			Engine:      engine,
@@ -531,6 +598,10 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 			CostTTL:     sessionCostTTL, // matches in-memory sweeper (0 = keep)
 			ApprovalTTL: 24 * time.Hour, // resolved approvals retained 24h
 			BucketTTL:   time.Hour,      // fully-refilled buckets reaped after 1h
+			// Multi-node reconciliation (v1.0). Armed only when the interval is >0
+			// (Postgres backend) AND the store supports it; SQLite => 0 => disabled.
+			NodeID:            persistCfg.NodeID,
+			ReconcileInterval: reconcileInterval,
 		})
 		hctx, hcancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := syncer.Hydrate(hctx); err != nil {
@@ -540,6 +611,9 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		syncer.Start()
 		defer syncer.Close()
 		log.Printf("Persistence: enabled (store=%s, audit-backend=%s)", storePath, persistCfg.AuditBackend)
+		if reconcileInterval > 0 && persistCfg.NodeID != "" {
+			log.Printf("Multi-node reconciliation: enabled (node-id=%s interval=%s, Postgres backend)", persistCfg.NodeID, reconcileInterval)
+		}
 	} else {
 		log.Printf("Persistence: disabled (--persist=false); runtime state is in-memory only")
 	}

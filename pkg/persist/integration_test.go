@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
 	"github.com/Caua-ferraz/AgentGuard/pkg/notify"
@@ -72,7 +73,15 @@ func newITServer(t *testing.T, st store.Store, overflowDir string) *itServer {
 		Engine: eng, Logger: buflog, DashboardEnabled: true, Notifier: disp,
 		APIKey: itAPIKey, BaseURL: "http://127.0.0.1:0", Version: "it",
 	})
-	sy := New(Config{Store: st, Engine: eng, Limiter: srv.Limiter(), Approvals: srv.ApprovalQueue()})
+	// Reconciliation ARMED (v1.0): NodeID + a fast ReconcileInterval so the
+	// background reconcile loop runs during the hot-path latency test and proves
+	// it stays off the /v1/check path (the p99<3ms gate below). Single node =>
+	// others=0 => behavioral no-op, but the loop still does its Snapshot-diff +
+	// store round-trips on a background goroutine.
+	sy := New(Config{
+		Store: st, Engine: eng, Limiter: srv.Limiter(), Approvals: srv.ApprovalQueue(),
+		NodeID: "it-node", ReconcileInterval: 100 * time.Millisecond, BucketTTL: time.Hour, CostTTL: time.Hour,
+	})
 	ts := httptest.NewServer(srv.Handler())
 	return &itServer{srv: srv, eng: eng, sy: sy, ts: ts, disp: disp, buflog: buflog}
 }
@@ -190,9 +199,20 @@ func TestIntegration_HotPathLatencyWithPersistence(t *testing.T) {
 		s.postCheck(t, `{"scope":"shell","command":"ls -la","agent_id":"warm"}`)
 	}
 
-	// Measure the SERVER's self-reported processing time (X-AgentGuard-Total-Ms)
-	// over many requests — this is the hot path, excluding httptest/network.
-	const n = 300
+	// --- Signal 1: the SERVER's self-reported processing time -----------------
+	// X-AgentGuard-Total-Ms over many requests — the hot path, excluding
+	// httptest/network. This stays the ENFORCED budget guard (assertion below,
+	// unchanged: p99 < 3ms).
+	//
+	// Caveat this test used to hide: the server derives that header from
+	// duration.Microseconds() (truncated to whole µs) and, on a coarse monotonic
+	// clock (Windows advances it only at the ~0.5ms system-timer tick), a ~µs
+	// handler reads 0 — so p99 floored to "0.000ms". We now (a) sample many more
+	// requests so the p99 is representative and (b) report in µs. On Linux CI the
+	// header resolves to real µs; on a coarse clock it stays 0 (unmeasurable at
+	// the source, since the server already truncated it), which is exactly why
+	// Signal 2 below exists as the legible, cross-platform headline.
+	const n = 1500
 	samples := make([]float64, 0, n)
 	for i := 0; i < n; i++ {
 		_, _, h := s.postCheck(t, `{"scope":"shell","command":"ls -la","agent_id":"lat"}`)
@@ -206,10 +226,47 @@ func TestIntegration_HotPathLatencyWithPersistence(t *testing.T) {
 	p50 := samples[len(samples)*50/100]
 	p99 := samples[len(samples)*99/100]
 	max := samples[len(samples)-1]
-	t.Logf("hot-path /v1/check with persistence ON: p50=%.3fms p99=%.3fms max=%.3fms (n=%d)", p50, p99, max, n)
+	t.Logf("server hot-path /v1/check (network-excluded, X-AgentGuard-Total-Ms): p50=%.1fµs p99=%.1fµs max=%.1fµs (n=%d)",
+		p50*1000, p99*1000, max*1000, n)
 
 	// Contract: <3ms p99. The store is write-behind, so it must not appear here.
 	if p99 >= 3.0 {
 		t.Errorf("hot-path p99 = %.3fms violates the <3ms budget with persistence on", p99)
 	}
+
+	// --- Signal 2: client-observed per-op latency, ns-precision, adaptive ------
+	// The header above is µs-granular and floors to 0 on a coarse clock, so it is
+	// not a legible headline. Here we measure the /v1/check round-trip latency at
+	// nanosecond precision: on a fine clock each sample is one round-trip; on a
+	// coarse clock the sampler groups enough round-trips for the monotonic clock
+	// to advance and records the mean-per-op. The reported p99 is therefore always
+	// non-zero and legible in µs, which makes this test load-bearing on every OS.
+	const clientTarget = 500
+	cs := make([]time.Duration, 0, clientTarget)
+	roundTrips := 0
+	for len(cs) < clientTarget && roundTrips < 40_000 {
+		start := time.Now()
+		calls := 0
+		var elapsed time.Duration
+		for {
+			s.postCheck(t, `{"scope":"shell","command":"ls -la","agent_id":"lat"}`)
+			calls++
+			elapsed = time.Since(start)
+			if elapsed > 0 || calls >= 100_000 {
+				break
+			}
+		}
+		roundTrips += calls
+		cs = append(cs, elapsed/time.Duration(calls))
+	}
+	if len(cs) < 100 {
+		t.Fatalf("collected only %d client latency samples (want >=100)", len(cs))
+	}
+	sort.Slice(cs, func(i, j int) bool { return cs[i] < cs[j] })
+	us := func(d time.Duration) float64 { return float64(d.Nanoseconds()) / 1000.0 }
+	cp50 := cs[len(cs)*50/100]
+	cp99 := cs[len(cs)*99/100]
+	cmax := cs[len(cs)-1]
+	t.Logf("client-observed /v1/check per-op latency (ns-precision, adaptive): p50=%.3fµs p99=%.3fµs max=%.3fµs (samples=%d, round-trips=%d)",
+		us(cp50), us(cp99), us(cmax), len(cs), roundTrips)
 }
