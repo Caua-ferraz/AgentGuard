@@ -19,7 +19,17 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Cross-platform coverage for the Go suite ONLY. The other jobs stay
+    # ubuntu-latest: they are ecosystem/service-specific (Docker, Postgres
+    # service container, Python/Node toolchains) and matrixing them adds
+    # runner queue time + flakes without adding firewall coverage.
+    # fail-fast: false so one OS leg failing does not cancel the others —
+    # we want to see whether a break is Windows-only or all-platform.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,22 +39,28 @@ jobs:
           go-version: '1.25.11'
 
       - name: Build
+        shell: bash
         run: go build -v ./...
 
       - name: Test
+        shell: bash
         run: go test -v -race -coverprofile=coverage.out ./...
 
       - name: Upload coverage
         uses: actions/upload-artifact@v4
         with:
-          name: go-coverage
+          # Per-OS name: upload-artifact@v4 rejects two uploads sharing one
+          # name within a run, so the matrix legs must not collide.
+          name: go-coverage-${{ matrix.os }}
           path: coverage.out
           if-no-files-found: warn
 
       - name: Validate default policy
+        shell: bash
         run: go run ./cmd/agentguard validate --policy configs/default.yaml
 
       - name: Validate example policies
+        shell: bash
         run: |
           for f in configs/examples/*.yaml; do
             echo "Validating $f..."
@@ -162,23 +178,32 @@ jobs:
   # framework extra and runs only its targeted integration test file —
   # keeps install time bounded and isolates per-framework breakage.
   #
-  # Non-blocking on PRs (`continue-on-error: true`) for the v0.5 cycle.
-  # Decision recorded in .audit/v05_decisions.md under "Integration-tests
-  # CI job non-blocking". v0.6 follow-up issue title:
-  #   "ci: make integration-tests job a required check after one full
-  #    week of green"
+  # Per-matrix blocking as of v1.0 (sub-task 2d): langchain and crewai are
+  # REQUIRED (allow_failure: false ⇒ a red leg fails CI); browser-use stays
+  # advisory (allow_failure: true) because its `playwright install` pulls
+  # ~200MB of Chromium from a CDN and is the known flake. Original v0.5
+  # decision (whole job non-blocking) recorded in .audit/v05_decisions.md
+  # under "Integration-tests CI job non-blocking".
   #
   # The browser-use leg additionally requires Chromium binaries via
   # `playwright install`; if that step fails (network flake, missing
-  # libs), only that matrix row goes red.
+  # libs), only that matrix row goes red — and it does not fail CI.
   integration-tests:
     runs-on: ubuntu-latest
-    # Non-blocking for v0.5; weekly cron + manual review surface failures.
-    continue-on-error: true
+    # Per-matrix gating: langchain/crewai red ⇒ CI red; browser-use red ⇒
+    # CI still green. Driven by the allow_failure flag on each matrix entry.
+    continue-on-error: ${{ matrix.allow_failure }}
     strategy:
       fail-fast: false
       matrix:
         framework: [langchain, crewai, browser-use]
+        include:
+          - framework: langchain
+            allow_failure: false
+          - framework: crewai
+            allow_failure: false
+          - framework: browser-use
+            allow_failure: true
     steps:
       - uses: actions/checkout@v4
 

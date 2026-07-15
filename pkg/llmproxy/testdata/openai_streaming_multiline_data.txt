@@ -1,0 +1,19 @@
+: Synthesized 2026-07-14 to exercise SSE-spec framing the mainstream
+: providers do not normally emit but the parser must survive: a single
+: event whose JSON payload is split across TWO `data:` lines (the SSE
+: spec joins multiple data: lines with '\n'; the join point here is
+: between JSON tokens, so the assembled payload is still valid JSON).
+: A bare `:` comment precedes it. One tool_call (noop, {}) is carried
+: whole in the multi-line event, then finish_reason:tool_calls and
+: data: [DONE]. NOTE: not real provider behavior -- a robustness
+: fixture for extractOpenAIDataLine's multi-line data: handling.
+
+: comment before a multiline-data event
+
+data: {"id":"chatcmpl-ml","object":"chat.completion.chunk","created":1730500300,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_ml","type":"function",
+data: "function":{"name":"noop","arguments":"{}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ml","object":"chat.completion.chunk","created":1730500300,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+

@@ -1,0 +1,18 @@
+: Synthesized 2026-07-14 from the OpenAI Chat Completions streaming
+: reference (docs/LLM_API_PROXY.md section 5.1). Realism coverage: a
+: no-parameter tool_call (get_time). OpenAI still streams the empty
+: object as arguments, here split across two fragments "{" then "}"
+: that assemble to {}. finish_reason:tool_calls, then data: [DONE].
+
+data: {"id":"chatcmpl-Empty","object":"chat.completion.chunk","created":1730500200,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"role":"assistant","content":null},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Empty","object":"chat.completion.chunk","created":1730500200,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_time0","type":"function","function":{"name":"get_time","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Empty","object":"chat.completion.chunk","created":1730500200,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Empty","object":"chat.completion.chunk","created":1730500200,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Empty","object":"chat.completion.chunk","created":1730500200,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+

@@ -105,6 +105,17 @@ func parsePolicyBytes(data []byte) (*Policy, error) {
 	if err := errorTimeWindowOnlyConditions(&pol); err != nil {
 		return nil, err
 	}
+
+	// Fold rule domains to lower case once (case-insensitive domain matching;
+	// see normalizeRuleDomains). Mirrors LoadFromFile so every YAML->Policy
+	// path — file load, multi-tenant store load, and Validate — is consistent.
+	normalizeRuleDomains(&pol)
+
+	// Non-fatal lint: warn on path patterns whose '*' recurses across '/'.
+	for _, w := range lintPathPatterns(&pol) {
+		log.Print(w)
+	}
+
 	return &pol, nil
 }
 

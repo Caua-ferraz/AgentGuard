@@ -424,17 +424,26 @@ func (s *Server) runOpenAIStreamLoop(w http.ResponseWriter, flusher http.Flusher
 
 		if len(event) > 0 {
 			result, ferr := acc.FeedEvent(event)
-			if ferr != nil {
-				// Malformed delta — drop the event and continue. We
-				// do NOT inject our own bytes into the stream (would
-				// violate byte-identity for following events). Skip
-				// silently; corruption affecting decisions surfaces
-				// as a denied/missing tool_call later.
-				if !isEOF {
-					continue
-				}
+			if ferr != nil && !result.Completed && !isEOF {
+				// Malformed NON-completion delta — drop the event and
+				// continue. We do NOT inject our own bytes into the
+				// stream (would violate byte-identity for following
+				// events). Corruption that affects a decision surfaces
+				// at completion (handled fail-closed below), not here.
+				continue
 			}
 			switch {
+			case ferr != nil && result.Completed:
+				// F1 (fail-closed): a finalized tool_call cycle whose
+				// assembled arguments are not valid JSON (truncated /
+				// malformed — routine on a max_tokens cutoff, or
+				// attacker-inducible). Such a completion MUST deny, never
+				// be silently dropped: dropping leaves the gate un-run,
+				// writes no audit entry, and strands the accumulator so
+				// every later event is buffered then dropped at EOF (the
+				// firewall goes dark with no trail). See denyMalformedOpenAI.
+				s.denyMalformedOpenAI(w, flusher, r, acc, result.CompletedToolCalls)
+
 			case result.OverflowBufferBytes:
 				metrics.IncLLMProxyBufferOverflow("openai")
 				refusal := s.buildRefusal("openai", Decision{
@@ -542,6 +551,72 @@ func (s *Server) gateAndFlushOpenAI(w http.ResponseWriter, flusher http.Flusher,
 	return true
 }
 
+// malformedToolCallDecision is the fail-closed verdict the streaming
+// orchestrator stamps when a finalized tool_call/tool_use cycle carries
+// a parse error (its assembled arguments are not valid JSON — e.g. a
+// max_tokens-truncated tool call, routine OR attacker-inducible). F1:
+// such a completion must DENY, never be silently dropped. The Rule is a
+// stable, tenant-agnostic string operators can alert on.
+func malformedToolCallDecision() Decision {
+	return Decision{
+		Allow:  false,
+		Reason: "malformed tool call arguments — refused",
+		Rule:   "deny:llm_api_proxy:malformed_tool_call",
+	}
+}
+
+// auditDeniedToolCalls runs the SAME PolicyCheck the normal gate runs
+// for each supplied tool call, purely to drive the audit trail: the
+// wired PolicyCheck POSTs to /v1/check, which writes the transport-
+// tagged audit entry (the proxy never emits audit entries directly —
+// single source of truth, see server.go). The returned decision and any
+// error are intentionally ignored — the F1 malformed-completion path
+// that calls this forces an unconditional fail-closed refusal — but the
+// call still closes the audit gap the pre-fix silent drop left open.
+//
+// It sets the same tenant/agent/session identity fields gateAndFlush*
+// sets so the audit entry is attributed identically to a normal deny.
+// Runs only on the (rare) malformed-completion path, never the happy
+// path, so it adds no per-event work to the hot loop.
+func (s *Server) auditDeniedToolCalls(r *http.Request, calls []ToolCallCheck) {
+	for i := range calls {
+		calls[i].TenantID = s.cfg.TenantID
+		calls[i].AgentID = strings.TrimSpace(r.Header.Get("X-Agent-ID"))
+		if calls[i].AgentID == "" {
+			calls[i].AgentID = "llm-proxy"
+		}
+		calls[i].SessionID = strings.TrimSpace(r.Header.Get("X-Session-ID"))
+		calls[i].Stream = true
+		_, _ = s.runPolicyCheck(r.Context(), calls[i])
+	}
+}
+
+// denyMalformedOpenAI is the F1 fail-closed path for the OpenAI loop: a
+// finalized tool_call cycle whose assembled arguments are not valid
+// JSON. It (1) audits each malformed call through the normal PolicyCheck
+// path (auditDeniedToolCalls), (2) emits a fail-closed refusal with the
+// fixed malformed_tool_call Decision regardless of the check's verdict,
+// (3) flushes, and (4) resets the accumulator. Unlike the overflow /
+// normal-deny branches it does NOT stop reading upstream: a later valid
+// tool_call in the same response must still be gated (the reset is what
+// un-sticks the accumulator). Buffered events (the malformed cycle's raw
+// bytes) are discarded, not flushed — the refusal replaces them.
+func (s *Server) denyMalformedOpenAI(w http.ResponseWriter, flusher http.Flusher, r *http.Request, acc *OpenAIToolCallAccumulator, calls []ToolCallCheck) {
+	s.auditDeniedToolCalls(r, calls)
+	var original ToolCallCheck
+	if len(calls) > 0 {
+		original = calls[0]
+	}
+	refusal := s.buildRefusal("openai", malformedToolCallDecision(), &RefusalContext{
+		Provider:              "openai",
+		OriginalToolCall:      original,
+		AnthropicToolUseIndex: -1,
+	})
+	_, _ = w.Write(refusal)
+	flusher.Flush()
+	acc.Reset()
+}
+
 // fallbackFailModeRule returns the rule string the streaming
 // orchestrator uses when the wired PolicyCheck returns an error WITHOUT
 // a populated Decision (e.g. test shims). Production code paths get
@@ -584,10 +659,19 @@ func (s *Server) runAnthropicStreamLoop(w http.ResponseWriter, flusher http.Flus
 
 		if len(event) > 0 {
 			result, ferr := acc.FeedEvent(event)
-			if ferr != nil && !isEOF {
+			if ferr != nil && !result.Completed && !isEOF {
+				// Malformed NON-completion delta — drop and continue
+				// (mirrors the OpenAI loop). A malformed COMPLETION is
+				// handled fail-closed below, never dropped.
 				continue
 			}
 			switch {
+			case ferr != nil && result.Completed:
+				// F1 (fail-closed): a finalized tool_use cycle with
+				// unparseable input JSON. Deny + audit + reset, then keep
+				// gating the rest of the stream — see denyMalformedAnthropic.
+				s.denyMalformedAnthropic(w, flusher, r, acc, result.CompletedToolCalls)
+
 			case result.OverflowBufferBytes:
 				metrics.IncLLMProxyBufferOverflow("anthropic")
 				refusal := s.buildRefusal("anthropic", Decision{
@@ -674,4 +758,27 @@ func (s *Server) gateAndFlushAnthropic(w http.ResponseWriter, flusher http.Flush
 	flusher.Flush()
 	acc.Reset()
 	return true
+}
+
+// denyMalformedAnthropic is the Anthropic sibling of denyMalformedOpenAI
+// (see it for the full rationale). It audits the malformed tool_use
+// through the normal PolicyCheck path, emits a fail-closed refusal that
+// rewrites the buffered tool_use's content-block index (captured via
+// acc.ActiveToolUseIndex() BEFORE the reset), flushes, then resets so a
+// later valid tool_use in the same stream is still gated. It does NOT
+// stop reading upstream.
+func (s *Server) denyMalformedAnthropic(w http.ResponseWriter, flusher http.Flusher, r *http.Request, acc *AnthropicAccumulator, calls []ToolCallCheck) {
+	s.auditDeniedToolCalls(r, calls)
+	var original ToolCallCheck
+	if len(calls) > 0 {
+		original = calls[0]
+	}
+	refusal := s.buildRefusal("anthropic", malformedToolCallDecision(), &RefusalContext{
+		Provider:              "anthropic",
+		OriginalToolCall:      original,
+		AnthropicToolUseIndex: acc.ActiveToolUseIndex(),
+	})
+	_, _ = w.Write(refusal)
+	flusher.Flush()
+	acc.Reset()
 }
