@@ -84,17 +84,27 @@ func (s *PostgresStore) DSN() string { return s.dsn }
 // the "ORDER BY id ASC" insertion order in QueryAudit is preserved.
 var pgSchemaStmts = []string{
 	`CREATE TABLE IF NOT EXISTS approvals (
-	    tenant_id   TEXT    NOT NULL,
-	    id          TEXT    NOT NULL,
-	    request     TEXT    NOT NULL,
-	    result      TEXT    NOT NULL,
-	    created_at  TEXT    NOT NULL,
-	    resolved    INTEGER NOT NULL DEFAULT 0,
-	    decision    TEXT    NOT NULL DEFAULT '',
-	    resolved_at TEXT    NOT NULL DEFAULT '',
+	    tenant_id     TEXT    NOT NULL,
+	    id            TEXT    NOT NULL,
+	    request       TEXT    NOT NULL,
+	    result        TEXT    NOT NULL,
+	    created_at    TEXT    NOT NULL,
+	    resolved      INTEGER NOT NULL DEFAULT 0,
+	    decision      TEXT    NOT NULL DEFAULT '',
+	    resolved_at   TEXT    NOT NULL DEFAULT '',
+	    consumed_at   TEXT    NOT NULL DEFAULT '',
+	    resolved_via  TEXT    NOT NULL DEFAULT '',
+	    resolved_from TEXT    NOT NULL DEFAULT '',
 	    PRIMARY KEY (tenant_id, id)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_approvals_resolved ON approvals(resolved, resolved_at)`,
+	// approvals one-shot/actor columns (post-v0.9.0 approval hardening) for
+	// DBs whose approvals table predates them; Postgres has native
+	// IF NOT EXISTS so no duplicate-column dance is needed (mirror of
+	// SQLiteStore.Migrate's guarded ALTERs).
+	`ALTER TABLE approvals ADD COLUMN IF NOT EXISTS consumed_at   TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE approvals ADD COLUMN IF NOT EXISTS resolved_via  TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE approvals ADD COLUMN IF NOT EXISTS resolved_from TEXT NOT NULL DEFAULT ''`,
 
 	`CREATE TABLE IF NOT EXISTS rate_buckets (
 	    tenant_id   TEXT    NOT NULL,
@@ -200,12 +210,16 @@ func (s *PostgresStore) UpsertApprovals(ctx context.Context, recs []ApprovalReco
 	}
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		stmt, err := tx.PrepareContext(ctx, `
-			INSERT INTO approvals (tenant_id, id, request, result, created_at, resolved, decision, resolved_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			INSERT INTO approvals (tenant_id, id, request, result, created_at, resolved, decision, resolved_at, consumed_at, resolved_via, resolved_from)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 			ON CONFLICT (tenant_id, id) DO UPDATE SET
 				request=excluded.request, result=excluded.result,
 				resolved=excluded.resolved, decision=excluded.decision,
-				resolved_at=excluded.resolved_at`)
+				resolved_at=excluded.resolved_at,
+				consumed_at=CASE WHEN approvals.consumed_at <> '' THEN approvals.consumed_at ELSE excluded.consumed_at END,
+				resolved_via=excluded.resolved_via, resolved_from=excluded.resolved_from
+			WHERE NOT (approvals.resolved <> 0 AND excluded.resolved = 0)
+			  AND NOT (approvals.resolved <> 0 AND approvals.decision = 'DENY' AND excluded.decision <> 'DENY')`)
 		if err != nil {
 			return err
 		}
@@ -222,6 +236,7 @@ func (s *PostgresStore) UpsertApprovals(ctx context.Context, recs []ApprovalReco
 			if _, err := stmt.ExecContext(ctx,
 				r.TenantID, r.ID, string(reqJSON), string(resJSON),
 				fmtTime(r.CreatedAt), boolToInt(r.Resolved), r.Decision, fmtTime(r.ResolvedAt),
+				fmtTime(r.ConsumedAt), r.ResolvedVia, r.ResolvedFrom,
 			); err != nil {
 				return err
 			}
@@ -232,7 +247,7 @@ func (s *PostgresStore) UpsertApprovals(ctx context.Context, recs []ApprovalReco
 
 func (s *PostgresStore) LoadApprovals(ctx context.Context) ([]ApprovalRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT tenant_id, id, request, result, created_at, resolved, decision, resolved_at FROM approvals`)
+		`SELECT tenant_id, id, request, result, created_at, resolved, decision, resolved_at, consumed_at, resolved_via, resolved_from FROM approvals`)
 	if err != nil {
 		return nil, fmt.Errorf("store: load approvals: %w", err)
 	}
@@ -241,12 +256,12 @@ func (s *PostgresStore) LoadApprovals(ctx context.Context) ([]ApprovalRecord, er
 	var out []ApprovalRecord
 	for rows.Next() {
 		var (
-			r                     ApprovalRecord
-			reqJSON, resJSON      string
-			createdAt, resolvedAt string
-			resolvedInt           int
+			r                                 ApprovalRecord
+			reqJSON, resJSON                  string
+			createdAt, resolvedAt, consumedAt string
+			resolvedInt                       int
 		)
-		if err := rows.Scan(&r.TenantID, &r.ID, &reqJSON, &resJSON, &createdAt, &resolvedInt, &r.Decision, &resolvedAt); err != nil {
+		if err := rows.Scan(&r.TenantID, &r.ID, &reqJSON, &resJSON, &createdAt, &resolvedInt, &r.Decision, &resolvedAt, &consumedAt, &r.ResolvedVia, &r.ResolvedFrom); err != nil {
 			return out, fmt.Errorf("store: scan approval: %w", err)
 		}
 		if err := json.Unmarshal([]byte(reqJSON), &r.Request); err != nil {
@@ -257,6 +272,7 @@ func (s *PostgresStore) LoadApprovals(ctx context.Context) ([]ApprovalRecord, er
 		}
 		r.CreatedAt = parseTime(createdAt)
 		r.ResolvedAt = parseTime(resolvedAt)
+		r.ConsumedAt = parseTime(consumedAt)
 		r.Resolved = resolvedInt != 0
 		out = append(out, r)
 	}

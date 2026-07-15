@@ -597,6 +597,7 @@ func (s *Syncer) reconcileApprovals(ctx context.Context) error {
 		cand := &proxy.PendingAction{
 			ID: r.ID, TenantID: tenant, Request: r.Request, Result: r.Result,
 			CreatedAt: r.CreatedAt, Resolved: r.Resolved, Decision: r.Decision, ResolvedAt: r.ResolvedAt,
+			ConsumedAt: r.ConsumedAt, ResolvedVia: r.ResolvedVia, ResolvedFrom: r.ResolvedFrom,
 		}
 		k := approvalKey{tenant: store.EffectiveTenant(r.TenantID), id: r.ID}
 		if l, ok := local[k]; ok && approvalMergeNoOp(l, cand) {
@@ -624,12 +625,20 @@ func approvalMergeNoOp(l, r *proxy.PendingAction) bool {
 		return !r.Resolved
 	}
 	// Local resolved (terminal). A remote pending keeps local; a remote resolved
-	// with the SAME decision is identical; a DIFFERING decision may flip via
-	// DENY-wins, so it must pass.
+	// with a DIFFERING decision may flip via DENY-wins, so it must pass.
 	if !r.Resolved {
 		return true
 	}
-	return l.Decision == r.Decision
+	if l.Decision != r.Decision {
+		return false
+	}
+	// Same terminal decision. Still a real update when the remote carries a
+	// one-shot consumption stamp this node lacks (the ALLOW was spent on
+	// another node) — that must reach ApplyRemote or the ALLOW stays
+	// replayable here. Consumption is monotonic (set-once, never cleared),
+	// so "local already stamped" and "remote unstamped" both stay no-ops
+	// even if the live entry advances after this snapshot.
+	return !l.ConsumedAt.IsZero() || r.ConsumedAt.IsZero()
 }
 
 // Flush snapshots every in-memory source and upserts it to the store in one

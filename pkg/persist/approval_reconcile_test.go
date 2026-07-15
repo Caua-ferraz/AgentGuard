@@ -333,3 +333,103 @@ func join(xs []string, sep string) string {
 	}
 	return out
 }
+
+// (f) one-shot consumption propagates cluster-wide: node A resolves an ALLOW
+// (with actor stamp) and later consumes it; node B — whose entry already
+// carries the SAME decision — must still receive the consumption stamp through
+// reconcile (the merge no-op filter must not swallow it) and must refuse to
+// honor the replay. A stale flush from B in between must not clear the stamp
+// in the store (the UpsertApprovals monotonic-merge guard).
+func TestReconcileApprovals_ConsumptionPropagates(t *testing.T) {
+	ctx := context.Background()
+	nodes := newApNodes(t, 2)
+	a, b := nodes[0], nodes[1]
+
+	pa, err := a.q.Add(
+		policy.ActionRequest{Scope: "shell", Command: "sudo make install"},
+		policy.CheckResult{Decision: policy.RequireApproval},
+		"local",
+	)
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := a.sy.Flush(ctx); err != nil {
+		t.Fatalf("flush A: %v", err)
+	}
+	if err := b.sy.reconcileApprovals(ctx); err != nil {
+		t.Fatalf("B reconcile: %v", err)
+	}
+
+	// A resolves ALLOW with an actor stamp; B reconciles the resolution.
+	if err := a.q.ResolveWithActor(pa.ID, policy.Allow, "local", "bearer", "192.0.2.9"); err != nil {
+		t.Fatalf("resolve on A: %v", err)
+	}
+	if err := a.sy.Flush(ctx); err != nil {
+		t.Fatalf("flush A: %v", err)
+	}
+	if err := b.sy.reconcileApprovals(ctx); err != nil {
+		t.Fatalf("B reconcile: %v", err)
+	}
+	bpa := lookupOn(t, b.q, pa.ID, "local")
+	if bpa == nil || !bpa.Resolved || bpa.Decision != string(policy.Allow) {
+		t.Fatalf("B did not adopt A's resolution: %+v", bpa)
+	}
+	if bpa.ResolvedVia != "bearer" || bpa.ResolvedFrom != "192.0.2.9" {
+		t.Errorf("actor stamp lost crossing nodes: via=%q from=%q", bpa.ResolvedVia, bpa.ResolvedFrom)
+	}
+
+	// A consumes the one-shot ALLOW and flushes. B then flushes its own STALE
+	// (unconsumed) snapshot — the store guard must keep consumed_at — before
+	// reconciling the stamp in.
+	if cp, _ := a.q.ConsumeResolved(pa.ID, "local", time.Now().UTC(), 0); cp == nil {
+		t.Fatal("A failed to consume its own resolved ALLOW")
+	}
+	if err := a.sy.Flush(ctx); err != nil {
+		t.Fatalf("flush A: %v", err)
+	}
+	if err := b.sy.Flush(ctx); err != nil {
+		t.Fatalf("stale flush B: %v", err)
+	}
+	if err := b.sy.reconcileApprovals(ctx); err != nil {
+		t.Fatalf("B reconcile: %v", err)
+	}
+
+	bpa = lookupOn(t, b.q, pa.ID, "local")
+	if bpa == nil || bpa.ConsumedAt.IsZero() {
+		t.Fatalf("consumption stamp did not reach node B (one click would be honorable once per node): %+v", bpa)
+	}
+	// The replay on B must fall through — nil copy means not honorable
+	// (validity 0 disables expiry, and the entry provably exists above).
+	if cp, _ := b.q.ConsumeResolved(pa.ID, "local", time.Now().UTC(), 0); cp != nil {
+		t.Fatalf("node B honored an ALLOW already spent on node A: %+v", cp)
+	}
+}
+
+// The merge no-op filter must not classify "same decision, remote consumed,
+// local not" as a no-op — that is exactly the update that closes the one-shot
+// hole. The genuinely-identical and locally-dominated cases stay filtered.
+func TestApprovalMergeNoOp_ConsumptionMustPass(t *testing.T) {
+	at := time.Now().UTC()
+	mk := func(consumedAt time.Time) *proxy.PendingAction {
+		return &proxy.PendingAction{
+			ID: "ap_noop", Resolved: true, Decision: string(policy.Allow),
+			ResolvedAt: at, ConsumedAt: consumedAt,
+		}
+	}
+	zero := time.Time{}
+	cases := []struct {
+		name     string
+		l, r     *proxy.PendingAction
+		wantNoOp bool
+	}{
+		{"remote consumed, local not => must pass", mk(zero), mk(at.Add(time.Second)), false},
+		{"local consumed, remote not => no-op", mk(at.Add(time.Second)), mk(zero), true},
+		{"both consumed => no-op", mk(at.Add(time.Second)), mk(at.Add(2 * time.Second)), true},
+		{"neither consumed => no-op", mk(zero), mk(zero), true},
+	}
+	for _, tc := range cases {
+		if got := approvalMergeNoOp(tc.l, tc.r); got != tc.wantNoOp {
+			t.Errorf("%s: approvalMergeNoOp = %v, want %v", tc.name, got, tc.wantNoOp)
+		}
+	}
+}

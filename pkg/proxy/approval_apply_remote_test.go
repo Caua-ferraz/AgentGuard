@@ -111,6 +111,60 @@ func TestApplyRemote_SameDecisionKeepsLocal(t *testing.T) {
 	}
 }
 
+// (one-shot goal) consumption is monotonic CLUSTER-wide: a remote consumption
+// stamp lands on a same-decision local entry (without it, one human click is
+// honorable once per node), and once landed the local ConsumeResolved refuses
+// the replay exactly as if it had been spent here.
+func TestApplyRemote_ConsumptionPropagates(t *testing.T) {
+	q := newTenantTestQueue()
+	at := time.Now().UTC()
+	q.Restore([]*PendingAction{apResolved("ap_c", "", string(policy.Allow), at)})
+
+	consumed := at.Add(2 * time.Second)
+	r := apResolved("ap_c", "", string(policy.Allow), at)
+	r.ConsumedAt = consumed
+	q.ApplyRemote([]*PendingAction{r})
+
+	pa, ok := q.Lookup("ap_c", "local")
+	if !ok || !pa.ConsumedAt.Equal(consumed) {
+		t.Fatalf("remote consumption stamp not merged into same-decision local entry: ok=%v ConsumedAt=%v", ok, pa.ConsumedAt)
+	}
+	if cp, out := q.ConsumeResolved("ap_c", "local", time.Now().UTC(), 0); out != consumeAlreadyConsumed || cp != nil {
+		t.Fatalf("ALLOW spent on another node was honored again here: cp=%+v outcome=%v", cp, out)
+	}
+}
+
+// A local consumption stamp is never cleared by an unconsumed remote row (a
+// lagging node's view must not resurrect a spent capability), and adopting a
+// remote resolution carries its stamp and actor fields with it.
+func TestApplyRemote_ConsumptionNeverClearedAndAdoptionCarriesActor(t *testing.T) {
+	q := newTenantTestQueue()
+	at := time.Now().UTC()
+
+	// Local consumed; remote identical but unconsumed => stamp kept.
+	l := apResolved("ap_keep", "", string(policy.Allow), at)
+	l.ConsumedAt = at.Add(time.Second)
+	q.Restore([]*PendingAction{l})
+	q.ApplyRemote([]*PendingAction{apResolved("ap_keep", "", string(policy.Allow), at)})
+	if pa, ok := q.Lookup("ap_keep", "local"); !ok || pa.ConsumedAt.IsZero() {
+		t.Fatalf("unconsumed remote row cleared the local consumption stamp: ok=%v pa=%+v", ok, pa)
+	}
+
+	// Local pending; remote resolved+consumed+actor => adoption is complete.
+	q.Restore([]*PendingAction{apPending("ap_adopt", "")})
+	r := apResolved("ap_adopt", "", string(policy.Allow), at)
+	r.ConsumedAt = at.Add(3 * time.Second)
+	r.ResolvedVia, r.ResolvedFrom = "bearer", "192.0.2.9"
+	q.ApplyRemote([]*PendingAction{r})
+	pa, ok := q.Lookup("ap_adopt", "local")
+	if !ok || !pa.Resolved || !pa.ConsumedAt.Equal(r.ConsumedAt) {
+		t.Fatalf("adopted resolution dropped the consumption stamp: ok=%v pa=%+v", ok, pa)
+	}
+	if pa.ResolvedVia != "bearer" || pa.ResolvedFrom != "192.0.2.9" {
+		t.Errorf("adopted resolution dropped the actor stamp: via=%q from=%q", pa.ResolvedVia, pa.ResolvedFrom)
+	}
+}
+
 // tenant isolation: a remote row for tenant-a must never mutate a tenant-b entry
 // that happens to share the same raw ID (CLAUDE.md §3).
 func TestApplyRemote_TenantIsolation(t *testing.T) {

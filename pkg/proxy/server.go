@@ -1784,11 +1784,14 @@ func (q *ApprovalQueue) ApplyRemote(remote []*PendingAction) {
 func mergeRemoteLocked(l, r *PendingAction) {
 	switch {
 	case !l.Resolved && r.Resolved:
-		// local pending, remote resolved => adopt the remote resolution.
+		// local pending, remote resolved => adopt the remote resolution,
+		// actor stamp included (the resolver lives on the other node).
 		l.Resolved = true
 		l.Decision = r.Decision
 		l.ResolvedAt = r.ResolvedAt
 		l.Result = r.Result
+		l.ResolvedVia = r.ResolvedVia
+		l.ResolvedFrom = r.ResolvedFrom
 	case l.Resolved && r.Resolved && l.Decision != r.Decision:
 		// Conflicting resolutions => DENY wins, regardless of ResolvedAt. Canonical
 		// decisions are only ALLOW/DENY, so a differing pair is exactly one of
@@ -1799,11 +1802,22 @@ func mergeRemoteLocked(l, r *PendingAction) {
 			l.Decision = r.Decision
 			l.ResolvedAt = r.ResolvedAt
 			l.Result = r.Result
+			l.ResolvedVia = r.ResolvedVia
+			l.ResolvedFrom = r.ResolvedFrom
 		}
 	default:
 		// l resolved & r pending           => keep l (never resurrect).
 		// both resolved, same decision       => keep l (identical state).
 		// both pending                        => keep l (nothing to surface).
+	}
+	// One-shot consumption is monotonic CLUSTER-wide, not per node: adopt a
+	// remote consumption stamp when this node has none (the resolved ALLOW
+	// was spent on another node — without this, one human click is honorable
+	// once per node), and never clear a local stamp. The DENY-wins analog
+	// for the spent-capability bit; applies in every branch, including
+	// same-decision "identical" merges where only the stamp differs.
+	if l.ConsumedAt.IsZero() && !r.ConsumedAt.IsZero() {
+		l.ConsumedAt = r.ConsumedAt
 	}
 }
 

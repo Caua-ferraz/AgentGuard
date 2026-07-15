@@ -254,8 +254,11 @@ func (s *SQLiteStore) UpsertApprovals(ctx context.Context, recs []ApprovalRecord
 			ON CONFLICT(tenant_id, id) DO UPDATE SET
 				request=excluded.request, result=excluded.result,
 				resolved=excluded.resolved, decision=excluded.decision,
-				resolved_at=excluded.resolved_at, consumed_at=excluded.consumed_at,
-				resolved_via=excluded.resolved_via, resolved_from=excluded.resolved_from`)
+				resolved_at=excluded.resolved_at,
+				consumed_at=CASE WHEN approvals.consumed_at <> '' THEN approvals.consumed_at ELSE excluded.consumed_at END,
+				resolved_via=excluded.resolved_via, resolved_from=excluded.resolved_from
+			WHERE NOT (approvals.resolved <> 0 AND excluded.resolved = 0)
+			  AND NOT (approvals.resolved <> 0 AND approvals.decision = 'DENY' AND excluded.decision <> 'DENY')`)
 		if err != nil {
 			return err
 		}
