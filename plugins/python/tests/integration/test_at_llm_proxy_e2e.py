@@ -38,7 +38,7 @@ The behavioural property pinned (under both paths):
 
 This is the "what does the agent do?" coupon the v0.5 plan calls out.
 
-TODO(v0.6, #at-llm-proxy-binary-e2e): once a CI runner reliably ships
+TODO(v0.7, #at-llm-proxy-binary-e2e): once a CI runner reliably ships
 both `make build-llm-proxy` and a writable port for the proxy, flip
 path A from optional to default and remove path B as redundant.
 """

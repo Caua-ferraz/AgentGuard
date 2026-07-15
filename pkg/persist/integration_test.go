@@ -14,8 +14,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"testing"
 	"time"
 
@@ -179,94 +177,10 @@ func TestIntegration_StateSurvivesRestart(t *testing.T) {
 	}
 }
 
-func TestIntegration_HotPathLatencyWithPersistence(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	st, err := store.NewSQLiteStore(filepath.Join(dir, "agentguard.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
-	s := newITServer(t, st, dir)
-	defer s.close()
-	if err := s.sy.Hydrate(ctx); err != nil {
-		t.Fatalf("hydrate: %v", err)
-	}
-	s.sy.Start() // background flush loop running, exactly like production
-
-	// Warm up.
-	for i := 0; i < 20; i++ {
-		s.postCheck(t, `{"scope":"shell","command":"ls -la","agent_id":"warm"}`)
-	}
-
-	// --- Signal 1: the SERVER's self-reported processing time -----------------
-	// X-AgentGuard-Total-Ms over many requests — the hot path, excluding
-	// httptest/network. This stays the ENFORCED budget guard (assertion below,
-	// unchanged: p99 < 3ms).
-	//
-	// Caveat this test used to hide: the server derives that header from
-	// duration.Microseconds() (truncated to whole µs) and, on a coarse monotonic
-	// clock (Windows advances it only at the ~0.5ms system-timer tick), a ~µs
-	// handler reads 0 — so p99 floored to "0.000ms". We now (a) sample many more
-	// requests so the p99 is representative and (b) report in µs. On Linux CI the
-	// header resolves to real µs; on a coarse clock it stays 0 (unmeasurable at
-	// the source, since the server already truncated it), which is exactly why
-	// Signal 2 below exists as the legible, cross-platform headline.
-	const n = 1500
-	samples := make([]float64, 0, n)
-	for i := 0; i < n; i++ {
-		_, _, h := s.postCheck(t, `{"scope":"shell","command":"ls -la","agent_id":"lat"}`)
-		ms, err := strconv.ParseFloat(h.Get("X-AgentGuard-Total-Ms"), 64)
-		if err != nil {
-			t.Fatalf("missing/invalid X-AgentGuard-Total-Ms header: %q", h.Get("X-AgentGuard-Total-Ms"))
-		}
-		samples = append(samples, ms)
-	}
-	sort.Float64s(samples)
-	p50 := samples[len(samples)*50/100]
-	p99 := samples[len(samples)*99/100]
-	max := samples[len(samples)-1]
-	t.Logf("server hot-path /v1/check (network-excluded, X-AgentGuard-Total-Ms): p50=%.1fµs p99=%.1fµs max=%.1fµs (n=%d)",
-		p50*1000, p99*1000, max*1000, n)
-
-	// Contract: <3ms p99. The store is write-behind, so it must not appear here.
-	if p99 >= 3.0 {
-		t.Errorf("hot-path p99 = %.3fms violates the <3ms budget with persistence on", p99)
-	}
-
-	// --- Signal 2: client-observed per-op latency, ns-precision, adaptive ------
-	// The header above is µs-granular and floors to 0 on a coarse clock, so it is
-	// not a legible headline. Here we measure the /v1/check round-trip latency at
-	// nanosecond precision: on a fine clock each sample is one round-trip; on a
-	// coarse clock the sampler groups enough round-trips for the monotonic clock
-	// to advance and records the mean-per-op. The reported p99 is therefore always
-	// non-zero and legible in µs, which makes this test load-bearing on every OS.
-	const clientTarget = 500
-	cs := make([]time.Duration, 0, clientTarget)
-	roundTrips := 0
-	for len(cs) < clientTarget && roundTrips < 40_000 {
-		start := time.Now()
-		calls := 0
-		var elapsed time.Duration
-		for {
-			s.postCheck(t, `{"scope":"shell","command":"ls -la","agent_id":"lat"}`)
-			calls++
-			elapsed = time.Since(start)
-			if elapsed > 0 || calls >= 100_000 {
-				break
-			}
-		}
-		roundTrips += calls
-		cs = append(cs, elapsed/time.Duration(calls))
-	}
-	if len(cs) < 100 {
-		t.Fatalf("collected only %d client latency samples (want >=100)", len(cs))
-	}
-	sort.Slice(cs, func(i, j int) bool { return cs[i] < cs[j] })
-	us := func(d time.Duration) float64 { return float64(d.Nanoseconds()) / 1000.0 }
-	cp50 := cs[len(cs)*50/100]
-	cp99 := cs[len(cs)*99/100]
-	cmax := cs[len(cs)-1]
-	t.Logf("client-observed /v1/check per-op latency (ns-precision, adaptive): p50=%.3fµs p99=%.3fµs max=%.3fµs (samples=%d, round-trips=%d)",
-		us(cp50), us(cp99), us(cmax), len(cs), roundTrips)
-}
+// NOTE: TestIntegration_HotPathLatencyWithPersistence lives in
+// integration_latency_test.go behind a `//go:build !race` tag — it is a
+// wall-clock p99 budget gate that the race detector's timing distortion would
+// flake. The shared itServer/newITServer/postCheck helpers above are compiled
+// in all builds, so both files use them. OURS's load-bearing, coarse-clock-safe
+// adaptive sampler (Signal 2) was folded into that gate so p99 stays legible on
+// every OS.

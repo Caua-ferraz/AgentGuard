@@ -130,8 +130,8 @@ func TestEntry_EffectiveTransport_ExplicitValuesPassThrough(t *testing.T) {
 // "sdk" SHOULD include pre-v0.5 entries (Transport="" on disk)
 // because EffectiveTransport defaults them to "sdk".
 func TestQueryFilter_TransportFiltersEffective(t *testing.T) {
-	preV05 := Entry{Request: policy.ActionRequest{Scope: "shell"}}                                // Transport=""
-	sdkExplicit := Entry{Transport: TransportSDK, Request: policy.ActionRequest{Scope: "shell"}}  // Transport="sdk"
+	preV05 := Entry{Request: policy.ActionRequest{Scope: "shell"}}                               // Transport=""
+	sdkExplicit := Entry{Transport: TransportSDK, Request: policy.ActionRequest{Scope: "shell"}} // Transport="sdk"
 	mcp := Entry{Transport: TransportMCPGateway, Request: policy.ActionRequest{Scope: "mcp_tool"}}
 
 	if !matchesFilter(preV05, QueryFilter{Transport: TransportSDK}) {

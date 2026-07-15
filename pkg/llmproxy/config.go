@@ -28,9 +28,10 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/url"
 	"os"
 	"strings"
+
+	"github.com/Caua-ferraz/AgentGuard/pkg/internal/gateclient"
 )
 
 // Default flag values. Centralised here so tests can refer to them
@@ -41,12 +42,14 @@ const (
 	DefaultListen = "127.0.0.1:8081"
 
 	// Defaults aligned with docs/LLM_API_PROXY.md § 2 CLI surface.
+	// The gate-side values are the shared contract from
+	// pkg/internal/gateclient (same for the MCP gateway).
 	DefaultUpstreamOpenAI    = "https://api.openai.com"
 	DefaultUpstreamAnthropic = "https://api.anthropic.com"
-	DefaultGuardURL          = "http://127.0.0.1:8080"
-	DefaultTenantID          = "local"
-	DefaultFailMode          = "deny"
-	DefaultLogLevel          = "info"
+	DefaultGuardURL          = gateclient.DefaultGuardURL
+	DefaultTenantID          = gateclient.DefaultTenantID
+	DefaultFailMode          = gateclient.DefaultFailMode
+	DefaultLogLevel          = gateclient.DefaultLogLevel
 
 	// DefaultMaxBufferBytes (1 MiB) is the per-stream tool-call
 	// accumulation cap. Mirrors the central server's MaxRequestBodySize
@@ -118,6 +121,12 @@ type Config struct {
 	// failures.
 	FailMode string
 
+	// FailAuditLog is the local JSONL file the gate appends a deny
+	// record to when /v1/check is unreachable in fail-closed-with-audit
+	// mode (the central server can't write the audit entry itself).
+	// Empty disables the local record. Unused in other fail modes.
+	FailAuditLog string
+
 	// MaxBufferBytes caps the per-stream tool-call accumulation
 	// buffer (default 1 MiB). The streaming pipeline enforces it.
 	MaxBufferBytes int
@@ -163,18 +172,14 @@ func ParseConfigWithOutput(args []string, errOut io.Writer) (*Config, error) {
 	fs := flag.NewFlagSet("agentguard-llm-proxy", flag.ContinueOnError)
 	fs.SetOutput(errOut)
 
+	gate := gateclient.RegisterGateFlags(fs,
+		"Path to policy YAML for tool→scope mapping; empty falls back to DefaultLLMToolScopeMap with no operator overrides")
 	listen := fs.String("listen", DefaultListen, "Address to bind (host:port)")
 	upstreamOpenAI := fs.String("upstream-openai", DefaultUpstreamOpenAI, "Base URL for OpenAI-shape requests")
 	upstreamAnthropic := fs.String("upstream-anthropic", DefaultUpstreamAnthropic, "Base URL for Anthropic-shape requests")
-	guardURL := fs.String("guard-url", DefaultGuardURL, "Central AgentGuard server base URL")
-	apiKey := fs.String("api-key", "", "Bearer token for /v1/check (defaults to $AGENTGUARD_API_KEY)")
 	proxyAPIKey := fs.String("proxy-api-key", "", "Optional bearer the proxy itself enforces on inbound requests (X-AgentGuard-Proxy-Auth). Empty = no proxy auth.")
-	tenantID := fs.String("tenant-id", DefaultTenantID, "Tenant ID")
-	failMode := fs.String("fail-mode", DefaultFailMode, `Fail mode when /v1/check is unreachable: "deny" | "allow" | "fail-closed-with-audit"`)
 	maxBufferBytes := fs.Int("max-buffer-bytes", DefaultMaxBufferBytes, "Per-stream tool-call buffer cap in bytes")
 	maxConcurrentStreams := fs.Int("max-concurrent-streams", DefaultMaxConcurrentStreams, "Global cap on simultaneous streaming requests; 0 disables the cap. Excess requests are refused with 503 + Retry-After: 5.")
-	logLevel := fs.String("log-level", DefaultLogLevel, `Stderr verbosity: "info" | "debug"`)
-	policyPath := fs.String("policy", "", "Path to policy YAML for tool→scope mapping; empty falls back to DefaultLLMToolScopeMap with no operator overrides")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -184,19 +189,16 @@ func ParseConfigWithOutput(args []string, errOut io.Writer) (*Config, error) {
 		Listen:               *listen,
 		UpstreamOpenAI:       *upstreamOpenAI,
 		UpstreamAnthropic:    *upstreamAnthropic,
-		GuardURL:             *guardURL,
-		APIKey:               *apiKey,
+		GuardURL:             *gate.GuardURL,
+		APIKey:               gateclient.ResolveAPIKey(*gate.APIKey),
 		ProxyAPIKey:          *proxyAPIKey,
-		TenantID:             *tenantID,
-		FailMode:             *failMode,
+		TenantID:             *gate.TenantID,
+		FailMode:             *gate.FailMode,
+		FailAuditLog:         *gate.FailAuditLog,
 		MaxBufferBytes:       *maxBufferBytes,
 		MaxConcurrentStreams: *maxConcurrentStreams,
-		LogLevel:             *logLevel,
-		PolicyPath:           *policyPath,
-	}
-
-	if cfg.APIKey == "" {
-		cfg.APIKey = os.Getenv("AGENTGUARD_API_KEY")
+		LogLevel:             *gate.LogLevel,
+		PolicyPath:           *gate.PolicyPath,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -220,26 +222,14 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("--listen %q is missing port", c.Listen)
 	}
 
-	if err := validateBaseURL("--upstream-openai", c.UpstreamOpenAI); err != nil {
+	if err := gateclient.ValidateBaseURL("--upstream-openai", c.UpstreamOpenAI); err != nil {
 		return err
 	}
-	if err := validateBaseURL("--upstream-anthropic", c.UpstreamAnthropic); err != nil {
+	if err := gateclient.ValidateBaseURL("--upstream-anthropic", c.UpstreamAnthropic); err != nil {
 		return err
 	}
-	if err := validateBaseURL("--guard-url", c.GuardURL); err != nil {
+	if err := gateclient.ValidateGateConfig(c.GuardURL, c.TenantID, c.FailMode, c.LogLevel); err != nil {
 		return err
-	}
-
-	switch c.FailMode {
-	case "deny", "allow", "fail-closed-with-audit":
-	default:
-		return fmt.Errorf("--fail-mode must be deny|allow|fail-closed-with-audit, got %q", c.FailMode)
-	}
-
-	switch c.LogLevel {
-	case "info", "debug":
-	default:
-		return fmt.Errorf("--log-level must be info|debug, got %q", c.LogLevel)
 	}
 
 	if c.MaxBufferBytes <= 0 {
@@ -265,27 +255,6 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("--listen %q binds non-loopback host %q without --proxy-api-key; refuse to start to avoid exposing an unauthenticated proxy", c.Listen, host)
 	}
 
-	return nil
-}
-
-// validateBaseURL enforces that v has a scheme + host. Empty paths
-// are accepted (we'll join concrete paths at request time).
-func validateBaseURL(name, v string) error {
-	if v == "" {
-		return fmt.Errorf("%s must not be empty", name)
-	}
-	parsed, err := url.Parse(v)
-	if err != nil {
-		return fmt.Errorf("%s %q is not a valid URL: %w", name, v, err)
-	}
-	if parsed.Scheme == "" || parsed.Host == "" {
-		return fmt.Errorf("%s %q is not a valid URL (missing scheme or host)", name, v)
-	}
-	switch parsed.Scheme {
-	case "http", "https":
-	default:
-		return fmt.Errorf("%s %q must use http or https", name, v)
-	}
 	return nil
 }
 

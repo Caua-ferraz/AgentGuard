@@ -488,3 +488,17 @@ func slicesEqual(a, b []string) bool {
 	}
 	return true
 }
+
+// TestMergeCapabilities_AdvertisesListChanged pins the listChanged=true
+// contract: the gateway forwards upstream tools/list_changed frames, so
+// it must advertise the capability.
+func TestMergeCapabilities_AdvertisesListChanged(t *testing.T) {
+	merged := MergeCapabilities(nil)
+	tools, ok := merged["tools"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("merged caps missing tools map: %v", merged)
+	}
+	if lc, _ := tools["listChanged"].(bool); !lc {
+		t.Errorf("tools.listChanged = %v, want true (gateway forwards list_changed)", tools["listChanged"])
+	}
+}

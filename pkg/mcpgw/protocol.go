@@ -34,7 +34,12 @@ const (
 	MethodPing              = "ping"
 	MethodLoggingSetLevel   = "logging/setLevel"
 	NotificationInitialized = "notifications/initialized"
-	NotificationCancelled   = "notifications/cancelled"
+
+	// NotificationToolsListChanged is emitted by upstreams whose tool
+	// set changed; the gateway forwards it to the host so clients
+	// re-pull tools/list.
+	NotificationToolsListChanged = "notifications/tools/list_changed"
+	NotificationCancelled        = "notifications/cancelled"
 )
 
 // JSON-RPC 2.0 reserved error codes (per the spec).
@@ -444,16 +449,17 @@ func NegotiateProtocolVersion(clientRequested string, supported []string) string
 // `resources` and `prompts` capabilities are intentionally masked OUT —
 // even when an upstream advertises them, the gateway does NOT expose
 // them to the client because resources/* and prompts/* method routing
-// is not yet implemented (see TODO(v0.6, #mcp-resources)). Advertising
+// is not yet implemented (see TODO(v0.7, #mcp-resources)). Advertising
 // them today would mislead the client into showing resources that every
 // read would reject with MethodNotFound (see Bridge.handleNotImplemented).
 //
-// TODO(v0.6, #mcp-list-changed): forward upstream
-// notifications/tools/list_changed and flip our advertised tools
-// capability to listChanged: true.
+// `listChanged` is advertised true: the bridge forwards upstream
+// notifications/tools/list_changed frames to the host (see
+// Bridge.onUpstreamNotification), so clients re-pull tools/list when
+// any upstream's tool set changes.
 func MergeCapabilities(upstreamCaps []map[string]interface{}) map[string]interface{} {
 	merged := map[string]interface{}{
-		"tools":   map[string]interface{}{"listChanged": false},
+		"tools":   map[string]interface{}{"listChanged": true},
 		"logging": map[string]interface{}{},
 	}
 

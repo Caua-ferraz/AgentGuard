@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1736,7 +1735,7 @@ func TestNewServer_ResumesFromCheckpoint(t *testing.T) {
 	}
 
 	// Snapshot the allowed counter before boot — the seeder must not bump it.
-	before := atomic.LoadUint64(&metrics.AllowedTotal)
+	before := metrics.AllowedTotal()
 
 	logger, err := audit.NewFileLogger(logPath)
 	if err != nil {
@@ -1751,7 +1750,7 @@ func TestNewServer_ResumesFromCheckpoint(t *testing.T) {
 		Version:  "test",
 	})
 
-	after := atomic.LoadUint64(&metrics.AllowedTotal)
+	after := metrics.AllowedTotal()
 	if after != before {
 		t.Errorf("checkpointed file must be skipped on boot; AllowedTotal went from %d to %d", before, after)
 	}
@@ -1844,9 +1843,9 @@ func TestRateLimitDoubleCount(t *testing.T) {
 		Version:  "test",
 	})
 
-	checksBefore := atomic.LoadUint64(&metrics.ChecksTotal)
-	deniedBefore := atomic.LoadUint64(&metrics.DeniedTotal)
-	rlBefore := atomic.LoadUint64(&metrics.RateLimitedTotal)
+	checksBefore := metrics.ChecksTotal()
+	deniedBefore := metrics.DeniedTotal()
+	rlBefore := metrics.RateLimitedTotal()
 
 	// First request: under the limit, expect ALLOW (or default-deny — but
 	// this command matches the allow rule, so ALLOW).
@@ -1858,9 +1857,9 @@ func TestRateLimitDoubleCount(t *testing.T) {
 		srv.handleCheck(w, req)
 	}
 
-	checksAfter := atomic.LoadUint64(&metrics.ChecksTotal)
-	deniedAfter := atomic.LoadUint64(&metrics.DeniedTotal)
-	rlAfter := atomic.LoadUint64(&metrics.RateLimitedTotal)
+	checksAfter := metrics.ChecksTotal()
+	deniedAfter := metrics.DeniedTotal()
+	rlAfter := metrics.RateLimitedTotal()
 
 	// 2 total checks (one allowed, one rate-limited DENY).
 	if got := checksAfter - checksBefore; got != 2 {
@@ -2586,7 +2585,7 @@ func TestHandleCheck_ApprovalIDReplay_DifferentAgent_FallsThrough(t *testing.T) 
 	approvalID := seedReplayApproval(t, srv,
 		`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a"}`)
 
-	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+	mismatchBefore := metrics.ApprovalReplayMismatchTotal()
 
 	// agent_b replays the same id against the same command. Must NOT
 	// short-circuit; the policy still says REQUIRE_APPROVAL for agent_b.
@@ -2606,7 +2605,7 @@ func TestHandleCheck_ApprovalIDReplay_DifferentAgent_FallsThrough(t *testing.T) 
 	if result.Decision != policy.RequireApproval {
 		t.Errorf("decision = %s; want REQUIRE_APPROVAL (fresh evaluation)", result.Decision)
 	}
-	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got <= mismatchBefore {
+	if got := metrics.ApprovalReplayMismatchTotal(); got <= mismatchBefore {
 		t.Errorf("ApprovalReplayMismatchTotal = %d; want > %d (security signal not incremented)", got, mismatchBefore)
 	}
 }
@@ -2618,7 +2617,7 @@ func TestHandleCheck_ApprovalIDReplay_DifferentScope_FallsThrough(t *testing.T) 
 	approvalID := seedReplayApproval(t, srv,
 		`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a"}`)
 
-	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+	mismatchBefore := metrics.ApprovalReplayMismatchTotal()
 
 	// Replay against the network scope (with the same other fields).
 	// Network scope has no rule for command="sudo apt install vim", so
@@ -2630,7 +2629,7 @@ func TestHandleCheck_ApprovalIDReplay_DifferentScope_FallsThrough(t *testing.T) 
 	if result.Decision == policy.Allow {
 		t.Errorf("decision = ALLOW; replay across scopes must not auto-allow (rule=%q)", result.Rule)
 	}
-	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got <= mismatchBefore {
+	if got := metrics.ApprovalReplayMismatchTotal(); got <= mismatchBefore {
 		t.Errorf("ApprovalReplayMismatchTotal not incremented on scope mismatch")
 	}
 }
@@ -2642,7 +2641,7 @@ func TestHandleCheck_ApprovalIDReplay_DifferentCommand_FallsThrough(t *testing.T
 	approvalID := seedReplayApproval(t, srv,
 		`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a"}`)
 
-	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+	mismatchBefore := metrics.ApprovalReplayMismatchTotal()
 
 	// Attacker replays the id with `rm -rf /`. The approval was for a
 	// different command; the cache must NOT honour it, and the policy's
@@ -2654,7 +2653,7 @@ func TestHandleCheck_ApprovalIDReplay_DifferentCommand_FallsThrough(t *testing.T
 	if result.Decision != policy.Deny {
 		t.Errorf("decision = %s; want DENY (rm -rf * is denied; replay must not bypass)", result.Decision)
 	}
-	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got <= mismatchBefore {
+	if got := metrics.ApprovalReplayMismatchTotal(); got <= mismatchBefore {
 		t.Errorf("ApprovalReplayMismatchTotal not incremented on command mismatch")
 	}
 }
@@ -2666,7 +2665,7 @@ func TestHandleCheck_ApprovalIDReplay_DifferentPath_FallsThrough(t *testing.T) {
 	approvalID := seedReplayApproval(t, srv,
 		`{"scope":"filesystem","action":"write","path":"/etc/hosts","agent_id":"agent_a"}`)
 
-	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+	mismatchBefore := metrics.ApprovalReplayMismatchTotal()
 
 	// Replay the id against /etc/shadow. Different path → must NOT
 	// short-circuit. /etc/shadow matches the same require_approval rule
@@ -2679,7 +2678,7 @@ func TestHandleCheck_ApprovalIDReplay_DifferentPath_FallsThrough(t *testing.T) {
 	if result.Decision == policy.Allow {
 		t.Errorf("decision = ALLOW; path-mismatched replay must not auto-allow (rule=%q)", result.Rule)
 	}
-	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got <= mismatchBefore {
+	if got := metrics.ApprovalReplayMismatchTotal(); got <= mismatchBefore {
 		t.Errorf("ApprovalReplayMismatchTotal not incremented on path mismatch")
 	}
 }
@@ -2691,7 +2690,7 @@ func TestHandleCheck_ApprovalIDReplay_DifferentURL_FallsThrough(t *testing.T) {
 	approvalID := seedReplayApproval(t, srv,
 		`{"scope":"network","domain":"api.example.com","url":"https://api.example.com/safe","agent_id":"agent_a"}`)
 
-	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+	mismatchBefore := metrics.ApprovalReplayMismatchTotal()
 
 	// Replay the id with a different URL on the same domain.
 	body := fmt.Sprintf(`{"scope":"network","domain":"api.example.com","url":"https://api.example.com/admin/wipe","agent_id":"agent_a","approval_id":%q}`, approvalID)
@@ -2701,7 +2700,7 @@ func TestHandleCheck_ApprovalIDReplay_DifferentURL_FallsThrough(t *testing.T) {
 	if result.Decision == policy.Allow {
 		t.Errorf("decision = ALLOW; URL-mismatched replay must not auto-allow (rule=%q)", result.Rule)
 	}
-	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got <= mismatchBefore {
+	if got := metrics.ApprovalReplayMismatchTotal(); got <= mismatchBefore {
 		t.Errorf("ApprovalReplayMismatchTotal not incremented on URL mismatch")
 	}
 }
@@ -2715,7 +2714,7 @@ func TestHandleCheck_ApprovalIDValidRetry_SameRequestStillShortCircuits(t *testi
 	approvalID := seedReplayApproval(t, srv,
 		`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a"}`)
 
-	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+	mismatchBefore := metrics.ApprovalReplayMismatchTotal()
 
 	body := fmt.Sprintf(`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a","approval_id":%q}`, approvalID)
 	result, code := retryCheck(t, srv, body)
@@ -2732,7 +2731,7 @@ func TestHandleCheck_ApprovalIDValidRetry_SameRequestStillShortCircuits(t *testi
 	if result.ApprovalID != approvalID {
 		t.Errorf("approval_id = %q; want %q (the original)", result.ApprovalID, approvalID)
 	}
-	if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got != mismatchBefore {
+	if got := metrics.ApprovalReplayMismatchTotal(); got != mismatchBefore {
 		t.Errorf("ApprovalReplayMismatchTotal = %d; want %d (legitimate retry must NOT bump the security signal)", got, mismatchBefore)
 	}
 }
@@ -2767,7 +2766,7 @@ func TestHandleCheck_ApprovalIDReplay_LogsMismatchSignal(t *testing.T) {
 	approvalID := seedReplayApproval(t, srv,
 		`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a"}`)
 
-	mismatchBefore := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal)
+	mismatchBefore := metrics.ApprovalReplayMismatchTotal()
 
 	// Three different mismatched replays — each must bump the counter.
 	bodies := []string{
@@ -2778,7 +2777,7 @@ func TestHandleCheck_ApprovalIDReplay_LogsMismatchSignal(t *testing.T) {
 	for i, b := range bodies {
 		_, _ = retryCheck(t, srv, b)
 		want := mismatchBefore + uint64(i+1)
-		if got := atomic.LoadUint64(&metrics.ApprovalReplayMismatchTotal); got != want {
+		if got := metrics.ApprovalReplayMismatchTotal(); got != want {
 			t.Errorf("after replay %d: ApprovalReplayMismatchTotal = %d; want %d", i+1, got, want)
 		}
 	}

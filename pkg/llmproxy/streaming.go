@@ -182,6 +182,20 @@ var errSSEEventTooLarge = errors.New("sse event exceeded buffer cap")
 // nil: ALLOW. This makes the streaming pipe testable without the gate
 // wired and matches the rest of the package's nil-safety pattern.
 func (s *Server) runPolicyCheck(ctx context.Context, tc ToolCallCheck) (Decision, error) {
+	// SECURITY (audit H3): reject tool-call arguments that contain duplicate
+	// JSON keys before evaluating policy. The gate projects from a Go map
+	// (last-wins on duplicates) while the ALLOW path replays the raw argument
+	// bytes; a first-wins downstream executor would then act on a different
+	// value than the one gated — a parser-differential bypass. Fail closed
+	// regardless of the wired PolicyCheck (this is a hard deny, nil error, so
+	// it is not subject to --fail-mode allow).
+	if hasDuplicateJSONKeys(tc.RawArguments) {
+		return Decision{
+			Allow:  false,
+			Reason: "tool call arguments contain duplicate JSON keys (ambiguous to gate; refused)",
+			Rule:   "deny:llm_api_proxy:duplicate_argument_key",
+		}, nil
+	}
 	if s.PolicyCheck == nil {
 		return Decision{Allow: true, Rule: "allow:llm_api_proxy:no_hook"}, nil
 	}
@@ -444,6 +458,22 @@ func (s *Server) runOpenAIStreamLoop(w http.ResponseWriter, flusher http.Flusher
 				// firewall goes dark with no trail). See denyMalformedOpenAI.
 				s.denyMalformedOpenAI(w, flusher, r, acc, result.CompletedToolCalls)
 
+			case result.ProtocolViolation:
+				// Defensive: the OpenAI accumulator does not currently emit
+				// this (its tool_calls all close together at finish_reason, so
+				// there is no interleave window). Handled here so a future
+				// parser change can never silently drop the signal and leak an
+				// ungated call. Fail closed with a synthetic refusal.
+				metrics.IncLLMProxyProtocolViolation("openai")
+				refusal := s.buildRefusal("openai", Decision{
+					Allow:  false,
+					Reason: "upstream tool_call stream is malformed; refused",
+					Rule:   "deny:llm_api_proxy:tool_use_interleaved",
+				}, &RefusalContext{Provider: "openai", AnthropicToolUseIndex: -1})
+				_, _ = w.Write(refusal)
+				flusher.Flush()
+				return
+
 			case result.OverflowBufferBytes:
 				metrics.IncLLMProxyBufferOverflow("openai")
 				refusal := s.buildRefusal("openai", Decision{
@@ -671,6 +701,22 @@ func (s *Server) runAnthropicStreamLoop(w http.ResponseWriter, flusher http.Flus
 				// unparseable input JSON. Deny + audit + reset, then keep
 				// gating the rest of the stream — see denyMalformedAnthropic.
 				s.denyMalformedAnthropic(w, flusher, r, acc, result.CompletedToolCalls)
+
+			case result.ProtocolViolation:
+				// SECURITY (audit H1/H2): the upstream emitted a structurally
+				// unsafe tool_use stream (interleaved second tool_use, or
+				// start-input conflicting with streamed deltas). We cannot
+				// gate it without risking an ungated call, so we fail closed:
+				// discard the buffered bytes and emit a synthetic refusal.
+				metrics.IncLLMProxyProtocolViolation("anthropic")
+				refusal := s.buildRefusal("anthropic", Decision{
+					Allow:  false,
+					Reason: "upstream tool_use stream is malformed (interleaved or conflicting tool_use blocks); refused",
+					Rule:   "deny:llm_api_proxy:tool_use_interleaved",
+				}, &RefusalContext{Provider: "anthropic", AnthropicToolUseIndex: acc.ActiveToolUseIndex()})
+				_, _ = w.Write(refusal)
+				flusher.Flush()
+				return
 
 			case result.OverflowBufferBytes:
 				metrics.IncLLMProxyBufferOverflow("anthropic")

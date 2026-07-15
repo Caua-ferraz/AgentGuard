@@ -5,10 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/Caua-ferraz/AgentGuard/pkg/internal/gateclient"
 )
 
 // Config is the parsed CLI/env configuration for one gateway invocation.
@@ -42,6 +43,12 @@ type Config struct {
 	// Mirrors the SDK fail-mode contract documented in
 	// docs/PROXY_ARCHITECTURE.md § 6.1.
 	FailMode string
+
+	// FailAuditLog is the local JSONL file the gate appends a deny
+	// record to when /v1/check is unreachable in fail-closed-with-audit
+	// mode (the central server can't write the audit entry itself).
+	// Empty disables the local record. Unused in other fail modes.
+	FailAuditLog string
 
 	// PolicyMode is "strict" (dual-check: mcp_tool + mapped scope) or
 	// "fast" (single-check: mcp_tool only). Default "strict".
@@ -84,7 +91,7 @@ type Config struct {
 // SplitCommandLine). Currently only stdio is supported; the
 // Transport field is reserved for a future Streamable-HTTP impl.
 //
-// TODO(v0.6, #mcp-streamable-http): add Transport == "http" with a
+// TODO(v0.7, #mcp-streamable-http): add Transport == "http" with a
 // URL field, paired with a different Upstream impl in transport.go.
 type UpstreamSpec struct {
 	Namespace string // e.g. "fs", "github"
@@ -113,15 +120,11 @@ func ParseConfigWithOutput(args []string, errOut io.Writer) (*Config, error) {
 
 	var upstreams stringSliceFlag
 	fs.Var(&upstreams, "upstream", `Downstream MCP server. Format: "<ns>:<cmd>" or "<cmd>" (ns defaults to first command word). Repeatable.`)
-	guardURL := fs.String("guard-url", "http://127.0.0.1:8080", "Central AgentGuard server base URL")
-	apiKey := fs.String("api-key", "", "Bearer token for /v1/check (defaults to $AGENTGUARD_API_KEY)")
-	tenantID := fs.String("tenant-id", "local", "Tenant ID for the central server")
-	failMode := fs.String("fail-mode", "deny", `Fail mode when /v1/check is unreachable: "deny" | "allow" | "fail-closed-with-audit"`)
+	gate := gateclient.RegisterGateFlags(fs,
+		"Path to the same policy YAML the central AgentGuard server loads (required for --policy-mode strict; used to resolve tool_scope_map locally)")
 	policyMode := fs.String("policy-mode", "strict", `Policy mode: "strict" (dual-check) or "fast" (single-check)`)
-	logLevel := fs.String("log-level", "info", `Stderr verbosity: "info" | "debug"`)
 	upstreamTimeout := fs.Duration("upstream-timeout", 30*time.Second, "Per-frame upstream-response timeout")
 	reconnectCap := fs.Duration("reconnect-cap", 60*time.Second, "Upper bound on reconnect backoff")
-	policyPath := fs.String("policy", "", "Path to the same policy YAML the central AgentGuard server loads (required for --policy-mode strict; used to resolve tool_scope_map locally)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -131,48 +134,30 @@ func ParseConfigWithOutput(args []string, errOut io.Writer) (*Config, error) {
 		return nil, errors.New("at least one --upstream is required")
 	}
 
+	// Env fallback + shared invariants (guard-url, tenant, fail-mode,
+	// log-level) — one contract with the LLM proxy.
+	if err := gate.Resolve(); err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
-		GuardURL:                  *guardURL,
-		APIKey:                    *apiKey,
-		TenantID:                  *tenantID,
-		FailMode:                  *failMode,
+		GuardURL:                  *gate.GuardURL,
+		APIKey:                    *gate.APIKey,
+		TenantID:                  *gate.TenantID,
+		FailMode:                  *gate.FailMode,
+		FailAuditLog:              *gate.FailAuditLog,
 		PolicyMode:                *policyMode,
-		LogLevel:                  *logLevel,
+		LogLevel:                  *gate.LogLevel,
 		UpstreamTimeout:           *upstreamTimeout,
 		ReconnectCap:              *reconnectCap,
-		PolicyPath:                *policyPath,
+		PolicyPath:                *gate.PolicyPath,
 		SupportedProtocolVersions: append([]string{}, DefaultSupportedProtocolVersions...),
 	}
 
-	// API-key fallback: env var if flag empty.
-	if cfg.APIKey == "" {
-		cfg.APIKey = os.Getenv("AGENTGUARD_API_KEY")
-	}
-
-	// Validate guard URL.
-	if cfg.GuardURL == "" {
-		return nil, errors.New("--guard-url must not be empty")
-	}
-	parsed, err := url.Parse(cfg.GuardURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return nil, fmt.Errorf("--guard-url %q is not a valid URL", cfg.GuardURL)
-	}
-
-	// Validate enums.
-	switch cfg.FailMode {
-	case "deny", "allow", "fail-closed-with-audit":
-	default:
-		return nil, fmt.Errorf("--fail-mode must be deny|allow|fail-closed-with-audit, got %q", cfg.FailMode)
-	}
 	switch cfg.PolicyMode {
 	case "strict", "fast":
 	default:
 		return nil, fmt.Errorf("--policy-mode must be strict|fast, got %q", cfg.PolicyMode)
-	}
-	switch cfg.LogLevel {
-	case "info", "debug":
-	default:
-		return nil, fmt.Errorf("--log-level must be info|debug, got %q", cfg.LogLevel)
 	}
 
 	// --policy is required in strict mode (the gate needs the

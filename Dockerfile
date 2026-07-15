@@ -1,6 +1,6 @@
 # Build stage
-# 1.25.10 carries GO-2026-5037
-FROM golang:1.25.11-alpine AS builder
+# 1.25.12 carries the fix for GO-2026-5856 (crypto/tls ECH privacy leak)
+FROM golang:1.25.12-alpine AS builder
 
 WORKDIR /app
 COPY go.mod go.sum* ./

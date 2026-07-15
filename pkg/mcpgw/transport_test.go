@@ -260,3 +260,55 @@ func TestStdioUpstream_Reconnect(t *testing.T) {
 			up.Status(), logBuf.String())
 	}
 }
+
+// TestStdioUpstream_RoutesNotificationsToSink: unsolicited notification
+// frames from the upstream reach OnNotification instead of being
+// dropped (the #mcp-list-changed seam).
+func TestStdioUpstream_RoutesNotificationsToSink(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip in short mode")
+	}
+
+	got := make(chan string, 4)
+	logger := newTransportLogger(&bytes.Buffer{}, "info")
+	up := NewStdioUpstreamWithOptions(UpstreamSpec{
+		Namespace: "stub",
+		Command:   "stub-server",
+	}, StdioUpstreamOptions{
+		Logger:         logger,
+		CommandFactory: stubFactory(t, "--notify-list-changed-on-call"),
+		Backoff:        []time.Duration{50 * time.Millisecond},
+		OnNotification: func(method string) { got <- method },
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := up.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = up.Close() })
+	if _, err := up.Initialize(ctx, "2025-11-25", map[string]interface{}{}, ClientInfo{Name: "test"}); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+
+	resp, err := up.Send(ctx, &Request{
+		ID:     "call-1",
+		Method: MethodToolsCall,
+		Params: json.RawMessage(`{"name":"echo","arguments":{}}`),
+	})
+	if err != nil {
+		t.Fatalf("tools/call Send: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("tools/call error: %+v", resp.Error)
+	}
+
+	select {
+	case method := <-got:
+		if method != NotificationToolsListChanged {
+			t.Errorf("notification method = %q, want %q", method, NotificationToolsListChanged)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("OnNotification never fired for the upstream's list_changed frame")
+	}
+}

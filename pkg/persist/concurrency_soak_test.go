@@ -52,6 +52,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -83,16 +84,123 @@ func soakPolicy() *policy.Policy {
 	}
 }
 
+// shardedFileLogger fans audit writes across N independent *audit.FileLogger
+// shards (each its own fd + mutex), round-robining by an atomic counter. It is a
+// drop-in audit.Logger: BufferedAsyncLogger's drain workers call Log concurrently,
+// and sharding lets them write real JSONL to distinct files in PARALLEL instead of
+// serializing on one file mutex. That parallel drain is what lets the default file
+// backend keep up with this soak's sustained arrival even under `go test -race`
+// (where a single-writer FileLogger's race-instrumented encode falls a few percent
+// short and spills). Writes are still real, durable JSONL — the production default
+// backend — just spread across shards on the off-hot-path drain side.
+type shardedFileLogger struct {
+	shards []*audit.FileLogger
+	next   atomic.Uint64
+}
+
+// newShardedFileLogger opens `shards` file loggers (audit.<i>.jsonl) under dir.
+// On any open failure it closes the shards already opened and returns the error.
+func newShardedFileLogger(dir string, shards int) (*shardedFileLogger, error) {
+	s := &shardedFileLogger{shards: make([]*audit.FileLogger, 0, shards)}
+	for i := 0; i < shards; i++ {
+		fl, err := audit.NewFileLogger(filepath.Join(dir, fmt.Sprintf("audit.%d.jsonl", i)))
+		if err != nil {
+			for _, opened := range s.shards {
+				_ = opened.Close()
+			}
+			return nil, err
+		}
+		s.shards = append(s.shards, fl)
+	}
+	return s, nil
+}
+
+// Log routes the entry to the next shard (round-robin). FileLogger.Log is
+// goroutine-safe, so concurrent drain workers landing on distinct shards write in
+// parallel; the rare collision on the same shard serializes on that shard's mutex.
+func (s *shardedFileLogger) Log(e audit.Entry) error {
+	i := s.next.Add(1) - 1
+	return s.shards[int(i%uint64(len(s.shards)))].Log(e)
+}
+
+// Query aggregates across shards. The soak never queries; this exists to satisfy
+// the audit.Logger interface (BufferedAsyncLogger.Query passes through to it).
+func (s *shardedFileLogger) Query(f audit.QueryFilter) ([]audit.Entry, error) {
+	var out []audit.Entry
+	for _, sh := range s.shards {
+		es, err := sh.Query(f)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, es...)
+	}
+	return out, nil
+}
+
+// Close closes every shard, returning the first error (all are still attempted).
+func (s *shardedFileLogger) Close() error {
+	var first error
+	for _, sh := range s.shards {
+		if err := sh.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
 // newSoakServer builds the same store + Syncer + buffered-async-audit wiring as
 // newITServer (persistence + reconcile armed, mirroring cmd/agentguard), but
 // with soakPolicy so a sustained-load run stays decision-deterministic. It
 // returns the shared *itServer so the existing close() teardown is reused.
+//
+// Audit backend — why this soak uses the DEFAULT file backend, not the
+// store/SQLite one newITServer uses: v0.9 moved the X-AgentGuard-Total-Ms
+// measurement to AFTER the audit enqueue, so the hot path now includes
+// BufferedAsyncLogger.Log. That enqueue is microseconds ONLY while the async
+// drain keeps up. If the queue saturates, Log's documented durability fallback
+// spills every entry to the disk-overflow file under overflowMu — a deliberate
+// durability-over-latency fallback, NOT a blocking bug — and that spill is the
+// multi-ms Total-Ms tail this test guards against. newITServer is a low-RPS
+// correctness test, so its SQLite-backed audit never saturates; this soak drives
+// well over 10k req/s, which a SQLite sink with a small worker pool cannot drain,
+// so it would spill and we'd be timing the overflow fallback, not the real async
+// hot path. So the soak provisions the audit the way a correctly-sized
+// deployment would: the default JSONL file backend (far faster per write than
+// SQLite) behind the buffered wrapper.
+//
+// Drain is SHARDED across several independent file loggers (see
+// newShardedFileLogger). A single FileLogger serializes every write on one
+// mutex+fd; under `go test -race` the race detector's per-access instrumentation
+// inflates that single-writer json.Encode just enough that it falls a few percent
+// short of this soak's arrival rate and spills (empirically ~500 spills at
+// steady state, independent of worker count — it is the raw single-writer
+// ceiling, not lock contention). Sharding lets the drain workers write real
+// JSONL to distinct files in parallel, so the async pipeline keeps up with
+// margin under BOTH the normal and the -race run. The sharding is purely on the
+// DRAIN side (background workers) — entirely off the /v1/check hot path, which
+// only enqueues — so it changes neither the hot-path measurement nor the
+// production audit semantics; it just gives the pipeline enough steady-state
+// throughput to honestly satisfy the DroppedToOverflow()==0 guard below (we are
+// NOT inflating the queue to mask a persistent deficit — the drain genuinely
+// keeps up). Persistence + reconcile stay fully armed: the SQLite store still
+// backs the Syncer (buckets, costs, approvals, reconcile) below — only the audit
+// sink changed.
 func newSoakServer(t *testing.T, st store.Store, overflowDir string) *itServer {
 	t.Helper()
 	eng := policy.NewEngineFromPolicy(soakPolicy())
 	disp := notify.NewDispatcher(policy.NotificationCfg{})
-	buflog, err := audit.NewBufferedAsyncLogger(store.NewAuditLogger(st), audit.BufferedAsyncOpts{
-		QueueSize: 4096, Workers: 2, OverflowPath: filepath.Join(overflowDir, "overflow.jsonl"),
+	// Default production audit backend (JSONL file append), sharded so the async
+	// drain parallelizes. Closed via t.Cleanup, which runs AFTER the buffered
+	// wrapper's drain-on-close (a test-function defer via s.close()) and BEFORE
+	// t.TempDir's RemoveAll (registered earlier, so it runs later under LIFO), so
+	// no open handle lingers to block temp-dir teardown on Windows.
+	fileLog, err := newShardedFileLogger(overflowDir, 8)
+	if err != nil {
+		t.Fatalf("sharded file audit logger: %v", err)
+	}
+	t.Cleanup(func() { _ = fileLog.Close() })
+	buflog, err := audit.NewBufferedAsyncLogger(fileLog, audit.BufferedAsyncOpts{
+		QueueSize: 4096, Workers: 4, OverflowPath: filepath.Join(overflowDir, "overflow.jsonl"),
 	})
 	if err != nil {
 		t.Fatalf("buffered logger: %v", err)
@@ -271,6 +379,24 @@ func TestIntegration_ConcurrentHotPathLatencyWithPersistence(t *testing.T) {
 	}
 	if len(all) < 2000 {
 		t.Fatalf("collected only %d successful samples under load (want >=2000 for a meaningful p99); machine may be stalled", len(all))
+	}
+
+	// Honesty guard for the p99 measured below. Since v0.9, X-AgentGuard-Total-Ms
+	// is captured AFTER the audit enqueue, so a fast reading is only valid if the
+	// async drain kept up at steady state. If the queue had saturated, Buffered-
+	// AsyncLogger.Log would have spilled each entry to the disk-overflow file
+	// under overflowMu — the durability-over-latency fallback whose per-request
+	// cost is exactly the multi-ms tail this test guards against — and a "fast"
+	// p99 would be a lie masking that spill. Assert zero drops so the p99 is
+	// provably the true async hot path, and so a future audit-backend regression
+	// that reintroduces overflow-spill under this load fails HERE (loudly) instead
+	// of silently degrading the tail. DroppedToOverflow() is a lifetime atomic
+	// counter (warm-up included) read before any teardown defer runs.
+	dropped := s.buflog.DroppedToOverflow()
+	t.Logf("audit steady-state drain: DroppedToOverflow=%d (0 == the async pipeline kept up, so the p99 below is the true async enqueue, not the disk-overflow fallback)", dropped)
+	if dropped != 0 {
+		t.Errorf("audit overflow-spilled %d entries during the %d-worker soak — the measured hot-path p99 would reflect the disk-overflow durability fallback, not the true async enqueue; the audit drain must keep up at steady state (provision a faster backend / more drain workers), not spill",
+			dropped, workers)
 	}
 
 	sort.Float64s(all)

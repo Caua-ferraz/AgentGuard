@@ -42,7 +42,7 @@ import (
 // Versions are injected at link time via -ldflags. Defaults are used
 // for `go run ./cmd/agentguard-mcp-gateway` and `go test`.
 var (
-	version = "0.6.0"
+	version = "0.9.0"
 	commit  = "dev"
 )
 
@@ -151,7 +151,7 @@ func main() {
 	// separate operator-monitoring concern. They ship to stderr logs
 	// today; an /v1/operator/event endpoint to surface them in the
 	// dashboard is future work. See pkg/mcpgw/audit.go for the full
-	// rationale and TODO(v0.6, #mcp-gateway-events).
+	// rationale and TODO(v0.7, #mcp-gateway-events).
 
 	if err := bridge.Run(ctx, os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "agentguard-mcp-gateway: %v\n", err)

@@ -1,6 +1,6 @@
 # Policy Reference
 
-Canonical reference for the AgentGuard policy YAML format as of **v0.5.1**.
+Canonical reference for the AgentGuard policy YAML format as of **v0.9.0**.
 
 Source of truth: `pkg/policy/engine.go` (types) and `pkg/policy/engine.go:Engine.Check` (evaluation). Examples here are the shapes the Go YAML decoder accepts — unknown keys are silently ignored.
 

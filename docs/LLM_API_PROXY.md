@@ -86,6 +86,7 @@ agentguard-llm-proxy \
 | `--proxy-api-key`        | optional bearer the proxy itself enforces on inbound. Empty = no proxy auth (localhost-only safe). | unset |
 | `--tenant-id`            | tenant header value                                       | `local`                      |
 | `--fail-mode`            | `deny` / `allow` / `fail-closed-with-audit`               | `deny`                       |
+| `--fail-audit-log`       | local JSONL fallback audit for `fail-closed-with-audit` denials (empty disables) | `agentguard-fail-audit.jsonl` |
 | `--max-buffer-bytes`     | per-stream tool-call buffer cap (see § 6)                 | `1048576` (1 MiB)            |
 | `--policy`               | path to AgentGuard policy YAML; loaded only for `tool_scope_map` operator overrides. Without it, the proxy falls back to `DefaultLLMToolScopeMap` and logs a WARN at startup. | unset |
 | `--log-level`            | stderr verbosity                                          | `info`                       |
@@ -720,11 +721,11 @@ constructor isn't overriding `base_url` from elsewhere.
 anything — every tool call triggers a callback to the central
 server's `/v1/check`. If the central server is down, the proxy's
 `--fail-mode` controls behaviour: `deny` (default), `allow`, or
-`fail-closed-with-audit`. `fail-closed-with-audit` is currently
-identical to `deny` except for the synthetic Rule string
-(`deny:llm_api_proxy:fail_closed_audit`) so operators can monitor
-central-server outage events specifically; the proxy does not yet
-emit a local audit log entry on this path. See
+`fail-closed-with-audit`. `fail-closed-with-audit` denies with the
+distinct Rule `deny:llm_api_proxy:fail_closed_audit` and appends the
+denial to the local `--fail-audit-log` JSONL file (default
+`agentguard-fail-audit.jsonl`) so the outage window is auditable
+without the central server. See
 [`docs/PROXY_ARCHITECTURE.md`](./PROXY_ARCHITECTURE.md) § 6.1 for the
 full table.
 

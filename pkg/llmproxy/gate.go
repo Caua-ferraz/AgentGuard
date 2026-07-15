@@ -29,36 +29,29 @@ package llmproxy
 //     DENY with Rule="deny:llm_api_proxy:fail_closed".
 //   - --fail-mode fail-closed-with-audit: same DENY shape but the
 //     synthetic Rule is "deny:llm_api_proxy:fail_closed_audit" so
-//     dashboards can break out the two failure modes. The failure
-//     is surfaced via metrics + stderr logs today; a local audit
-//     entry from the proxy side is future work. See
-//     TODO(v0.6, #llm-proxy-fail-closed-audit-emit) below.
+//     dashboards can break out the two failure modes, and the denial
+//     is appended to the local --fail-audit-log JSONL file so the
+//     outage window stays reconstructable without the central server.
 //   - --fail-mode allow: /v1/check unreachable → synthetic ALLOW.
 //     Useful for dev / failover scenarios where availability beats
 //     enforcement; NOT a production posture.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync/atomic"
-	"time"
 
+	"github.com/Caua-ferraz/AgentGuard/pkg/internal/gateclient"
 	"github.com/Caua-ferraz/AgentGuard/pkg/notify"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
 // DefaultGuardHTTPTimeout is the per-/v1/check-call timeout the gate
 // applies when the operator does not pass a custom http.Client.
-// Five seconds matches the SDKs and the value documented in
-// docs/PROXY_ARCHITECTURE.md § 6.1.
-const DefaultGuardHTTPTimeout = 5 * time.Second
+const DefaultGuardHTTPTimeout = gateclient.DefaultGuardHTTPTimeout
 
 // FailModeRuleClosed and friends are the synthetic Rule strings the
 // gate stamps on fail-mode decisions so operators can alert on them
@@ -71,18 +64,27 @@ const (
 	InvalidResponseRule     = "deny:llm_api_proxy:invalid_response"
 )
 
-// HTTPPolicyClient is the LLM API Proxy's wire-level connection to the
-// central AgentGuard server's /v1/check endpoint. One instance per
-// proxy process; the underlying http.Client (and its connection pool)
-// is reused.
+// llmFailModeRules feeds the proxy's synthetic-rule contract to the
+// shared gate client.
+var llmFailModeRules = gateclient.FailModeRules{
+	Open:        FailModeRuleOpen,
+	Closed:      FailModeRuleClosed,
+	ClosedAudit: FailModeRuleClosedAudit,
+	Invalid:     InvalidResponseRule,
+}
+
+// HTTPPolicyClient is the LLM API Proxy's connection to the central
+// AgentGuard server's /v1/check endpoint. One instance per proxy
+// process; the underlying http.Client (and its connection pool) is
+// reused.
 //
-// Mirrors pkg/mcpgw/gate.go:HTTPPolicyClient with these differences:
-//   - No dual-check (the mapped scope IS the gate scope).
-//   - Argument projection per mapped scope (path for filesystem,
-//     url+domain for network/browser, command for shell, ...).
-//   - meta.transport stamped as "llm_api_proxy" on every call so the
-//     central server's audit log + SSE chip + transport-tag tests
-//     attribute the entry to this proxy.
+// The /v1/check wire contract and fail-mode translation live in
+// pkg/internal/gateclient (shared with the MCP gateway). This client
+// adds the proxy-specific parts: single-check scope mapping (no
+// dual-check — the mapped scope IS the gate scope), per-scope argument
+// projection, source-side secret redaction, and
+// meta.transport="llm_api_proxy" stamping so the central server's
+// audit log attributes entries to this proxy.
 type HTTPPolicyClient struct {
 	GuardURL string // e.g. "http://127.0.0.1:8080"
 	APIKey   string // bearer token; empty if --api-key not set
@@ -109,11 +111,16 @@ type HTTPPolicyClient struct {
 	// server does its own redaction at notification dispatch but the
 	// audit log itself does not, so the proxy redacts at the source.
 	redactor *notify.Redactor
+
+	// fallback records local audit entries for fail-closed-with-audit
+	// denials made while the central server is unreachable. nil (the
+	// other fail modes, or --fail-audit-log "") records nothing.
+	fallback *gateclient.FallbackAuditWriter
 }
 
 // NewHTTPPolicyClient constructs a gate against cfg + an initial policy
 // snapshot. The caller is expected to subscribe to the policy provider's
-// Watch and call SetPolicy on every reload (mirrors mcpgw).
+// Watch and call SetPolicy on every reload.
 func NewHTTPPolicyClient(cfg *Config, pol *policy.Policy) *HTTPPolicyClient {
 	c := &HTTPPolicyClient{
 		GuardURL:   cfg.GuardURL,
@@ -122,6 +129,9 @@ func NewHTTPPolicyClient(cfg *Config, pol *policy.Policy) *HTTPPolicyClient {
 		FailMode:   cfg.FailMode,
 		HTTPClient: &http.Client{Timeout: DefaultGuardHTTPTimeout},
 		redactor:   notify.DefaultRedactor(),
+	}
+	if cfg.FailMode == "fail-closed-with-audit" {
+		c.fallback = gateclient.NewFallbackAuditWriter(cfg.FailAuditLog)
 	}
 	c.SetPolicy(pol)
 	return c
@@ -181,7 +191,7 @@ func (c *HTTPPolicyClient) Check(ctx context.Context, req *ToolCallCheck) (Decis
 		Meta:          buildLLMMeta(req, scope, c.redactor),
 	}
 	if scope == "filesystem" {
-		ar.Action = inferLLMFilesystemAction(req.ToolName)
+		ar.Action = gateclient.InferFilesystemAction(req.ToolName)
 	}
 	if scope == "browser" {
 		ar.Action = req.ToolName
@@ -189,7 +199,7 @@ func (c *HTTPPolicyClient) Check(ctx context.Context, req *ToolCallCheck) (Decis
 
 	dec, err := c.callV1Check(ctx, ar)
 	if err != nil {
-		return c.failModeDecision(err), err
+		return c.failModeDecision(ar, err), err
 	}
 	return dec, nil
 }
@@ -296,12 +306,12 @@ func projectDomain(scope string, args map[string]interface{}) string {
 func formatLLMCommand(req *ToolCallCheck, scope string, red *notify.Redactor) string {
 	switch scope {
 	case "shell":
-		if cmd := firstStringArg(req.Arguments, "command", "cmd", "script", "code"); cmd != "" {
+		if cmd := gateclient.FirstStringArg(req.Arguments, "command", "cmd", "script", "code"); cmd != "" {
 			return redactSingle(red, cmd)
 		}
 		// Fall back to tool name + serialised args so shell rules that
 		// match on a wrapper tool's invocation still fire.
-		if argStr := firstStringArg(req.Arguments, "args"); argStr != "" {
+		if argStr := gateclient.FirstStringArg(req.Arguments, "args"); argStr != "" {
 			return redactSingle(red, req.ToolName+" "+argStr)
 		}
 		return req.ToolName
@@ -323,7 +333,7 @@ func formatLLMCommand(req *ToolCallCheck, scope string, red *notify.Redactor) st
 	case "data":
 		// Data scope: prefer the value being submitted so existing
 		// data rules can match on it. Sensitive args go in meta only.
-		if v := firstStringArg(req.Arguments, "value", "content", "text", "data"); v != "" {
+		if v := gateclient.FirstStringArg(req.Arguments, "value", "content", "text", "data"); v != "" {
 			return redactSingle(red, v)
 		}
 		return req.ToolName
@@ -400,181 +410,25 @@ func redactSingle(red *notify.Redactor, s string) string {
 	return red.Redact(ev).Request.Command
 }
 
-// firstStringArg returns the first non-empty string value found in args
-// under any of the supplied keys, or "" if none match. Mirrors the
-// helper of the same name in pkg/mcpgw/gate.go for consistency.
-func firstStringArg(args map[string]interface{}, keys ...string) string {
-	if len(args) == 0 {
-		return ""
-	}
-	for _, k := range keys {
-		if v, ok := args[k]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				return s
-			}
-		}
-	}
-	return ""
-}
-
-// inferLLMFilesystemAction maps a tool-name verb to the canonical
-// filesystem-scope action ("read"/"write"/"delete"). Best-effort —
-// rules that match by Path only are unaffected. Mirrors
-// mcpgw.inferFilesystemAction; duplicated rather than imported because
-// pkg/mcpgw → pkg/llmproxy would be a layering inversion.
-func inferLLMFilesystemAction(toolName string) string {
-	tl := strings.ToLower(toolName)
-	switch {
-	case strings.HasPrefix(tl, "read"), strings.HasPrefix(tl, "list"),
-		strings.HasPrefix(tl, "get"), strings.HasPrefix(tl, "stat"),
-		strings.HasPrefix(tl, "cat"), strings.HasPrefix(tl, "find"),
-		strings.HasPrefix(tl, "glob"):
-		return "read"
-	case strings.HasPrefix(tl, "write"), strings.HasPrefix(tl, "edit"),
-		strings.HasPrefix(tl, "create"), strings.HasPrefix(tl, "append"),
-		strings.HasPrefix(tl, "save"), strings.HasPrefix(tl, "copy"),
-		strings.HasPrefix(tl, "move"):
-		return "write"
-	case strings.HasPrefix(tl, "delete"), strings.HasPrefix(tl, "remove"),
-		strings.HasPrefix(tl, "unlink"), strings.HasPrefix(tl, "rm"):
-		return "delete"
-	}
-	return ""
-}
-
-// callV1Check POSTs an ActionRequest to <GuardURL>/v1/t/<TenantID>/check
-// and decodes the CheckResult into a Decision. Errors are returned for
-// the caller (Check) to translate into the configured fail-mode.
+// callV1Check delegates to the shared gate client with the proxy's
+// identity stamped on the User-Agent.
 func (c *HTTPPolicyClient) callV1Check(ctx context.Context, ar policy.ActionRequest) (Decision, error) {
-	if c.HTTPClient == nil {
-		c.HTTPClient = &http.Client{Timeout: DefaultGuardHTTPTimeout}
+	caller := gateclient.Caller{
+		GuardURL:   c.GuardURL,
+		APIKey:     c.APIKey,
+		TenantID:   c.TenantID,
+		UserAgent:  "agentguard-llm-proxy/" + BuildVersion,
+		HTTPClient: c.HTTPClient,
 	}
-
-	tenant := c.TenantID
-	if tenant == "" {
-		tenant = "local"
-	}
-	endpoint := strings.TrimRight(c.GuardURL, "/") + "/v1/t/" + url.PathEscape(tenant) + "/check"
-
-	body, err := json.Marshal(ar)
-	if err != nil {
-		return Decision{}, fmt.Errorf("marshal /v1/check body: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return Decision{}, fmt.Errorf("build /v1/check request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agentguard-llm-proxy/1.0")
-	if c.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return Decision{}, fmt.Errorf("/v1/check request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Cap the response body so a misbehaving server doesn't OOM the
-	// proxy. /v1/check responses are O(few hundred bytes).
-	const maxResp = 64 * 1024
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResp))
-	if err != nil {
-		return Decision{}, fmt.Errorf("read /v1/check body: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return Decision{}, fmt.Errorf("/v1/check HTTP %d: %s", resp.StatusCode, truncateForError(string(raw)))
-	}
-
-	var cr policy.CheckResult
-	if err := json.Unmarshal(raw, &cr); err != nil {
-		return Decision{}, fmt.Errorf("decode /v1/check response: %w", err)
-	}
-
-	return decisionFromCheckResult(cr), nil
+	return caller.CallV1Check(ctx, ar, llmFailModeRules)
 }
 
-// decisionFromCheckResult maps a policy.CheckResult onto the LLM
-// proxy's Decision shape (mirrors pkg/mcpgw/gate.go for consistency
-// and so refusal-construction helpers stay shareable).
-func decisionFromCheckResult(cr policy.CheckResult) Decision {
-	d := Decision{
-		Reason: cr.Reason,
-		Rule:   cr.Rule,
-	}
-	switch cr.Decision {
-	case policy.Allow:
-		d.Allow = true
-	case policy.RequireApproval:
-		d.Allow = false
-		d.RequiresApproval = true
-		d.ApprovalID = cr.ApprovalID
-		d.ApprovalURL = cr.ApprovalURL
-	case policy.Deny:
-		d.Allow = false
-	default:
-		// Defensive: an unrecognised decision string is treated as a
-		// hard DENY with a stable rule so dashboards can alert.
-		d.Allow = false
-		if d.Rule == "" {
-			d.Rule = InvalidResponseRule
-		}
-		if d.Reason == "" {
-			d.Reason = "unknown decision: " + string(cr.Decision)
-		}
-	}
+// failModeDecision translates a /v1/check failure into the configured
+// fail-mode verdict. In fail-closed-with-audit mode the denial is also
+// recorded locally (--fail-audit-log) so operators can reconstruct the
+// deny chain for the outage window without the central server.
+func (c *HTTPPolicyClient) failModeDecision(ar policy.ActionRequest, err error) Decision {
+	d := gateclient.FailModeDecision(c.FailMode, err, llmFailModeRules)
+	c.fallback.Record(ar, d, "llm_api_proxy", c.TenantID)
 	return d
 }
-
-// failModeDecision returns the synthetic Decision dictated by the
-// gate's --fail-mode when /v1/check is unreachable or returns
-// malformed bytes.
-//
-// TODO(v0.6, #llm-proxy-fail-closed-audit-emit): the
-// "fail-closed-with-audit" branch currently surfaces only via metrics
-// + stderr. A local audit entry from the proxy side (without round-
-// tripping the central server) so operators can reconstruct the deny
-// chain when /v1/check is offline is future work.
-func (c *HTTPPolicyClient) failModeDecision(err error) Decision {
-	switch strings.ToLower(c.FailMode) {
-	case "allow":
-		return Decision{
-			Allow:  true,
-			Reason: "fail-mode allow: " + err.Error(),
-			Rule:   FailModeRuleOpen,
-		}
-	case "fail-closed-with-audit":
-		return Decision{
-			Allow:  false,
-			Reason: "central server unreachable: " + err.Error(),
-			Rule:   FailModeRuleClosedAudit,
-		}
-	default: // "deny" or anything unrecognised
-		return Decision{
-			Allow:  false,
-			Reason: "central server unreachable: " + err.Error(),
-			Rule:   FailModeRuleClosed,
-		}
-	}
-}
-
-// truncateForError caps long /v1/check error bodies so a verbose
-// upstream response doesn't blow up logs.
-func truncateForError(s string) string {
-	const maxLen = 256
-	s = strings.TrimSpace(s)
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
-
-// ErrPolicyNotLoaded is returned by gate-side helpers when no policy
-// snapshot has been wired into the gate yet. Currently unused inside
-// gate.go (the nil-policy path falls through to default mappings) but
-// exposed so downstream callers (cmd/agentguard-llm-proxy/main.go) can
-// sentinel-check should they need to.
-var ErrPolicyNotLoaded = errors.New("llmproxy: policy snapshot not loaded")

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
@@ -170,6 +171,8 @@ func TestBufferedAsync_OverflowOnSaturation(t *testing.T) {
 		t.Fatalf("NewBufferedAsyncLogger: %v", err)
 	}
 
+	droppedBefore := metrics.AuditBufferedDroppedToOverflowTotal()
+
 	// Wait until the worker has actually pulled an entry from the queue
 	// before pushing the rest, otherwise the channel may briefly hold all
 	// 3 slots and we get a different overflow count than asserted.
@@ -187,6 +190,18 @@ func TestBufferedAsync_OverflowOnSaturation(t *testing.T) {
 	// Now: queue has 2 (slots 1,2), 8 went to overflow.
 	if got := b.DroppedToOverflow(); got != 8 {
 		t.Errorf("expected 8 dropped-to-overflow, got %d", got)
+	}
+
+	// The Prometheus mirrors track the instance counters: the spill
+	// counter advanced by the same 8, and the queue-depth gauge reads
+	// the 2 entries parked in the channel.
+	if got := metrics.AuditBufferedDroppedToOverflowTotal() - droppedBefore; got != 8 {
+		t.Errorf("metrics dropped-to-overflow delta = %d, want 8", got)
+	}
+	var promOut strings.Builder
+	metrics.WritePrometheus(&promOut)
+	if !strings.Contains(promOut.String(), "agentguard_audit_buffered_queue_depth 2") {
+		t.Errorf("queue-depth gauge not at 2; output:\n%s", promOut.String())
 	}
 
 	// Verify on disk: 8 lines.
@@ -221,6 +236,7 @@ func TestBufferedAsync_RecoveryLoopDrains(t *testing.T) {
 	}
 	f.Close()
 
+	drainedBefore := metrics.AuditBufferedDrainedFromOverflowTotal()
 	cap := &captureLogger{}
 	b, err := NewBufferedAsyncLogger(cap, BufferedAsyncOpts{
 		QueueSize:        16,
@@ -237,6 +253,9 @@ func TestBufferedAsync_RecoveryLoopDrains(t *testing.T) {
 
 	if got := b.DrainedFromOverflow(); got < 5 {
 		t.Errorf("expected DrainedFromOverflow >= 5, got %d", got)
+	}
+	if got := metrics.AuditBufferedDrainedFromOverflowTotal() - drainedBefore; got < 5 {
+		t.Errorf("metrics drained-from-overflow delta = %d, want >= 5", got)
 	}
 
 	// Overflow file should be gone after a successful drain (rename then

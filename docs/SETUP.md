@@ -6,10 +6,10 @@ Get AgentGuard running on your machine in under 5 minutes.
 
 | Tool | Version | Check |
 |------|---------|-------|
-| Go | 1.22+ | `go version` |
+| Go | 1.25+ | `go version` |
 | Git | any | `git --version` |
 | Python (optional, for the SDK) | 3.10+ | `python --version` |
-| Node.js (optional, for the TS SDK) | 18+ | `node --version` |
+| Node.js (optional, for the TS SDK) | 20+ | `node --version` |
 | Docker (optional) | any | `docker --version` |
 
 ## What you're setting up
@@ -74,7 +74,7 @@ go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@latest
 
 ```bash
 curl http://localhost:8080/health
-# {"status":"ok","version":"0.5.1"}
+# {"status":"ok","version":"0.9.0"}
 ```
 
 Open `http://localhost:8080/dashboard` in your browser to see the live dashboard.

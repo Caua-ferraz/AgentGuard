@@ -1283,7 +1283,7 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 		// req.Domain), and Action (against req.Action — typically
 		// "form_input"). Default-deny applies when no rule matches.
 		//
-		// TODO(v0.6, #data-pii): regex / classifier-based PII patterns
+		// TODO(v0.7, #data-pii): regex / classifier-based PII patterns
 		// (SSN, credit-card numbers, AWS keys) baked into a built-in
 		// rule library so operators don't have to spell them out.
 		if rs.Scope == "filesystem" && req.Path != "" {

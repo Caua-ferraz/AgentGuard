@@ -10,7 +10,7 @@ dashboard you can approve / deny from.
 ## Prerequisites
 
 - **Claude Desktop** installed: <https://claude.ai/download>
-- **Go 1.22+** (for `go install`): <https://go.dev/dl/>
+- **Go 1.25+** (for `go install`): <https://go.dev/dl/>
 - **`npx`** (Node.js 18+): <https://nodejs.org/> — used to launch the
   upstream MCP servers
 

@@ -212,13 +212,13 @@ func RunStartup(ctx context.Context, env Env) error {
 
 // CLIOptions is the parsed form of the `agentguard migrate` subcommand flags.
 type CLIOptions struct {
-	DryRun           bool
-	ID               string // run only this migration, skip others
-	List             bool   // list registered migrations and exit
-	ResetCheckpoint  bool   // delete the replay checkpoint before running
-	AuditLogPath     string
-	CheckpointPath   string
-	BackupDir        string
+	DryRun          bool
+	ID              string // run only this migration, skip others
+	List            bool   // list registered migrations and exit
+	ResetCheckpoint bool   // delete the replay checkpoint before running
+	AuditLogPath    string
+	CheckpointPath  string
+	BackupDir       string
 }
 
 // ErrMigrationNotFound is returned by RunCLI when --id names a migration that

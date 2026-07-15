@@ -139,6 +139,20 @@ sees the response.
 
 ---
 
+### 2.5 Gate client via `pkg/internal/gateclient`
+
+The wire-level `/v1/check` contract is implemented **once** in
+`pkg/internal/gateclient` and consumed by both proxies: the HTTP call
+shape (tenant-scoped URL, schema_version stamping, bearer auth, 64 KiB
+response cap), the fail-mode translation, the shared `Decision` type
+(re-exported by each proxy via type alias), and the shared CLI flag
+set + validation (`--guard-url`, `--api-key`, `--tenant-id`,
+`--fail-mode`, `--log-level`, `--policy`, with the AGENTGUARD_API_KEY
+env fallback). Each proxy keeps only its own scope-mapping and
+argument-projection logic. The package is internal — it is substrate,
+not public API; the per-binary synthetic Rule strings remain each
+proxy's stable contract.
+
 ## 3. Audit transport tag
 
 Every audit entry is chipped by **how the agent talked to the
@@ -319,7 +333,14 @@ Both proxies adopt the **same** flag for parity:
 |-----------------------------|-----------------------------------------------------------|
 | `deny`                      | synthesise `DENY` with `Rule="deny:<gateway>:fail_closed"` (LLM proxy emits `deny:llm_api_proxy:fail_closed`; MCP gateway emits `deny:gateway:fail_closed`). The agent sees a deny. **Default.** |
 | `allow`                     | synthesise `ALLOW` with `Rule="allow:<gateway>:fail_open"`. **Use only in trusted dev environments.** Logged as WARN at startup. |
-| `fail-closed-with-audit`    | synthesise `DENY` with a **distinct** `Rule="deny:<gateway>:fail_closed_audit"` so dashboards can break out central-server-outage events from plain fail-closed denials. The failure surfaces via the rule string + metrics + stderr only — operators can grep audit logs for `fail_closed_audit` to find these events. The proxy does **not** emit a local audit log entry today; a planned follow-up will write a fallback file (`<flag>.fallback.jsonl`) when the central server is unreachable. Until then, treat this mode as "deny + distinct rule" — the `_with_audit` suffix signals roadmap intent rather than current behaviour. |
+| `fail-closed-with-audit`    | synthesise `DENY` with a **distinct** `Rule="deny:<gateway>:fail_closed_audit"` so dashboards can break out central-server-outage events from plain fail-closed denials, **and append the denial to a local fallback audit file** (`--fail-audit-log`, default `agentguard-fail-audit.jsonl`, canonical `audit.Entry` JSONL) so the outage window stays reconstructable without the central server. |
+
+Independent of `--fail-mode`: when `/v1/check` answers 2xx but with an
+**unrecognised decision string**, both proxies deny with the stable
+`Rule="deny:<gateway>:invalid_response"` (`deny:llm_api_proxy:
+invalid_response` / `deny:gateway:invalid_response`) so a misbehaving
+or version-skewed central server is visible on dashboards instead of
+silently passing through.
 
 The Python SDK (always fail-closed) and TypeScript SDK (configurable
 `failMode`) keep their existing behaviour — the new flag just brings the
@@ -381,7 +402,7 @@ The two proxies have very different surfaces here:
   ```json
   {
     "status": "ok",
-    "version": "0.5.0",
+    "version": "0.9.0",
     "transport": "llm_api_proxy",
     "uptime_s": 412
   }

@@ -68,6 +68,7 @@ from agentguard import (
     AgentGuardDenied,
     Guard,
 )
+from agentguard.adapters._common import extract_check_params
 
 
 # ---------------------------------------------------------------------------
@@ -226,32 +227,7 @@ def _build_guarded_class() -> type:
 
         def _extract_check_params(self, tool_input: Any) -> dict:
             """Extract check params from str/dict tool input."""
-            params: dict = {}
-            if isinstance(tool_input, str):
-                params["command"] = tool_input
-            elif isinstance(tool_input, dict):
-                if "command" in tool_input or "cmd" in tool_input:
-                    params["command"] = tool_input.get(
-                        "command", tool_input.get("cmd", "")
-                    )
-                if "url" in tool_input:
-                    params["url"] = tool_input["url"]
-                    try:
-                        from urllib.parse import urlparse
-                        parsed = urlparse(tool_input["url"])
-                        if parsed.hostname:
-                            params["domain"] = parsed.hostname
-                    except Exception:
-                        pass
-                if "path" in tool_input or "file_path" in tool_input:
-                    params["path"] = tool_input.get(
-                        "path", tool_input.get("file_path", "")
-                    )
-                if "session_id" in tool_input:
-                    params["session_id"] = tool_input["session_id"]
-                if "est_cost" in tool_input:
-                    params["est_cost"] = tool_input["est_cost"]
-            return params
+            return extract_check_params(tool_input, self.name)
 
         # ----------------------------------------------------------
         # The single shared gate.

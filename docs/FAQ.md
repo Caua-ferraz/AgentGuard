@@ -6,7 +6,7 @@ Questions that come up often in issues and conversations. For symptom-keyed debu
 
 ### What is AgentGuard, exactly?
 
-**A wire-level checkpoint** that sits between an AI agent and everything it touches — shell, files, network, browser, MCP servers, the model itself. Every action is evaluated against a YAML policy and resolved as `ALLOW` / `DENY` / `REQUIRE_APPROVAL`, with a tamper-evident audit log and a human-in-the-loop approval queue behind it.
+**A wire-level checkpoint** that sits between an AI agent and everything it touches — shell, files, network, browser, MCP servers, the model itself. Every action is evaluated against a YAML policy and resolved as `ALLOW` / `DENY` / `REQUIRE_APPROVAL`, with an append-only audit log and a human-in-the-loop approval queue behind it.
 
 The checkpoint runs at three layers, all sharing one policy + audit + approval queue:
 
@@ -87,7 +87,7 @@ Use fail-open only when AgentGuard is advisory (e.g., you have another enforceme
 
 ### Is the SQLite audit backend ready?
 
-It's implemented (`pkg/audit/sqlite_logger.go`) but still **not wired by default** in v0.5.x. Activation requires adding `modernc.org/sqlite` as an import side-effect and constructing `audit.NewSQLiteLogger(path)` in `cmd/agentguard/main.go`. The default JSON-Lines file logger (with rotation on by default since v0.5.0) covers every observed deployment so far; the SQLite path is kept around for the multi-tenant v0.6 work where range-query semantics matter more.
+Yes — since v0.6 it ships as the durable-store backend: run with `--persist --audit-backend=store` and the audit trail lands in the SQLite store's indexed `audit_entries` table (writes stay off the /v1/check hot path via the async buffer, which the store backend force-enables). The default remains the JSON-Lines file logger with rotation. The earlier standalone `audit.SQLiteLogger` prototype was never wired and has been removed.
 
 ### Where's the admin API for managing approvers / RBAC?
 

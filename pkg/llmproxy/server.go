@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Caua-ferraz/AgentGuard/pkg/internal/gateclient"
 	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 )
 
@@ -102,16 +103,9 @@ type ToolCallCheck struct {
 	UpstreamStatus int
 }
 
-// Decision is the verdict returned by PolicyCheck. Mirrors
-// mcpgw.Decision so refusal-rewriting code can share helpers.
-type Decision struct {
-	Allow            bool
-	RequiresApproval bool
-	Reason           string
-	Rule             string
-	ApprovalID       string
-	ApprovalURL      string
-}
+// Decision is the verdict returned by PolicyCheck. Alias of the shared
+// gateclient.Decision so both proxies speak one verdict shape.
+type Decision = gateclient.Decision
 
 // ----- Server -----
 
@@ -346,17 +340,17 @@ func (s *Server) admitStream(w http.ResponseWriter) bool {
 	if cap <= 0 {
 		// Disabled; still bump the gauge so operators can observe
 		// in-flight streams even when uncapped.
-		n := s.streamingActive.Add(1)
-		metrics.SetLLMProxyStreamsActive(n)
+		s.streamingActive.Add(1)
+		metrics.AddLLMProxyStreamsActive(1)
 		return true
 	}
-	// Optimistic add-then-check keeps this lock-free; if we overshoot
-	// we decrement and refuse, which costs one extra atomic op in the
-	// rare overflow case.
+	// Optimistic add-then-check keeps this lock-free; if we overshoot we
+	// decrement and refuse, at the cost of one extra atomic in the rare
+	// overflow case.
 	n := s.streamingActive.Add(1)
 	if n > int64(cap) {
 		s.streamingActive.Add(-1)
-		metrics.SetLLMProxyStreamsActive(s.streamingActive.Load())
+		// Gauge not bumped for a rejected stream, so nothing to roll back.
 		metrics.IncLLMProxyStreamsRejected()
 		w.Header().Set("Retry-After", "5")
 		w.Header().Set("Content-Type", "application/json")
@@ -364,7 +358,7 @@ func (s *Server) admitStream(w http.ResponseWriter) bool {
 		_, _ = w.Write([]byte(`{"error":{"message":"server overloaded; too many concurrent streams","type":"agentguard_error"}}`))
 		return false
 	}
-	metrics.SetLLMProxyStreamsActive(n)
+	metrics.AddLLMProxyStreamsActive(1)
 	return true
 }
 
@@ -372,8 +366,8 @@ func (s *Server) admitStream(w http.ResponseWriter) bool {
 // safe to call once per successful admitStream return; never call it
 // when admitStream returned false (the slot was already released).
 func (s *Server) releaseStream() {
-	n := s.streamingActive.Add(-1)
-	metrics.SetLLMProxyStreamsActive(n)
+	s.streamingActive.Add(-1)
+	metrics.AddLLMProxyStreamsActive(-1)
 }
 
 // handleHealth is the proxy's own liveness endpoint. Distinct from

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Caua-ferraz/AgentGuard/pkg/internal/gateclient"
 )
 
 // MetaApprovalIDKey is the reserved `_meta` key MCP clients use to
@@ -105,19 +107,11 @@ type ToolsCallRequest struct {
 	ApprovalID string                 // populated from _meta.dev.agentguard/approval_id if present
 }
 
-// Decision is the verdict returned by PolicyCheck.
-type Decision struct {
-	Allow       bool
-	Reason      string
-	Rule        string
-	ApprovalID  string // set when REQUIRE_APPROVAL
-	ApprovalURL string
-	// RequiresApproval is set when the policy engine returned
-	// REQUIRE_APPROVAL. The bridge surfaces it as an isError=true
-	// content block (per docs/MCP_GATEWAY.md § 6.1) rather than a
-	// JSON-RPC error.
-	RequiresApproval bool
-}
+// Decision is the verdict returned by PolicyCheck. Alias of the shared
+// gateclient.Decision so both proxies speak one verdict shape. The
+// bridge surfaces RequiresApproval as an isError=true content block
+// (per docs/MCP_GATEWAY.md § 6.1) rather than a JSON-RPC error.
+type Decision = gateclient.Decision
 
 // AuditEntry is the bridge-internal shape passed to AuditEmit. A19
 // translates this into the canonical audit.Entry with
@@ -142,7 +136,7 @@ type AuditEntry struct {
 // SSEEvent is the bridge-internal shape passed to SSEEmit. A19
 // translates this into the broadcast channel the dashboard reads.
 type SSEEvent struct {
-	Type      string                 // "check" | "denied" | "approval_required"
+	Type      string // "check" | "denied" | "approval_required"
 	Timestamp time.Time
 	AgentID   string
 	Decision  string
@@ -198,8 +192,10 @@ func (b *Bridge) Run(ctx context.Context, in io.Reader, out io.Writer, errLog io
 			// Test injection already wired this namespace.
 			continue
 		}
+		ns := spec.Namespace
 		up := NewStdioUpstreamWithOptions(spec, StdioUpstreamOptions{
-			Logger: b.logger,
+			Logger:         b.logger,
+			OnNotification: func(method string) { b.onUpstreamNotification(ns, method) },
 		})
 		if err := up.Start(ctx); err != nil {
 			b.logger.Infof("startup: upstream %q failed to spawn: %v", spec.Namespace, err)
@@ -311,7 +307,7 @@ func (b *Bridge) dispatchFrame(ctx context.Context, line []byte, wg *sync.WaitGr
 		b.writeResponse(b.handleLoggingSetLevel(ctx, id, probe.Params))
 	default:
 		// resources/* and prompts/* are not yet routed.
-		// TODO(v0.6, #mcp-resources): forward resources/* and
+		// TODO(v0.7, #mcp-resources): forward resources/* and
 		// prompts/* with namespace-prefixed URIs.
 		b.writeResponse(NewResponseError(id, ErrCodeMethodNotFound,
 			fmt.Sprintf("method %q not supported by gateway", probe.Method), nil))
@@ -411,8 +407,11 @@ func (b *Bridge) handleInitialize(ctx context.Context, id RequestID, raw json.Ra
 // walking each upstream's cursor until exhausted before returning.
 // Cursor opacity is preserved.
 //
-// TODO(v0.6, #mcp-pagination): forward host cursor selectively per
+// TODO(v0.7, #mcp-pagination): forward host cursor selectively per
 // namespace + multiplex nextCursor as base64({"ns":..., "cursor":...}).
+// Deliberately deferred: the collapse behaviour above is spec-correct
+// (cursor opacity preserved, all tools returned); multiplexed cursors
+// are an optimisation that only pays off for very large tool sets.
 func (b *Bridge) handleToolsList(ctx context.Context, id RequestID, _ json.RawMessage) *Response {
 	type upResult struct {
 		ns    string
@@ -591,8 +590,8 @@ func (b *Bridge) handleToolsCall(ctx context.Context, id RequestID, raw json.Raw
 			Content: result.Content,
 			IsError: result.IsError,
 			Meta: map[string]interface{}{
-				MetaApprovalIDKey:                 dec.ApprovalID,
-				"dev.agentguard/approval_url":     dec.ApprovalURL,
+				MetaApprovalIDKey:             dec.ApprovalID,
+				"dev.agentguard/approval_url": dec.ApprovalURL,
 			},
 		})
 		return NewResponseResult(id, out)
@@ -672,10 +671,15 @@ func (b *Bridge) handleLoggingSetLevel(ctx context.Context, id RequestID, raw js
 // runPolicyCheck invokes the PolicyCheck hook, falling back to a
 // nil-safe ALLOW when no hook is wired (early-bring-up mode).
 //
-// TODO(v0.6, #mcp-meta-fallback): in-process state for clients that
+// TODO(v0.7, #mcp-meta-fallback): in-process state for clients that
 // strip `_meta` (some MCP host implementations may not preserve
 // custom `_meta` keys). The recommended path is the meta round-trip
 // per docs/MCP_GATEWAY.md § 6.2; this fallback is the escape hatch.
+// Deliberately deferred pending a security design pass: any heuristic
+// that matches a retry to a prior approval WITHOUT the explicit
+// approval id re-opens the replay surface the B1 shape-validator
+// closed (see audit 2026-06 / ApprovalReplayMismatch). Do not
+// implement as a drive-by.
 func (b *Bridge) runPolicyCheck(ctx context.Context, req *ToolsCallRequest) (Decision, error) {
 	if b.PolicyCheck == nil {
 		return Decision{
@@ -771,6 +775,42 @@ func (b *Bridge) writeResponse(resp *Response) {
 	}
 	if _, err := b.output.Write(data); err != nil {
 		b.logger.Infof("write response: stdout write failed: %v", err)
+	}
+}
+
+// onUpstreamNotification handles upstream-initiated notifications.
+// Only notifications/tools/list_changed is forwarded to the host —
+// the gateway re-aggregates tools/list across namespaces on demand,
+// so the host just needs the signal to re-pull. Everything else stays
+// gateway-internal (logged at debug by the transport).
+func (b *Bridge) onUpstreamNotification(ns, method string) {
+	if method != NotificationToolsListChanged {
+		return
+	}
+	b.logger.Debugf("upstream %q: tools/list_changed; forwarding to host", ns)
+	b.writeNotification(&Notification{
+		JSONRPC: JSONRPCVersion,
+		Method:  NotificationToolsListChanged,
+	})
+}
+
+// writeNotification emits a one-way frame to the host under outMu so a
+// concurrently-written response cannot tear it.
+func (b *Bridge) writeNotification(n *Notification) {
+	data, err := json.Marshal(n)
+	if err != nil {
+		b.logger.Infof("write notification: marshal failed: %v", err)
+		return
+	}
+	data = append(data, '\n')
+
+	b.outMu.Lock()
+	defer b.outMu.Unlock()
+	if b.output == nil {
+		return
+	}
+	if _, err := b.output.Write(data); err != nil {
+		b.logger.Infof("write notification: stdout write failed: %v", err)
 	}
 }
 

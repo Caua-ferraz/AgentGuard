@@ -275,15 +275,15 @@ func buildAnthropicRefusalNonStreaming(message, model string) []byte {
 
 // buildAnthropicRefusalSSE emits the Anthropic-shape synthetic refusal:
 //
-//   1. content_block_start (text) at toolUseIndex — the buffered
-//      tool_use's content_block_start was discarded on the DENY path,
-//      so this is the first start event the client sees at this index.
-//   2. content_block_delta (text_delta) carrying the message body.
-//   3. content_block_stop closing the text block.
-//   4. message_delta with stop_reason: end_turn — overrides any
-//      tool_use stop_reason that would have otherwise come from
-//      upstream and tells the SDK no tool result is needed.
-//   5. message_stop terminating the message.
+//  1. content_block_start (text) at toolUseIndex — the buffered
+//     tool_use's content_block_start was discarded on the DENY path,
+//     so this is the first start event the client sees at this index.
+//  2. content_block_delta (text_delta) carrying the message body.
+//  3. content_block_stop closing the text block.
+//  4. message_delta with stop_reason: end_turn — overrides any
+//     tool_use stop_reason that would have otherwise come from
+//     upstream and tells the SDK no tool result is needed.
+//  5. message_stop terminating the message.
 //
 // Each event is `event: <name>\ndata: <json>\n\n` per the Anthropic
 // streaming wire format (docs/LLM_API_PROXY.md § 5.2).

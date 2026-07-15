@@ -80,10 +80,11 @@ agentguard-mcp-gateway \
 | flag                | repeatable | meaning                                         |
 |---------------------|------------|-------------------------------------------------|
 | `--upstream "<ns>:<cmd>"` | yes  | Downstream MCP server. `ns` is the namespace prefix; `cmd` is the command (passed through `shlex.Split`). If `ns:` is omitted, the namespace defaults to the first whitespace-delimited token of `cmd`. |
-| `--guard-url`       | no         | central server URL. Default `http://127.0.0.1:8080`. |
+| `--guard-url`       | no         | central server URL. Default `http://127.0.0.1:8080`. Must be an `http`/`https` URL with a host. |
 | `--api-key`         | no         | bearer for `/v1/check`. Falls back to `AGENTGUARD_API_KEY` env. |
-| `--tenant-id`       | no         | default `local`.                                |
-| `--fail-mode`       | no         | `deny` / `allow` / `fail-closed-with-audit`. Default `deny`. `fail-closed-with-audit` is currently identical to `deny` except for the synthetic Rule string (`deny:gateway:fail_closed_audit`) so operators can monitor central-server outage events specifically. The proxy does **not** yet emit a local audit log entry on this path; that fallback file is planned. See [`PROXY_ARCHITECTURE.md`](./PROXY_ARCHITECTURE.md) § 6.1. |
+| `--tenant-id`       | no         | default `local`. Must be non-empty.             |
+| `--fail-mode`       | no         | `deny` / `allow` / `fail-closed-with-audit`. Default `deny`. `fail-closed-with-audit` denies with the distinct Rule `deny:gateway:fail_closed_audit` **and** records the denial in the local `--fail-audit-log` file. See [`PROXY_ARCHITECTURE.md`](./PROXY_ARCHITECTURE.md) § 6.1. |
+| `--fail-audit-log`  | no         | local JSONL fallback audit file for `fail-closed-with-audit` denials. Default `agentguard-fail-audit.jsonl`; empty disables. |
 | `--policy`          | no         | Path to AgentGuard policy YAML. **Required** when `--policy-mode strict` (the default). Used to resolve `tool_scope_map` overrides for the dual-check (`mcp_tool` + mapped scope). |
 | `--policy-mode`     | no         | `strict` (default) or `fast`. `strict` requires `--policy` and fails closed if the file is missing/invalid; `fast` skips loading and uses only the gateway's built-in default mapping. |
 | `--log-level`       | no         | stderr verbosity. Default `info`.               |
@@ -154,9 +155,9 @@ Sequence:
      "id": 1,
      "result": {
        "protocolVersion": "2025-11-25",
-       "serverInfo": { "name": "agentguard-mcp-gateway", "version": "0.5.0" },
+       "serverInfo": { "name": "agentguard-mcp-gateway", "version": "0.9.0" },
        "capabilities": {
-         "tools": { "listChanged": false }
+         "tools": { "listChanged": true }
        }
      }
    }
@@ -174,7 +175,7 @@ itself can faithfully proxy.
 
 | capability       | gateway behaviour                                          |
 |------------------|------------------------------------------------------------|
-| `tools`          | always advertised. `listChanged: false` — the gateway does not subscribe to upstream `tools/list_changed` notifications today; clients refresh by re-issuing `tools/list`. |
+| `tools`          | always advertised. `listChanged: true` *(v0.7)* — the gateway forwards upstream `notifications/tools/list_changed` to the host so clients re-pull `tools/list` when any upstream's tool set changes. |
 | `resources`      | advertised iff at least one upstream advertises. `resources/list` and `resources/read` are forwarded verbatim with namespace-prefixed URIs. Test coverage for resources is light. |
 | `prompts`        | same as resources. Test coverage is light. |
 | `logging`        | always advertised; gateway forwards `logging/setLevel` to every upstream. |

@@ -51,9 +51,9 @@ func newIntegrationServer(t *testing.T, cfgMutators ...func(*Config)) *integrati
 		Name:    "integration",
 		Rules: []policy.RuleSet{
 			{
-				Scope: "shell",
-				Allow: []policy.Rule{{Pattern: "ls *"}, {Pattern: "echo *"}},
-				Deny:  []policy.Rule{{Pattern: "rm -rf *", Message: "blocked"}},
+				Scope:           "shell",
+				Allow:           []policy.Rule{{Pattern: "ls *"}, {Pattern: "echo *"}},
+				Deny:            []policy.Rule{{Pattern: "rm -rf *", Message: "blocked"}},
 				RequireApproval: []policy.Rule{{Pattern: "sudo *"}},
 			},
 			{
@@ -725,4 +725,3 @@ func readBody(t *testing.T, resp *http.Response) string {
 	}
 	return string(b)
 }
-

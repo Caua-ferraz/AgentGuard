@@ -100,6 +100,19 @@ type FeedResult struct {
 	// count exceeded the cap. The orchestrator emits the canonical
 	// "tool call arguments exceed gating buffer" refusal.
 	OverflowBufferBytes bool
+
+	// ProtocolViolation signals the parser detected a structurally unsafe
+	// stream that cannot be gated without risking a bypass. Today the only
+	// trigger is the Anthropic accumulator observing a second tool_use
+	// content block open before the first one closed (audit finding H1):
+	// Anthropic emits content blocks serially, and an interleaved second
+	// tool_use would pass through ungated once the first block's gate cycle
+	// resets the accumulator. The orchestrator MUST emit a synthetic
+	// refusal and stop reading upstream — fail-closed: refuse the ambiguous
+	// stream rather than deliver an ungated tool call. The OpenAI
+	// accumulator never sets this (its tool_calls all close together at
+	// finish_reason, so there is no interleave window).
+	ProtocolViolation bool
 }
 
 // OpenAIToolCallAccumulator stitches streaming tool_call fragments
@@ -244,7 +257,15 @@ func (a *OpenAIToolCallAccumulator) FeedEvent(rawEvent []byte) (FeedResult, erro
 				}
 				if tc.Function != nil {
 					st.HasFunction = true
-					if tc.Function.Name != "" {
+					// SECURITY (audit M1): take the FIRST non-empty function
+					// name, not the last. OpenAI emits the name once in the
+					// first fragment for a given tool_calls[i].index; a
+					// non-conformant upstream that sends a second, different
+					// name would otherwise make the gate evaluate the LAST
+					// name while a spec-conformant (first-wins) client SDK
+					// executes the FIRST — a parser-differential. First-wins
+					// here matches the client and removes the ambiguity.
+					if tc.Function.Name != "" && st.Name == "" {
 						st.Name = tc.Function.Name
 					}
 					if tc.Function.Arguments != "" {

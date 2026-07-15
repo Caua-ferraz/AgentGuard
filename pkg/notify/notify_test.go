@@ -12,6 +12,8 @@ import (
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/metrics"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
+	"os"
+	"path/filepath"
 )
 
 // countingNotifier is a test-only Notifier that records invocations.
@@ -109,6 +111,59 @@ func TestDispatcher_DispatchTimeoutDefaultsWhenUnset(t *testing.T) {
 	wh := d.notifiers[0].(*WebhookNotifier)
 	if got, want := wh.client.Timeout, policy.DefaultNotifyDispatchTimeout; got != want {
 		t.Errorf("default dispatch timeout = %v, want %v", got, want)
+	}
+}
+
+// TestDispatcher_DispatchTimeoutAbortsHangingWebhook is the behavioral anchor
+// for the three structural timeout tests above: those assert the configured
+// duration lands on wh.client.Timeout, but a refactor could move timeout
+// handling elsewhere (a RoundTripper, a per-request context deadline) and keep
+// the field while breaking the behavior. This test points a webhook at a server
+// that never responds and proves the dispatch_timeout actually BOUNDS the call —
+// Notify returns an error in well under the server's 10s hang, not the field
+// value. Survives any mechanism change that preserves the contract.
+func TestDispatcher_DispatchTimeoutAbortsHangingWebhook(t *testing.T) {
+	// stop releases the handler at cleanup so httptest.Server.Close doesn't
+	// block waiting on the still-hanging connection. Defers run LIFO, so close
+	// (stop) fires before srv.Close().
+	stop := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done(): // client gave up (timeout) → unblock
+		case <-stop:
+		}
+	}))
+	defer srv.Close()
+	defer close(stop)
+
+	const dispatchTimeout = 300 * time.Millisecond
+	d := NewDispatcher(policy.NotificationCfg{
+		DispatchTimeout: "300ms",
+		OnDeny:          []policy.NotifyTarget{{Type: "webhook", URL: srv.URL}},
+	})
+	defer d.Close()
+
+	wh, ok := d.notifiers[0].(*WebhookNotifier)
+	if !ok {
+		t.Fatalf("notifier[0] = %T, want *WebhookNotifier", d.notifiers[0])
+	}
+
+	start := time.Now()
+	err := wh.Notify(Event{Type: "denied"})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Error("expected a timeout error from the hanging webhook, got nil")
+	}
+	// Upper bound: must be bounded by the ~300ms timeout, not the server's 10s.
+	// Generous to avoid CI flakiness — the point is "bounded", not exact.
+	if elapsed > 3*time.Second {
+		t.Errorf("Notify took %v; dispatch_timeout=%v failed to bound the call", elapsed, dispatchTimeout)
+	}
+	// Lower bound: it must have actually waited on the timeout, not failed
+	// instantly (which would mean the timeout wasn't applied at all).
+	if elapsed < dispatchTimeout/2 {
+		t.Errorf("Notify returned in %v, faster than half the %v timeout — was the timeout applied?", elapsed, dispatchTimeout)
 	}
 }
 
@@ -414,8 +469,14 @@ func TestDispatcher_UsesExtraRedactionPatterns(t *testing.T) {
 		Type:    "denied",
 		Request: policy.ActionRequest{Command: "upload ORG_ABCD1234 to s3"},
 	})
-	// Give the worker a tick to consume.
-	time.Sleep(50 * time.Millisecond)
+	// Poll until the worker delivers the event rather than sleeping a fixed
+	// 50ms: under load / -race the worker may not have drained the queue yet,
+	// which would read an empty Command and fail spuriously (the redacted-check
+	// would see "" and report a missing [REDACTED]). Mirrors the robust pattern
+	// in TestDispatcher_RedactsBeforeDelivery.
+	waitForCondition(t, time.Second, func() bool {
+		return captured.Get().Request.Command != ""
+	}, "extra-pattern redaction event to be delivered")
 
 	got := captured.Get()
 	if strings.Contains(got.Request.Command, "ORG_ABCD1234") {
@@ -486,8 +547,12 @@ func (c *capturingNotifier) Get() Event {
 	return c.e
 }
 
-// TestDispatcher_MultiAgentFanout: events from different agent_ids must all
-// reach every notifier (no per-agent filtering at the dispatcher layer).
+// TestDispatcher_MultiAgentFanout is a forward-looking regression guard, NOT a
+// duplicate of TestDispatcher_DispatchesAllEvents: it pins the contract that the
+// dispatcher does NO per-agent_id filtering — every agent's events reach every
+// notifier. If someone later adds per-agent routing/filtering at this layer,
+// this fails even though basic delivery still works. The agent_id variety is
+// the point; the overlap with the plain delivery test is deliberate.
 func TestDispatcher_MultiAgentFanout(t *testing.T) {
 	d := NewDispatcherWithOpts(policy.NotificationCfg{}, 4, 32)
 	defer d.Close()
@@ -515,6 +580,11 @@ func TestDispatcher_MultiAgentFanout(t *testing.T) {
 // TestDispatcherCloseDoubleCall closes R3 #6: Close must be idempotent.
 // A second Close call used to panic on close-of-closed-channel; the
 // sync.Once guard makes repeat calls a no-op.
+//
+// Intentional overlap with TestDispatcher_DoubleCloseRandomized (notify_
+// property_test.go): this is the focused, deterministic pin tied to the R3 #6
+// regression (sequential double-close); the property test adds the concurrent
+// interleaving. Keep both — they fail for different reasons.
 func TestDispatcherCloseDoubleCall(t *testing.T) {
 	d := NewDispatcherWithOpts(policy.NotificationCfg{}, 1, 4)
 	d.Close()
@@ -585,4 +655,140 @@ func TestDispatcher_TimestampFilled(t *testing.T) {
 	if captured.Get().Timestamp.Before(before) {
 		t.Errorf("timestamp was not filled: %v", captured.Get().Timestamp)
 	}
+}
+
+// ---- spool-to-disk (queue overflow durability) -----------------------------
+
+func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for %s", what)
+}
+
+// TestDispatcher_SpoolOnSaturation_ThenRecoveryDelivers: queue-full
+// events land in the spool instead of being dropped, and the recovery
+// loop delivers every one of them once the worker frees up.
+func TestDispatcher_SpoolOnSaturation_ThenRecoveryDelivers(t *testing.T) {
+	spool := filepath.Join(t.TempDir(), "notify-spool.jsonl")
+	droppedBefore := atomic.LoadUint64(&DroppedEvents)
+	spooledBefore := metrics.NotifySpooledTotal()
+
+	d := NewDispatcherWithOptions(policy.NotificationCfg{}, DispatcherOptions{
+		Workers:          1,
+		QueueSize:        1,
+		SpoolPath:        spool,
+		RecoveryInterval: 50 * time.Millisecond,
+	})
+	defer d.Close()
+	counting := &countingNotifier{delay: 150 * time.Millisecond}
+	d.notifiers = append(d.notifiers, counting)
+
+	const total = 6
+	for i := 0; i < total; i++ {
+		d.Send(Event{Type: "denied"})
+	}
+
+	if got := metrics.NotifySpooledTotal() - spooledBefore; got == 0 {
+		t.Fatal("expected at least one event spooled under saturation")
+	}
+	if got := atomic.LoadUint64(&DroppedEvents) - droppedBefore; got != 0 {
+		t.Fatalf("spool enabled: %d events dropped, want 0", got)
+	}
+
+	waitForCondition(t, 20*time.Second, func() bool {
+		counting.mu.Lock()
+		defer counting.mu.Unlock()
+		return counting.calls >= total
+	}, "all spooled events delivered")
+
+	if metrics.NotifyDespooledTotal() == 0 {
+		t.Error("despooled counter never advanced")
+	}
+}
+
+// TestDispatcher_SpoolDisabled_DropsAsBefore pins the legacy contract:
+// without --notify-spool, queue overflow still drops and counts.
+func TestDispatcher_SpoolDisabled_DropsAsBefore(t *testing.T) {
+	droppedBefore := atomic.LoadUint64(&DroppedEvents)
+
+	d := NewDispatcherWithOpts(policy.NotificationCfg{}, 1, 1)
+	defer d.Close()
+	d.notifiers = append(d.notifiers, &countingNotifier{delay: 200 * time.Millisecond})
+
+	for i := 0; i < 6; i++ {
+		d.Send(Event{Type: "denied"})
+	}
+	if got := atomic.LoadUint64(&DroppedEvents) - droppedBefore; got == 0 {
+		t.Error("spool disabled: expected drops under saturation")
+	}
+}
+
+// TestDispatcher_SpoolLeftoverFromPreviousProcessIsDelivered: a spool
+// file written by a previous (crashed/stopped) process is picked up by
+// the next dispatcher with the same path.
+func TestDispatcher_SpoolLeftoverFromPreviousProcessIsDelivered(t *testing.T) {
+	spool := filepath.Join(t.TempDir(), "notify-spool.jsonl")
+	leftover := `{"notifier_index":0,"event":{"type":"denied","timestamp":"2026-06-12T00:00:00Z","request":{"scope":"shell","command":"rm -rf /"},"result":{"decision":"DENY","reason":"left over"}}}` + "\n"
+	if err := os.WriteFile(spool, []byte(leftover), 0o600); err != nil {
+		t.Fatalf("seed spool: %v", err)
+	}
+
+	// Inject capt via extraNotifiers so d.notifiers is fully built before the
+	// spool-recovery goroutine starts reading it. Appending after construction
+	// races with drainSpoolOnce (the seeded spool gives the loop work on its
+	// first tick) — see DispatcherOptions.extraNotifiers.
+	capt := &capturingNotifier{}
+	d := NewDispatcherWithOptions(policy.NotificationCfg{}, DispatcherOptions{
+		Workers:          2,
+		QueueSize:        16,
+		SpoolPath:        spool,
+		RecoveryInterval: 50 * time.Millisecond,
+		extraNotifiers:   []Notifier{capt},
+	})
+	defer d.Close()
+
+	waitForCondition(t, 15*time.Second, func() bool {
+		return capt.Get().Result.Reason == "left over"
+	}, "leftover spooled event delivered")
+}
+
+// TestDispatcher_SpoolCorruptLineSkippedRemainderDelivered: a crashed process
+// commonly leaves a truncated/garbage final frame in the spool. Recovery must
+// skip the unparseable line and still deliver the well-formed records around it
+// — never wedge the drain loop on a bad frame. drainSpoolOnce documents this
+// "skip corrupt, continue" posture; this pins it so a refactor can't regress
+// into aborting the whole drain (and silently losing every later event).
+func TestDispatcher_SpoolCorruptLineSkippedRemainderDelivered(t *testing.T) {
+	spool := filepath.Join(t.TempDir(), "notify-spool.jsonl")
+	// Line 1: garbage/truncated (a partial write from a crash). Line 2: a valid
+	// record that must still be delivered after the corrupt frame is skipped.
+	content := "{not valid json — truncated frame\n" +
+		`{"notifier_index":0,"event":{"type":"denied","timestamp":"2026-06-12T00:00:00Z","request":{"scope":"shell","command":"rm -rf /"},"result":{"decision":"DENY","reason":"after corrupt line"}}}` + "\n"
+	if err := os.WriteFile(spool, []byte(content), 0o600); err != nil {
+		t.Fatalf("seed spool: %v", err)
+	}
+
+	// extraNotifiers wires capt as notifier index 0 before the recovery loop
+	// starts (see DispatcherOptions.extraNotifiers) — same pattern as the
+	// leftover test above, which the seeded spool's first tick would otherwise
+	// race.
+	capt := &capturingNotifier{}
+	d := NewDispatcherWithOptions(policy.NotificationCfg{}, DispatcherOptions{
+		Workers:          2,
+		QueueSize:        16,
+		SpoolPath:        spool,
+		RecoveryInterval: 50 * time.Millisecond,
+		extraNotifiers:   []Notifier{capt},
+	})
+	defer d.Close()
+
+	waitForCondition(t, 15*time.Second, func() bool {
+		return capt.Get().Result.Reason == "after corrupt line"
+	}, "valid spooled event following a corrupt line to be delivered")
 }

@@ -54,6 +54,7 @@ Start the AgentGuard server. This is the only subcommand that runs a long-lived 
 | `--audit-queue-size <int>` | `1024` | Bounded queue size for the buffered async logger. Ignored unless `--audit-buffered`. |
 | `--audit-workers <int>` | `4` | Worker goroutines draining the buffered audit queue. Ignored unless `--audit-buffered`. |
 | `--audit-overflow-path <path>` | `<audit-log>.overflow.jsonl` | Disk-overflow spill file used when the buffered queue saturates. Ignored unless `--audit-buffered`. |
+| `--notify-spool <path>` | *(empty)* | *(v0.7)* JSONL spool file for notification events that overflow the dispatch queue — spooled events are redelivered by a recovery loop (including leftovers from a previous process) instead of dropped. Empty disables (drop-on-full). |
 | `--debug-pprof` | off | Expose Go pprof handlers on a **separate localhost-only** listener (`--debug-pprof-port`). Off by default; enable for performance investigations only. Tunnel via `kubectl port-forward` / `ssh -L` to access remotely — this listener never binds beyond `127.0.0.1`. |
 | `--debug-pprof-port <int>` | `6060` | Port for the localhost-only pprof listener. Ignored unless `--debug-pprof`. |
 | `--persist` | `true` | **(v0.6)** Persist runtime state (approvals, rate-limit buckets, cost accumulators) to a durable store so it survives restarts. Zero-config: auto-creates `agentguard.db` (SQLite). Set `false` for pure in-memory (pre-v0.6 behavior). The store is **never** on the `/v1/check` hot path — a background syncer flushes snapshots on a ≥1 s tick and hydrates memory on boot. See [Persistence & multi-tenancy](#persistence--multi-tenancy-v06). |
@@ -147,16 +148,18 @@ Exactly one of these selects how requests enter the subcommand. Specifying more 
 | `--request '<json>'` | One JSON object inline on the command line |
 | `--stdin` | One JSON object read from stdin |
 | `--batch` | JSON Lines (one request per line) read from stdin |
+| `--watch <file>` | *(v0.7)* Follow a JSONL file (tail -f) and verdict each appended request — one policy load for the whole stream, policy hot-reloads on edit. Runs until SIGINT/SIGTERM, then exits with the aggregate code |
 
 ### Flags
 
 | Flag | Default | Description |
 |---|---|---|
 | `--policy <path>` | *(required)* | Policy YAML to evaluate against. Validated at startup; missing or malformed → exit 3. |
-| `--tenant-id <id>` | `local` | Tenant identifier. v0.5 only recognises `local`; any other value resolves to a synthetic `DENY` with `matched_rule="deny:tenant:not_found"`. |
+| `--tenant-id <id>` | `local` | Tenant identifier. The offline `check` command evaluates against the supplied policy file only — an unknown tenant resolves to a synthetic `DENY` with `matched_rule="deny:tenant:not_found"`. |
 | `--request <json>` | *(empty)* | Single check from a JSON string. Mutually exclusive with `--stdin`/`--batch`. |
 | `--stdin` | off | Read a single JSON request object from stdin. |
 | `--batch` | off | Read JSONL (one request per line) from stdin. |
+| `--watch <file>` | *(empty)* | Follow a JSONL file and verdict each appended request. Mutually exclusive with `--request`/`--stdin`/`--batch`. Only newline-terminated lines are processed (a torn mid-append write is buffered until completed); a malformed line aborts with exit 3. |
 | `--output <fmt>` | `text` | Output format: `text` (human-friendly) or `json` (one JSON object per request, matching the `/v1/check` response shape). |
 | `--scope <name>` | *(empty)* | Required for the per-field flag mode. `shell`, `filesystem`, `network`, `cost`, `data`, etc. |
 | `--command <str>` | *(empty)* | Shell command to evaluate (shell scope). |
@@ -203,6 +206,11 @@ cat <<EOF | agentguard check --policy configs/default.yaml --batch
 {"scope":"shell","command":"rm -rf /","agent_id":"bot1"}
 {"scope":"network","domain":"api.openai.com","agent_id":"bot1"}
 EOF
+
+# Watch mode: follow a JSONL file and verdict requests as they are
+# appended (one policy load for the whole stream; Ctrl-C to stop and
+# get the aggregate exit code).
+agentguard check --policy configs/default.yaml --watch actions.jsonl
 
 # JSON output for downstream tooling.
 agentguard check --policy configs/default.yaml \

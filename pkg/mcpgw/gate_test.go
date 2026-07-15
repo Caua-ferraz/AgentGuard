@@ -3,14 +3,18 @@ package mcpgw
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
@@ -20,13 +24,13 @@ import (
 // received ActionRequest for cross-call assertions (e.g.,
 // dual-check fired exactly N times against scope X).
 type mockGuardServer struct {
-	srv      *httptest.Server
-	calls    atomic.Int64
-	scopeMu  sync.Mutex
+	srv            *httptest.Server
+	calls          atomic.Int64
+	scopeMu        sync.Mutex
 	receivedScopes []string
 	receivedReqs   []policy.ActionRequest
-	handlerMu sync.Mutex
-	handler   func(ar policy.ActionRequest) (status int, result policy.CheckResult, raw string)
+	handlerMu      sync.Mutex
+	handler        func(ar policy.ActionRequest) (status int, result policy.CheckResult, raw string)
 }
 
 func newMockGuardServer(t *testing.T) *mockGuardServer {
@@ -589,24 +593,6 @@ func TestHTTPPolicyClient_PropagatesApprovalID_DualCheck(t *testing.T) {
 	}
 }
 
-func TestInferFilesystemAction(t *testing.T) {
-	cases := map[string]string{
-		"read_file":   "read",
-		"list_dir":    "read",
-		"get_file":    "read",
-		"write_file":  "write",
-		"edit_file":   "write",
-		"delete_file": "delete",
-		"remove_dir":  "delete",
-		"unknown":     "",
-	}
-	for in, want := range cases {
-		if got := inferFilesystemAction(in); got != want {
-			t.Errorf("inferFilesystemAction(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // TestHTTPPolicyClient_FailMode_DenyVsClosedAudit_DistinctRules pins
 // the B4 fix on the MCP gate side: --fail-mode deny and
 // --fail-mode fail-closed-with-audit must emit DISTINCT rule strings
@@ -673,4 +659,78 @@ func TestHTTPPolicyClient_FailMode_DenyVsClosedAudit_DistinctRules(t *testing.T)
 			t.Errorf("expected fail-closed reason; got %q", dec.Reason)
 		}
 	})
+}
+
+// TestHTTPPolicyClient_FailClosedWithAudit_WritesLocalFallback: in
+// fail-closed-with-audit mode, a /v1/check failure must leave a local
+// audit record (--fail-audit-log) so the outage window stays
+// reconstructable without the central server.
+func TestHTTPPolicyClient_FailClosedWithAudit_WritesLocalFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, _ := w.(http.Hijacker)
+		conn, _, _ := hj.Hijack()
+		_ = conn.Close()
+	}))
+	defer srv.Close()
+
+	fallbackPath := filepath.Join(t.TempDir(), "fail-audit.jsonl")
+	cfg := &Config{
+		GuardURL:     srv.URL,
+		TenantID:     "acme",
+		PolicyMode:   "fast",
+		FailMode:     "fail-closed-with-audit",
+		FailAuditLog: fallbackPath,
+	}
+	gate := NewHTTPPolicyClient(cfg, nil)
+	gate.HTTPClient = &http.Client{Timeout: 250 * time.Millisecond}
+
+	dec, err := gate.Check(context.Background(), toolsCallReq("fs:delete_file", map[string]interface{}{"path": "/tmp/x"}))
+	if err != nil {
+		t.Fatalf("Check should not bubble err, got %v", err)
+	}
+	if dec.Allow || dec.Rule != FailModeRuleClosedAudit {
+		t.Fatalf("expected audit-variant deny, got %+v", dec)
+	}
+
+	data, err := os.ReadFile(fallbackPath)
+	if err != nil {
+		t.Fatalf("fallback file not written: %v", err)
+	}
+	var entry audit.Entry
+	if jerr := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &entry); jerr != nil {
+		t.Fatalf("fallback line is not a canonical audit.Entry: %v\n%s", jerr, data)
+	}
+	if entry.Transport != "mcp_gateway" || entry.TenantID != "acme" ||
+		entry.Result.Rule != FailModeRuleClosedAudit || entry.Request.Command != "fs:delete_file" {
+		t.Errorf("fallback entry fields wrong: %+v", entry)
+	}
+}
+
+// TestHTTPPolicyClient_PlainDeny_NoLocalFallback: the local record is
+// scoped to fail-closed-with-audit; plain deny mode writes nothing.
+func TestHTTPPolicyClient_PlainDeny_NoLocalFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, _ := w.(http.Hijacker)
+		conn, _, _ := hj.Hijack()
+		_ = conn.Close()
+	}))
+	defer srv.Close()
+
+	fallbackPath := filepath.Join(t.TempDir(), "fail-audit.jsonl")
+	cfg := &Config{
+		GuardURL:     srv.URL,
+		TenantID:     "local",
+		PolicyMode:   "fast",
+		FailMode:     "deny",
+		FailAuditLog: fallbackPath,
+	}
+	gate := NewHTTPPolicyClient(cfg, nil)
+	gate.HTTPClient = &http.Client{Timeout: 250 * time.Millisecond}
+
+	if _, err := gate.Check(context.Background(), toolsCallReq("fs:read_file", nil)); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if _, err := os.Stat(fallbackPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("plain deny mode must not create the fallback file; stat err=%v", err)
+	}
 }
