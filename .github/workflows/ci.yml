@@ -450,8 +450,14 @@ jobs:
           go-version: '1.25.12'
 
       - name: Hot-path p99 latency gates (<3ms)
-        # Two blocking gates: the persistence integration hot path and the pure
-        # Engine.Check hot path, both asserting p99 < 3ms in-test.
+        # Three blocking gates: the persistence integration hot path, the pure
+        # Engine.Check hot path, and the concurrent soak — all asserting
+        # p99 < 3ms in-test. The soak's p99 assert enforces only under
+        # AGENTGUARD_SOAK_P99_GATE=1, set here where the test runs ISOLATED;
+        # inside the main `test` job's parallel `go test ./...` it is advisory,
+        # because sibling test binaries co-scheduling on the runner inflate the
+        # tail without indicting the hot path.
         run: |
           go test ./pkg/persist/ -run TestIntegration_HotPathLatencyWithPersistence -v -count=1
           go test ./pkg/policy/ -run TestEngineCheck_P99LatencyGate -v -count=1
+          AGENTGUARD_SOAK_P99_GATE=1 go test ./pkg/persist/ -run TestIntegration_ConcurrentHotPathLatencyWithPersistence -v -count=1

@@ -142,6 +142,7 @@ func TestRotation_MetaRotatedFromPointsAtArchive(t *testing.T) {
 	}
 	if meta == nil {
 		t.Fatal("live file must have a schema header after rotation")
+		return // unreachable; keeps conservative nil analysis (SA5011) quiet
 	}
 	if meta.RotatedFrom == "" {
 		t.Fatal("post-rotation live file must carry rotated_from")

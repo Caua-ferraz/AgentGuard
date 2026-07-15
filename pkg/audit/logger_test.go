@@ -494,6 +494,7 @@ func TestReadMeta_SchemaV2File(t *testing.T) {
 	}
 	if m == nil {
 		t.Fatal("expected non-nil meta for v2 file")
+		return // unreachable; keeps conservative nil analysis (SA5011) quiet
 	}
 	if m.SchemaVersion != CurrentSchemaVersion {
 		t.Errorf("expected v%d, got v%d", CurrentSchemaVersion, m.SchemaVersion)
