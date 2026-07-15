@@ -22,6 +22,10 @@ func RateLimitedTotal() uint64    { return Default.RateLimitedTotal() }
 func ApprovalReplayMismatchTotal() uint64 {
 	return Default.ApprovalReplayMismatchTotal()
 }
+func IncApprovalReplayRefused(reason string) { Default.IncApprovalReplayRefused(reason) }
+func ApprovalReplayRefusedTotal(reason string) uint64 {
+	return Default.ApprovalReplayRefusedTotal(reason)
+}
 
 // -- Labeled counters --
 

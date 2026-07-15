@@ -38,7 +38,7 @@ Start the AgentGuard server. This is the only subcommand that runs a long-lived 
 | `--policy <path>` | `configs/default.yaml` | Path to policy YAML. Rejected at startup if missing or invalid. |
 | `--port <int>` | `8080` | TCP port. See bind behavior below. |
 | `--dashboard` | off | Serve `/dashboard` HTML + `/api/stream` SSE. Required for human approval UI. |
-| `--watch` | off | Poll the policy file every 2 s; hot-reload on mtime change. No restart needed. |
+| `--watch` | off | Log policy hot-reload activity. Hot-reload itself is always on (fsnotify events, with a 2 s mtime poll as fallback); no restart needed after policy edits. |
 | `--audit-log <path>` | `audit.jsonl` | Append-only JSON Lines file. Mode `0600`. Rotation is on by default; configurable via `--audit-max-size-mb`, `--audit-max-backups`, `--audit-max-age-days`, `--audit-compress`. Operators following older guidance should NOT also configure logrotate against `audit.jsonl` — the dual-rotator chain corrupts the rotation index. See [`OPERATIONS.md`](OPERATIONS.md#audit-log-rotation). |
 | `--api-key <key>` | *(empty)* | Bearer token for gated endpoints. **If empty, the server binds to `127.0.0.1` only** (localhost-only). |
 | `--base-url <url>` | `http://localhost:<port>` | External URL used when constructing `approval_url` in check responses. Set this behind a reverse proxy. |
@@ -46,6 +46,7 @@ Start the AgentGuard server. This is the only subcommand that runs a long-lived 
 | `--tls-terminated-upstream` | off | Issue session cookies with `Secure` even when `r.TLS == nil`. Set when behind a TLS-terminating proxy that does not forward `X-Forwarded-Proto`. See [`DEPLOYMENT.md`](DEPLOYMENT.md). |
 | `--session-cost-ttl <dur>` | `0` (never expire) | Evict idle session-cost accumulator entries. Example: `24h`. Zero keeps v0.4.0 behavior. |
 | `--session-cost-sweep-interval <dur>` | `max(ttl/4, 1m)` | Sweeper cadence. Ignored when `--session-cost-ttl 0`. |
+| `--approval-validity <dur>` | `5m` | How long a resolved approval is honored by the `/v1/check` approval-id retry, measured from resolution. Past the window the retry re-enters the approval flow under a new id. `0` disables the bound. Default matches the SDKs' `wait_for_approval` poll window. Resolved ALLOWs are additionally **one-shot** regardless of this flag — see [`APPROVAL_WORKFLOW.md`](APPROVAL_WORKFLOW.md#one-shot-consumption-and-validity). |
 | `--audit-max-size-mb <int>` | `100` | Rotate when the live audit file reaches this MiB. `0` disables rotation entirely (v0.4.x behavior — unbounded growth). See [`OPERATIONS.md`](OPERATIONS.md#audit-log-rotation). |
 | `--audit-max-backups <int>` | `5` | Maximum number of rotated archives to retain. `0` keeps all archives indefinitely. |
 | `--audit-max-age-days <int>` | `30` | Maximum age (days) of archived audit files. Older archives pruned at rotation time. `0` disables age-based pruning. |
@@ -76,7 +77,7 @@ By default `serve` is now **stateful**: runtime state survives a restart. On a c
 
 The store is a *cold-path* component — it is never read or written on the `/v1/check` request path, so the <3 ms p99 budget is unaffected. Disable with `--persist=false` for the legacy pure-in-memory behavior.
 
-**Tenancy.** The `local` tenant's policy comes from `--policy`. Additional tenants are registered in the store with [`agentguard tenant`](#agentguard-tenant-v06) and addressed via the `/v1/t/<tenant>/...` route family; each tenant is evaluated against its **own** policy, with isolated approvals, rate limits, cost accumulators, and audit. A tenant that has no registered policy is denied (`deny:tenant:not_found`).
+**Tenancy.** The `local` tenant's policy comes from `--policy`. Additional tenants are registered in the store with [`agentguard tenant`](#agentguard-tenant-v06) and addressed via the `/v1/t/<tenant>/...` route family; each tenant is evaluated against its **own** policy, with isolated approvals, rate limits, cost accumulators, and audit. A tenant that has no registered policy is rejected over HTTP with `404 {"error":"tenant not found"}` (see [`API.md`](API.md#url-families-legacy-vs-tenant-aware-v05)); the offline [`agentguard check --tenant-id`](#agentguard-check) path returns a synthetic DENY with `matched_rule="deny:tenant:not_found"`.
 
 ### Examples
 
@@ -292,7 +293,7 @@ Query `/v1/audit` for recent decisions. All filters are optional and AND-combine
 | `--decision <D>` | *(none)* | `ALLOW`, `DENY`, or `REQUIRE_APPROVAL`. |
 | `--scope <name>` | *(none)* | `shell`, `filesystem`, `network`, `browser`, `cost`, `data`, `mcp_tool`. |
 | `--transport <name>` | *(none)* | Filter by audit `transport` tag. One of `sdk`, `mcp_gateway`, `llm_api_proxy`. Pre-v0.5 entries are excluded when set. |
-| `--limit <int>` | `100` | Max entries. Server clamps silently above configured ceiling (default 1000). |
+| `--limit <int>` | `50` | Max entries. Server clamps silently above configured ceiling (default 1000). |
 | `--api-key <key>` | `$AGENTGUARD_API_KEY` | Bearer token. |
 
 ```bash
@@ -370,7 +371,7 @@ Startup migrations run automatically inside `agentguard serve` before the audit 
 
 ```bash
 agentguard version
-# agentguard 0.5.1 (abc1234)
+# agentguard 0.9.0 (abc1234)
 ```
 
 The `version` string is baked in at build time via `-ldflags "-X main.version=... -X main.commit=..."` (see `Makefile`).
@@ -380,10 +381,10 @@ The `version` string is baked in at build time via `-ldflags "-X main.version=..
 Every subcommand kicks off an async best-effort check against the GitHub Releases API at startup (800 ms budget). If a newer release exists, one line lands on stderr before subcommand output; otherwise silent.
 
 ```
-Notice: agentguard v0.5.1 is deprecated, version v0.5.2 available — https://github.com/Caua-ferraz/AgentGuard/releases/latest
+Notice: agentguard v0.9.0 is deprecated, version v0.9.1 available — https://github.com/Caua-ferraz/AgentGuard/releases/latest
 ```
 
-Skipped when the binary was built with `commit=dev`, when `AGENTGUARD_NO_UPDATE_CHECK` is set, or when the HTTP request fails. Never touches stdout, never affects exit codes.
+Skipped when the binary was built with `commit=dev`, when `AGENTGUARD_NO_UPDATE_CHECK` is set to any value other than `0`, or when the HTTP request fails. Never touches stdout, never affects exit codes.
 
 ---
 
@@ -393,7 +394,7 @@ Skipped when the binary was built with `commit=dev`, when `AGENTGUARD_NO_UPDATE_
 |---|---|---|
 | `AGENTGUARD_API_KEY` | `approve`, `deny`, `status`, `audit` (when `--api-key` unset) | empty |
 | `AGENTGUARD_URL` | SDKs (not the CLI) | `http://localhost:8080` |
-| `AGENTGUARD_NO_UPDATE_CHECK` | All subcommands — disables the GitHub Releases startup check when set | unset |
+| `AGENTGUARD_NO_UPDATE_CHECK` | All subcommands — disables the GitHub Releases startup check when set to any value other than `0` | unset |
 
 The CLI does **not** read `AGENTGUARD_URL` — pass `--url` explicitly. Only the Python/TypeScript SDKs honor that env var.
 

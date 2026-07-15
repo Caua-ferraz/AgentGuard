@@ -1,5 +1,24 @@
 # AgentGuard Internal Security Audit — 2026-06
 
+> **Resolution status (as of v0.9.0, 2026-07):** this document is the
+> point-in-time Phase-0 record; the statuses in the summary table below are
+> what was *planned* at audit time, not what is open today. Since then:
+> **H1, H2** fixed (`6c87334`, Anthropic streaming gating bypasses — now
+> refused fail-closed, counted by `agentguard_llmproxy_protocol_violation_total`);
+> **H3, M1** fixed (`51e7b76`, duplicate-key and first-wins tool-name
+> differentials); **M3** fixed (control-byte stripping wired into
+> `normalizeRequest`); **L4** closed in v0.9 by truth-up (append-only claim +
+> WORM forwarding guidance — see `CHANGELOG.md` § 0.9.0); **M2** fixed
+> post-v0.9.0 (`pkg/store/sqlite.go` now creates the DB 0600 and tightens
+> pre-existing files/sidecars on every open, with Unix-gated regression
+> tests); **M4** fixed post-v0.9.0 (`Redactor.Redact` now also scrubs
+> `Request.Path`/`Domain`/`Action`, covering all notifier outputs including
+> the Slack display action, with webhook/Slack regression tests); **L1**
+> hardened post-v0.9.0 (`absoluteMaxBufferBytes`, a built-in 64 MiB
+> ceiling in `pkg/llmproxy/streaming.go`, now bounds the streaming
+> buffers even when `MaxBufferBytes` is 0 — the stream is refused
+> fail-closed past it). L2/L3/L5 stand as documented/accepted risks.
+
 **Scope:** wire-level firewall runtime — MCP gateway, LLM API proxy, policy engine,
 central proxy server, audit log, persistence store.
 **Method:** read-only source review of the eight surfaces enumerated in the v0.6
@@ -197,7 +216,7 @@ name the spec-conformant client would act on.
 ## M2 — SQLite store files not mode 0600 (Medium)
 
 **Files:** [pkg/store/sqlite.go:34-63](../../pkg/store/sqlite.go#L34-L63),
-[pkg/audit/sqlite_logger.go:104-135](../../pkg/audit/sqlite_logger.go#L104-L135),
+`pkg/audit/sqlite_logger.go:104-135` (prototype since removed from the tree),
 [cmd/agentguard/main.go:282-296](../../cmd/agentguard/main.go#L282-L296).
 
 `NewSQLiteStore`/`NewSQLiteLogger` call `sql.Open("sqlite", path)`, which creates
@@ -266,6 +285,17 @@ Production default is non-zero, so this is operator-self-inflicted.
 **Fix / mitigation:** document that `0` disables the safety cap and is
 non-production; optionally enforce a hard absolute ceiling regardless. Logged as a
 TODO in this doc; not a Phase-1 blocker.
+
+**Status (post-v0.9.0): fixed.** `absoluteMaxBufferBytes`
+(`pkg/llmproxy/streaming.go`, 64 MiB = `MaxConfigurableBufferBytes`) now
+bounds both the per-event read and the accumulator cap whenever the
+computed cap is `<= 0`; the stream is refused fail-closed with the
+canonical buffer-overflow refusal. Positive operator-configured caps are
+untouched. `readSSEEvent` was additionally moved from `ReadBytes` to a
+`ReadSlice` loop so the cap is enforced every few KiB *within* a line —
+previously a single newline-free blob was buffered whole before the cap
+check ran, bypassing every cap (including the default 1 MiB) regardless
+of this finding's `0` case.
 
 ---
 
@@ -345,7 +375,7 @@ the same 0600 handling.
   `command`, `reason`, `rule`.
 - **P2 — No SQL injection.** Every query in
   [pkg/store/sqlite.go](../../pkg/store/sqlite.go) and
-  [pkg/audit/sqlite_logger.go](../../pkg/audit/sqlite_logger.go) uses `?`
+  `pkg/audit/sqlite_logger.go` (prototype since removed) uses `?`
   placeholders; the only string concatenation builds **static** column-name
   predicates (`"agent_id = ?"`), never user data. `LIMIT`/`OFFSET` are
   parameterized.

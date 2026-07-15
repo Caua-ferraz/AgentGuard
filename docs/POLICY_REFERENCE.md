@@ -124,13 +124,13 @@ Minimum example:
 
 ### Footgun: `time_window` without `require_prior`
 
-If you set only `time_window`, the condition is a **no-op** — it is always satisfied. `LoadFromFile` emits:
+Setting only `time_window` is rejected at policy load — `LoadFromFile` fails with:
 
 ```
-WARNING: rule "…" has time_window without require_prior — condition will be ignored
+rules[0]("…").conditions[0]: time_window without require_prior is rejected; pair time_window with require_prior or remove it
 ```
 
-This was a deliberate v0.4.0 backward-compat quirk that **became a hard policy-load error in v0.5.0** (see [`DEPRECATIONS.md`](DEPRECATIONS.md)). Either remove the orphan `time_window` or add a `require_prior` clause.
+In v0.4.x this was a silent no-op that only logged a WARNING; it **became a hard policy-load error in v0.5.0** (see [`DEPRECATIONS.md`](DEPRECATIONS.md)). Either remove the orphan `time_window` or add a `require_prior` clause.
 
 ### Footgun: no audit history → condition fails
 
@@ -607,6 +607,6 @@ allow:
 - `name` present, non-empty.
 - `filesystem` rule `paths` do not contain `..` after normalization.
 - Every `notifications.redaction.extra_patterns` entry compiles as a Go regexp.
-- `conditions.time_window` without `require_prior` emits a WARNING (not yet an error).
+- `conditions.time_window` without `require_prior` is rejected as a hard load error (since v0.5.0).
 
 There is **no** schema validation beyond the above — typos in field names are silently ignored by the YAML decoder. Always run `agentguard validate --policy <file>` after edits; wire it into CI against every policy file you ship.

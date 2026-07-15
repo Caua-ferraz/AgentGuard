@@ -121,7 +121,7 @@ dashboard. No agent code change required.
   for the full schema, including `require_approval` rules that pause the
   call until you click the dashboard's approve button.
 - **Add more upstreams** (github, fetch, slack, postgres):
-  [`docs/MCP_GATEWAY.md § Multi-upstream`](MCP_GATEWAY.md#3-multi-upstream-management)
+  [`docs/MCP_GATEWAY.md § Multi-upstream`](MCP_GATEWAY.md#4-multi-upstream-routing)
   and the official server catalog at
   <https://github.com/modelcontextprotocol/servers>.
 - **Approval flow walkthrough:** [`docs/APPROVAL_WORKFLOW.md`](APPROVAL_WORKFLOW.md)

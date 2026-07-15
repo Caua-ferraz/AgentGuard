@@ -1,9 +1,11 @@
-# Service Level Objectives — AgentGuard v0.7
+# Service Level Objectives — AgentGuard v0.9
 
-**Status:** baseline established. Targets below are operational expectations
-for a single-replica deployment running the in-process file-backed audit
-logger; revisit when deployments adopt the v0.6 store-backed audit
-(`--audit-backend=store`) or when horizontal scale-out becomes a thing.
+**Status:** baseline established (captured on v0.5.0; still the recorded
+floor). Targets below are operational expectations for a single-replica
+deployment running the in-process file-backed audit logger (the default);
+revisit when deployments adopt the store-backed audit
+(`--audit-backend=store`, v0.6+) or when horizontal scale-out becomes a
+thing (a v1.0 topic — see [`COMPATIBILITY.md`](COMPATIBILITY.md)).
 
 ## Service in scope
 
@@ -39,34 +41,39 @@ The targets below assume:
 | `/v1/check` p50 latency     | **< 1 ms**           | Engine path is in-memory; audit write is a single `json.Encode` to a buffered file. |
 | `/v1/check` p95 latency     | **< 3 ms**           | Allows one fsync per request to stay inside 3 ms. |
 | `/v1/check` p99 latency     | **< 5 ms** at 1k RPS | GC pause + sporadic file-system sync. |
-| Throughput (sustained)      | **≥ 1 000 RPS**      | Per replica; horizontal scale-out is out-of-scope for v0.5. |
+| Throughput (sustained)      | **≥ 1 000 RPS**      | Per replica; horizontal scale-out stays out of scope through v0.9 (single-node posture). |
 | Audit-write durability lag  | **< 100 ms**         | Time between `Log()` returning and the entry being readable by `Query`. |
 | Approval-required emit lag  | **< 250 ms**         | `notify.Dispatcher` queue depth + a single webhook hop. |
 
-These targets are **aspirational** for v0.5. They are validated against the
-benchmarks in §Baseline below; production validation against a real
-workload (with realistic policy sizes and concurrency) is tracked as a
-v0.6 follow-up.
+These targets are backed two ways as of v0.9: the micro-benchmarks in
+§Baseline below, and a CI latency gate (`TestEngineCheck_P99LatencyGate`,
+`pkg/policy`) that fails the build if `Engine.Check` p99 crosses the 3 ms
+budget with the persistence syncer active (measured ≪0.1 ms for the bare
+engine; ~0.53 ms for the full HTTP `/v1/check` path). Production
+validation against a real workload (realistic policy sizes and
+concurrency) remains open — see §Validation plan.
 
-## Out of scope for the v0.5 SLO
+## Out of scope for this SLO
 
 - **Cost-scope under heavy contention.** `Engine.Check(scope="cost")`
   takes a write lock so cost reservation and decision are atomic. Many
   concurrent cost checks against the same `Engine` instance will serialize.
   We do not bound p99 in this regime.
 - **`require_prior` audit-history scan.** When a rule has a `require_prior`
-  condition, the engine queries the audit log via `HistoryQuerier`, which
-  walks the JSONL file linearly. p99 here scales with audit-log size.
-  Deferred (the v0.6 store backend's indexed `audit_entries` table is the
-  intended fix before we publish a target).
+  condition, the engine queries the audit log via `HistoryQuerier`. With the
+  default file backend this walks the JSONL file linearly, so p99 scales
+  with audit-log size. The v0.6 store backend's indexed `audit_entries`
+  table (`--audit-backend=store`) removes the linear scan, but no latency
+  target is published for this path yet.
 - **Startup replay.** `NewServer` re-reads the audit log to seed in-memory
   decision counters. A multi-GiB log delays the first accurate `/metrics`
-  scrape; this is documented in `CLAUDE.md` and not part of the steady-state
-  SLO.
+  scrape; this is documented in
+  [`OPERATIONS.md`](OPERATIONS.md#audit-log-rotation) and not part of the
+  steady-state SLO.
 - **CSRF / session-store contention** on the dashboard auth path. The
   dashboard is a developer tool, not a load-bearing surface.
 
-## Baseline (v0.5)
+## Baseline (captured on v0.5.0 — still the recorded floor)
 
 Numbers below were captured on `2026-05-05` with `make bench` on an AMD
 Ryzen 7 5800X (16-thread, Windows 11, Go 1.26.1) using a local SSD.
@@ -119,13 +126,16 @@ benchmarks shift materially (≥ 10 % regression).
 
 ## Validation plan
 
-The benchmarks above are the v0.5 floor. The SLO targets themselves
-will be validated by:
+The benchmarks above are the v0.5.0 floor. Since v0.9, CI enforces the
+engine-path budget on every push via `TestEngineCheck_P99LatencyGate`
+plus the HTTP-path persistence-on check
+(`TestIntegration_HotPathLatencyWithPersistence`). What remains for full
+SLO validation:
 
 1. A `vegeta`/`hey` harness against `agentguard serve` running with
    `--policy configs/default.yaml` and a tmpfs-backed audit log,
-   driving 1 kRPS sustained for 5 minutes. **Not yet automated** —
-   tracked for v0.6.
+   driving 1 kRPS sustained for 5 minutes. **Still not automated** as
+   of v0.9.
 2. Latency histograms exported via `/metrics`
    (`agentguard_request_duration_ms`,
    `agentguard_policy_eval_duration_ms`,

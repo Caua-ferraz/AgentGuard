@@ -87,12 +87,12 @@ Details: [`docs/OPERATIONS.md`](OPERATIONS.md).
 
 ## Approvals disappeared after a restart
 
-**Cause:** the approval queue is in-memory only (`pkg/proxy/server.go` `ApprovalQueue`). Pending actions are lost on any process restart and polling SDKs will eventually time out.
+**Cause:** since v0.6 the queue is persistent by default, so this should only happen if (a) you run `--persist=false` (pre-v0.6 in-memory mode), (b) the process can't write its `--data-dir` (check the startup log for store errors), or (c) the entries were created inside the final ≥1 s store-sync window before a hard crash.
 
 **Mitigations:**
 
-- Set SDK `wait_for_approval(timeout=...)` to a realistic human SLA — long enough to survive a short restart, short enough to free the agent if approval never comes.
-- Use systemd / a process supervisor that minimizes restart windows.
+- Run with `--persist` (the default) and verify `agentguard.db` exists and grows in `--data-dir`.
+- Set SDK `wait_for_approval(timeout=...)` to a realistic human SLA — approvals survive a restart, but nobody can resolve them while the process is down.
 - For mission-critical flows, have the calling agent checkpoint its state so it can re-issue the `check` and get a fresh approval ID.
 
 ---
@@ -103,7 +103,7 @@ Details: [`docs/OPERATIONS.md`](OPERATIONS.md).
 
 **Fix:**
 
-- Rotate the audit log regularly (AgentGuard does not auto-rotate).
+- Keep rotation enabled (it is on by default since v0.5: `--audit-max-size-mb 100`, 5 backups) so the active file stays bounded.
 - Ship historical audit data to an external aggregator and truncate the local file during scheduled maintenance.
 
 Details: [`docs/OPERATIONS.md`](OPERATIONS.md).
@@ -162,10 +162,10 @@ Details: [`docs/POLICY_REFERENCE.md`](POLICY_REFERENCE.md).
 
 **Cause:** `time_window` without `require_prior` was a v0.4.0-compat no-op that **errors out at policy load as of v0.5.0**. `LoadFromFile` returns the validation error; the server refuses to boot until the policy is fixed. Either remove the orphan `time_window` or add a `require_prior` clause. See [`DEPRECATIONS.md`](DEPRECATIONS.md).
 
-**Confirm:** look for a line like:
+**Confirm:** policy load fails with an error like:
 
 ```
-WARNING: rule "..." has time_window without require_prior — condition will be ignored
+rules[0]("deploy_*").conditions[0]: time_window without require_prior is rejected; pair time_window with require_prior or remove it
 ```
 
 **Fix:** add a `require_prior` (the pattern/action that must have been allowed within the window), or remove the orphan `time_window`.
@@ -244,7 +244,7 @@ It bound to `127.0.0.1`. If your agent runs in a separate container or host, the
 
 ### Tool calls flow through the LLM API Proxy but never reach the AgentGuard server
 
-The client's `OPENAI_BASE_URL` is missing the `/v1` suffix, or the request is a plain chat completion (intentionally passthrough). Check `agentguard_llmproxy_tool_calls_total` — if it's not incrementing, no tool call was produced. Set `OPENAI_BASE_URL=http://127.0.0.1:8081/v1` (include `/v1`); for Anthropic use `ANTHROPIC_BASE_URL=http://127.0.0.1:8081` (no `/v1`). Details: [`QUICKSTART_LLM_PROXY.md`](QUICKSTART_LLM_PROXY.md).
+The client's `OPENAI_BASE_URL` is missing the `/v1` suffix, or the request is a plain chat completion (intentionally passthrough — no tool call means nothing to gate). Check the central server's audit log (`agentguard audit --transport llm_api_proxy`) — if nothing lands there while tool calls run, the traffic isn't reaching the proxy. Set `OPENAI_BASE_URL=http://127.0.0.1:8081/v1` (include `/v1`); for Anthropic use `ANTHROPIC_BASE_URL=http://127.0.0.1:8081` (no `/v1`). Details: [`QUICKSTART_LLM_PROXY.md`](QUICKSTART_LLM_PROXY.md).
 
 ---
 

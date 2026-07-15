@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.9.0] — 2026-06-22
+## [0.9.0] — 2026-07-09
 
 > **Surface-stabilization release — the step before a validated v1.0.** AgentGuard's public surface is now stabilized: all three enforcement paths (MCP Gateway, LLM API Proxy, SDK / `/v1/check`) are verified end-to-end, the test suite is green, and v0.9 locks in the surfaces it intends to freeze at 1.0 while correcting one honesty defect. There are **no new features** and **no breaking changes** — the `/v1/check` wire protocol and the audit JSONL are byte-compatible with v0.7 (no schema bump). See [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) for the stabilized surfaces and the additive-only intent (a hard guarantee from 1.0). v0.9 ships only after additional testing and validation.
 
@@ -22,7 +22,7 @@ All notable changes to this project will be documented in this file.
 
 ## [0.7.0] — 2026-06-12
 
-> The consistency + durability release. Three workstreams land together (v0.6.0 was never tagged — its milestone ships here):
+> The consistency + durability release. Three workstreams land together (v0.6.0 was tagged but had no standalone release notes or CHANGELOG entry — its milestone is documented here):
 >
 > 1. **Persistent multi-tenant state** (the v0.6 milestone): `serve` is stateful by default — approvals, rate limits, and cost accumulators survive restarts via a zero-config SQLite store, and per-tenant policies are first-class (`agentguard tenant put`, isolated runtime state, tenant-scoped audit).
 > 2. **Cross-transport verdict consistency**: the `/v1/check` gate client and check-param inference are now implemented once and shared by the MCP Gateway, LLM API Proxy, and Python adapters — the same tool call gets the same verdict on every integration path (this fixed real skews; see *Fixed*).
@@ -60,7 +60,7 @@ All notable changes to this project will be documented in this file.
 
 - **`serve` is stateful by default.** A first run creates `agentguard.db` (+ `-wal`/`-shm` sidecars, now gitignored) in the working directory. This is additive — the wire contract (`schema_version: v1`, the `/v1/t/{tenant}/...` routes) is unchanged, and `--persist=false` reverts to the prior behavior.
 
-## [0.5.2] — 2026-06-02
+## [0.5.2] — 2026-06-01
 
 > Maintenance release. Toolchain refresh (Go 1.22→1.25, Alpine 3.19→3.22 — both EOL on the previous pin), TypeScript SDK majors (TS 5→6, Jest 29→30, Node floor 18→20 — Node 18 EOL), supply-chain monitoring (govulncheck on every push, SBOM SPDX+CycloneDX attached on release), and a real bug fix in the MCP gateway: the upstream `initialize` was emitting `capabilities` as omitempty/null, which the current `@modelcontextprotocol/server-filesystem` (the README's quickstart example) and any spec-conformant strict server reject. The README's headline MCP Gateway path is functional again.
 
@@ -91,7 +91,7 @@ All notable changes to this project will be documented in this file.
 - **fsnotify supply-chain advisory (May 2026).** A maintainer access/ownership dispute around `fsnotify` surfaced in May 2026. v1.10.1 itself is legitimate; its checksum is now pinned in `go.sum` and verified by Go's module proxy. Reviewers should still eyeball the `go.sum` diff. Detection layering (dependabot + govulncheck + SBOM) is the response — see the new supply-chain monitoring entries above.
 - **MCP Gateway "examples" configs.** The five `examples/*-config.*` files reference `@modelcontextprotocol/server-filesystem` via `npx`. With the v0.5.2 gateway fix they work against the current published version; the gateway no longer requires pinning the filesystem-server.
 
-## [0.5.1] — 2026-05-11
+## [0.5.1] — 2026-05-07
 
 > Adapter hotfix + maintenance release. CrewAI 1.x + pydantic 2.12 and langgraph 1.0 + langchain_core 1.x both reject the v0.5.0 composition-wrapper adapters at framework boundaries (`isinstance(thing, BaseTool)` / `isinstance(thing, Runnable)` no longer honour `BaseTool.register()` virtual-subclass registrations). v0.5.1 ships hybrid subclass+override adapters that satisfy the framework's isinstance checks natively while preserving the policy-enforcement contract by overriding every dispatch entry point. All binaries (CLI, MCP Gateway, LLM API Proxy) bumped to v0.5.1 alongside the Python SDK. Python 3.9 dropped from the support matrix (upstream EOL October 2025); 3.10+ required.
 
@@ -116,7 +116,7 @@ All notable changes to this project will be documented in this file.
 
 - **Python 3.9 from `python-test` matrix** and from the `Programming Language :: Python :: 3.9` trove classifier. Users on 3.9 should pin to v0.5.0 or upgrade.
 
-## [0.5.0] — 2026-05-05
+## [0.5.0] — 2026-05-07
 
 > The proxy heroes release. Two new wire-level binaries (`agentguard-mcp-gateway`, `agentguard-llm-proxy`) make AgentGuard a wire-level firewall for MCP-aware clients and OpenAI/Anthropic SDK callers. The SDK becomes the compatibility tier — still fully supported and hardened, but no longer the only integration path. ~92 of the v0.4.1 audit's findings closed. See [`docs/releases/v0.5.0.md`](docs/releases/v0.5.0.md) for the operator-facing summary.
 

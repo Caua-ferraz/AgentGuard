@@ -17,7 +17,7 @@ What happens from the moment a policy returns `REQUIRE_APPROVAL` to the moment t
   │                   │ Notifier.Send ───────────▶│ (Slack / webhook / console)
   │ ◀───── 200 OK ────│   approval_id, approval_url
   │   decision=REQUIRE_APPROVAL                   │
-  │                   │                           │ 2. clicks link / uses CLI
+  │                   │                           │ 2. opens dashboard / uses CLI
   │                   │                           │
   │ 3. poll /v1/status/{id}  (every 2 s)          │
   │  ──────────────▶  │                           │
@@ -52,11 +52,11 @@ The response body:
   "reason": "Matches approval rule in shell scope",
   "matched_rule": "require_approval:shell:<pattern>",
   "approval_id": "ap_1a2b3c4d5e6f7890abcdef1234567890",
-  "approval_url": "http://localhost:8080/dashboard?approval=ap_1a2b..."
+  "approval_url": "http://localhost:8080/v1/approve/ap_1a2b..."
 }
 ```
 
-The `approval_url` is built from `--base-url` (or `http://localhost:<port>` if unset). Behind a reverse proxy, set `--base-url https://guardrails.example` so the link in Slack/email works.
+The `approval_url` is built from `--base-url` (or `http://localhost:<port>` if unset) and points at the **POST-only resolution endpoint** `/v1/approve/{id}` — it is for CLI/scripted resolution, not a browser page (humans approve in the dashboard, see step 4). Behind a reverse proxy, set `--base-url https://guardrails.example` so the URL in notifications points at the reachable host.
 
 ---
 
@@ -79,8 +79,9 @@ The `approval_url` is built from `--base-url` (or `http://localhost:<port>` if u
     "decision": "REQUIRE_APPROVAL",
     "reason": "Matches approval rule in shell scope",
     "approval_id": "ap_1a2b…",
-    "approval_url": "https://guardrails.example/dashboard?approval=ap_1a2b…"
-  }
+    "approval_url": "https://guardrails.example/v1/approve/ap_1a2b…"
+  },
+  "approval_url": "https://guardrails.example/v1/approve/ap_1a2b…"
 }
 ```
 
@@ -91,19 +92,20 @@ Redactor (in `pkg/notify/notify.go` — `DefaultRedactor`) scrubs:
 - `xox[baprs]-…` (Slack)
 - `(secret|token|password|api_key)=<value>`
 
-Redaction runs on `Command`, `URL`, `Reason`, and every `Meta` value.
+Redaction runs on `Command`, `Path`, `Domain`, `Action`, `URL`, `Reason`, and every `Meta` value.
 
 ### Slack payload (what approvers actually see)
 
-`SlackNotifier` wraps the event in an attachment:
+`SlackNotifier` wraps the event in an attachment (`pkg/notify/notify.go`):
 
 ```json
 {
   "attachments": [{
-    "color": "warning",
-    "title": "AgentGuard: Approval required",
-    "text": "agent `researcher-01` wants to run:\n`sudo apt upgrade`",
-    "footer": "Approve at: https://guardrails.example/dashboard?approval=ap_1a2b…"
+    "color": "#ecb22e",
+    "text": ":warning: *REQUIRE_APPROVAL* | scope: `shell` | action: `sudo apt upgrade`\n>Matches approval rule in shell scope\n><https://guardrails.example/v1/approve/ap_1a2b…|Approve this action>",
+    "footer": "AgentGuard",
+    "ts": 1745064224,
+    "mrkdwn_in": ["text"]
   }]
 }
 ```
@@ -130,7 +132,7 @@ The SDKs wrap this in `wait_for_approval` (Python) / `waitForApproval` (TypeScri
 
 - Poll every 2 s (`pollIntervalMs: 2_000` / `poll_interval=2`).
 - Send the Bearer token on every poll — `/v1/status` is auth-gated.
-- Stop on either `resolved: true` **or** wall-clock timeout.
+- Stop on either `status: "resolved"` **or** wall-clock timeout.
 
 ### Timeouts
 
@@ -153,14 +155,14 @@ CheckResult(decision="DENY", reason="Approval timed out", approval_id="ap_...")
 
 This is a logical deny, not a transport error — the `approval_id` is preserved so you can resolve it out-of-band.
 
-### Restart kills in-flight approvals
+### Restarts and in-flight approvals
 
-The approval queue is **in-memory**. A proxy restart loses every pending entry. Agents polling across a restart will:
+Since v0.6 the approval queue is **persistent by default** (`--persist`, SQLite-backed — see [`CLI.md`](CLI.md#persistence--multi-tenancy-v06)): pending entries are rehydrated on boot, and agents polling `/v1/status/{id}` across a restart pick up where they left off. Two caveats:
 
-1. See `404` on `/v1/status/{id}` (or resolved=false forever, depending on build).
-2. Eventually hit their SDK timeout and receive the fail-deny response.
+1. The store flushes on a ≥1 s background tick — an approval created in the final moments before a hard crash may not have been written and is lost.
+2. With `--persist=false` (the pre-v0.6 in-memory mode), a restart loses every pending entry; agents see `404` on `/v1/status/{id}` and eventually hit their SDK timeout, receiving the fail-deny response.
 
-**Rule of thumb**: `SDK timeout = expected_human_response_time + restart_budget`. If you never restart mid-shift, set it to the human SLA. If you might, subtract the restart window.
+**Rule of thumb** still applies: `SDK timeout = expected_human_response_time + restart_budget` — even though state survives a restart, nobody can resolve approvals while the process is down.
 
 ---
 
@@ -170,7 +172,7 @@ Three resolution channels, all equivalent:
 
 ### a) Dashboard (most common)
 
-Approver clicks the `approval_url` → `/dashboard?approval=ap_…`. The dashboard reads the pending item, shows the request (scope, command, agent, reason), and offers **Approve** / **Deny** buttons. Clicking posts `/v1/approve/{id}` or `/v1/deny/{id}` with the CSRF header.
+Approver opens the dashboard at `<base-url>/dashboard`, which lists pending approvals in real time (SSE). Each item shows the request (scope, command, agent, reason) with **Approve** / **Deny** buttons; clicking posts `/v1/approve/{id}` or `/v1/deny/{id}` with the CSRF header. (The `approval_url` field in the check response is the POST-only API endpoint used by channels b and c below, not a dashboard deep-link.)
 
 ### b) CLI
 
@@ -191,17 +193,47 @@ curl -X POST -H "Authorization: Bearer $KEY" \
 # {"status":"approved"}
 ```
 
-See [`API.md`](API.md#post-v1approveid--post-v1denyid).
+See [`API.md`](API.md#post-v1approveid--post-v1denyid--tenant-aware-mirrors).
 
 ### What happens server-side
 
 `ApprovalQueue.Resolve(id, decision)`:
 
-1. Locks, flips `Resolved=true`, stamps `Decision`.
-2. Broadcasts a `resolved` SSE event (dashboard updates in real time).
-3. Returns.
+1. Locks; if the entry is already resolved, either no-ops (same decision —
+   idempotent for retried requests) or rejects with a `409` conflict
+   (opposite decision — resolutions are **write-once**; a DENY can never be
+   flipped to ALLOW after the fact, or vice versa).
+2. Otherwise flips `Resolved=true`, stamps `Decision`, `ResolvedAt`, and
+   the actor (`resolved_via`: `bearer`/`session`/`open` + peer host).
+3. Broadcasts a `resolved` SSE event (dashboard updates in real time) —
+   exactly once per approval; retries do not re-broadcast.
+4. Returns.
 
 It does **not** unblock any waiter — the agent's SDK learns about the resolution on its next poll (within ≤ 2 s).
+
+### One-shot consumption and validity
+
+A resolved **ALLOW** is a single-use, time-boxed capability:
+
+- The first `/v1/check` retry carrying the `approval_id` (and matching the
+  original request shape) is honored with `matched_rule: "allow:approved"`
+  and **consumes** the approval. Any further replay of the same id falls
+  through to fresh policy evaluation and re-enters the approval flow under
+  a new id — one human click authorizes at most one execution.
+- Honoring is bounded by `--approval-validity` (default `5m`, matching the
+  SDKs' `wait_for_approval` window; `0` disables): a resolution older than
+  the window is no longer replayable.
+- A resolved **DENY** stays sticky within the validity window (a retrying
+  model gets an immediate deny instead of spawning fresh approval
+  requests) and is never "consumed".
+- `GET /v1/status/{id}` is read-only — SDK poll loops and dashboards never
+  spend the capability.
+- Refused replays are visible as
+  `agentguard_approval_replay_refused_total{reason="consumed"|"expired"}`;
+  a rising `consumed` count means something is trying to reuse one
+  approval for multiple executions.
+- Consumption survives restarts (persisted with the approval), so a
+  restart cannot resurrect a spent ALLOW.
 
 ---
 
@@ -265,7 +297,7 @@ Every resolution is recorded in the audit log with `decision: ALLOW` or `DENY` a
 | Approvers never see Slack/webhook notification | Queue dropped on slow endpoint, or filter mismatch in `notifications.approval_required` | Watch `agentguard_notify_events_dropped_total`; verify the notifier's `type` block in policy. |
 | `approval_url` in Slack is `http://localhost:8080` behind a proxy | `--base-url` not set | Start server with `--base-url https://guardrails.example`. |
 | Approval works in dashboard but `POST /v1/approve/{id}` from script returns 401 | Missing Bearer | Set `Authorization: Bearer $KEY`. |
-| Approvals "stuck" after a restart | In-memory queue, lost | Re-issue `check()` from the agent; resolve stale IDs are no-op. |
+| Approvals "stuck" after a restart | Running with `--persist=false`, or the entry was created inside the final store-sync window before a crash | Re-issue `check()` from the agent; resolving stale IDs is a no-op. |
 | Agent sees ALLOW but action fails at cost check | Cost only reserves on `check()` re-run after approval | Either re-run check, or use the `guarded` wrapper with `wait_for_approval=True`. |
 
 ---

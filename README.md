@@ -56,28 +56,7 @@ For Claude Desktop and any MCP-aware client (Cursor, Cline, Continue, Zed), poin
 go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-mcp-gateway@latest
 ```
 
-Then add to `claude_desktop_config.json` (macOS path: `~/Library/Application Support/Claude/claude_desktop_config.json`):
-
-```jsonc
-{
-  "mcpServers": {
-    "agentguard": {
-      "command": "agentguard-mcp-gateway",
-      "args": [
-        "--upstream", "fs:npx -y @modelcontextprotocol/server-filesystem /tmp",
-        "--guard-url", "http://127.0.0.1:8080",
-        "--api-key", "$AGENTGUARD_API_KEY",
-        "--policy", "/etc/agentguard/policy.yaml",
-        "--policy-mode", "strict",
-        "--fail-mode", "deny"
-      ],
-      "env": { "AGENTGUARD_API_KEY": "<your-key-or-source-from-shell>" }
-    }
-  }
-}
-```
-
-90-second walkthrough: [`docs/QUICKSTART_MCP.md`](docs/QUICKSTART_MCP.md). Wire-format design + client-integration gotchas: [`docs/MCP_GATEWAY.md`](docs/MCP_GATEWAY.md). Ready configs for Cursor, Cline, Continue, Zed: [`examples/`](examples/).
+Then add the gateway to `claude_desktop_config.json` — copy the ready-made block from the 90-second walkthrough in [`docs/QUICKSTART_MCP.md`](docs/QUICKSTART_MCP.md) or from [`examples/claude-desktop-config.json`](examples/claude-desktop-config.json). Ready configs for Cursor, Cline, Continue, Zed: [`examples/`](examples/). Wire-format design + client-integration gotchas: [`docs/MCP_GATEWAY.md`](docs/MCP_GATEWAY.md).
 
 ### 2. LLM API Proxy
 
@@ -142,7 +121,8 @@ cd AgentGuard && go build -o agentguard ./cmd/agentguard
 # Or via Go install
 go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@latest
 
-# Or Docker
+# Or Docker (build the image from the repo's Dockerfile first)
+docker build -t agentguard:latest .
 docker run -d -p 8080:8080 \
   -v agentguard-audit:/var/lib/agentguard \
   agentguard:latest
@@ -269,32 +249,9 @@ Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS deta
 
 ## Roadmap
 
-### Implemented
-- [x] Core policy engine with YAML rules (deny → require_approval → allow → default deny)
-- [x] Audit logging (JSON lines) with size-triggered rotation, retention, and gzip compression — wired by default *(v0.5)*
-- [x] Shell, filesystem, network, browser, cost, `data`, and `mcp_tool` scopes (string-glob matching — see [Limitations](#limitations--threat-model))
-- [x] Approval queue with Slack/webhook/console notifications — persisted to the SQLite store and restored on restart *(v0.6)*
-- [x] Web dashboard (live SSE feed, stats, interactive approve/deny)
-- [x] Token-bucket rate limiting per scope per agent — persisted across restarts *(v0.6)*
-- [x] Per-agent policy overrides via `agents:` config
-- [x] Cost guardrails — per-action limits, alert thresholds, and session-level cost tracking
-- [x] Conditional rules — `require_prior` and `time_window` conditions evaluated at check time
-- [x] Python SDK + adapters: LangChain, CrewAI, browser-use, MCP
-- [x] TypeScript/Node.js SDK
-- [x] Full CLI: serve, validate, check, approve, deny, status, audit, tenant, migrate, version
-- [x] Docker support with multi-stage build
-- [x] Policy hot-reload via `--watch`
-- [x] **Data scope** — first-class `data` scope for exfiltration / sensitive-payload checks, wired through policy engine and SDKs *(v0.5)*
-- [x] **MCP Gateway** — wire-level Model Context Protocol proxy with multi-upstream namespacing, capability merging, reconnect-with-backoff, and approval `_meta` round-trip; ships as the `agentguard-mcp-gateway` binary with copy-paste configs for Claude Desktop, Cursor, Cline, Continue, and Zed *(v0.5)*
-- [x] **LLM API Proxy** — drop-in OpenAI / Anthropic-compatible base URL with streaming pause/resume/rewrite, tool-call gating, provider-aware synthetic refusals, and tool→scope mapping; ships as the `agentguard-llm-proxy` binary with copy-paste examples for the OpenAI SDK, Anthropic SDK, LangChain, and CrewAI *(v0.5)*
-- [x] **Persistent state** — approvals, rate-limit buckets, and cost accumulators write-behind to a zero-config SQLite store (`agentguard.db`, WAL) and rehydrate on boot; never on the `/v1/check` hot path *(v0.6)*
-- [x] **Multi-tenant policies** — register per-tenant policies (`agentguard tenant put`) served over `/v1/t/<tenant>/...`, each evaluated against its own policy with isolated approvals/limits/costs/audit; optional SQLite audit backend (`--audit-backend=store`) *(v0.6)*
-- [x] **Cross-transport verdict consistency** — one shared `/v1/check` gate client and one shared check-param inference across the MCP Gateway, LLM API Proxy, and Python adapters, so the same tool call gets the same verdict on every integration path *(v0.7)*
-- [x] **Outage-proof enforcement trail** — `--fail-mode fail-closed-with-audit` writes denials to a local fallback audit file (`--fail-audit-log`) while the central server is unreachable; notification overflow spools to disk and is redelivered (`--notify-spool`) *(v0.7)*
-- [x] **`agentguard check --watch`** — follow a JSONL file (tail -f) and verdict each appended request with a single policy load; built for CI plans and local agent harnesses *(v0.7)*
-- [x] **MCP `tools/list_changed` forwarding** — the gateway relays upstream tool-set changes to the host and advertises `listChanged: true` *(v0.7)*
-- [x] **Operator-grade health + observability** — `/v1/health` turns `"degraded"` on audit overflow backlog; new Prometheus series for buffered-audit and notify-spool durability *(v0.7)*
-- [x] **Mid-stream policy revocation** — LangChain `stream`/`astream` re-validate the decision every 10 s, so revoking a permission cuts live streams off *(v0.7)*
+### Where things stand (v0.9)
+
+Everything in the pitch above is shipped: the policy engine with all seven scopes, the three enforcement paths (MCP Gateway and LLM API Proxy since v0.5, SDKs + adapters throughout), audit logging with default-on rotation, the approval queue + dashboard, cost guardrails, rate limiting, persistent state and multi-tenant policies on a zero-config SQLite store (v0.6), cross-transport verdict consistency and outage durability (v0.7), and the v0.9 surface stabilization with a CI-enforced p99 latency gate. The release-by-release detail lives in [`CHANGELOG.md`](CHANGELOG.md); the stabilized surfaces and what 1.0 will freeze are in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
 
 ### Planned
 - [ ] PostgreSQL store backend for multi-node / shared state (the v0.6 SQLite store is single-node)

@@ -79,7 +79,7 @@ agentguard-mcp-gateway \
 
 | flag                | repeatable | meaning                                         |
 |---------------------|------------|-------------------------------------------------|
-| `--upstream "<ns>:<cmd>"` | yes  | Downstream MCP server. `ns` is the namespace prefix; `cmd` is the command (passed through `shlex.Split`). If `ns:` is omitted, the namespace defaults to the first whitespace-delimited token of `cmd`. |
+| `--upstream "<ns>:<cmd>"` | yes  | Downstream MCP server. `ns` is the namespace prefix; `cmd` is tokenized by the gateway's own `SplitCommandLine` (double quotes and `\` escapes only — no single quotes, `$VAR` expansion, or pipes). If `ns:` is omitted, the namespace defaults to the first whitespace-delimited token of `cmd`. |
 | `--guard-url`       | no         | central server URL. Default `http://127.0.0.1:8080`. Must be an `http`/`https` URL with a host. |
 | `--api-key`         | no         | bearer for `/v1/check`. Falls back to `AGENTGUARD_API_KEY` env. |
 | `--tenant-id`       | no         | default `local`. Must be non-empty.             |
@@ -90,6 +90,7 @@ agentguard-mcp-gateway \
 | `--log-level`       | no         | stderr verbosity. Default `info`.               |
 | `--upstream-timeout`| no         | per-frame upstream-response timeout. Default `30s`. |
 | `--reconnect-cap`   | no         | upper bound on reconnect backoff. Default `60s`. |
+| `--version`         | no         | print version and exit. Checked before any other flag is parsed, so it works without `--upstream`. |
 
 Stdout is reserved for JSON-RPC. All logging goes to stderr — the MCP
 spec explicitly permits this (the host MAY capture or ignore it).
@@ -341,15 +342,18 @@ var defaultToolScopeMap = []toolScopePattern{
 }
 ```
 
-Policy-YAML override under `mcp:`:
+Policy-YAML override — `tool_scope_map` is a **top-level list** (same level as `rules:`; see [`POLICY_REFERENCE.md`](POLICY_REFERENCE.md#tool_scope_map) for why it's a list, not a map):
 
 ```yaml
-mcp:
-  tool_scope_map:
-    "fs:read_file":   filesystem
-    "fs:write_file":  filesystem
-    "github:*":       network
-    "*:execute_*":    shell
+tool_scope_map:
+  - pattern: "fs:read_file"
+    scope: filesystem
+  - pattern: "fs:write_file"
+    scope: filesystem
+  - pattern: "github:*"
+    scope: network
+  - pattern: "*:execute_*"
+    scope: shell
 ```
 
 Merge semantics: policy entries are evaluated **before** built-ins.
@@ -382,8 +386,8 @@ rules:
       - pattern: "fs:write_file"
         conditions:
           # require_prior so an explicit allow of read_file qualifies write
-          require_prior: "fs:read_*"
-          time_window: 5m
+          - require_prior: "fs:read_*"
+            time_window: "5m"
     require_approval:
       - pattern: "*:execute_*"
     allow:
@@ -403,11 +407,13 @@ rules:
     allow:
       - domain: "api.github.com"
 
-mcp:
-  tool_scope_map:
-    "fs:read_file":  filesystem
-    "fs:write_file": filesystem
-    "github:*":      network
+tool_scope_map:
+  - pattern: "fs:read_file"
+    scope: filesystem
+  - pattern: "fs:write_file"
+    scope: filesystem
+  - pattern: "github:*"
+    scope: network
 ```
 
 ---
@@ -463,7 +469,7 @@ feed (blue), distinct from `sdk` (green) and `llm_api_proxy` (purple).
 
 Host sends `tools/call`. Gateway runs policy check. Result =
 `REQUIRE_APPROVAL` with `approval_id="ap_<32hex>"` and
-`approval_url="http://127.0.0.1:8080/dashboard?approval=ap_..."`.
+`approval_url="http://127.0.0.1:8080/v1/approve/ap_..."` (the POST resolution endpoint; humans approve in the dashboard at `/dashboard`).
 
 The gateway returns:
 
@@ -473,7 +479,7 @@ The gateway returns:
   "result": {
     "content": [{
       "type": "text",
-      "text": "[AgentGuard] Action requires approval.\nReason: <reason>\nApproval ID: ap_<hex>\nApprove at: http://127.0.0.1:8080/dashboard?approval=ap_<hex>"
+      "text": "[AgentGuard] Action requires approval.\nReason: <reason>\nApproval ID: ap_<hex>\nApprove at: http://127.0.0.1:8080/v1/approve/ap_<hex>"
     }],
     "isError": true
   }
@@ -679,9 +685,6 @@ accumulates).
 
 ## 10. Currently out of scope
 
-- Forwarding upstream `notifications/tools/list_changed` and flipping
-  the gateway's advertised capability to `listChanged: true`. Clients
-  refresh by re-issuing `tools/list`.
 - Full `resources/*` and `prompts/*` support is forwarded verbatim with
   namespace-prefixed URIs but is not test-covered.
 - Streamable HTTP transport on the host-facing side. The gateway is
@@ -711,24 +714,10 @@ verification checklist. The fastest end-to-end is
 
 ### 11.1 Minimal Claude Desktop config
 
-```jsonc
-{
-  "mcpServers": {
-    "agentguard": {
-      "command": "agentguard-mcp-gateway",
-      "args": [
-        "--upstream", "fs:npx -y @modelcontextprotocol/server-filesystem /tmp",
-        "--guard-url", "http://127.0.0.1:8080",
-        "--api-key", "$AGENTGUARD_API_KEY",
-        "--policy", "/etc/agentguard/policy.yaml",
-        "--policy-mode", "strict",
-        "--fail-mode", "deny"
-      ],
-      "env": { "AGENTGUARD_API_KEY": "<paste-or-source-from-secret-store>" }
-    }
-  }
-}
-```
+Copy [`examples/claude-desktop-config.json`](../examples/claude-desktop-config.json)
+(the authoritative block, also walked through step-by-step in
+[`QUICKSTART_MCP.md`](./QUICKSTART_MCP.md)) into the config-file path from
+the table above.
 
 The gateway namespaces tools per upstream (`fs:read_text_file`,
 `github:create_issue`, …), so policies written against namespaced names

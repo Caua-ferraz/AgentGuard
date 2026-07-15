@@ -170,6 +170,46 @@ The only behavioural difference an operator might notice: v0.5.0 Python SDK on C
 
 ---
 
+## v0.5.x → v0.7.0 (includes the v0.6 milestone)
+
+v0.5.2 was a maintenance release (toolchain refresh, no migration). The
+v0.6 milestone (persistence + multi-tenancy) shipped without standalone
+release notes and is documented under v0.7.0 — upgrading from any v0.5.x
+directly to v0.7.0 is the supported path. Full detail:
+[`releases/v0.7.0.md`](releases/v0.7.0.md).
+
+### What happens automatically
+
+- **`serve` becomes stateful by default.** First run creates
+  `agentguard.db` (SQLite, WAL) in the working directory (`--data-dir`
+  to relocate); approvals, rate-limit buckets, and cost accumulators now
+  survive restarts. `--persist=false` restores the old pure-in-memory
+  behaviour. No existing file is rewritten — the store is a new artifact.
+- **No wire or format changes.** `schema_version: "v1"`, the `/v1/...`
+  and `/v1/t/{tenant}/...` route families, and the audit JSONL
+  (`schema_version: 2`) are backward-compatible.
+
+### What you should do
+
+1. **Give the process a writable `--data-dir`** (or run `--persist=false`
+   deliberately) and add `agentguard.db` + `-wal`/`-shm` to your backup
+   plan — see [`OPERATIONS.md`](OPERATIONS.md#backups).
+2. **Review `action`-keyed filesystem rules.** Verdicts are now
+   consistent across integration paths; CrewAI/MCP paths that previously
+   omitted `action` now send it, so expect new (correct) matches.
+3. **Optionally adopt the new operator surface:** `--fail-audit-log`
+   (outage-window denial audit on both proxies), `--notify-spool`
+   (notification overflow spool), `--audit-backend=store`,
+   `agentguard tenant put|list|rm`, and `agentguard check --watch`.
+
+### Rollback to v0.5.x
+
+Reinstall the v0.5.x binaries. They ignore `agentguard.db` entirely
+(delete it if you want a clean tree); pending approvals stored in it are
+lost, matching v0.5.x's in-memory behaviour.
+
+---
+
 ## v0.7.0 → v0.9.0
 
 ### What happens automatically

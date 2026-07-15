@@ -105,7 +105,7 @@ In a Claude Desktop chat:
   `fetch` upstream and a `network` rule, the gateway gates it.
 
 If actions appear in Claude but never show on the dashboard, see the
-**Common gotchas** section in [`docs/MCP_GATEWAY.md`](../docs/MCP_GATEWAY.md#client-integration).
+**Common gotchas** section in [`docs/MCP_GATEWAY.md`](../docs/MCP_GATEWAY.md#11-client-integration).
 
 ## API key handling
 

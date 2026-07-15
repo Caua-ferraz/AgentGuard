@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -265,6 +267,78 @@ func TestSQLiteStore_PersistenceAcrossReopen(t *testing.T) {
 	aps, _ := s2.LoadApprovals(ctx)
 	if len(aps) != 1 || aps[0].ID != "ap1" {
 		t.Fatalf("approval did not survive reopen: %+v", aps)
+	}
+}
+
+// --- file permissions: audit 2026-06 finding M2 ---
+
+// requireMode fails the test unless path exists with exactly mode 0600.
+func requireMode0600(t *testing.T, path string) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Fatalf("%s: mode = %04o, want 0600", path, got)
+	}
+}
+
+func TestSQLiteStore_FilesAreOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes are not meaningful on Windows")
+	}
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "perm.db")
+
+	s, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer s.Close()
+
+	// Force a WAL write so the sidecars exist.
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err := s.UpsertApprovals(ctx, []ApprovalRecord{{TenantID: "local", ID: "ap_perm", CreatedAt: now}}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	requireMode0600(t, path)
+	for _, sidecar := range []string{path + "-wal", path + "-shm"} {
+		if _, err := os.Stat(sidecar); err == nil {
+			requireMode0600(t, sidecar)
+		}
+	}
+}
+
+func TestSQLiteStore_TightensPreexistingLooseModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes are not meaningful on Windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.db")
+
+	// Simulate a database (plus stale sidecars) created by a pre-fix version
+	// under the default umask.
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.WriteFile(p, nil, 0o644); err != nil {
+			t.Fatalf("seed %s: %v", p, err)
+		}
+		if err := os.Chmod(p, 0o644); err != nil {
+			t.Fatalf("chmod %s: %v", p, err)
+		}
+	}
+
+	s, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer s.Close()
+
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		if _, err := os.Stat(p); err == nil {
+			requireMode0600(t, p)
+		}
 	}
 }
 

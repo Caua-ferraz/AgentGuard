@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"runtime/debug"
 	"strconv"
@@ -115,6 +116,17 @@ type Config struct {
 	// Zero or negative falls back to MaxAuditQueryLimit. Wired from
 	// policy's proxy.audit.max_limit.
 	AuditMaxLimit int
+
+	// ApprovalValidity bounds how long a RESOLVED approval is honored by
+	// the /v1/check approval-id short-circuit, measured from ResolvedAt.
+	// Past the window the replay falls through to fresh policy evaluation
+	// (fail-safe: the action re-enters the approval flow under a new id).
+	// Zero disables the bound (an unconsumed resolution is honorable until
+	// the entry is purged). Wired from the --approval-validity serve flag;
+	// the CLI default is 5m — matching the SDKs' wait_for_approval poll
+	// window — while the zero value here keeps directly-constructed
+	// Configs (tests, embedders) on pre-flag behavior.
+	ApprovalValidity time.Duration
 }
 
 // Server is the AgentGuard HTTP proxy.
@@ -215,6 +227,21 @@ type PendingAction struct {
 	// store's resolved-approval GC (PurgeResolvedApprovals). Zero while pending;
 	// omitempty keeps single-tenant /api/pending payloads byte-stable.
 	ResolvedAt time.Time `json:"resolved_at,omitempty"`
+	// ConsumedAt is set the first time the /v1/check approval-id
+	// short-circuit honors this entry's resolved ALLOW. A consumed
+	// approval is a spent one-shot capability: subsequent replays fall
+	// through to fresh policy evaluation, so one human click can never
+	// authorize more than one execution. Zero while unconsumed; omitzero
+	// keeps pre-consumption payloads byte-stable on the wire.
+	ConsumedAt time.Time `json:"consumed_at,omitzero"`
+	// ResolvedVia / ResolvedFrom stamp HOW the resolution arrived —
+	// "bearer" (API key), "session" (dashboard cookie), or "open" (server
+	// running without --api-key) — and the peer address it came from.
+	// With single-key auth this is not identity, but it makes incident
+	// reconstruction possible and gives post-v1 multi-key auth a field to
+	// land in. Empty while pending.
+	ResolvedVia  string `json:"resolved_via,omitempty"`
+	ResolvedFrom string `json:"resolved_from,omitempty"`
 }
 
 // AuditEvent is sent over SSE to dashboard clients for any check result.
@@ -602,9 +629,29 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 				// Intentional fall-through: do NOT short-circuit, do NOT
 				// 4xx. Normal Engine.Check runs below.
 			} else {
-				result := s.resolvedApprovalToResult(req, pa)
-				s.logAndRespond(w, req, result, start, tenantID)
-				return
+				// Shape matches — now spend the capability atomically.
+				// ConsumeResolved re-checks state under the write lock so
+				// concurrent replays of one approved id can never both be
+				// honored: exactly one consumes the ALLOW, the rest fall
+				// through to fresh evaluation (which re-enters the
+				// approval flow — fail-safe, and no validity/consumption
+				// oracle is exposed, matching the mismatch path above).
+				cp, outcome := s.approval.ConsumeResolved(req.ApprovalID, tenantID, time.Now().UTC(), s.cfg.ApprovalValidity)
+				switch outcome {
+				case consumePending, consumeHonored:
+					result := s.resolvedApprovalToResult(req, cp)
+					s.logAndRespond(w, req, result, start, tenantID)
+					return
+				case consumeAlreadyConsumed:
+					metrics.IncApprovalReplayRefused("consumed")
+					log.Printf("approval_id %q replayed after its ALLOW was already consumed (one-shot); falling through to fresh policy evaluation", req.ApprovalID)
+				case consumeExpired:
+					metrics.IncApprovalReplayRefused("expired")
+					log.Printf("approval_id %q resolved longer than the approval-validity window ago; falling through to fresh policy evaluation", req.ApprovalID)
+				case consumeNotFound:
+					// Entry evicted between Lookup and Consume; treat as
+					// unknown id.
+				}
 			}
 		}
 		// Unknown approval_id — fall through to normal evaluation.
@@ -938,6 +985,54 @@ func approvalIDFromRequest(r *http.Request, legacyPrefix string) string {
 	return ""
 }
 
+// resolutionActor derives the (via, from) stamp for an approve/deny call:
+// which auth mechanism admitted it and the peer address it arrived from.
+// Coarse by design — with single-key auth there is no identity to record —
+// but enough to reconstruct "who could have clicked this" in an incident.
+func resolutionActor(r *http.Request) (via, from string) {
+	switch {
+	case r.Header.Get("Authorization") != "":
+		via = "bearer"
+	case hasSessionCookie(r):
+		via = "session"
+	default:
+		via = "open" // server running without --api-key
+	}
+	from = r.RemoteAddr
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		from = host
+	}
+	return via, from
+}
+
+// hasSessionCookie reports whether the request carries an ag_session cookie.
+func hasSessionCookie(r *http.Request) bool {
+	_, err := r.Cookie(SessionCookieName)
+	return err == nil
+}
+
+// writeResolveError maps a Resolve failure onto the wire: a write-once
+// conflict is 409 with a structured body (so dashboards/scripts can show
+// the standing decision); anything else keeps the legacy 404 plain-text.
+func writeResolveError(w http.ResponseWriter, err error) {
+	var conflict *ApprovalConflictError
+	if errors.As(err, &conflict) {
+		status := "denied"
+		if policy.Decision(conflict.Existing) == policy.Allow {
+			status = "approved"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":  "already resolved",
+			"id":     conflict.ID,
+			"status": status,
+		})
+		return
+	}
+	http.Error(w, err.Error(), http.StatusNotFound)
+}
+
 // handleApprove approves a pending action.
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -950,8 +1045,9 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing id", http.StatusBadRequest)
 		return
 	}
-	if err := s.approval.Resolve(id, policy.Allow, TenantIDFromContext(r.Context())); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+	via, from := resolutionActor(r)
+	if err := s.approval.ResolveWithActor(id, policy.Allow, TenantIDFromContext(r.Context()), via, from); err != nil {
+		writeResolveError(w, err)
 		return
 	}
 
@@ -971,8 +1067,9 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing id", http.StatusBadRequest)
 		return
 	}
-	if err := s.approval.Resolve(id, policy.Deny, TenantIDFromContext(r.Context())); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+	via, from := resolutionActor(r)
+	if err := s.approval.ResolveWithActor(id, policy.Deny, TenantIDFromContext(r.Context()), via, from); err != nil {
+		writeResolveError(w, err)
 		return
 	}
 
@@ -1352,6 +1449,64 @@ func (q *ApprovalQueue) Lookup(id, tenantID string) (*PendingAction, bool) {
 	return &cp, true
 }
 
+// consumeOutcome is the result of ConsumeResolved's atomic state check.
+type consumeOutcome int
+
+const (
+	// consumeNotFound: unknown id or another tenant's id (no oracle).
+	consumeNotFound consumeOutcome = iota
+	// consumePending: entry exists but no human has resolved it yet.
+	consumePending
+	// consumeHonored: the caller may act on the returned copy's decision.
+	// For ALLOW this call just spent the one-shot capability.
+	consumeHonored
+	// consumeAlreadyConsumed: the ALLOW was already spent by an earlier
+	// replay — the caller must fall through to fresh policy evaluation.
+	consumeAlreadyConsumed
+	// consumeExpired: resolved longer than the validity window ago — the
+	// caller must fall through to fresh policy evaluation.
+	consumeExpired
+)
+
+// ConsumeResolved is the write side of the /v1/check approval-id
+// short-circuit. It atomically checks {exists, tenant, resolved, within
+// validity, not yet consumed} and — for a resolved ALLOW — marks the entry
+// consumed, all under one lock, so concurrent replays of the same id can
+// never both be honored (exactly one wins; the rest see AlreadyConsumed).
+//
+// A resolved DENY is honored without consumption: replaying a deny is
+// harmless, and keeping it sticky within the validity window means a model
+// that retries after a human denial gets an immediate deny instead of
+// spawning a fresh approval request. validity <= 0 disables the expiry
+// check (Config.ApprovalValidity zero value).
+//
+// The returned *PendingAction is a defensive copy, valid for NotFound
+// (nil), Pending, and Honored.
+func (q *ApprovalQueue) ConsumeResolved(id, tenantID string, now time.Time, validity time.Duration) (*PendingAction, consumeOutcome) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	pa, ok := q.pending[id]
+	if !ok || !tenantsMatch(pa.TenantID, tenantID) {
+		return nil, consumeNotFound
+	}
+	if !pa.Resolved {
+		cp := *pa
+		return &cp, consumePending
+	}
+	if validity > 0 && now.Sub(pa.ResolvedAt) > validity {
+		return nil, consumeExpired
+	}
+	if policy.Decision(pa.Decision) == policy.Allow {
+		if !pa.ConsumedAt.IsZero() {
+			return nil, consumeAlreadyConsumed
+		}
+		pa.ConsumedAt = now
+	}
+	cp := *pa
+	return &cp, consumeHonored
+}
+
 // Add registers a new pending approval. If the queue is at capacity the
 // oldest resolved entry is evicted first (LRU on CreatedAt; resolution does
 // not rewind it, so the eviction target is the entry that has been around
@@ -1422,7 +1577,35 @@ func (q *ApprovalQueue) evictOldestResolvedLocked() bool {
 	return true
 }
 
+// ApprovalConflictError reports an attempt to overwrite an already-resolved
+// approval with the opposite decision. Resolution is write-once: a decision,
+// once made, is history — corrections happen by re-running the action through
+// /v1/check (fresh approval id), never by mutating the record. Without this
+// latch, any late, duplicated, or mistaken second click could silently flip a
+// DENY on a destructive action into an ALLOW that the agent's poll loop or
+// replay path would then honor.
+type ApprovalConflictError struct {
+	ID       string
+	Existing string // the decision already on record ("ALLOW" / "DENY")
+}
+
+func (e *ApprovalConflictError) Error() string {
+	return fmt.Sprintf("approval %s already resolved %s; decisions are write-once", e.ID, e.Existing)
+}
+
+// Resolve is ResolveWithActor without an actor stamp. Kept for callers
+// (and tests) that predate the stamp; the HTTP handlers use
+// ResolveWithActor.
 func (q *ApprovalQueue) Resolve(id string, decision policy.Decision, tenantID string) error {
+	return q.ResolveWithActor(id, decision, tenantID, "", "")
+}
+
+// ResolveWithActor resolves a pending approval, write-once. Repeating the
+// SAME decision is an idempotent no-op (nil error, no field mutation, no
+// duplicate SSE broadcast) so retried HTTP requests are harmless. The
+// OPPOSITE decision returns *ApprovalConflictError and mutates nothing.
+// via/from stamp how the resolution arrived (see PendingAction.ResolvedVia).
+func (q *ApprovalQueue) ResolveWithActor(id string, decision policy.Decision, tenantID, via, from string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -1433,9 +1616,18 @@ func (q *ApprovalQueue) Resolve(id string, decision policy.Decision, tenantID st
 		return fmt.Errorf("pending action %s not found", id)
 	}
 
+	if pa.Resolved {
+		if pa.Decision == string(decision) {
+			return nil // idempotent repeat; original stamp and timestamp stand
+		}
+		return &ApprovalConflictError{ID: id, Existing: pa.Decision}
+	}
+
 	pa.Resolved = true
 	pa.Decision = string(decision)
 	pa.ResolvedAt = time.Now().UTC()
+	pa.ResolvedVia = via
+	pa.ResolvedFrom = from
 
 	// Broadcast resolution to SSE clients of this tenant. Carry the original
 	// transport so dashboard JS keeps the same chip on the "resolved" event as

@@ -223,6 +223,7 @@ func (s *Syncer) Hydrate(ctx context.Context) error {
 			actions = append(actions, &proxy.PendingAction{
 				ID: r.ID, TenantID: tenant, Request: r.Request, Result: r.Result,
 				CreatedAt: r.CreatedAt, Resolved: r.Resolved, Decision: r.Decision, ResolvedAt: r.ResolvedAt,
+				ConsumedAt: r.ConsumedAt, ResolvedVia: r.ResolvedVia, ResolvedFrom: r.ResolvedFrom,
 			})
 		}
 		s.cfg.Approvals.Restore(actions)
@@ -670,6 +671,7 @@ func (s *Syncer) Flush(ctx context.Context) error {
 				TenantID: store.EffectiveTenant(pa.TenantID), ID: pa.ID,
 				Request: pa.Request, Result: pa.Result, CreatedAt: pa.CreatedAt,
 				Resolved: pa.Resolved, Decision: pa.Decision, ResolvedAt: pa.ResolvedAt,
+				ConsumedAt: pa.ConsumedAt, ResolvedVia: pa.ResolvedVia, ResolvedFrom: pa.ResolvedFrom,
 			})
 		}
 		if err := s.cfg.Store.UpsertApprovals(ctx, recs); err != nil {

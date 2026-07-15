@@ -38,6 +38,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -68,6 +70,11 @@ func main() {
 
 	cfg, err := llmproxy.ParseConfig(args)
 	if err != nil {
+		// -h/--help already printed the FlagSet's usage; exit 0 like the
+		// core agentguard subcommands (flag.ExitOnError convention).
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
 		fmt.Fprintf(os.Stderr, "agentguard-llm-proxy: %v\n", err)
 		os.Exit(2)
 	}

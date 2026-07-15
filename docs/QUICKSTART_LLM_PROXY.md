@@ -112,13 +112,18 @@ rules:
     # ... existing rules ...
 ```
 
-The proxy hot-reloads via `--watch`. Modify the prompt in
-`examples/openai-sdk-config.py` to ask the model to `rm -rf /etc`
-and re-run. The model emits a tool call; AgentGuard intercepts it
-mid-stream and rewrites the response as a synthetic assistant text:
+The proxy hot-reloads the policy file automatically (its own watcher —
+no flag needed; `--watch` on `agentguard serve` only logs reload
+activity). Modify the prompt in `examples/openai-sdk-config.py` to ask
+the model to `rm -rf /etc` and re-run. The model emits a tool call;
+AgentGuard intercepts it mid-stream and rewrites the response as a
+synthetic assistant text:
 
 ```
-[AgentGuard] Tool call denied: deny:shell:rm-rf
+AgentGuard denied this action.
+
+Reason: Action denied by shell deny rule
+Rule: deny:shell:rm -rf *
 ```
 
 The dashboard logs a `DENY`. No SDK changes, no agent code changes —

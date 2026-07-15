@@ -2,6 +2,7 @@ package notify
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -527,6 +528,98 @@ func TestDispatcher_RedactsBeforeDelivery(t *testing.T) {
 	}
 	if v, ok := got.Request.Meta["password"]; ok && strings.Contains(v, "hunter2") {
 		t.Errorf("password survived redaction in Meta: %q", v)
+	}
+}
+
+// TestDispatcher_RedactsPathInWebhookBody: secrets embedded in Request.Path
+// must be scrubbed before the event leaves the process as webhook JSON
+// (audit finding M4 — Redact previously skipped Path/Domain/Action).
+func TestDispatcher_RedactsPathInWebhookBody(t *testing.T) {
+	const token = "ghp_abcdef1234567890abcdef1234567890abcd"
+
+	var mu sync.Mutex
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		body = string(b)
+		mu.Unlock()
+	}))
+	defer srv.Close()
+
+	cfg := policy.NotificationCfg{
+		OnDeny: []policy.NotifyTarget{{Type: "webhook", URL: srv.URL}},
+	}
+	d := NewDispatcher(cfg)
+	defer d.Close()
+
+	d.Send(Event{
+		Type: "denied",
+		Request: policy.ActionRequest{
+			Scope: "fs",
+			Path:  "/bucket/report.csv?token=" + token,
+		},
+	})
+
+	waitForCondition(t, time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return body != ""
+	}, "webhook to receive the redacted event")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Contains(body, token) {
+		t.Errorf("token in Path survived redaction into webhook body: %s", body)
+	}
+	if !strings.Contains(body, "[REDACTED]") {
+		t.Errorf("expected [REDACTED] in webhook body, got %s", body)
+	}
+}
+
+// TestDispatcher_RedactsPathInSlackPayload: the Slack notifier uses
+// Request.Path as its display action when Command is empty, so a secret in
+// Path would otherwise land verbatim in the Slack message text (M4).
+func TestDispatcher_RedactsPathInSlackPayload(t *testing.T) {
+	const token = "ghp_abcdef1234567890abcdef1234567890abcd"
+
+	var mu sync.Mutex
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		body = string(b)
+		mu.Unlock()
+	}))
+	defer srv.Close()
+
+	cfg := policy.NotificationCfg{
+		OnDeny: []policy.NotifyTarget{{Type: "slack", URL: srv.URL}},
+	}
+	d := NewDispatcher(cfg)
+	defer d.Close()
+
+	d.Send(Event{
+		Type: "denied",
+		Request: policy.ActionRequest{
+			Scope: "fs",
+			Path:  "/bucket/report.csv?token=" + token,
+		},
+	})
+
+	waitForCondition(t, time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return body != ""
+	}, "slack webhook to receive the redacted payload")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Contains(body, token) {
+		t.Errorf("token in Path survived redaction into slack payload: %s", body)
+	}
+	if !strings.Contains(body, "[REDACTED]") {
+		t.Errorf("expected [REDACTED] in slack payload, got %s", body)
 	}
 }
 

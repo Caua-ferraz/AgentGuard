@@ -37,14 +37,14 @@ proxy:
 ```yaml
 proxy:
   audit:
-    default_limit: 50    # used when /v1/audit omits ?limit
-    max_limit: 200       # ceiling; ?limit=N above this is silently clamped
+    default_limit: 50    # example override — used when /v1/audit omits ?limit
+    max_limit: 200       # example override — ?limit=N above this is silently clamped
 ```
 
 | Key | Default |
 |---|---|
-| `default_limit` | `50` |
-| `max_limit` | `200` |
+| `default_limit` | `100` |
+| `max_limit` | `1000` |
 
 ### `notifications.dispatch_timeout`
 
@@ -97,15 +97,19 @@ agentguard serve \
   --audit-log /var/lib/agentguard/audit.jsonl \
   --session-cost-ttl 24h \
   --session-cost-sweep-interval 1h \
+  --data-dir /var/lib/agentguard \
+  --audit-backend file \
   --watch \
   --dashboard
 ```
+
+The v0.6 persistence knobs (`--persist`, `--store-dsn`, `--data-dir`, `--audit-backend`) are covered in [`CLI.md`](CLI.md#persistence--multi-tenancy-v06).
 
 See [`CLI.md`](CLI.md) for the full list.
 
 ---
 
-## Hardcoded constants (v0.5.x)
+## Hardcoded constants (as of v0.9)
 
 These are **not configurable** yet. Listed so you know what ceiling you're running against. Changing any of these requires a code change.
 
@@ -117,10 +121,11 @@ These are **not configurable** yet. Listed so you know what ceiling you're runni
 | `MaxBuckets` (rate limiter) | `10000` | `pkg/ratelimit/ratelimit.go` | Stale buckets evicted on insert pressure. |
 | `DefaultWorkers` (notifier) | `8` | `pkg/notify/notify.go` | Goroutine pool for dispatch. |
 | `DefaultQueueSize` (notifier) | `256` | `pkg/notify/notify.go` | Shared queue depth across notifiers. |
-| Policy watch poll interval | `2s` | `pkg/policy/watcher.go` | `os.Stat().ModTime()` cadence. |
+| Policy watch fallback poll interval | `2s` | `pkg/policy/watcher.go` | Reloads are fsnotify-driven (immediate); the 2 s `os.Stat().ModTime()` poll is the fallback when fsnotify is unavailable. |
 | Histogram buckets (ms) | `0.25..10000` | `pkg/metrics/metrics.go` | Contract — re-bucketing invalidates historical Prometheus data. |
 | Notifier histogram buckets (s) | `0.005..10` | `pkg/metrics/metrics.go` | Same contract note. |
 | Audit scanner buffer | `1 MB` per line | `pkg/audit/logger.go` | Raised from stdlib default to tolerate long rows. |
+| `absoluteMaxBufferBytes` (LLM proxy) | `64 MiB` | `pkg/llmproxy/streaming.go` | Hard safety ceiling on the streaming buffers. A `MaxBufferBytes` of `0` disables the operator cap (`--max-buffer-bytes` itself rejects `0`; only reachable by embedding the package) but this ceiling still applies — the stream is refused fail-closed past it. |
 
 If you need any of these configurable in YAML, open an issue with the use case.
 
