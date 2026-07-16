@@ -61,21 +61,48 @@ Historical audit queries then become a two-tier lookup: recent entries from the 
 
 ## Multi-instance deployments
 
-Two state stores do **not** propagate across replicas (v0.6 persistence makes them survive a *restart*, but each replica still keeps its own working copy — there is no shared state):
+Since v1.0, replicas can share state through PostgreSQL. Which mode you are in
+depends on the store backend:
 
-### Rate-limit buckets (`pkg/ratelimit/ratelimit.go`)
+### Shared mode — PostgreSQL (v1.0)
 
-- Key: `"<scope>:<tenant>:<agent_id>"` (tenant-aware since v0.6).
-- An agent hitting two replicas round-robin gets up to `2 × max_requests` per window.
-- `MaxBuckets = 10000` buckets per instance; stale buckets evicted on insertion pressure.
+Set `--store-dsn postgres://…` on every replica and give each a distinct
+`--node-id` (defaults to the hostname — fine for pods, wrong for two processes
+on one host). Replicas then converge through background reconciliation every
+`--reconcile-interval` (default 2s); the enforcement hot path never waits on
+the database.
 
-### Session-cost accumulators (`pkg/policy/engine.go` `sessionCosts`)
+What "shared" means, precisely:
 
-- Keyed by `session_id` from the incoming request.
-- An agent session hitting two replicas sees `max_per_session` enforced against **each** replica's local total, not the global total.
-- `--session-cost-ttl` evicts idle entries; it does not solve the sharing problem.
+- **Rate-limit buckets and session costs are bounded-overshoot, not globally
+  strict.** Each node enforces against its in-memory view and learns the other
+  nodes' consumption on the next reconcile. Worst case, admissions overshoot a
+  limit by ≈ `reconcile-interval × peak rate` per additional replica; steady
+  state converges to the global limit. If you need a hard global ceiling,
+  backstop with an upstream rate limiter.
+- **Approvals are visible cluster-wide.** A pending approval created on node A
+  can be approved via node B's dashboard; resolutions propagate within one
+  reconcile interval. Conflicting resolutions converge to **DENY**, a resolved
+  approval is never un-resolved, and a one-shot ALLOW consumed on any node is
+  spent cluster-wide once reconciled (within the staleness window a replay
+  racing to another node can still be honored there — size
+  `--reconcile-interval` accordingly if that window matters to you). Every
+  node's own deny is enforced immediately (fail-closed); only *adopting* a
+  remote decision is subject to the interval.
 
-### Mitigations (from simplest to most involved)
+### Per-instance mode — SQLite (the default)
+
+Two state stores do **not** propagate across replicas (persistence makes them
+survive a *restart*, but each replica keeps its own working copy):
+
+- **Rate-limit buckets** (`pkg/ratelimit/ratelimit.go`): key
+  `"<scope>:<tenant>:<agent_id>"`; an agent hitting two replicas round-robin
+  gets up to `2 × max_requests` per window. `MaxBuckets = 10000` per instance.
+- **Session-cost accumulators** (`pkg/policy/engine.go` `sessionCosts`): keyed
+  by `session_id`; each replica enforces `max_per_session` against its local
+  total. `--session-cost-ttl` evicts idle entries; it does not share state.
+
+Mitigations if you must run multiple replicas *without* PostgreSQL:
 
 1. **Run one replica.** Scale vertically. AgentGuard is a latency-sensitive sidecar, not a throughput bottleneck — one well-sized instance usually handles thousands of agents.
 2. **Pin sessions.** Configure your load balancer for session affinity on `session_id` (header or cookie). Rate-limit buckets still drift across replicas for multi-session agents, but cost accounting becomes accurate.

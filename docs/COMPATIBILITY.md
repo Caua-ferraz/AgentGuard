@@ -1,10 +1,11 @@
-# Compatibility & Stability — surface stabilization (v0.9 → 1.0)
+# Compatibility & Stability — the v1.0 freeze
 
-**Status:** Stabilized as of **v0.9.0**; formally frozen at **v1.0.0**.
+**Status:** Stabilized as of **v0.9.0**; **frozen as of v1.0.0** — the
+additive-only rule is now the hard guarantee.
 
-v0.9 is a *stabilization release*, not a feature release. This document declares
-the public surfaces AgentGuard is stabilizing toward a 1.0 freeze, and states the
-backward-compatibility intent on the road to 1.0 and the hard guarantee from 1.0.
+This document declares the public surfaces AgentGuard froze at 1.0 (stabilized
+through the v0.9 release, validated and hardened on the road to 1.0) and states
+the backward-compatibility guarantee that holds across the 1.x line.
 
 ## The promise
 
@@ -22,11 +23,11 @@ additive-only.** Concretely:
   version identifier (`schema/v2`, audit `schema_version: 3`, a new route
   family), never as a silent mutation of a stabilized surface.
 
-v0.9 is pre-1.0 and under active validation: we treat these surfaces as stable and
-avoid breaking them, but reserve the right to correct one before 1.0 if testing
-surfaces a genuine problem. From **1.0** the additive-only rule is a hard
-guarantee — a `go get -u` / `pip install -U` / `npm update` within the 1.x line
-will not break you.
+The pre-1.0 validation window is over: from **1.0** the additive-only rule is a
+hard guarantee — a `go get -u` / `pip install -U` / `npm update` within the 1.x
+line will not break you. (One correction made during that window, per the
+reserved right: approval resolutions became write-once/one-shot — see
+[`MIGRATION.md`](MIGRATION.md#v090--v100).)
 
 ---
 
@@ -128,16 +129,31 @@ These may change without it being a compatibility break:
 
 ## Topology
 
-The supported v0.9 deployment topology is **single-node (`replicas: 1`)**. The
-approval queue, rate-limit buckets, and cost accumulators persist to a local
-SQLite store and survive restarts, but they are not shared across instances. A
-PostgreSQL / multi-node backend is a **v1.0 requirement**; see the README
-[Limitations & Threat Model](../README.md#limitations--threat-model).
+Two supported topologies as of v1.0:
+
+- **Single-node (`replicas: 1`) — the default.** The approval queue, rate-limit
+  buckets, and cost accumulators persist to a local SQLite store and survive
+  restarts, but they are not shared across instances.
+- **Multi-node on PostgreSQL.** Set `--store-dsn postgres://…` and a distinct
+  `--node-id` per replica. Replicas share approval / rate-limit / cost state
+  through background reconciliation (`--reconcile-interval`, default 2s) — the
+  enforcement hot path never makes a synchronous database call. The documented
+  semantics of the shared mode are part of the compatibility promise:
+  distributed rate/cost limiting is **bounded-overshoot** (not globally
+  strict), cross-node approval staleness is at most one reconcile interval,
+  conflicting approval resolutions converge to **DENY**, and a consumed
+  one-shot ALLOW is spent cluster-wide once reconciled — the shared store
+  merge is monotonic (a resolution is never un-resolved, a resolved DENY is
+  never overwritten by a non-DENY, a consumption stamp is never cleared).
+
+The additive v1.0 surface on top of v0.9 — `--store-dsn` accepting
+`postgres://`/`postgresql://`, `--node-id`, `--reconcile-interval`,
+`--approval-validity`, and the write-once / one-shot approval lifecycle
+(HTTP 409 on a conflicting re-resolution) — is frozen under the same rules as
+the surfaces above.
 
 ## Post-v1, only if a concrete need arises
 
-Out of scope for v0.9 and deliberately not on the stabilization: in-process
+Out of scope and deliberately not on the stabilization: in-process
 cryptographic audit sealing (hash-chaining / Merkle checkpoints — use external
-WORM instead), RBAC / multi-key auth, and audit secret-redaction. (PostgreSQL /
-multi-node is **not** in this list — it is a v1.0 requirement; see
-[Topology](#topology) above.)
+WORM instead), RBAC / multi-key auth, and audit secret-redaction.

@@ -169,7 +169,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata: { name: agentguard }
 spec:
-  replicas: 1   # ⚠ rate limits and session-cost accounting are per-instance; see docs/OPERATIONS.md
+  replicas: 1   # ⚠ per-instance limits on the default SQLite store; replicas > 1 needs --store-dsn postgres:// — see docs/OPERATIONS.md
   template:
     spec:
       containers:
@@ -196,7 +196,7 @@ spec:
           persistentVolumeClaim: { claimName: agentguard-audit }
 ```
 
-> **Warning — multi-instance:** rate-limit buckets and session-cost accumulators are in-memory and not shared across replicas. Running `replicas: > 1` lets an agent burst past per-scope limits by hitting different pods. See [`docs/OPERATIONS.md`](OPERATIONS.md) for mitigations.
+> **Multi-instance:** on the default SQLite store, rate-limit buckets and session-cost accumulators are per-instance — `replicas: > 1` lets an agent burst past per-scope limits by hitting different pods. Since v1.0, point every replica at PostgreSQL (`--store-dsn postgres://…`) with a distinct `--node-id` (in Kubernetes, pass the pod name) to share approval / rate-limit / cost state; distributed limiting is bounded-overshoot, converging every `--reconcile-interval` (default 2s). See [`docs/OPERATIONS.md`](OPERATIONS.md#multi-instance-deployments).
 
 ---
 

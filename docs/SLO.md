@@ -41,7 +41,7 @@ The targets below assume:
 | `/v1/check` p50 latency     | **< 1 ms**           | Engine path is in-memory; audit write is a single `json.Encode` to a buffered file. |
 | `/v1/check` p95 latency     | **< 3 ms**           | Allows one fsync per request to stay inside 3 ms. |
 | `/v1/check` p99 latency     | **< 5 ms** at 1k RPS | GC pause + sporadic file-system sync. |
-| Throughput (sustained)      | **≥ 1 000 RPS**      | Per replica; horizontal scale-out stays out of scope through v0.9 (single-node posture). |
+| Throughput (sustained)      | **≥ 1 000 RPS**      | Per replica; since v1.0, scale horizontally with the PostgreSQL backend (per-replica targets unchanged — reconciliation is background-only). |
 | Audit-write durability lag  | **< 100 ms**         | Time between `Log()` returning and the entry being readable by `Query`. |
 | Approval-required emit lag  | **< 250 ms**         | `notify.Dispatcher` queue depth + a single webhook hop. |
 

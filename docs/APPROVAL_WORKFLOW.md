@@ -234,6 +234,17 @@ A resolved **ALLOW** is a single-use, time-boxed capability:
   approval for multiple executions.
 - Consumption survives restarts (persisted with the approval), so a
   restart cannot resurrect a spent ALLOW.
+- **Multi-node (v1.0, PostgreSQL store):** all of the above holds
+  cluster-wide, eventually — an approval resolved on one node is visible on
+  every node within one `--reconcile-interval` (default 2s), and a consumed
+  ALLOW is spent everywhere once its stamp reconciles. Inside that staleness
+  window a replay racing to a node that has not yet reconciled can be honored
+  once there; shrink `--reconcile-interval` if that window matters to your
+  threat model. Conflicting resolutions across nodes always converge to
+  **DENY**, and the shared store's merge is monotonic (a resolution is never
+  un-resolved, a resolved DENY is never overwritten by a non-DENY, a
+  consumption stamp is never cleared) — so neither restarts nor lagging
+  replicas can resurrect a spent or denied approval.
 
 ---
 

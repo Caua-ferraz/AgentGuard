@@ -481,6 +481,21 @@ legal. The downstream `message_delta { stop_reason }` field is
 rewritten from `tool_use` to `end_turn` to prevent the agent from
 expecting a tool result it's not getting.
 
+#### Malformed tool calls fail closed (v1.0)
+
+A tool call that **completes** with arguments that are not valid JSON —
+routine on a `max_tokens` cutoff mid-arguments, and attacker-inducible —
+is refused with the same synthetic-refusal shapes above, under the fixed
+rule `deny:llm_api_proxy:malformed_tool_call` (stable; alert on it). The
+refusal is audited through the normal `/v1/check` path, the buffered
+malformed bytes are discarded (never forwarded), and the accumulator is
+reset so any *later* valid tool call in the same stream is still gated.
+Malformed **non-completion** deltas are unchanged: dropped silently,
+because corruption that matters resurfaces at completion, where it now
+denies. (Before v1.0 a malformed completion was silently dropped — no
+refusal, no audit entry, and the stream went dark for the rest of the
+connection.)
+
 ### 5.5 Byte-identity invariant on ALLOW
 
 **Critical correctness property:** in the ALLOW path, the bytes

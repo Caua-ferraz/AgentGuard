@@ -242,4 +242,64 @@ Trivial. v0.9.0 introduces no on-disk state, no schema bumps, and no wire-protoc
 
 ---
 
+## v0.9.0 → v1.0.0
+
+### What happens automatically
+
+- **Additive store-schema migration on first boot.** The `approvals` table
+  gains three columns (`consumed_at`, `resolved_via`, `resolved_from` — the
+  one-shot consumption stamp and resolution-actor fields) via guarded
+  `ALTER TABLE`s, and two new tables (`rate_consumption`, `cost_consumption`)
+  are created for multi-node reconciliation. Idempotent, additive-only, no
+  rewrite of existing rows; pre-v1.0 approvals load as unconsumed/unstamped.
+  No backup step is needed and `agentguard migrate` is not involved.
+- Everything else is untouched: `/v1/check` request/response shapes, the
+  audit format (`schema_version: 2`), and the policy schema (`version: "1"`)
+  are byte-for-byte compatible with v0.9.
+
+### Behavior changes worth knowing about
+
+- **Approval resolutions are write-once.** Re-approving an already-approved
+  id (or re-denying a denied one) stays an idempotent no-op, but a
+  *conflicting* re-resolution now returns `409 Conflict` with a structured
+  body instead of silently flipping the decision. Anything that relied on
+  flip-by-re-POST must stop; that was the last-write-wins hole.
+- **A resolved ALLOW is one-shot and time-boxed.** The first `/v1/check`
+  retry carrying the `approval_id` consumes it; later replays re-enter the
+  approval flow. Honoring is bounded by `--approval-validity` (default `5m`;
+  `0` restores the unbounded pre-v1.0 window). Long-delayed retries that
+  used to be honored will now come back as fresh approval requests.
+- **Malformed streaming tool calls now fail closed.** The LLM API Proxy
+  refuses (and audits) a completed tool call whose assembled arguments are
+  not valid JSON, instead of silently dropping it and going dark for the
+  rest of the stream.
+- **Domain matching is case-insensitive.** A deny rule for `evil.com` now
+  matches `EVIL.com`. Policies that (accidentally) relied on case-sensitive
+  domain rules are evaluated case-insensitively.
+- **Multi-node is opt-in.** Nothing changes unless you set
+  `--store-dsn postgres://…`; the zero-config SQLite default behaves exactly
+  as in v0.9 (the reconcile ticker stays off). See
+  [`OPERATIONS.md`](OPERATIONS.md#multi-instance-deployments).
+
+### What you should do
+
+1. Swap the binaries and SDKs to 1.0.0. No config or data changes are
+   required for single-node deployments.
+2. If you run (or plan to run) more than one replica: provision PostgreSQL,
+   set `--store-dsn postgres://…` and a distinct `--node-id` per replica,
+   and read the bounded-overshoot semantics in
+   [`COMPATIBILITY.md`](COMPATIBILITY.md#topology) before sizing
+   `--reconcile-interval`.
+
+### Rollback to v0.9.0
+
+Supported. The schema changes are additive: a v0.9.0 binary reads a
+v1.0-touched SQLite store (the extra columns and tables are simply ignored).
+Two things degrade on rollback: one-shot consumption stamps stop being
+enforced (v0.9 predates them — previously-spent ALLOWs become replayable
+within their retention window), and any Postgres-backed deployment must
+return to single-node SQLite (v0.9 has no Postgres backend).
+
+---
+
 _Migration guides for prior releases live in the git history of this file._

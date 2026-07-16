@@ -105,6 +105,8 @@ agentguard serve \
 
 The v0.6 persistence knobs (`--persist`, `--store-dsn`, `--data-dir`, `--audit-backend`) are covered in [`CLI.md`](CLI.md#persistence--multi-tenancy-v06).
 
+**Multi-node (v1.0, PostgreSQL only):** `--reconcile-interval` (default `2s`) is the one knob that trades convergence for store traffic — it bounds both the distributed rate-limit overshoot (≈ `interval × peak rate` per extra replica) and the cross-node approval staleness (a resolution or one-shot consumption on another node lands within one interval). Halving it halves both windows and doubles reconcile queries; the `/v1/check` hot path is untouched either way. `--node-id` is identity, not tuning — just keep it distinct per replica.
+
 See [`CLI.md`](CLI.md) for the full list.
 
 ---

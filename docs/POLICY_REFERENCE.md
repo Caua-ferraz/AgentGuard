@@ -588,6 +588,11 @@ allow:
   - domain: "*.foo.com"
 ```
 
+Domain matching is **case-insensitive** (v1.0): the request's domain and the
+rule's `domain` patterns are both lowercased before matching, so a deny rule
+for `evil.com` also matches `EVIL.com` — DNS names are case-equivalent, and
+before v1.0 a mixed-case request could slip past a lowercase deny rule.
+
 ### Paths are cleaned first
 
 `matchRule` applies `filepath.Clean + ToSlash` to both the rule's `paths` entries and the request's `Path`, so `./a/./b` and `a/b` are equivalent.
@@ -608,5 +613,11 @@ allow:
 - `filesystem` rule `paths` do not contain `..` after normalization.
 - Every `notifications.redaction.extra_patterns` entry compiles as a Go regexp.
 - `conditions.time_window` without `require_prior` is rejected as a hard load error (since v0.5.0).
+
+One **non-fatal warning** (v1.0): a rule path pattern that contains `/` but no
+`**` (e.g. `/workspace/*`) is logged at load, because its single `*` crosses
+`/` and matches recursively (`/workspace/a/b/secret.env`) — usually broader
+than intended. The policy still loads; switch to `**` (segment-aware) if you
+meant one level. See [Single-star `*` crosses `/`](#single-star--crosses-).
 
 There is **no** schema validation beyond the above — typos in field names are silently ignored by the YAML decoder. Always run `agentguard validate --policy <file>` after edits; wire it into CI against every policy file you ship.

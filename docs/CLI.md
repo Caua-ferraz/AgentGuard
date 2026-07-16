@@ -59,9 +59,11 @@ Start the AgentGuard server. This is the only subcommand that runs a long-lived 
 | `--debug-pprof` | off | Expose Go pprof handlers on a **separate localhost-only** listener (`--debug-pprof-port`). Off by default; enable for performance investigations only. Tunnel via `kubectl port-forward` / `ssh -L` to access remotely — this listener never binds beyond `127.0.0.1`. |
 | `--debug-pprof-port <int>` | `6060` | Port for the localhost-only pprof listener. Ignored unless `--debug-pprof`. |
 | `--persist` | `true` | **(v0.6)** Persist runtime state (approvals, rate-limit buckets, cost accumulators) to a durable store so it survives restarts. Zero-config: auto-creates `agentguard.db` (SQLite). Set `false` for pure in-memory (pre-v0.6 behavior). The store is **never** on the `/v1/check` hot path — a background syncer flushes snapshots on a ≥1 s tick and hydrates memory on boot. See [Persistence & multi-tenancy](#persistence--multi-tenancy-v06). |
-| `--store-dsn <dsn>` | *(empty)* | **(v0.6)** Durable store location. Empty ⇒ zero-config SQLite at `<data-dir>/agentguard.db`; a SQLite file path is also accepted. (Postgres is future work.) Ignored when `--persist=false`. |
+| `--store-dsn <dsn>` | *(empty)* | **(v0.6)** Durable store location. Empty ⇒ zero-config SQLite at `<data-dir>/agentguard.db`; a SQLite file path is also accepted. **(v1.0)** A `postgres://` / `postgresql://` DSN selects the PostgreSQL backend — required for [multi-node deployments](OPERATIONS.md#multi-instance-deployments). Ignored when `--persist=false`. |
 | `--data-dir <path>` | `.` | **(v0.6)** Directory for the zero-config SQLite database (`agentguard.db` + its `-wal`/`-shm` sidecars). Ignored when `--store-dsn` is set or `--persist=false`. |
-| `--audit-backend <file\|store>` | `file` | **(v0.6)** Where the audit trail lives. `file` = JSONL (rotation + migration, the default). `store` = the SQLite store's indexed `audit_entries` table (one-file deployment, indexed `/v1/audit` queries). `store` requires `--persist` and always runs buffered (async) — a synchronous DB write per request would break the <3 ms budget, so buffering is forced. |
+| `--node-id <id>` | *(hostname)* | **(v1.0)** This replica's identity in the shared PostgreSQL store. Must be distinct per replica (two processes on one host need explicit values; in Kubernetes pass the pod name). No effect on the SQLite backend. |
+| `--reconcile-interval <dur>` | `2s` | **(v1.0)** Cadence of the background reconcile that merges other nodes' rate/cost consumption and approval state into this node's in-memory view (and publishes this node's). Postgres-only: forced off on the SQLite backend. Smaller ⇒ tighter rate-limit overshoot bound and fresher cross-node approvals, more store traffic. Never touches the `/v1/check` hot path. |
+| `--audit-backend <file\|store>` | `file` | **(v0.6)** Where the audit trail lives. `file` = JSONL (rotation + migration, the default). `store` = the durable store's indexed `audit_entries` table (one-file deployment, indexed `/v1/audit` queries). `store` requires `--persist` and always runs buffered (async) — a synchronous DB write per request would break the <3 ms budget, so buffering is forced. |
 
 ### Bind behavior
 
@@ -76,6 +78,8 @@ By default `serve` is now **stateful**: runtime state survives a restart. On a c
 - **write-behind syncs** them back on a background ticker (≥ 1 s) and on graceful shutdown.
 
 The store is a *cold-path* component — it is never read or written on the `/v1/check` request path, so the <3 ms p99 budget is unaffected. Disable with `--persist=false` for the legacy pure-in-memory behavior.
+
+**Multi-node (v1.0).** With `--store-dsn postgres://…`, every replica shares the same durable tier and additionally reconciles its in-memory state with the other nodes every `--reconcile-interval` (default 2s), identified by `--node-id`. Memory stays authoritative per node — reconciliation is background-only, so distributed rate/cost limiting is bounded-overshoot rather than globally strict, and cross-node approval staleness is at most one interval. Semantics and sizing guidance: [`OPERATIONS.md`](OPERATIONS.md#multi-instance-deployments).
 
 **Tenancy.** The `local` tenant's policy comes from `--policy`. Additional tenants are registered in the store with [`agentguard tenant`](#agentguard-tenant-v06) and addressed via the `/v1/t/<tenant>/...` route family; each tenant is evaluated against its **own** policy, with isolated approvals, rate limits, cost accumulators, and audit. A tenant that has no registered policy is rejected over HTTP with `404 {"error":"tenant not found"}` (see [`API.md`](API.md#url-families-legacy-vs-tenant-aware-v05)); the offline [`agentguard check --tenant-id`](#agentguard-check) path returns a synthetic DENY with `matched_rule="deny:tenant:not_found"`.
 
@@ -95,6 +99,15 @@ agentguard serve \
   --tls-terminated-upstream \
   --session-cost-ttl 24h \
   --dashboard
+
+# Multi-node (v1.0) — every replica points at the same PostgreSQL and
+# carries its own --node-id (here: the pod name).
+agentguard serve \
+  --policy /etc/agentguard/policy.yaml \
+  --store-dsn "postgres://agentguard:$PGPASS@pg.internal:5432/agentguard" \
+  --node-id "$POD_NAME" \
+  --reconcile-interval 2s \
+  --api-key "$AGENTGUARD_API_KEY"
 ```
 
 ### Signals

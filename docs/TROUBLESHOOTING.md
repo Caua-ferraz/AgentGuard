@@ -73,15 +73,16 @@ touch configs/default.yaml
 
 ## Rate limit works locally but gets bypassed in production
 
-**Likely cause:** you are running more than one AgentGuard replica. Rate-limit buckets are in-memory per instance (`pkg/ratelimit/ratelimit.go`); an agent can burst past the cap by hitting different pods / VMs round-robin.
+**Likely cause:** you are running more than one AgentGuard replica on the default SQLite store. Rate-limit buckets are in-memory per instance (`pkg/ratelimit/ratelimit.go`); an agent can burst past the cap by hitting different pods / VMs round-robin.
 
 **Mitigations:**
 
+- Share state across replicas (v1.0): `--store-dsn postgres://…` plus a distinct `--node-id` per replica. Note the shared mode is bounded-overshoot — brief bursts can still exceed the cap by ≈ `reconcile-interval × peak rate` per extra replica before the nodes converge.
 - Divide per-scope `max_requests` by the replica count when writing the policy.
 - Pin agents to a single AgentGuard instance via session affinity.
 - Keep `replicas: 1` and scale vertically.
 
-Details: [`docs/OPERATIONS.md`](OPERATIONS.md).
+Details: [`docs/OPERATIONS.md`](OPERATIONS.md#multi-instance-deployments).
 
 ---
 
