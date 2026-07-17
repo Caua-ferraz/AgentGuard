@@ -283,8 +283,16 @@ Trivial. v0.9.0 introduces no on-disk state, no schema bumps, and no wire-protoc
 
 ### What you should do
 
-1. Swap the binaries and SDKs to 1.0.0. No config or data changes are
+1. **Swap the binaries and SDKs to 1.0.0.** No config or data changes are
    required for single-node deployments.
+
+   ```bash
+   go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@v1.0.0
+   go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-mcp-gateway@v1.0.0
+   go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@v1.0.0
+   pip install --upgrade "agentguardproxy==1.0.0"
+   npm install @agentguard/sdk@1.0.0
+   ```
 2. If you run (or plan to run) more than one replica: provision PostgreSQL,
    set `--store-dsn postgres://…` and a distinct `--node-id` per replica,
    and read the bounded-overshoot semantics in

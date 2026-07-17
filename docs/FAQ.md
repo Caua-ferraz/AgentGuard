@@ -91,7 +91,7 @@ Yes — since v0.6 it ships as the durable-store backend: run with `--persist --
 
 ### Where's the admin API for managing approvers / RBAC?
 
-There isn't one. As of v0.9 there is still **one API key** — anyone with it has full access to approve/deny/audit/status and the dashboard. Multi-tenant policy and state isolation shipped in v0.6 (`/v1/t/{tenant}/...` routes plus the `agentguard tenant` CLI — see [`API.md`](API.md) and [`CLI.md`](CLI.md#agentguard-tenant-v06)), but per-approver identities and RBAC did not. For now, treat the API key like a root password.
+There isn't one. As of v1.0 there is still **one API key** — anyone with it has full access to approve/deny/audit/status and the dashboard. Multi-tenant policy and state isolation shipped in v0.6 (`/v1/t/{tenant}/...` routes plus the `agentguard tenant` CLI — see [`API.md`](API.md) and [`CLI.md`](CLI.md#agentguard-tenant-v06)), but per-approver identities and RBAC did not. For now, treat the API key like a root password.
 
 ### Can I edit policies from the dashboard?
 

@@ -111,7 +111,7 @@ See [`CLI.md`](CLI.md) for the full list.
 
 ---
 
-## Hardcoded constants (as of v0.9)
+## Hardcoded constants (as of v1.0)
 
 These are **not configurable** yet. Listed so you know what ceiling you're running against. Changing any of these requires a code change.
 

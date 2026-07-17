@@ -384,7 +384,7 @@ Startup migrations run automatically inside `agentguard serve` before the audit 
 
 ```bash
 agentguard version
-# agentguard 0.9.0 (abc1234)
+# agentguard 1.0.0 (abc1234)
 ```
 
 The `version` string is baked in at build time via `-ldflags "-X main.version=... -X main.commit=..."` (see `Makefile`).
@@ -394,7 +394,7 @@ The `version` string is baked in at build time via `-ldflags "-X main.version=..
 Every subcommand kicks off an async best-effort check against the GitHub Releases API at startup (800 ms budget). If a newer release exists, one line lands on stderr before subcommand output; otherwise silent.
 
 ```
-Notice: agentguard v0.9.0 is deprecated, version v0.9.1 available — https://github.com/Caua-ferraz/AgentGuard/releases/latest
+Notice: agentguard v1.0.0 is deprecated, version v1.0.1 available — https://github.com/Caua-ferraz/AgentGuard/releases/latest
 ```
 
 Skipped when the binary was built with `commit=dev`, when `AGENTGUARD_NO_UPDATE_CHECK` is set to any value other than `0`, or when the HTTP request fails. Never touches stdout, never affects exit codes.

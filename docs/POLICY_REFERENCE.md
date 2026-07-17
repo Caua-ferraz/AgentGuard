@@ -1,6 +1,6 @@
 # Policy Reference
 
-Canonical reference for the AgentGuard policy YAML format as of **v0.9.0**.
+Canonical reference for the AgentGuard policy YAML format as of **v1.0.0**.
 
 Source of truth: `pkg/policy/engine.go` (types) and `pkg/policy/engine.go:Engine.Check` (evaluation). Examples here are the shapes the Go YAML decoder accepts — unknown keys are silently ignored.
 
@@ -155,7 +155,7 @@ If the `HistoryQuerier` is not wired (it is by default in `NewServer`), or the a
 
 **Key is `<scope>:<agent_id>`.** Per-agent, per-scope.
 
-**In-memory and per-instance.** Multi-replica deployments do not share buckets — agents can burst past the nominal cap by hitting different pods. See [`docs/OPERATIONS.md`](OPERATIONS.md).
+**In-memory; per-instance on the default SQLite store.** Multi-replica deployments on SQLite do not share buckets — agents can burst past the nominal cap by hitting different pods. With the v1.0 PostgreSQL backend, replicas share consumption via background reconcile (bounded-overshoot: brief bursts can still exceed the cap by ≈ `reconcile-interval × peak rate` per extra replica). See [`docs/OPERATIONS.md`](OPERATIONS.md#multi-instance-deployments).
 
 A rate-limit denial produces `CheckResult{Decision: DENY, Rule: "deny:ratelimit:<scope>"}` and increments `agentguard_rate_limited_total`.
 

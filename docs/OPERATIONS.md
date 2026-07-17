@@ -138,7 +138,7 @@ Operational guidance:
 | Constant | Value | Source |
 |---|---|---|
 | `SessionTTL` | `1h` | `pkg/proxy/auth.go` (default, overridable via `policy.proxy.session.ttl`) |
-| `MaxSessions` | `1024` | `pkg/proxy/auth.go` (still hardcoded as of v0.9) |
+| `MaxSessions` | `1024` | `pkg/proxy/auth.go` (still hardcoded as of v1.0) |
 
 At capacity, the oldest-by-expiry session is evicted. Under pathological login bursts you can see `503` with `Retry-After: 5` from `/auth/login`.
 

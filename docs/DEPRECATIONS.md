@@ -16,8 +16,8 @@ Before the removal release ships, check `agentguard_deprecations_used_total` in 
 
 | feature | deprecated-in | removal-target | migration-path | owner |
 |---|---|---|---|---|
-| `audit.migration.v040_to_v041` | v0.4.1 | TBD (was v0.4.3 — that release never shipped; still in the binary as of v0.9.0) | Runs automatically on startup (registered via `pkg/migrate/v040_to_v041`, also invocable as `agentguard migrate`). Users still on headerless v1 audit files should migrate before the removal release, whenever it is rescheduled. | audit |
-| `audit.backup.v040` | v0.4.1 | TBD (was v0.4.3 — that release never shipped; convention still active as of v0.9.0) | `.v040-backup` is created by the v0.4.0 → v0.4.1 migration to enable downgrade. Operators who want the backup retained long-term should archive it externally. It will be removed alongside the migration code. | audit |
+| `audit.migration.v040_to_v041` | v0.4.1 | TBD (was v0.4.3 — that release never shipped; still in the binary as of v1.0.0) | Runs automatically on startup (registered via `pkg/migrate/v040_to_v041`, also invocable as `agentguard migrate`). Users still on headerless v1 audit files should migrate before the removal release, whenever it is rescheduled. | audit |
+| `audit.backup.v040` | v0.4.1 | TBD (was v0.4.3 — that release never shipped; convention still active as of v1.0.0) | `.v040-backup` is created by the v0.4.0 → v0.4.1 migration to enable downgrade. Operators who want the backup retained long-term should archive it externally. It will be removed alongside the migration code. | audit |
 
 ## Removed (historical)
 

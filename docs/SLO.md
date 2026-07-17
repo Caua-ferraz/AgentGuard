@@ -1,11 +1,13 @@
-# Service Level Objectives — AgentGuard v0.9
+# Service Level Objectives — AgentGuard v1.0
 
 **Status:** baseline established (captured on v0.5.0; still the recorded
 floor). Targets below are operational expectations for a single-replica
 deployment running the in-process file-backed audit logger (the default);
 revisit when deployments adopt the store-backed audit
-(`--audit-backend=store`, v0.6+) or when horizontal scale-out becomes a
-thing (a v1.0 topic — see [`COMPATIBILITY.md`](COMPATIBILITY.md)).
+(`--audit-backend=store`, v0.6+). Multi-node deployments (v1.0, PostgreSQL
+— see [`COMPATIBILITY.md`](COMPATIBILITY.md#topology)) apply these targets
+**per replica**; reconciliation is background-only and does not touch the
+`/v1/check` path.
 
 ## Service in scope
 
@@ -45,7 +47,7 @@ The targets below assume:
 | Audit-write durability lag  | **< 100 ms**         | Time between `Log()` returning and the entry being readable by `Query`. |
 | Approval-required emit lag  | **< 250 ms**         | `notify.Dispatcher` queue depth + a single webhook hop. |
 
-These targets are backed two ways as of v0.9: the micro-benchmarks in
+These targets are backed two ways as of v1.0: the micro-benchmarks in
 §Baseline below, and a CI latency gate (`TestEngineCheck_P99LatencyGate`,
 `pkg/policy`) that fails the build if `Engine.Check` p99 crosses the 3 ms
 budget with the persistence syncer active (measured ≪0.1 ms for the bare
@@ -135,7 +137,8 @@ SLO validation:
 1. A `vegeta`/`hey` harness against `agentguard serve` running with
    `--policy configs/default.yaml` and a tmpfs-backed audit log,
    driving 1 kRPS sustained for 5 minutes. **Still not automated** as
-   of v0.9.
+   of v1.0 (the in-suite concurrent soak — `pkg/persist`, 32 workers,
+   ~11 kRPS locally — is the closest current proxy for it).
 2. Latency histograms exported via `/metrics`
    (`agentguard_request_duration_ms`,
    `agentguard_policy_eval_duration_ms`,
