@@ -21,19 +21,45 @@ def domain_from_url(url: Any) -> str:
         return ""
 
 
+# Filesystem-action verb groups. These MUST stay byte-identical to the Go
+# transports' gateclient.InferFilesystemAction (pkg/internal/gateclient/
+# gateclient.go): same verbs, same groups, same precedence (read, then
+# write, then delete). Parity is pinned by two mirrored test tables —
+# plugins/python/tests/test_action_parity.py and
+# pkg/internal/gateclient/gateclient_test.go. Edit both sides together.
+_READ_PREFIXES = ("read", "list", "get", "stat", "cat", "find", "glob")
+_WRITE_PREFIXES = ("write", "edit", "create", "append", "save", "copy", "move")
+_DELETE_PREFIXES = ("delete", "remove", "unlink", "rm")
+
+
 def infer_path_action(tool_name: Any) -> str:
     """Map a tool-name verb to the canonical filesystem action
-    ("read"/"write"/"delete"), or "" when no verb matches. Mirrors the
-    Go side's gateclient.InferFilesystemAction verb groups.
+    ("read"/"write"/"delete"), or "" when no verb matches.
+
+    Mirrors the Go transports' gateclient.InferFilesystemAction exactly:
+    a case-insensitive ``strings.HasPrefix`` (Python ``str.startswith``)
+    against these verb groups, checked in this order —
+
+        read   = read, list, get, stat, cat, find, glob
+        write  = write, edit, create, append, save, copy, move
+        delete = delete, remove, unlink, rm
+
+    Prefix (not substring) matching is deliberate: it avoids the false
+    positives substring matching produces that Go never makes — e.g.
+    "set_target" contains "get" but does not START with it, and
+    "undelete_x" contains "delete" but does not start with it. Both
+    correctly yield "" here, matching Go. Parity is pinned by
+    plugins/python/tests/test_action_parity.py, whose table mirrors
+    pkg/internal/gateclient/gateclient_test.go.
     """
     if not isinstance(tool_name, str):
         return ""
     name_lower = tool_name.lower()
-    if "read" in name_lower or "get" in name_lower:
+    if name_lower.startswith(_READ_PREFIXES):
         return "read"
-    if "write" in name_lower or "save" in name_lower or "create" in name_lower:
+    if name_lower.startswith(_WRITE_PREFIXES):
         return "write"
-    if "delete" in name_lower or "remove" in name_lower:
+    if name_lower.startswith(_DELETE_PREFIXES):
         return "delete"
     return ""
 
