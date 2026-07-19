@@ -490,7 +490,7 @@ notifications:
 
 - `approval_required` → fired when a rule matches `REQUIRE_APPROVAL`.
 - `on_deny` → fired when a rule matches `DENY`.
-- `redaction.extra_patterns` → Go `regexp` (RE2) patterns appended to the built-in redactor list (Bearer tokens, `AKIA…`, `ghp_…`, `xox?-…`, `secret=…`). Applied to `Command`, `URL`, `Reason`, and every `Meta` value before dispatch. Invalid regex → policy load fails.
+- `redaction.extra_patterns` → Go `regexp` (RE2) patterns appended to the built-in redactor list (Bearer tokens, `AKIA…`, `ghp_…`, `xox?-…`, `secret=…`). Applied to `Command`, `Path`, `Domain`, `URL`, `Action`, `Reason`, and every `Meta` value before dispatch. Invalid regex → policy load fails.
 - `dispatch_timeout` — Go duration; default `10s`. Per-target `timeout` overrides it.
 
 | `type` | Purpose | Honors `timeout` |

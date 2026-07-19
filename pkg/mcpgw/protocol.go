@@ -440,8 +440,9 @@ func NegotiateProtocolVersion(clientRequested string, supported []string) string
 // advertisement to the client during initialize. Rules (per
 // docs/MCP_GATEWAY.md § 3.3):
 //
-//   - `tools` is always advertised; listChanged: false (the gateway
-//     does not subscribe to upstream tools/list_changed yet).
+//   - `tools` is always advertised with listChanged: true (the gateway
+//     forwards upstream tools/list_changed notifications — see the
+//     `listChanged` note below).
 //   - `logging` is always advertised; gateway forwards
 //     logging/setLevel to every upstream.
 //   - `completions` is not advertised.
@@ -451,7 +452,8 @@ func NegotiateProtocolVersion(clientRequested string, supported []string) string
 // them to the client because resources/* and prompts/* method routing
 // is not yet implemented (see TODO(v0.7, #mcp-resources)). Advertising
 // them today would mislead the client into showing resources that every
-// read would reject with MethodNotFound (see Bridge.handleNotImplemented).
+// read would reject with MethodNotFound (the default case in
+// Bridge.dispatchFrame returns ErrCodeMethodNotFound for unrouted methods).
 //
 // `listChanged` is advertised true: the bridge forwards upstream
 // notifications/tools/list_changed frames to the host (see

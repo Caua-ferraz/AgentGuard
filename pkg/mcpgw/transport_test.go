@@ -312,3 +312,38 @@ func TestStdioUpstream_RoutesNotificationsToSink(t *testing.T) {
 		t.Fatal("OnNotification never fired for the upstream's list_changed frame")
 	}
 }
+
+// TestReadLoop_ServerInitiatedRequestLogLevel pins the (1) log-level
+// bump: a server-initiated REQUEST (id + method, no matching pending
+// entry) is dropped and surfaced at Info, while a stray response
+// (id, no method) stays at Debug. The logger is configured at "info"
+// level so Debug output is suppressed — presence in the buffer is the
+// assertion. readLoop is driven directly from an in-memory reader; it
+// returns when the reader EOFs.
+func TestReadLoop_ServerInitiatedRequestLogLevel(t *testing.T) {
+	newUp := func(buf *bytes.Buffer) *StdioUpstream {
+		return NewStdioUpstreamWithOptions(UpstreamSpec{Namespace: "fs"},
+			StdioUpstreamOptions{Logger: newTransportLogger(buf, "info")})
+	}
+
+	// A server-initiated request: sampling/createMessage carries an id
+	// AND a method but matches no pending entry -> Info, dropped.
+	var infoBuf bytes.Buffer
+	newUp(&infoBuf).readLoop(bytes.NewReader(
+		[]byte(`{"jsonrpc":"2.0","id":7,"method":"sampling/createMessage","params":{}}` + "\n")))
+	out := infoBuf.Bytes()
+	if !bytes.Contains(out, []byte("info")) ||
+		!bytes.Contains(out, []byte("server-initiated request")) ||
+		!bytes.Contains(out, []byte("sampling/createMessage")) {
+		t.Fatalf("server-initiated request should log at Info naming the method; got:\n%s", out)
+	}
+
+	// A stray/duplicate response: id but no method -> Debug, which is
+	// suppressed at the "info" level, so the buffer stays empty.
+	var strayBuf bytes.Buffer
+	newUp(&strayBuf).readLoop(bytes.NewReader(
+		[]byte(`{"jsonrpc":"2.0","id":9,"result":{}}` + "\n")))
+	if strayBuf.Len() != 0 {
+		t.Errorf("stray response should stay at Debug (suppressed at info); got:\n%s", strayBuf.String())
+	}
+}

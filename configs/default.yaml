@@ -102,7 +102,7 @@ rules:
     deny:
       - domain: "*.production.internal"
         message: "Production access requires an elevated policy"
-    # rate_limit is PER-INSTANCE — the bucket key is "<scope>:<agent_id>".
+    # rate_limit is PER-INSTANCE — the bucket key is "scope:tenant:agent".
     # Multi-replica deployments multiply the effective cap. See
     # docs/OPERATIONS.md#multi-instance-deployments for mitigations.
     rate_limit:
