@@ -364,6 +364,16 @@ func NewServer(cfg Config) *Server {
 	mux.HandleFunc("/v1/status/", requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleStatus))
 	mux.HandleFunc("/v1/audit", requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleAuditQuery))
 
+	// Audit ingest (POST): append a pre-decided fail-closed refusal to the
+	// trail without running policy — the F1 audit-verdict fidelity path, used
+	// by a transport proxy that manufactures its own refusal (e.g. the LLM API
+	// Proxy's malformed-tool-call DENY). State-changing (writes an entry), so it
+	// requires Bearer OR (session + CSRF), matching approve/deny. The
+	// method-specific "POST /v1/audit" is strictly more specific than the
+	// methodless "/v1/audit" GET query above, so the mux routes POST here and
+	// GET to handleAuditQuery with no conflict.
+	mux.HandleFunc("POST /v1/audit", requireAuthOrSession(cfg.APIKey, s.sessions, true, s.handleAuditRecord))
+
 	// -----------------------------------------------------------------
 	// Tenant-aware mirrors of every operational route.
 	//
@@ -380,7 +390,7 @@ func NewServer(cfg Config) *Server {
 	// routes additionally require CSRF when authenticated via session.
 	//
 	// Method-prefixed wildcard syntax is Go 1.22+; the Dockerfile pins
-	// golang:1.22-alpine so this is safe.
+	// golang:1.25.12-alpine so this is safe.
 	mux.HandleFunc("POST /v1/t/{tenant}/check", s.withTenant(s.handleCheck))
 	mux.HandleFunc("POST /v1/t/{tenant}/approve/{id}",
 		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, true, s.handleApprove)))
@@ -390,6 +400,8 @@ func NewServer(cfg Config) *Server {
 		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleStatus)))
 	mux.HandleFunc("GET /v1/t/{tenant}/audit",
 		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleAuditQuery)))
+	mux.HandleFunc("POST /v1/t/{tenant}/audit",
+		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, true, s.handleAuditRecord)))
 
 	// Auth endpoints for dashboard login/logout.
 	mux.HandleFunc("/auth/login", s.handleLogin)
@@ -1122,6 +1134,84 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(entries)
+}
+
+// handleAuditRecord appends a pre-decided fail-closed refusal to the audit
+// trail WITHOUT running the policy engine. It is the ingest side of the F1
+// audit-verdict fidelity fix (C3): a transport proxy that manufactures its own
+// refusal — e.g. the LLM API Proxy's malformed-tool-call DENY — POSTs the
+// verdict the client actually received here, so the central audit log (the
+// single source of truth) reflects that DENY rather than the ALLOW a
+// fidelity-blind /v1/check would log after evaluating the garbage-projected
+// request.
+//
+// The endpoint records DENY only: Decision is hardcoded to policy.Deny, so a
+// caller can never inject an ALLOW into the trail. It reuses logAndRespond — the
+// same audit-write + SSE-broadcast chokepoint /v1/check uses — so recorded
+// entries are indistinguishable downstream (transport tag, tenant stamp, SSE
+// chip) from real gate entries. This handler is NOT on the hot path: it fires
+// only on the proxy's rare malformed-completion path, never on /v1/check.
+func (s *Server) handleAuditRecord(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	start := time.Now()
+
+	limit := s.maxRequestBodyBytes
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	var rec policy.AuditRecord
+	if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
+		// Distinguish "body too large" from other parse errors, mirroring
+		// handleCheck so the body-cap enforcement stays observable.
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			metrics.IncRequestRejected(metrics.RejectedBodyTooLarge)
+			http.Error(w, fmt.Sprintf("Request body too large (limit %d bytes)", limit), http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Schema negotiation mirrors handleCheck: empty defaults to v1; any other
+	// value is rejected so a future v2 record never silently misparses.
+	if rec.SchemaVersion == "" {
+		rec.SchemaVersion = SchemaVersionV1
+	} else if rec.SchemaVersion != SchemaVersionV1 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":    "unsupported schema_version; expected " + SchemaVersionV1,
+			"received": rec.SchemaVersion,
+		})
+		return
+	}
+
+	// Rule is required: a blank rule would produce an unattributable audit
+	// entry that dashboards and alerts cannot key on.
+	if strings.TrimSpace(rec.Rule) == "" {
+		http.Error(w, "rule is required", http.StatusBadRequest)
+		return
+	}
+
+	tenantID := TenantIDFromContext(r.Context())
+
+	// DENY only. The caller-supplied decision is intentionally not trusted:
+	// this endpoint exists solely to record a fail-closed refusal, so Decision
+	// is hardcoded and can never be an ALLOW.
+	result := policy.CheckResult{
+		Decision: policy.Deny,
+		Reason:   rec.Reason,
+		Rule:     rec.Rule,
+	}
+
+	// logAndRespond is the shared audit-write + SSE-broadcast + response
+	// chokepoint. Reusing it stamps the transport tag (from request meta), the
+	// tenant, the decision metric, and the timing headers exactly as a real
+	// gate entry would — keeping the trail uniform.
+	s.logAndRespond(w, rec.Request, result, start, tenantID)
 }
 
 // parseBoundedInt parses an optional query-string integer.

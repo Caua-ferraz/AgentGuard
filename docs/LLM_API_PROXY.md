@@ -82,7 +82,7 @@ agentguard-llm-proxy \
 | `--upstream-openai`      | base URL for OpenAI-shape requests                        | `https://api.openai.com`     |
 | `--upstream-anthropic`   | base URL for Anthropic-shape requests                     | `https://api.anthropic.com`  |
 | `--guard-url`            | central server `/v1/check` URL                            | `http://127.0.0.1:8080`      |
-| `--api-key`              | bearer for `/v1/check` (from `AGENTGUARD_API_KEY`)        | unset (warn)                 |
+| `--api-key`              | bearer for `/v1/check` **and** `POST /v1/audit` (from `AGENTGUARD_API_KEY`). Required for full forced-refusal audit fidelity when the central server is keyed (§ 5.4 Audit fidelity); without it those audits fall back to the lower-fidelity `/v1/check` path. | unset (warn) |
 | `--proxy-api-key`        | optional bearer the proxy itself enforces on inbound. Empty = no proxy auth (localhost-only safe). | unset |
 | `--tenant-id`            | tenant header value                                       | `local`                      |
 | `--fail-mode`            | `deny` / `allow` / `fail-closed-with-audit`               | `deny`                       |
@@ -487,14 +487,32 @@ A tool call that **completes** with arguments that are not valid JSON —
 routine on a `max_tokens` cutoff mid-arguments, and attacker-inducible —
 is refused with the same synthetic-refusal shapes above, under the fixed
 rule `deny:llm_api_proxy:malformed_tool_call` (stable; alert on it). The
-refusal is audited through the normal `/v1/check` path, the buffered
-malformed bytes are discarded (never forwarded), and the accumulator is
-reset so any *later* valid tool call in the same stream is still gated.
-Malformed **non-completion** deltas are unchanged: dropped silently,
-because corruption that matters resurfaces at completion, where it now
-denies. (Before v1.0 a malformed completion was silently dropped — no
-refusal, no audit entry, and the stream went dark for the rest of the
-connection.)
+refusal is recorded in the central audit trail with the exact DENY the
+client received (see **Audit fidelity** below), the buffered malformed
+bytes are discarded (never forwarded), and the accumulator is reset so
+any *later* valid tool call in the same stream is still gated. Malformed
+**non-completion** deltas are unchanged: dropped silently, because
+corruption that matters resurfaces at completion, where it now denies.
+(Before v1.0 a malformed completion was silently dropped — no refusal, no
+audit entry, and the stream went dark for the rest of the connection.)
+
+##### Audit fidelity
+
+For a proxy-manufactured refusal (the malformed-completion DENY above),
+the engine verdict a plain `/v1/check` would log is the *wrong* verdict —
+the engine might well ALLOW the garbage-projected request while the client
+got DENY, so the trail would read ALLOW for a refused call. To avoid that,
+the proxy POSTs the client-visible DENY to the central server's
+`POST /v1/audit` ingest, which appends it verbatim (no re-evaluation).
+
+`POST /v1/audit` is auth-gated. **If the central server runs with
+`--api-key`, give this proxy `--api-key` too** — otherwise the audit POST
+returns 401. On any `/v1/audit` failure the proxy does **not** drop the
+entry: it best-effort falls back to the pre-v1.0 `/v1/check` audit path,
+which still writes a transport-tagged entry (carrying the *engine* verdict,
+not the DENY). So fidelity degrades to the lower-fidelity path without
+`--api-key`, but audit **coverage never does** — a forced refusal is always
+recorded one way or the other.
 
 ### 5.5 Byte-identity invariant on ALLOW
 

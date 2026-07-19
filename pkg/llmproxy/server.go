@@ -167,6 +167,21 @@ type Server struct {
 	// not used.
 	BuildRefusal func(provider string, decision Decision, ctx *RefusalContext) []byte
 
+	// RecordForcedAudit, when non-nil, records a proxy-manufactured fail-closed
+	// refusal in the CENTRAL audit trail carrying the verdict the client
+	// actually received (e.g. the malformed-tool-call DENY), instead of the
+	// policy verdict a /v1/check would log. Wired by main.go to the gate's
+	// /v1/audit ingest call — the F1 audit-verdict fidelity fix (C3). This keeps
+	// audit single-source-of-truth: the proxy still writes no local entries; it
+	// asks the central server to record the DENY it manufactured.
+	//
+	// nil is safe: the malformed-completion path then falls back to
+	// auditDeniedToolCalls (the pre-fidelity behavior), so an audit trail is
+	// still produced — with the engine verdict rather than the forced DENY. Only
+	// the rare malformed-completion path consults this hook; the happy ALLOW
+	// path (gateAndFlush*) never does, so wiring it costs the hot path nothing.
+	RecordForcedAudit func(ctx context.Context, req *ToolCallCheck, decision Decision)
+
 	// running guards Run from being called concurrently for the
 	// same Server (defensive — one Run per process is the contract).
 	running   sync.Mutex
@@ -261,8 +276,7 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 // routes builds the request multiplexer. Method-prefix patterns
-// require Go 1.22+ (project pins go 1.22 in go.mod, see CLAUDE.md
-// "Project Conventions").
+// require Go 1.22+ (project pins go 1.25.0 in go.mod).
 //
 // Every registered handler is wrapped with recoverPanic so a panic in
 // a per-request goroutine (parser, accumulator, refusal builder)

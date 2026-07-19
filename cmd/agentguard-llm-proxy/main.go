@@ -90,6 +90,7 @@ func main() {
 	// production deployments should set both.
 	if cfg.APIKey == "" {
 		fmt.Fprintln(os.Stderr, "agentguard-llm-proxy: WARNING --api-key not set; /v1/check calls will be unauthenticated")
+		fmt.Fprintln(os.Stderr, "agentguard-llm-proxy: WARNING --api-key not set; if the central server is keyed, forced-refusal audits fall back to the lower-fidelity /v1/check path (POST /v1/audit is auth-gated). Set --api-key for full audit fidelity.")
 	}
 	if cfg.ProxyAPIKey == "" {
 		fmt.Fprintf(os.Stderr, "agentguard-llm-proxy: WARNING --proxy-api-key not set; %s header will not be enforced\n", llmproxy.ProxyAuthHeader)
@@ -154,18 +155,28 @@ func main() {
 		defer stopWatch()
 	}
 
-	// Bind the three hooks. The server is otherwise immutable post-
+	// Bind the hooks. The server is otherwise immutable post-
 	// construction so this must happen before Run.
 	server.PolicyCheck = gate.Check
 	server.ScopeMap = gate.MapScope
 	server.BuildRefusal = llmproxy.BuildRefusalRich
+	// RecordForcedAudit closes the F1 audit-verdict fidelity gap (C3): when the
+	// proxy manufactures its own fail-closed refusal (a malformed-tool-call
+	// completion), it asks the central server to record THAT DENY via the
+	// /v1/audit ingest endpoint, instead of the ALLOW a fidelity-blind
+	// /v1/check would log. Audit stays single-source-of-truth — the central
+	// server still owns the log; the proxy writes nothing locally.
+	server.RecordForcedAudit = gate.RecordForcedAudit
 
 	// Tool-call-level audit + SSE flow through the central server's
 	// /v1/check path: the gate stamps meta["transport"] = "llm_api_proxy"
 	// on every check; the transport-tag plumbing in pkg/proxy +
 	// pkg/audit lands the entry on disk and on the SSE bus with the
 	// right chip. So no additional audit emission lives in the proxy
-	// itself — single source of truth.
+	// itself — single source of truth. The malformed-completion refusal is
+	// the one path the proxy DECIDES on its own; even there it does not write
+	// audit directly — RecordForcedAudit routes the verdict to the central
+	// /v1/audit endpoint, preserving the single-source-of-truth invariant.
 
 	// Signal handling for graceful shutdown. The server cancels
 	// in-flight upstream calls when ctx is done.

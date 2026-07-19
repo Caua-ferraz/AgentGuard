@@ -39,6 +39,7 @@ package llmproxy
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -202,6 +203,77 @@ func (c *HTTPPolicyClient) Check(ctx context.Context, req *ToolCallCheck) (Decis
 		return c.failModeDecision(ar, err), err
 	}
 	return dec, nil
+}
+
+// RecordForcedAudit records a proxy-manufactured fail-closed refusal in the
+// central audit trail with the verdict the client actually received (e.g. the
+// malformed-tool-call DENY), rather than the engine verdict a /v1/check would
+// log. Wired into Server.RecordForcedAudit (F1 audit-verdict fidelity / C3).
+//
+// It builds the SAME ActionRequest shape Check builds (scope mapping, argument
+// projection, redacted meta with the transport tag) so the recorded entry sits
+// in the trail indistinguishable from a real gate entry, then POSTs it to
+// /v1/audit via the shared gate client. Best-effort: on failure it logs and
+// returns — the client already received the refusal, so an audit-record failure
+// must never change client-visible behavior.
+//
+// The ActionRequest construction is intentionally duplicated from Check rather
+// than shared via a helper: Check runs on every gated tool call (the happy hot
+// path) and must stay byte-identical, whereas this path is the rare
+// malformed-completion one where the duplication costs nothing.
+func (c *HTTPPolicyClient) RecordForcedAudit(ctx context.Context, req *ToolCallCheck, decision Decision) {
+	if req == nil {
+		return
+	}
+
+	scope := c.MapScope(req.ToolName)
+
+	ar := policy.ActionRequest{
+		SchemaVersion: "v1",
+		Scope:         scope,
+		AgentID:       req.AgentID,
+		SessionID:     req.SessionID,
+		Command:       formatLLMCommand(req, scope, c.redactor),
+		Path:          projectPath(scope, req.Arguments),
+		Domain:        projectDomain(scope, req.Arguments),
+		URL:           projectURL(scope, req.Arguments),
+		ApprovalID:    req.ApprovalID,
+		Meta:          buildLLMMeta(req, scope, c.redactor),
+	}
+	if scope == "filesystem" {
+		ar.Action = gateclient.InferFilesystemAction(req.ToolName)
+	}
+	if scope == "browser" {
+		ar.Action = req.ToolName
+	}
+
+	caller := gateclient.Caller{
+		GuardURL:   c.GuardURL,
+		APIKey:     c.APIKey,
+		TenantID:   c.TenantID,
+		UserAgent:  "agentguard-llm-proxy/" + BuildVersion,
+		HTTPClient: c.HTTPClient,
+	}
+	if err := caller.RecordForcedAudit(ctx, ar, decision.Reason, decision.Rule); err != nil {
+		// The forced-audit POST failed. The canonical case: the central server
+		// runs with --api-key but this proxy has none, so the (open) /v1/check
+		// works while the (auth-gated) POST /v1/audit returns 401. Without a
+		// fallback the refusal would leave NO audit entry at all — strictly
+		// worse than the pre-F1 behavior, which at least wrote a low-fidelity
+		// entry via /v1/check. So best-effort replay the ALREADY-BUILT
+		// ActionRequest through /v1/check: that reproduces the pre-F1 path and
+		// keeps the trail from going dark. The returned decision is ignored —
+		// the client already received the forced refusal, so nothing here may
+		// change client-visible behavior. Fidelity degrades (the engine verdict,
+		// not the DENY the client saw, is recorded); coverage never does. The
+		// --api-key remedy is in the log so full fidelity is one flag away
+		// (docs/LLM_API_PROXY.md § Audit fidelity).
+		log.Printf("agentguard-llm-proxy: forced-audit record failed (client refusal already sent); "+
+			"falling back to /v1/check low-fidelity audit — give this proxy --api-key when the central server is keyed for full fidelity: %v", err)
+		if _, ferr := c.callV1Check(ctx, ar); ferr != nil {
+			log.Printf("agentguard-llm-proxy: forced-audit /v1/check fallback also failed (audit entry lost for this refusal): %v", ferr)
+		}
+	}
 }
 
 // buildLLMMeta builds the meta map sent on the /v1/check call. Argument

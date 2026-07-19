@@ -634,14 +634,47 @@ func malformedToolCallDecision() Decision {
 	}
 }
 
-// auditDeniedToolCalls runs the SAME PolicyCheck the normal gate runs
-// for each supplied tool call, purely to drive the audit trail: the
-// wired PolicyCheck POSTs to /v1/check, which writes the transport-
-// tagged audit entry (the proxy never emits audit entries directly —
-// single source of truth, see server.go). The returned decision and any
-// error are intentionally ignored — the F1 malformed-completion path
-// that calls this forces an unconditional fail-closed refusal — but the
-// call still closes the audit gap the pre-fix silent drop left open.
+// auditMalformedToolCalls records the audit trail for a malformed-completion
+// refusal. When RecordForcedAudit is wired (production) it records the forced
+// DENY the client actually received — the F1 audit-verdict fidelity fix (C3):
+// the trail then reflects the malformed_tool_call DENY, not the engine verdict a
+// /v1/check would log after evaluating the garbage-projected request. When the
+// hook is nil (tests / early bring-up) it falls back to auditDeniedToolCalls,
+// which drives the normal /v1/check path — lower fidelity, but still an audit
+// trail rather than a silent gap.
+//
+// It sets the same tenant/agent/session identity fields gateAndFlush* set so the
+// recorded entry is attributed identically to a normal deny. Runs only on the
+// (rare) malformed-completion path, never the happy loop, so it adds no
+// per-event work to the hot path.
+func (s *Server) auditMalformedToolCalls(r *http.Request, calls []ToolCallCheck) {
+	if s.RecordForcedAudit == nil {
+		s.auditDeniedToolCalls(r, calls)
+		return
+	}
+	decision := malformedToolCallDecision()
+	for i := range calls {
+		calls[i].TenantID = s.cfg.TenantID
+		calls[i].AgentID = strings.TrimSpace(r.Header.Get("X-Agent-ID"))
+		if calls[i].AgentID == "" {
+			calls[i].AgentID = "llm-proxy"
+		}
+		calls[i].SessionID = strings.TrimSpace(r.Header.Get("X-Session-ID"))
+		calls[i].Stream = true
+		s.RecordForcedAudit(r.Context(), &calls[i], decision)
+	}
+}
+
+// auditDeniedToolCalls is the nil-hook FALLBACK for auditMalformedToolCalls
+// (used when Server.RecordForcedAudit is not wired — tests / early bring-up). It
+// runs the SAME PolicyCheck the normal gate runs for each supplied tool call,
+// purely to drive the audit trail: the wired PolicyCheck POSTs to /v1/check,
+// which writes the transport-tagged audit entry. The returned decision and any
+// error are intentionally ignored — the caller forces an unconditional
+// fail-closed refusal regardless — but the call still closes the audit gap the
+// pre-fix silent drop left open. Note the fidelity limitation this fallback
+// carries: /v1/check records the ENGINE verdict (often ALLOW), not the DENY the
+// client received; RecordForcedAudit exists precisely to fix that.
 //
 // It sets the same tenant/agent/session identity fields gateAndFlush*
 // sets so the audit entry is attributed identically to a normal deny.
@@ -671,7 +704,7 @@ func (s *Server) auditDeniedToolCalls(r *http.Request, calls []ToolCallCheck) {
 // un-sticks the accumulator). Buffered events (the malformed cycle's raw
 // bytes) are discarded, not flushed — the refusal replaces them.
 func (s *Server) denyMalformedOpenAI(w http.ResponseWriter, flusher http.Flusher, r *http.Request, acc *OpenAIToolCallAccumulator, calls []ToolCallCheck) {
-	s.auditDeniedToolCalls(r, calls)
+	s.auditMalformedToolCalls(r, calls)
 	var original ToolCallCheck
 	if len(calls) > 0 {
 		original = calls[0]
@@ -853,7 +886,7 @@ func (s *Server) gateAndFlushAnthropic(w http.ResponseWriter, flusher http.Flush
 // later valid tool_use in the same stream is still gated. It does NOT
 // stop reading upstream.
 func (s *Server) denyMalformedAnthropic(w http.ResponseWriter, flusher http.Flusher, r *http.Request, acc *AnthropicAccumulator, calls []ToolCallCheck) {
-	s.auditDeniedToolCalls(r, calls)
+	s.auditMalformedToolCalls(r, calls)
 	var original ToolCallCheck
 	if len(calls) > 0 {
 		original = calls[0]
