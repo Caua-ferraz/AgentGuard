@@ -288,6 +288,14 @@ func (u *StdioUpstream) spawnLocked(ctx context.Context) error {
 // readLoop scans newline-delimited JSON frames from stdout and routes
 // them to pending response channels. Exits when stdout EOFs (which
 // happens on subprocess exit or when Close shuts down stdin/stdout).
+//
+// Server-initiated requests (sampling/createMessage, roots/list,
+// elicitation/create) are NOT supported: the gateway is a tools-only
+// firewall and does not broker server->client requests. Such a frame
+// carries both an `id` and a `method`, matches no pending response, and
+// is dropped — logged at Info so an operator can see when an upstream
+// wants a capability the gateway does not proxy. See
+// docs/MCP_GATEWAY.md § 10.
 func (u *StdioUpstream) readLoop(r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), MaxStdoutLineBytes)
@@ -296,7 +304,11 @@ func (u *StdioUpstream) readLoop(r io.Reader) {
 		if len(line) == 0 {
 			continue
 		}
-		// Try Response first — it's the common case.
+		// Try Response first — it's the common case. A frame with an
+		// `id` is treated as a response and routed to its pending
+		// channel. A server-initiated REQUEST also carries an `id`
+		// (plus a `method`) but matches no pending entry; it is handled
+		// in the else branch below.
 		var resp Response
 		if err := json.Unmarshal(line, &resp); err == nil && resp.ID != nil {
 			key := idKey(resp.ID)
@@ -311,7 +323,16 @@ func (u *StdioUpstream) readLoop(r io.Reader) {
 				// panic, but we own the channel lifecycle so this
 				// is purely defensive against future refactors.
 				safeSend(ch, &resp)
+			} else if method := frameMethod(line); method != "" {
+				// id + method that matches no pending request = an
+				// unsupported server-initiated REQUEST (see the
+				// doc-comment above). Surface at Info, not Debug, so the
+				// dropped capability is visible in production logs. The
+				// drop behaviour itself is unchanged.
+				u.logger.Infof("upstream %q: unsupported server-initiated request %q (id %v) dropped — the gateway brokers tools only, not server->client requests", u.spec.Namespace, method, resp.ID)
 			} else {
+				// A stray/duplicate response (id, no method) — e.g. a
+				// late reply after the caller timed out. Debug is right.
 				u.logger.Debugf("upstream %q: response with unknown id %v dropped", u.spec.Namespace, resp.ID)
 			}
 			continue
@@ -335,6 +356,22 @@ func (u *StdioUpstream) readLoop(r io.Reader) {
 	}
 	// Mark the upstream as needing reconnect. The supervisor picks
 	// this up via cmd.Wait().
+}
+
+// frameMethod extracts the JSON-RPC `method` field from a raw frame,
+// returning "" when the field is absent or the frame does not parse.
+// readLoop uses it to tell a server-initiated request (id + method)
+// apart from a stray response (id, no method) without a full re-decode.
+// Only invoked on the drop path (an id that matched no pending request),
+// never on the common in-order response path.
+func frameMethod(line []byte) string {
+	var probe struct {
+		Method string `json:"method"`
+	}
+	if json.Unmarshal(line, &probe) != nil {
+		return ""
+	}
+	return probe.Method
 }
 
 // safeSend pushes resp into ch without panicking if ch is closed.

@@ -1,6 +1,6 @@
 # Policy Reference
 
-Canonical reference for the AgentGuard policy YAML format as of **v0.9.0**.
+Canonical reference for the AgentGuard policy YAML format as of **v1.0.0**.
 
 Source of truth: `pkg/policy/engine.go` (types) and `pkg/policy/engine.go:Engine.Check` (evaluation). Examples here are the shapes the Go YAML decoder accepts — unknown keys are silently ignored.
 
@@ -155,7 +155,7 @@ If the `HistoryQuerier` is not wired (it is by default in `NewServer`), or the a
 
 **Key is `<scope>:<agent_id>`.** Per-agent, per-scope.
 
-**In-memory and per-instance.** Multi-replica deployments do not share buckets — agents can burst past the nominal cap by hitting different pods. See [`docs/OPERATIONS.md`](OPERATIONS.md).
+**In-memory; per-instance on the default SQLite store.** Multi-replica deployments on SQLite do not share buckets — agents can burst past the nominal cap by hitting different pods. With the v1.0 PostgreSQL backend, replicas share consumption via background reconcile (bounded-overshoot: brief bursts can still exceed the cap by ≈ `reconcile-interval × peak rate` per extra replica). See [`docs/OPERATIONS.md`](OPERATIONS.md#multi-instance-deployments).
 
 A rate-limit denial produces `CheckResult{Decision: DENY, Rule: "deny:ratelimit:<scope>"}` and increments `agentguard_rate_limited_total`.
 
@@ -490,7 +490,7 @@ notifications:
 
 - `approval_required` → fired when a rule matches `REQUIRE_APPROVAL`.
 - `on_deny` → fired when a rule matches `DENY`.
-- `redaction.extra_patterns` → Go `regexp` (RE2) patterns appended to the built-in redactor list (Bearer tokens, `AKIA…`, `ghp_…`, `xox?-…`, `secret=…`). Applied to `Command`, `URL`, `Reason`, and every `Meta` value before dispatch. Invalid regex → policy load fails.
+- `redaction.extra_patterns` → Go `regexp` (RE2) patterns appended to the built-in redactor list (Bearer tokens, `AKIA…`, `ghp_…`, `xox?-…`, `secret=…`). Applied to `Command`, `Path`, `Domain`, `URL`, `Action`, `Reason`, and every `Meta` value before dispatch. Invalid regex → policy load fails.
 - `dispatch_timeout` — Go duration; default `10s`. Per-target `timeout` overrides it.
 
 | `type` | Purpose | Honors `timeout` |
@@ -554,6 +554,24 @@ Pattern matching is where most policy bugs come from.
 
 `*` in a pattern without `**` is **any character sequence including `/`**. That is intentional for shell commands; it is a surprise when matching paths. For paths, prefer `**`.
 
+> **⚠ Over-broad ALLOW footgun — read this before writing path allows.**
+> Because a single `*` crosses `/`, an ALLOW rule like `paths: ["/workspace/*"]`
+> does **not** bound access to the top level of `/workspace`. It also matches
+> `/workspace/a/b/secret.env` and every other file at any depth — an allow you
+> believed was one directory deep silently grants the **entire subtree**.
+>
+> ```
+> paths: ["/workspace/*"]     # ⚠ ALSO matches /workspace/a/b/secret.env (whole subtree)
+> paths: ["/workspace/**"]    # segment-aware: every file under /workspace, as intended
+> ```
+>
+> The direction of the risk matters: on a **deny** rule an over-matching `*` makes
+> the deny *broader* (fail-safe), but on an **allow** rule it *widens* access
+> (fail-open). Audit ALLOW path rules for a bare `*` first, and write path bounds
+> with `**` so the depth is explicit. `agentguard serve` / policy load also emits
+> a non-fatal warning for exactly this pattern shape — see
+> [Load-time validation](#load-time-validation).
+
 ### Double-star `**` is segment-aware
 
 When the pattern contains `**`, the pattern and the input are split on `/`. `**` matches zero or more whole segments. Each non-`**` segment is still wildcard-matched with the same `*`/`?` rules.
@@ -588,6 +606,11 @@ allow:
   - domain: "*.foo.com"
 ```
 
+Domain matching is **case-insensitive** (v1.0): the request's domain and the
+rule's `domain` patterns are both lowercased before matching, so a deny rule
+for `evil.com` also matches `EVIL.com` — DNS names are case-equivalent, and
+before v1.0 a mixed-case request could slip past a lowercase deny rule.
+
 ### Paths are cleaned first
 
 `matchRule` applies `filepath.Clean + ToSlash` to both the rule's `paths` entries and the request's `Path`, so `./a/./b` and `a/b` are equivalent.
@@ -608,5 +631,11 @@ allow:
 - `filesystem` rule `paths` do not contain `..` after normalization.
 - Every `notifications.redaction.extra_patterns` entry compiles as a Go regexp.
 - `conditions.time_window` without `require_prior` is rejected as a hard load error (since v0.5.0).
+
+One **non-fatal warning** (v1.0): a rule path pattern that contains `/` but no
+`**` (e.g. `/workspace/*`) is logged at load, because its single `*` crosses
+`/` and matches recursively (`/workspace/a/b/secret.env`) — usually broader
+than intended. The policy still loads; switch to `**` (segment-aware) if you
+meant one level. See [Single-star `*` crosses `/`](#single-star--crosses-).
 
 There is **no** schema validation beyond the above — typos in field names are silently ignored by the YAML decoder. Always run `agentguard validate --policy <file>` after edits; wire it into CI against every policy file you ship.

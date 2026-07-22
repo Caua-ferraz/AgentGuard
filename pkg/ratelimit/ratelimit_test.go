@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -144,6 +145,142 @@ func TestScopeFromKey(t *testing.T) {
 			t.Errorf("scopeFromKey(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
+}
+
+// TestApplyDeltas_ReducesRemainingExistingKeysOnly proves the reconcile
+// write-back path: a negative TokenAdjust reduces an existing bucket's remaining
+// tokens, a delta for an absent key is a no-op (ApplyDeltas never invents a
+// bucket), and the remaining count is clamped at zero.
+func TestApplyDeltas_ReducesRemainingExistingKeysOnly(t *testing.T) {
+	l := New()
+	// Bucket "shell:local:bot" starts with max 5, consume 1 -> 4 remaining.
+	if err := l.Allow("shell:local:bot", 5, time.Minute); err != nil {
+		t.Fatalf("seed Allow: %v", err)
+	}
+
+	// Subtract 3 (other nodes consumed 3) -> 1 remaining. Absent key ignored.
+	l.ApplyDeltas([]BucketDelta{
+		{Key: "shell:local:bot", TokenAdjust: -3},
+		{Key: "does:not:exist", TokenAdjust: -100}, // skipped, no bucket created
+	})
+	if l.BucketCount() != 1 {
+		t.Fatalf("ApplyDeltas created a bucket for an absent key: count=%d", l.BucketCount())
+	}
+	// 1 remaining: one more Allow ok, the next denied.
+	if err := l.Allow("shell:local:bot", 5, time.Minute); err != nil {
+		t.Errorf("expected 1 token remaining after -3 adjust, Allow denied: %v", err)
+	}
+	if err := l.Allow("shell:local:bot", 5, time.Minute); err == nil {
+		t.Errorf("expected exhaustion after consuming the last token")
+	}
+
+	// Over-subtract clamps at zero (never negative): a big reduction then the
+	// next Allow is denied, not "resurrected" by an underflow.
+	l.ApplyDeltas([]BucketDelta{{Key: "shell:local:bot", TokenAdjust: -1000}})
+	if err := l.Allow("shell:local:bot", 5, time.Minute); err == nil {
+		t.Errorf("expected denial after clamped-to-zero remaining")
+	}
+}
+
+// TestApplyDeltas_ClampsToMax guards the firewall-safety invariant: a positive
+// adjust (which reconcile should never emit, but which must not be a footgun)
+// can never grant MORE than the bucket's capacity.
+func TestApplyDeltas_ClampsToMax(t *testing.T) {
+	l := New()
+	if err := l.Allow("net:local:bot", 3, time.Minute); err != nil { // 2 remaining
+		t.Fatalf("seed: %v", err)
+	}
+	l.ApplyDeltas([]BucketDelta{{Key: "net:local:bot", TokenAdjust: +999}})
+	// Capacity is 3; at most 3 Allows should now succeed, not 1002.
+	ok := 0
+	for i := 0; i < 10; i++ {
+		if l.Allow("net:local:bot", 3, time.Minute) == nil {
+			ok++
+		}
+	}
+	if ok > 3 {
+		t.Errorf("clamp-to-max violated: %d Allows succeeded, want <= 3", ok)
+	}
+}
+
+// TestApplyDeltas_EmptyIsNoOp is the single-node contract: an empty delta slice
+// mutates nothing.
+func TestApplyDeltas_EmptyIsNoOp(t *testing.T) {
+	l := New()
+	_ = l.Allow("shell:local:bot", 5, time.Minute)
+	before := l.Snapshot()
+	l.ApplyDeltas(nil)
+	l.ApplyDeltas([]BucketDelta{})
+	after := l.Snapshot()
+	if len(before) != 1 || len(after) != 1 || before[0].Tokens != after[0].Tokens {
+		t.Errorf("empty ApplyDeltas changed state: before=%+v after=%+v", before, after)
+	}
+}
+
+// BenchmarkAllow is the hot-path baseline: parallel Allow with no background
+// reconcile. Compare against BenchmarkAllowUnderConcurrentApplyDeltas to see the
+// contention cost (if any) of a concurrent chunked-lock ApplyDeltas.
+func BenchmarkAllow(b *testing.B) {
+	l := New()
+	const keys = 512
+	keyList := make([]string, keys)
+	for i := 0; i < keys; i++ {
+		keyList[i] = fmt.Sprintf("shell:local:agent-%d", i)
+		_ = l.Allow(keyList[i], 1_000_000, time.Hour)
+	}
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			_ = l.Allow(keyList[i%keys], 1_000_000, time.Hour)
+			i++
+		}
+	})
+}
+
+// BenchmarkAllowUnderConcurrentApplyDeltas proves the hot-path Allow does not
+// regress under a background goroutine hammering ApplyDeltas (the reconcile
+// write-back). Chunked locking keeps Allow's critical section short; a single
+// O(n) hold would show up here as contention.
+func BenchmarkAllowUnderConcurrentApplyDeltas(b *testing.B) {
+	l := New()
+	// Pre-create a spread of buckets so ApplyDeltas has real work to do.
+	const keys = 512
+	keyList := make([]string, keys)
+	deltas := make([]BucketDelta, keys)
+	for i := 0; i < keys; i++ {
+		k := fmt.Sprintf("shell:local:agent-%d", i)
+		keyList[i] = k
+		_ = l.Allow(k, 1_000_000, time.Hour)
+		deltas[i] = BucketDelta{Key: k, TokenAdjust: -1}
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				l.ApplyDeltas(deltas)
+			}
+		}
+	}()
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			_ = l.Allow(keyList[i%keys], 1_000_000, time.Hour)
+			i++
+		}
+	})
+	b.StopTimer()
+	close(stop)
+	wg.Wait()
 }
 
 func TestParseWindow(t *testing.T) {

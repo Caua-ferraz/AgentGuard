@@ -99,14 +99,17 @@ func (s *SQLiteStore) Path() string { return s.path }
 
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS approvals (
-    tenant_id   TEXT    NOT NULL,
-    id          TEXT    NOT NULL,
-    request     TEXT    NOT NULL,
-    result      TEXT    NOT NULL,
-    created_at  TEXT    NOT NULL,
-    resolved    INTEGER NOT NULL DEFAULT 0,
-    decision    TEXT    NOT NULL DEFAULT '',
-    resolved_at TEXT    NOT NULL DEFAULT '',
+    tenant_id     TEXT    NOT NULL,
+    id            TEXT    NOT NULL,
+    request       TEXT    NOT NULL,
+    result        TEXT    NOT NULL,
+    created_at    TEXT    NOT NULL,
+    resolved      INTEGER NOT NULL DEFAULT 0,
+    decision      TEXT    NOT NULL DEFAULT '',
+    resolved_at   TEXT    NOT NULL DEFAULT '',
+    consumed_at   TEXT    NOT NULL DEFAULT '',
+    resolved_via  TEXT    NOT NULL DEFAULT '',
+    resolved_from TEXT    NOT NULL DEFAULT '',
     PRIMARY KEY (tenant_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_resolved ON approvals(resolved, resolved_at);
@@ -159,13 +162,53 @@ CREATE TABLE IF NOT EXISTS policies (
     policy_yaml TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS rate_consumption (
+    tenant_id    TEXT    NOT NULL,
+    key          TEXT    NOT NULL,
+    window_epoch TEXT    NOT NULL,
+    node_id      TEXT    NOT NULL,
+    consumed     INTEGER NOT NULL,
+    updated_at   TEXT    NOT NULL,
+    PRIMARY KEY (tenant_id, key, window_epoch, node_id)
+);
+CREATE INDEX IF NOT EXISTS idx_rate_consumption_updated ON rate_consumption(updated_at);
+
+CREATE TABLE IF NOT EXISTS cost_consumption (
+    tenant_id  TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    node_id    TEXT NOT NULL,
+    consumed   REAL NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, session_id, node_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cost_consumption_updated ON cost_consumption(updated_at);
 `
 
 // Migrate creates the schema. Idempotent (CREATE ... IF NOT EXISTS), so it is
-// safe to run on every boot.
+// safe to run on every boot. Additive columns introduced after a table first
+// shipped are applied with guarded ALTERs — CREATE IF NOT EXISTS skips
+// existing tables, so a DB created by an older build would otherwise never
+// gain them.
 func (s *SQLiteStore) Migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
+	}
+	// approvals one-shot/actor columns (post-v0.9.0 approval hardening).
+	additive := []string{
+		`ALTER TABLE approvals ADD COLUMN consumed_at   TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approvals ADD COLUMN resolved_via  TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE approvals ADD COLUMN resolved_from TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range additive {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			// SQLite has no ADD COLUMN IF NOT EXISTS; a duplicate column
+			// error just means this DB already has it.
+			if strings.Contains(err.Error(), "duplicate column name") {
+				continue
+			}
+			return fmt.Errorf("store: migrate (additive column): %w", err)
+		}
 	}
 	return nil
 }
@@ -206,12 +249,16 @@ func (s *SQLiteStore) UpsertApprovals(ctx context.Context, recs []ApprovalRecord
 	}
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		stmt, err := tx.PrepareContext(ctx, `
-			INSERT INTO approvals (tenant_id, id, request, result, created_at, resolved, decision, resolved_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO approvals (tenant_id, id, request, result, created_at, resolved, decision, resolved_at, consumed_at, resolved_via, resolved_from)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(tenant_id, id) DO UPDATE SET
 				request=excluded.request, result=excluded.result,
 				resolved=excluded.resolved, decision=excluded.decision,
-				resolved_at=excluded.resolved_at`)
+				resolved_at=excluded.resolved_at,
+				consumed_at=CASE WHEN approvals.consumed_at <> '' THEN approvals.consumed_at ELSE excluded.consumed_at END,
+				resolved_via=excluded.resolved_via, resolved_from=excluded.resolved_from
+			WHERE NOT (approvals.resolved <> 0 AND excluded.resolved = 0)
+			  AND NOT (approvals.resolved <> 0 AND approvals.decision = 'DENY' AND excluded.decision <> 'DENY')`)
 		if err != nil {
 			return err
 		}
@@ -228,6 +275,7 @@ func (s *SQLiteStore) UpsertApprovals(ctx context.Context, recs []ApprovalRecord
 			if _, err := stmt.ExecContext(ctx,
 				r.TenantID, r.ID, string(reqJSON), string(resJSON),
 				fmtTime(r.CreatedAt), boolToInt(r.Resolved), r.Decision, fmtTime(r.ResolvedAt),
+				fmtTime(r.ConsumedAt), r.ResolvedVia, r.ResolvedFrom,
 			); err != nil {
 				return err
 			}
@@ -238,7 +286,7 @@ func (s *SQLiteStore) UpsertApprovals(ctx context.Context, recs []ApprovalRecord
 
 func (s *SQLiteStore) LoadApprovals(ctx context.Context) ([]ApprovalRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT tenant_id, id, request, result, created_at, resolved, decision, resolved_at FROM approvals`)
+		`SELECT tenant_id, id, request, result, created_at, resolved, decision, resolved_at, consumed_at, resolved_via, resolved_from FROM approvals`)
 	if err != nil {
 		return nil, fmt.Errorf("store: load approvals: %w", err)
 	}
@@ -247,12 +295,12 @@ func (s *SQLiteStore) LoadApprovals(ctx context.Context) ([]ApprovalRecord, erro
 	var out []ApprovalRecord
 	for rows.Next() {
 		var (
-			r                     ApprovalRecord
-			reqJSON, resJSON      string
-			createdAt, resolvedAt string
-			resolvedInt           int
+			r                                 ApprovalRecord
+			reqJSON, resJSON                  string
+			createdAt, resolvedAt, consumedAt string
+			resolvedInt                       int
 		)
-		if err := rows.Scan(&r.TenantID, &r.ID, &reqJSON, &resJSON, &createdAt, &resolvedInt, &r.Decision, &resolvedAt); err != nil {
+		if err := rows.Scan(&r.TenantID, &r.ID, &reqJSON, &resJSON, &createdAt, &resolvedInt, &r.Decision, &resolvedAt, &consumedAt, &r.ResolvedVia, &r.ResolvedFrom); err != nil {
 			return out, fmt.Errorf("store: scan approval: %w", err)
 		}
 		if err := json.Unmarshal([]byte(reqJSON), &r.Request); err != nil {
@@ -263,6 +311,7 @@ func (s *SQLiteStore) LoadApprovals(ctx context.Context) ([]ApprovalRecord, erro
 		}
 		r.CreatedAt = parseTime(createdAt)
 		r.ResolvedAt = parseTime(resolvedAt)
+		r.ConsumedAt = parseTime(consumedAt)
 		r.Resolved = resolvedInt != 0
 		out = append(out, r)
 	}
@@ -560,6 +609,166 @@ func rowsAffected(res sql.Result) int {
 		return 0
 	}
 	return int(n)
+}
+
+// --- multi-node reconciliation (v1.0) ---
+//
+// RateConsumption and CostConsumption back multi-node rate-limit / session-cost
+// reconciliation. They are DELIBERATELY NOT part of the exported store.Store
+// interface (CLAUDE.md §4 v1.0 lock: store.Store gains no methods). The concrete
+// *SQLiteStore and *PostgresStore carry the six Upsert/Load/Purge methods, and
+// pkg/persist reaches them through an unexported capability interface (mirroring
+// cmd/agentguard's persistentStore pattern). Everything here is cold-path,
+// written and read only by the background reconcile syncer.
+
+// RateConsumption is one node's ABSOLUTE cumulative consumption of a rate-limit
+// bucket within a fixed window (epoch). Rows are summed per (tenant, key, epoch)
+// across nodes to derive cluster-wide consumption; each node upserts only its own
+// (…, node_id) row, so writes are idempotent last-writer-wins with no
+// read-modify-write race. The tenant_id is part of the PK (zero-trust §3).
+type RateConsumption struct {
+	TenantID    string
+	Key         string
+	WindowEpoch time.Time
+	NodeID      string
+	Consumed    int
+	UpdatedAt   time.Time
+}
+
+// CostConsumption is one node's ABSOLUTE cumulative cost reservation for a
+// (tenant, session). Session cost is monotonic within a session, so no window is
+// needed. tenant_id is part of the PK (zero-trust §3).
+type CostConsumption struct {
+	TenantID  string
+	SessionID string
+	NodeID    string
+	Consumed  float64
+	UpdatedAt time.Time
+}
+
+func (s *SQLiteStore) UpsertRateConsumption(ctx context.Context, rows []RateConsumption) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	for i := range rows {
+		if rows[i].TenantID == "" {
+			return ErrTenantRequired
+		}
+	}
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		stmt, err := tx.PrepareContext(ctx, `
+			INSERT INTO rate_consumption (tenant_id, key, window_epoch, node_id, consumed, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT(tenant_id, key, window_epoch, node_id) DO UPDATE SET
+				consumed=excluded.consumed, updated_at=excluded.updated_at`)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = stmt.Close() }()
+		for _, r := range rows {
+			if _, err := stmt.ExecContext(ctx,
+				r.TenantID, r.Key, fmtTime(r.WindowEpoch), r.NodeID, r.Consumed, fmtTime(r.UpdatedAt),
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (s *SQLiteStore) LoadRateConsumption(ctx context.Context) ([]RateConsumption, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT tenant_id, key, window_epoch, node_id, consumed, updated_at FROM rate_consumption`)
+	if err != nil {
+		return nil, fmt.Errorf("store: load rate_consumption: %w", err)
+	}
+	defer rows.Close()
+
+	var out []RateConsumption
+	for rows.Next() {
+		var (
+			r              RateConsumption
+			epoch, updated string
+		)
+		if err := rows.Scan(&r.TenantID, &r.Key, &epoch, &r.NodeID, &r.Consumed, &updated); err != nil {
+			return out, fmt.Errorf("store: scan rate_consumption: %w", err)
+		}
+		r.WindowEpoch = parseTime(epoch)
+		r.UpdatedAt = parseTime(updated)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) PurgeRateConsumption(ctx context.Context, cutoff time.Time) (int, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM rate_consumption WHERE updated_at != '' AND updated_at < ?`, fmtTime(cutoff))
+	if err != nil {
+		return 0, fmt.Errorf("store: purge rate_consumption: %w", err)
+	}
+	return rowsAffected(res), nil
+}
+
+func (s *SQLiteStore) UpsertCostConsumption(ctx context.Context, rows []CostConsumption) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	for i := range rows {
+		if rows[i].TenantID == "" {
+			return ErrTenantRequired
+		}
+	}
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		stmt, err := tx.PrepareContext(ctx, `
+			INSERT INTO cost_consumption (tenant_id, session_id, node_id, consumed, updated_at)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(tenant_id, session_id, node_id) DO UPDATE SET
+				consumed=excluded.consumed, updated_at=excluded.updated_at`)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = stmt.Close() }()
+		for _, r := range rows {
+			if _, err := stmt.ExecContext(ctx,
+				r.TenantID, r.SessionID, r.NodeID, r.Consumed, fmtTime(r.UpdatedAt),
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (s *SQLiteStore) LoadCostConsumption(ctx context.Context) ([]CostConsumption, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT tenant_id, session_id, node_id, consumed, updated_at FROM cost_consumption`)
+	if err != nil {
+		return nil, fmt.Errorf("store: load cost_consumption: %w", err)
+	}
+	defer rows.Close()
+
+	var out []CostConsumption
+	for rows.Next() {
+		var (
+			r       CostConsumption
+			updated string
+		)
+		if err := rows.Scan(&r.TenantID, &r.SessionID, &r.NodeID, &r.Consumed, &updated); err != nil {
+			return out, fmt.Errorf("store: scan cost_consumption: %w", err)
+		}
+		r.UpdatedAt = parseTime(updated)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) PurgeCostConsumption(ctx context.Context, cutoff time.Time) (int, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM cost_consumption WHERE updated_at != '' AND updated_at < ?`, fmtTime(cutoff))
+	if err != nil {
+		return 0, fmt.Errorf("store: purge cost_consumption: %w", err)
+	}
+	return rowsAffected(res), nil
 }
 
 // Verify SQLiteStore satisfies the full Store interface at compile time.

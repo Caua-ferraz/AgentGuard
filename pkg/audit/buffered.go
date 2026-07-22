@@ -299,7 +299,7 @@ func (b *BufferedAsyncLogger) workerLoop() {
 // path on failure. Pulled out of workerLoop so the drain-on-close inner
 // loop can call the same code without duplicating the body.
 func (b *BufferedAsyncLogger) processEntry(entry Entry) {
-	if err := b.underlying.Log(entry); err != nil {
+	if err := b.safeUnderlyingLog(entry); err != nil {
 		log.Printf("WARN audit buffered: underlying log failed: %v (writing to overflow)", err)
 		if oerr := b.appendOverflow(entry); oerr != nil {
 			log.Printf("ERROR audit buffered: underlying log AND overflow append failed: underlying=%v overflow=%v", err, oerr)
@@ -307,6 +307,27 @@ func (b *BufferedAsyncLogger) processEntry(entry Entry) {
 		}
 		b.noteDroppedToOverflow()
 	}
+}
+
+// safeUnderlyingLog invokes b.underlying.Log behind a recover barrier so a
+// panic in a store driver, a custom Entry MarshalJSON, or a nil-handle close
+// race cannot escape the worker goroutine and abort the whole process.
+// CLAUDE.md §2 requires "a flush worker crash must never block or crash the
+// proxy loop"; an unrecovered goroutine panic would violate that.
+//
+// A recovered panic is converted into an error so it flows into the SAME
+// overflow-fallback path an ordinary Log error takes at both call sites
+// (processEntry and flushOverflowOnce): the entry stays durable and the
+// worker keeps draining. This mirrors pkg/notify's workerWithRecover, which
+// isolates panics from custom notifiers the same way.
+func (b *BufferedAsyncLogger) safeUnderlyingLog(entry Entry) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("PANIC audit buffered: underlying log panicked: %v (routing entry to overflow)", rec)
+			err = fmt.Errorf("underlying log panicked: %v", rec)
+		}
+	}()
+	return b.underlying.Log(entry)
 }
 
 // appendOverflow writes a single entry as a JSON line to the overflow file
@@ -511,8 +532,10 @@ func (b *BufferedAsyncLogger) flushOverflowOnce(timeout time.Duration) {
 		if err := json.Unmarshal(line, &entry); err != nil {
 			continue
 		}
-		if err := b.underlying.Log(entry); err != nil {
-			// Best-effort: re-spill into a fresh overflow file.
+		if err := b.safeUnderlyingLog(entry); err != nil {
+			// Best-effort: re-spill into a fresh overflow file. safeUnderlyingLog
+			// also absorbs a panicking underlying so the close-flush drain
+			// cannot crash on the way out.
 			_ = b.appendOverflow(entry)
 		}
 	}

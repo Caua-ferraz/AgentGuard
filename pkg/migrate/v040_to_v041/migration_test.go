@@ -123,6 +123,7 @@ func TestMigrate_WritesHeaderAndBackup(t *testing.T) {
 	}
 	if meta == nil {
 		t.Fatal("post-migration file must have a meta header")
+		return // unreachable; keeps conservative nil analysis (SA5011) quiet
 	}
 	if meta.SchemaVersion != audit.CurrentSchemaVersion {
 		t.Errorf("schema_version=%d, want %d", meta.SchemaVersion, audit.CurrentSchemaVersion)

@@ -90,6 +90,7 @@ agentguard-mcp-gateway \
 | `--log-level`       | no         | stderr verbosity. Default `info`.               |
 | `--upstream-timeout`| no         | per-frame upstream-response timeout. Default `30s`. |
 | `--reconnect-cap`   | no         | upper bound on reconnect backoff. Default `60s`. |
+| `--version`         | no         | print version and exit. Checked before any other flag is parsed, so it works without `--upstream`. |
 
 Stdout is reserved for JSON-RPC. All logging goes to stderr — the MCP
 spec explicitly permits this (the host MAY capture or ignore it).
@@ -155,7 +156,7 @@ Sequence:
      "id": 1,
      "result": {
        "protocolVersion": "2025-11-25",
-       "serverInfo": { "name": "agentguard-mcp-gateway", "version": "0.9.0" },
+       "serverInfo": { "name": "agentguard-mcp-gateway", "version": "1.0.0" },
        "capabilities": {
          "tools": { "listChanged": true }
        }
@@ -176,8 +177,8 @@ itself can faithfully proxy.
 | capability       | gateway behaviour                                          |
 |------------------|------------------------------------------------------------|
 | `tools`          | always advertised. `listChanged: true` *(v0.7)* — the gateway forwards upstream `notifications/tools/list_changed` to the host so clients re-pull `tools/list` when any upstream's tool set changes. |
-| `resources`      | advertised iff at least one upstream advertises. `resources/list` and `resources/read` are forwarded verbatim with namespace-prefixed URIs. Test coverage for resources is light. |
-| `prompts`        | same as resources. Test coverage is light. |
+| `resources`      | **masked out — never advertised**, even when an upstream supports it. `resources/*` method routing is not implemented (deferred; `#mcp-resources`), so `MergeCapabilities` drops the upstream `resources` capability. Advertising it would show the host resources that every `resources/read` rejects with `-32601 MethodNotFound`. |
+| `prompts`        | **masked out — never advertised**, same rationale as `resources` (`prompts/*` routing is not implemented; deferred under `#mcp-resources`). |
 | `logging`        | always advertised; gateway forwards `logging/setLevel` to every upstream. |
 | `completions`    | not advertised. |
 
@@ -385,8 +386,8 @@ rules:
       - pattern: "fs:write_file"
         conditions:
           # require_prior so an explicit allow of read_file qualifies write
-          require_prior: "fs:read_*"
-          time_window: 5m
+          - require_prior: "fs:read_*"
+            time_window: "5m"
     require_approval:
       - pattern: "*:execute_*"
     allow:
@@ -651,11 +652,22 @@ the gateway silently drops as the Python adapter does.
 
 ### 8.4 Cancellation
 
-When the host sends `notifications/cancelled` for an in-flight tool
-call, the gateway forwards the notification to the relevant upstream
-**and** cancels the goroutine waiting on the response. The audit entry
-is still written (decision=`CANCELLED`, with the original policy
-result if it had landed before cancellation).
+When the host sends `notifications/cancelled`, the gateway broadcasts
+the notification to every healthy upstream. **This is currently a
+best-effort no-op.** The notification's `params.requestId` is in the
+host's id space, but the gateway rewrites every request id to a
+gateway-internal id before sending it upstream (the upstream id space is
+per-connection — see `StdioUpstream.Send`). A forwarded cancellation
+therefore never matches an in-flight upstream request, and the upstream
+cannot act on it. The gateway also does **not** cancel the goroutine
+awaiting the response: the `tools/call` runs to completion (or
+`--upstream-timeout`) upstream and its response is still delivered to the
+host, which — having cancelled — may ignore it. No `CANCELLED` audit
+entry is written.
+
+Real cancellation requires threading a host↔upstream request-id map
+through the transport so the gateway can translate `requestId` on the
+way out. That is deferred — see `Bridge.handleNotification`.
 
 ---
 
@@ -684,10 +696,31 @@ accumulates).
 
 ## 10. Currently out of scope
 
-- Full `resources/*` and `prompts/*` support is forwarded verbatim with
-  namespace-prefixed URIs but is not test-covered.
-- Streamable HTTP transport on the host-facing side. The gateway is
-  stdio-only on both sides.
+- **`resources/*` and `prompts/*` are not routed.** The gateway
+  dispatches `initialize`, `tools/list`, `tools/call`, `ping`, and
+  `logging/setLevel`; every other method — including all `resources/*`
+  and `prompts/*` requests — falls through to `-32601 MethodNotFound`
+  (the default case in `Bridge.dispatchFrame`). The `resources` and
+  `prompts` capabilities are also **masked out** of the `initialize`
+  response (`MergeCapabilities`, see § 3.3) so a host never offers them.
+  Deferred design: `#mcp-resources` (see `TODO.md`).
+- **Server-initiated requests are not supported.** MCP lets a server
+  open a request back to the client (`sampling/createMessage`,
+  `roots/list`, `elicitation/create`). The gateway is a tools-only
+  firewall: such a frame from an upstream carries an `id` + `method`,
+  matches no pending response, and is dropped (logged at Info in
+  `StdioUpstream.readLoop`). The host never sees it, so a downstream that
+  depends on server-initiated flows will appear to hang on that feature
+  while its tools keep working normally.
+- **`notifications/cancelled` is a best-effort no-op** — the gateway
+  cannot map the host-space `requestId` onto the in-flight upstream
+  request. See § 8.4.
+- **Streamable HTTP transport** on either side. The gateway is
+  stdio-only host-facing and stdio-only upstream — `Upstream` has a
+  single `StdioUpstream` implementation. The `2025-03-26` "streamable
+  HTTP era" protocol *version* is negotiable (§ 3.1), but no HTTP
+  *transport* is wired. Deferred design: `#mcp-streamable-http` (see
+  `TODO.md`).
 - Per-upstream rate limiting. The central server's rate limiter
   applies, but a misbehaving downstream that floods on `tools/list`
   will be felt.

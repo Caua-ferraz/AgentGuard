@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
 	"github.com/Caua-ferraz/AgentGuard/pkg/notify"
@@ -70,7 +71,15 @@ func newITServer(t *testing.T, st store.Store, overflowDir string) *itServer {
 		Engine: eng, Logger: buflog, DashboardEnabled: true, Notifier: disp,
 		APIKey: itAPIKey, BaseURL: "http://127.0.0.1:0", Version: "it",
 	})
-	sy := New(Config{Store: st, Engine: eng, Limiter: srv.Limiter(), Approvals: srv.ApprovalQueue()})
+	// Reconciliation ARMED (v1.0): NodeID + a fast ReconcileInterval so the
+	// background reconcile loop runs during the hot-path latency test and proves
+	// it stays off the /v1/check path (the p99<3ms gate below). Single node =>
+	// others=0 => behavioral no-op, but the loop still does its Snapshot-diff +
+	// store round-trips on a background goroutine.
+	sy := New(Config{
+		Store: st, Engine: eng, Limiter: srv.Limiter(), Approvals: srv.ApprovalQueue(),
+		NodeID: "it-node", ReconcileInterval: 100 * time.Millisecond, BucketTTL: time.Hour, CostTTL: time.Hour,
+	})
 	ts := httptest.NewServer(srv.Handler())
 	return &itServer{srv: srv, eng: eng, sy: sy, ts: ts, disp: disp, buflog: buflog}
 }
@@ -172,4 +181,6 @@ func TestIntegration_StateSurvivesRestart(t *testing.T) {
 // integration_latency_test.go behind a `//go:build !race` tag — it is a
 // wall-clock p99 budget gate that the race detector's timing distortion would
 // flake. The shared itServer/newITServer/postCheck helpers above are compiled
-// in all builds, so both files use them.
+// in all builds, so both files use them. OURS's load-bearing, coarse-clock-safe
+// adaptive sampler (Signal 2) was folded into that gate so p99 stays legible on
+// every OS.

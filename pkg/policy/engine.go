@@ -3,6 +3,7 @@ package policy
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -281,7 +282,99 @@ func LoadFromFile(path string) (*Policy, error) {
 		return nil, err
 	}
 
+	// Fold rule domains to lower case once, so case-insensitive domain
+	// matching (normalizeRequest lower-cases the request side per Check)
+	// works without a rule-side allocation on the hot path.
+	normalizeRuleDomains(&pol)
+
+	// Non-fatal lint: warn on path patterns whose '*' recurses across '/'.
+	for _, w := range lintPathPatterns(&pol) {
+		log.Print(w)
+	}
+
 	return &pol, nil
+}
+
+// normalizeRuleDomains lower-cases every rule.Domain in the policy exactly
+// once, at load/parse time. DNS hostnames are case-insensitive, so a deny
+// rule written as "evil.com" must also match a request domain "EVIL.com".
+// The request side is folded in normalizeRequest on every Check; folding the
+// rule side here (instead of per-request in matchRule) keeps the hot path
+// free of a rule-side allocation. Domain patterns may contain wildcards
+// (e.g. "*.EVIL.com"); lower-casing them is safe because domains are
+// case-insensitive. Only Domain is folded — Path and Command patterns stay
+// case-sensitive.
+//
+// Covers both base rulesets and per-agent override rulesets. Slices share
+// their backing arrays through the copied map value, so writing through the
+// indexed elements mutates the underlying rules in place.
+func normalizeRuleDomains(pol *Policy) {
+	lower := func(sets []RuleSet) {
+		for si := range sets {
+			for _, rules := range [][]Rule{sets[si].Allow, sets[si].Deny, sets[si].RequireApproval} {
+				for ri := range rules {
+					if rules[ri].Domain != "" {
+						rules[ri].Domain = strings.ToLower(rules[ri].Domain)
+					}
+				}
+			}
+		}
+	}
+	lower(pol.Rules)
+	for _, cfg := range pol.Agents {
+		lower(cfg.Override)
+	}
+}
+
+// pathPatternRecursesAcrossSlash reports whether a path pattern's `*` will
+// silently match across `/` boundaries (i.e. recurse into nested paths). This
+// is the case for a pattern that contains a slash and a `*` but no `**`: such a
+// pattern skips globMatch's segment-aware `**` handling and falls to
+// wildcardMatch, whose `*` is greedy across `/`. For example "/workspace/*"
+// also matches "/workspace/a/b/secret.env". A pattern that already uses `**`
+// is segment-aware and is not flagged. This is a lint predicate only — it does
+// NOT change matching behavior (the globMatch contract is frozen).
+func pathPatternRecursesAcrossSlash(p string) bool {
+	return strings.Contains(p, "/") &&
+		strings.Contains(p, "*") &&
+		!strings.Contains(p, "**")
+}
+
+// lintPathPatterns returns a non-fatal warning message for every rule path
+// pattern whose `*` matches recursively across `/` (see
+// pathPatternRecursesAcrossSlash). It walks base rulesets and per-agent
+// override rulesets. The returned messages are logged at load time; the
+// policy is never rejected (this is a footgun warning, not a validation
+// error). Only Paths are inspected — domain and command patterns are matched
+// with whole-string wildcards by design and are not path-recursion footguns.
+func lintPathPatterns(pol *Policy) []string {
+	var warnings []string
+	collect := func(loc string, sets []RuleSet) {
+		for _, rs := range sets {
+			for kind, rules := range map[string][]Rule{
+				"allow":            rs.Allow,
+				"deny":             rs.Deny,
+				"require_approval": rs.RequireApproval,
+			} {
+				for _, r := range rules {
+					for _, p := range r.Paths {
+						if pathPatternRecursesAcrossSlash(p) {
+							warnings = append(warnings, fmt.Sprintf(
+								"policy: %s(%s) path pattern %q: '*' matches recursively across '/' "+
+									"(e.g. it also matches nested paths like %q/sub/secret.env). "+
+									"Use '**' if recursion is intended, or a more specific pattern otherwise.",
+								loc, kind, p, strings.TrimRight(p, "*/")))
+						}
+					}
+				}
+			}
+		}
+	}
+	collect("rules", pol.Rules)
+	for agentID, cfg := range pol.Agents {
+		collect(fmt.Sprintf("agents.%s.override", agentID), cfg.Override)
+	}
+	return warnings
 }
 
 // validateFilesystemPaths rejects filesystem rule patterns containing ".."
@@ -944,6 +1037,64 @@ func (e *Engine) RestoreCosts(snaps []CostSnapshot) {
 	}
 }
 
+// costApplyChunk bounds how many CostDelta entries ApplyCostDeltas processes
+// under a single write-lock acquisition. checkCost also takes e.mu for write;
+// holding it for a whole O(n) reconcile pass would serialize cost-scoped checks
+// behind reconcile and threaten the hot-path budget (CLAUDE.md §1). We acquire,
+// apply K, release, repeat.
+const costApplyChunk = 128
+
+// CostDelta is a background adjustment to one (tenant, session) cost
+// accumulator. CostAdjust is signed; a POSITIVE value adds other nodes' spend
+// into this node's local accumulator so the max_per_session compare in checkCost
+// sees the approximate cluster-wide session cost (multi-node reconcile). It is
+// applied by ApplyCostDeltas, never on the request path.
+type CostDelta struct {
+	Tenant     string
+	Session    string
+	CostAdjust float64
+}
+
+// ApplyCostDeltas folds background cost adjustments into the session-cost
+// accumulator in bounded, chunked write-lock acquisitions. It is the write half
+// of multi-node cost reconciliation and runs ONLY on the background syncer
+// goroutine — never on the /v1/check hot path.
+//
+// Semantics (CLAUDE.md §1/§3/§4 safe):
+//   - Partitioned by (tenant, session): a delta for tenant A can never move
+//     tenant B's budget (the same zero-trust key used by checkCost).
+//   - Chunked locking: at most costApplyChunk (K≈128) entries per lock hold, so
+//     a concurrent cost Check blocks for O(K), not O(n).
+//   - Zero-adjust deltas are skipped, so a no-change reconcile cycle (e.g. the
+//     single-node case where other-node spend is always zero) leaves lastUpdated
+//     untouched and is behavior-identical to reconcile being disabled.
+//   - Clamped >= 0 so a (refund-driven) negative adjust cannot push a session
+//     cost below zero.
+func (e *Engine) ApplyCostDeltas(deltas []CostDelta) {
+	now := time.Now()
+	for i := 0; i < len(deltas); i += costApplyChunk {
+		end := i + costApplyChunk
+		if end > len(deltas) {
+			end = len(deltas)
+		}
+		e.mu.Lock()
+		for _, d := range deltas[i:end] {
+			if d.CostAdjust == 0 {
+				continue
+			}
+			key := sessionCostKey{tenant: d.Tenant, session: d.Session}
+			entry := e.sessionCosts[key]
+			entry.cost += d.CostAdjust
+			if entry.cost < 0 {
+				entry.cost = 0
+			}
+			entry.lastUpdated = now
+			e.sessionCosts[key] = entry
+		}
+		e.mu.Unlock()
+	}
+}
+
 // Policy returns the currently active policy for the local tenant
 // (thread-safe). Returns nil only if the provider's most recent Get
 // surfaced ErrTenantNotFound for the local tenant; this should not
@@ -1425,11 +1576,19 @@ func (e *Engine) checkCost(rs RuleSet, req ActionRequest, tenantID string) Check
 //     (null-byte injection) or obscure traversal sequences.
 //   - URL-decode path/url once so "%2E%2E" traversal attempts are visible to
 //     filepath.Clean and the ".." guard.
+//   - Lower-case the Domain so matching is case-insensitive (DNS names are
+//     case-insensitive; a deny rule on "evil.com" must also match "EVIL.com").
+//     Rule domains are lower-cased once at load time (see normalizeRuleDomains)
+//     so both sides of the comparison are canonical. Only Domain is folded —
+//     Path and Command are case-sensitive and left untouched.
 //   - Leave glob metacharacters intact (no decoding of `*`/`?`).
 func normalizeRequest(req ActionRequest) ActionRequest {
 	req.Command = stripControl(req.Command)
 	req.Action = stripControl(req.Action)
-	req.Domain = stripControl(req.Domain)
+	// strings.ToLower fast-paths already-lowercase ASCII (the common case for
+	// hostnames) and returns the input unchanged with no allocation, so this
+	// stays within the hot-path budget.
+	req.Domain = strings.ToLower(stripControl(req.Domain))
 	req.URL = stripControl(req.URL)
 	req.Path = normalizePath(req.Path)
 	return req
@@ -1594,16 +1753,26 @@ func matchRule(rule Rule, req ActionRequest) bool {
 // asymmetry; see .audit/v05_decisions.md "Glob ** semantics for paths vs
 // domains" for the choice):
 //
-//  1. Path patterns (contain `/`):
-//     - Split on `/`. Each segment except `**` is matched with wildcardMatch.
-//     - `**` matches zero or more whole `/`-delimited segments.
+//  1. Path patterns are segment-aware ONLY when they contain `**`:
+//     - A pattern containing `**` is split on `/`. Each segment except `**`
+//     is matched with wildcardMatch; `**` matches zero or more whole
+//     `/`-delimited segments.
 //     - Therefore `/etc/**` matches both `/etc/passwd` AND `/etc` itself
 //     (the `**` consumes zero segments). Operators who want "at least
 //     one segment under /etc" must spell it `/etc/*/**` or list `/etc`
 //     explicitly in a separate rule.
-//     - The security guarantee: `**/secret/**` does NOT match
-//     `/notsecret/x`. `**` always lands on segment boundaries; it never
-//     substring-matches.
+//     - The security guarantee for `**` patterns: `**/secret/**` does NOT
+//     match `/notsecret/x`. `**` always lands on segment boundaries; it
+//     never substring-matches.
+//     - CAVEAT — a path pattern that contains `/` but NO `**` is NOT
+//     segment-aware. It is matched with whole-string wildcardMatch (case 3),
+//     whose single `*` is greedy across `/`. So `/workspace/*` matches
+//     `/workspace/a/b/secret.env`, not just direct children of
+//     `/workspace`. This is the code's actual behavior; if you want to
+//     limit a `*` to a single segment, there is no such spelling — use an
+//     explicit deeper pattern, and use `**` when recursion is intended.
+//     Policy load emits a non-fatal lint warning for such patterns (see
+//     lintPathPatterns).
 //
 //  2. Domain patterns (no `/`):
 //     - Matched with wildcardMatch. `*` matches any chars including `.`.

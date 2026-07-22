@@ -82,15 +82,16 @@ agentguard-llm-proxy \
 | `--upstream-openai`      | base URL for OpenAI-shape requests                        | `https://api.openai.com`     |
 | `--upstream-anthropic`   | base URL for Anthropic-shape requests                     | `https://api.anthropic.com`  |
 | `--guard-url`            | central server `/v1/check` URL                            | `http://127.0.0.1:8080`      |
-| `--api-key`              | bearer for `/v1/check` (from `AGENTGUARD_API_KEY`)        | unset (warn)                 |
+| `--api-key`              | bearer for `/v1/check` **and** `POST /v1/audit` (from `AGENTGUARD_API_KEY`). Required for full forced-refusal audit fidelity when the central server is keyed (§ 5.4 Audit fidelity); without it those audits fall back to the lower-fidelity `/v1/check` path. | unset (warn) |
 | `--proxy-api-key`        | optional bearer the proxy itself enforces on inbound. Empty = no proxy auth (localhost-only safe). | unset |
 | `--tenant-id`            | tenant header value                                       | `local`                      |
 | `--fail-mode`            | `deny` / `allow` / `fail-closed-with-audit`               | `deny`                       |
 | `--fail-audit-log`       | local JSONL fallback audit for `fail-closed-with-audit` denials (empty disables) | `agentguard-fail-audit.jsonl` |
-| `--max-buffer-bytes`     | per-stream tool-call buffer cap (see § 6)                 | `1048576` (1 MiB)            |
+| `--max-buffer-bytes`     | per-stream tool-call buffer cap (see § 6). The flag accepts 1 byte – 64 MiB; a config carrying `0` ("operator cap disabled", reachable only by embedding the package — the flag rejects `0`) is still bounded by a built-in 64 MiB absolute ceiling, past which the stream is refused fail-closed. | `1048576` (1 MiB)            |
 | `--max-concurrent-streams` | cap on simultaneously open streaming responses; excess requests are rejected (`agentguard_llmproxy_streams_rejected_total`) | `100` |
 | `--policy`               | path to AgentGuard policy YAML; loaded only for `tool_scope_map` operator overrides. Without it, the proxy falls back to `DefaultLLMToolScopeMap` and logs a WARN at startup. | unset |
 | `--log-level`            | stderr verbosity                                          | `info`                       |
+| `--version`              | print version and exit (checked before any other flag is parsed) | —                     |
 
 If `--api-key` is unset and `--listen` is non-loopback (`0.0.0.0:` or
 external IP), the proxy logs WARN and refuses to start in production
@@ -428,7 +429,7 @@ Algorithm (Anthropic): identical structure, but:
 When DENY (or REQUIRE_APPROVAL with a URL):
 
 ```
-data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"[AgentGuard] Tool call denied: <reason>"},"finish_reason":"stop"}]}
+data: {"choices":[{"delta":{"content":"AgentGuard denied this action.\n\nReason: <reason>\nRule: <rule>","role":"assistant"},"finish_reason":"stop","index":0}],"created":0,"id":"agentguard-refusal","object":"chat.completion.chunk"}
 
 data: [DONE]
 ```
@@ -468,7 +469,7 @@ data: { "type": "content_block_start", "index": <same>,
 event: content_block_delta
 data: { "type": "content_block_delta", "index": <same>,
         "delta": { "type": "text_delta",
-                   "text": "[AgentGuard] Tool call denied: <reason>" } }
+                   "text": "AgentGuard denied this action.\n\nReason: <reason>\nRule: <rule>" } }
 
 event: content_block_stop
 data: { "type": "content_block_stop", "index": <same> }
@@ -479,6 +480,39 @@ at the same index that the `tool_use` block was buffered for is wire-
 legal. The downstream `message_delta { stop_reason }` field is
 rewritten from `tool_use` to `end_turn` to prevent the agent from
 expecting a tool result it's not getting.
+
+#### Malformed tool calls fail closed (v1.0)
+
+A tool call that **completes** with arguments that are not valid JSON —
+routine on a `max_tokens` cutoff mid-arguments, and attacker-inducible —
+is refused with the same synthetic-refusal shapes above, under the fixed
+rule `deny:llm_api_proxy:malformed_tool_call` (stable; alert on it). The
+refusal is recorded in the central audit trail with the exact DENY the
+client received (see **Audit fidelity** below), the buffered malformed
+bytes are discarded (never forwarded), and the accumulator is reset so
+any *later* valid tool call in the same stream is still gated. Malformed
+**non-completion** deltas are unchanged: dropped silently, because
+corruption that matters resurfaces at completion, where it now denies.
+(Before v1.0 a malformed completion was silently dropped — no refusal, no
+audit entry, and the stream went dark for the rest of the connection.)
+
+##### Audit fidelity
+
+For a proxy-manufactured refusal (the malformed-completion DENY above),
+the engine verdict a plain `/v1/check` would log is the *wrong* verdict —
+the engine might well ALLOW the garbage-projected request while the client
+got DENY, so the trail would read ALLOW for a refused call. To avoid that,
+the proxy POSTs the client-visible DENY to the central server's
+`POST /v1/audit` ingest, which appends it verbatim (no re-evaluation).
+
+`POST /v1/audit` is auth-gated. **If the central server runs with
+`--api-key`, give this proxy `--api-key` too** — otherwise the audit POST
+returns 401. On any `/v1/audit` failure the proxy does **not** drop the
+entry: it best-effort falls back to the pre-v1.0 `/v1/check` audit path,
+which still writes a transport-tagged entry (carrying the *engine* verdict,
+not the DENY). So fidelity degrades to the lower-fidelity path without
+`--api-key`, but audit **coverage never does** — a forced refusal is always
+recorded one way or the other.
 
 ### 5.5 Byte-identity invariant on ALLOW
 
@@ -504,7 +538,7 @@ gating a single tool call. Rationale:
   e.g., a `write_file` with a multi-megabyte payload) hit this cap.
 - Above the cap, the proxy emits a synthetic refusal: "tool call too
   large to gate (> N bytes); rejected by AgentGuard". Operators see a
-  metric (`agentguard_llm_stream_overflow_total`) and can raise the
+  metric (`agentguard_llmproxy_buffer_overflow_total`) and can raise the
   limit if their use case needs it.
 
 Why 1 MiB:
@@ -713,7 +747,7 @@ Once the proxy is running and your code points at it:
    `rm -rf *` under `scope: shell` (or use the bundled one). Prompt
    the model to `rm -rf /etc`. The dashboard logs `DENY`; your code
    receives a synthetic assistant text starting with
-   `[AgentGuard] Tool call denied:` instead of any tool-call deltas.
+   `AgentGuard denied this action.` instead of any tool-call deltas.
 
 If actions never reach AgentGuard, the SDK is probably still talking
 to the real upstream — verify the env var is set for the process

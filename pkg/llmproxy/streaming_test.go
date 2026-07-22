@@ -1,8 +1,10 @@
 package llmproxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -319,6 +321,175 @@ func TestStreamingOverflowBufferBytes(t *testing.T) {
 	got, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(got), "exceed gating buffer") {
 		t.Errorf("expected buffer-overflow refusal; got %q", string(got))
+	}
+}
+
+// TestReadSSEEvent_NewlineFreeFloodRefused — a giant blob with no
+// newline at all must still trip the per-event cap. The pre-fix
+// ReadBytes implementation buffered the entire "line" before the cap
+// check ever ran, so a newline-free upstream flood grew memory
+// unboundedly even with --max-buffer-bytes at its default.
+func TestReadSSEEvent_NewlineFreeFloodRefused(t *testing.T) {
+	src := strings.NewReader(strings.Repeat("x", 5000)) // no '\n' anywhere
+	r := bufio.NewReaderSize(src, 16)                   // small buffer => deterministic ReadSlice chunks
+
+	got, err := readSSEEvent(r, 1024)
+	if !errors.Is(err, errSSEEventTooLarge) {
+		t.Fatalf("err = %v, want errSSEEventTooLarge", err)
+	}
+	// The cap check runs once per <=16-byte chunk, so accumulation must
+	// stop within one chunk of the cap — not after the full 5000 bytes.
+	if len(got) > 1024+16 {
+		t.Errorf("accumulated %d bytes; cap enforcement lagged past one chunk over 1024", len(got))
+	}
+}
+
+// TestReadSSEEvent_LongLineFragmentNotMistakenForBlankLine — when a
+// line is longer than the reader's buffer, ReadSlice hands it back in
+// fragments and the FINAL fragment can be exactly "\n" (or "\r\n").
+// That fragment must not be mistaken for the blank-line event
+// terminator; the event must come back whole and byte-identical.
+func TestReadSSEEvent_LongLineFragmentNotMistakenForBlankLine(t *testing.T) {
+	for _, nl := range []string{"\n", "\r\n"} {
+		// 16 data bytes fill the buffer exactly, leaving the newline
+		// sequence alone in the next fragment.
+		line := "data: 0123456789" + nl // len("data: 0123456789") == 16
+		event := line + "\n"            // blank line terminates the event
+		r := bufio.NewReaderSize(strings.NewReader(event+"data: next\n\n"), 16)
+
+		got, err := readSSEEvent(r, 0)
+		if err != nil {
+			t.Fatalf("nl=%q: err = %v, want nil", nl, err)
+		}
+		if string(got) != event {
+			t.Errorf("nl=%q: event = %q, want %q (fragment %q wrongly treated as blank line?)", nl, got, event, nl)
+		}
+	}
+}
+
+// TestReadSSEEvent_PartialTrailingEventEOF pins the documented EOF
+// contract: a stream ending mid-event returns the accumulated bytes
+// with err == io.EOF so callers can still attempt to dispatch it.
+func TestReadSSEEvent_PartialTrailingEventEOF(t *testing.T) {
+	r := bufio.NewReaderSize(strings.NewReader("data: partial\n"), 16)
+	got, err := readSSEEvent(r, 0)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("err = %v, want io.EOF", err)
+	}
+	if string(got) != "data: partial\n" {
+		t.Errorf("partial event = %q, want %q", got, "data: partial\n")
+	}
+}
+
+// TestStreamingNewlineFreeBlobRefusedAtDefaultCap is the loop-level
+// regression guard for the ReadBytes hole: with the DEFAULT
+// --max-buffer-bytes (1 MiB), a newline-free upstream blob must be
+// refused fail-closed at the 2x per-event read cap instead of being
+// buffered in its entirety.
+func TestStreamingNewlineFreeBlobRefusedAtDefaultCap(t *testing.T) {
+	cfg := &Config{
+		Listen:            "127.0.0.1:0",
+		UpstreamOpenAI:    "https://api.openai.com",
+		UpstreamAnthropic: "https://api.anthropic.com",
+		GuardURL:          "http://127.0.0.1:8080",
+		TenantID:          "test",
+		FailMode:          "deny",
+		LogLevel:          "info",
+		MaxBufferBytes:    DefaultMaxBufferBytes,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	// 3 MiB of 'a' with not a single newline — over the 2 MiB event cap.
+	chunk := strings.Repeat("a", 1<<20)
+	readers := []io.Reader{
+		strings.NewReader(chunk), strings.NewReader(chunk), strings.NewReader(chunk),
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	srv.runOpenAIStreamLoop(w, w, req, io.MultiReader(readers...))
+
+	got := w.Body.String()
+	if !strings.Contains(got, "exceed gating buffer") {
+		t.Errorf("expected buffer-overflow refusal for newline-free blob; got %d bytes: %.200q", len(got), got)
+	}
+}
+
+// TestHardCappedBufferBytes pins the cap-resolution contract: any
+// positive computed cap passes through untouched (operator-configured
+// behaviour is unchanged), and <= 0 falls back to the absolute ceiling.
+func TestHardCappedBufferBytes(t *testing.T) {
+	cases := []struct {
+		in, want int
+	}{
+		{0, absoluteMaxBufferBytes},
+		{-1, absoluteMaxBufferBytes},
+		{256, 256},
+		{DefaultMaxBufferBytes, DefaultMaxBufferBytes},
+		{MaxConfigurableBufferBytes * 2, MaxConfigurableBufferBytes * 2}, // 2x event cap at max config
+	}
+	for _, c := range cases {
+		if got := hardCappedBufferBytes(c.in); got != c.want {
+			t.Errorf("hardCappedBufferBytes(%d) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+// TestStreamingHardCeilingAppliesWhenCapDisabled — audit L1: with
+// MaxBufferBytes = 0 ("no operator-configured cap", only reachable by
+// building the Config directly; ParseConfig rejects 0) an upstream that
+// never terminates an SSE event previously grew the read buffer without
+// bound. The absolute hard ceiling must refuse the stream fail-closed
+// with the canonical buffer-overflow refusal instead.
+//
+// Drives runOpenAIStreamLoop directly rather than through a full HTTP
+// hop: with the cap at 0 readRequestBody rejects any request body
+// before streaming starts, and pushing 64 MiB through two loopback
+// servers buys no extra coverage over feeding the reader in-process.
+func TestStreamingHardCeilingAppliesWhenCapDisabled(t *testing.T) {
+	cfg := &Config{
+		Listen:            "127.0.0.1:0",
+		UpstreamOpenAI:    "https://api.openai.com",
+		UpstreamAnthropic: "https://api.anthropic.com",
+		GuardURL:          "http://127.0.0.1:8080",
+		TenantID:          "test",
+		FailMode:          "deny",
+		LogLevel:          "info",
+		MaxBufferBytes:    DefaultMaxBufferBytes,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	srv.cfg.MaxBufferBytes = 0 // bypasses Validate, as a direct Config build can
+
+	// One SSE event that never sees a blank-line terminator: 1 MiB data
+	// lines repeated until just past the absolute ceiling. If the
+	// ceiling regressed, the loop would swallow all of it and finish at
+	// EOF without a refusal (clean failure, no hang).
+	line := "data: " + strings.Repeat("a", 1<<20) + "\n"
+	nLines := absoluteMaxBufferBytes/len(line) + 2
+	readers := make([]io.Reader, nLines)
+	for i := range readers {
+		readers[i] = strings.NewReader(line)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	srv.runOpenAIStreamLoop(w, w, req, io.MultiReader(readers...))
+
+	got := w.Body.String()
+	if !strings.Contains(got, "exceed gating buffer") {
+		t.Errorf("expected buffer-overflow refusal with cap disabled; got %d bytes: %.200q", len(got), got)
 	}
 }
 

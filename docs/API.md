@@ -63,6 +63,8 @@ Auth posture is **identical** across both URL families — the middleware is URL
 
 `/v1/check` is intentionally unauthenticated so local agents can call it with zero setup. Gate it at the network layer (reverse proxy allowlist, firewall, service mesh) if your threat model requires.
 
+`/api/pending`, `/api/stream`, `/api/stats` and their `/v1/t/{tenant}/…` mirrors are registered only when the server runs `--dashboard`; without it they return `404`.
+
 ---
 
 ## `POST /v1/check` · `POST /v1/t/{tenant}/check`
@@ -99,8 +101,8 @@ Content-Type: application/json
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `agent_id` | string | yes | Used for per-agent overrides, rate-limit keying, audit filtering. |
-| `scope` | string | yes | `shell`, `filesystem`, `network`, `browser`, `cost`, `data`, or any custom string. |
+| `agent_id` | string | no (strongly recommended) | Keys per-agent overrides, rate-limit buckets, and audit filtering. Omitting it is not rejected — the policy just evaluates without per-agent context. |
+| `scope` | string | yes* | `shell`, `filesystem`, `network`, `browser`, `cost`, `data`, or any custom string. *Not enforced with a `400` — an empty scope matches no rules and falls through to default deny (`200`). |
 | `command` | string | — | For `shell` scope (required to match `pattern`). |
 | `action` | string | — | For `filesystem` scope (required alongside `path`). |
 | `path` | string | — | For `filesystem`. Normalized with `filepath.Clean + ToSlash`. |
@@ -109,6 +111,7 @@ Content-Type: application/json
 | `session_id` | string | — | For `cost` scope accumulator. |
 | `est_cost` | float | — | For `cost` scope. Negative values denied. |
 | `meta` | object | — | Free-form string→string map; logged as-is. |
+| `approval_id` | string | — | Replay of a previously issued approval (see [`APPROVAL_WORKFLOW.md`](APPROVAL_WORKFLOW.md)). Honored only when the request's operationally-meaningful fields match the original, the resolution is younger than `--approval-validity` (default 5m), and — for ALLOW — **at most once**: approvals are one-shot capabilities, so a second replay of the same id falls through to fresh policy evaluation and re-enters the approval flow under a new id. Refusals are counted in `agentguard_approval_replay_refused_total`. |
 
 Body is limited to `MaxRequestBodyBytes` (default 1 MB; configurable via `proxy.request.max_body_bytes`). Exceeded → `413`.
 
@@ -144,7 +147,7 @@ Body is limited to `MaxRequestBodyBytes` (default 1 MB; configurable via `proxy.
 | Code | Meaning |
 |---|---|
 | `200` | Policy evaluated (ALLOW / DENY / REQUIRE_APPROVAL — inspect body). |
-| `400` | Malformed JSON or missing `scope`/`agent_id`. |
+| `400` | Malformed JSON or unsupported `schema_version`. |
 | `413` | Body exceeds `MaxRequestBodyBytes`. |
 | `500` | `crypto/rand` failure while generating an approval ID. Never silently returns a deterministic ID. |
 
@@ -156,7 +159,7 @@ Rate-limit denials return `200` with `decision: "DENY"` and `matched_rule: "deny
 
 Tenant-aware mirrors live at `POST /v1/t/{tenant}/approve/{id}` and `POST /v1/t/{tenant}/deny/{id}`. Auth posture and request body are identical.
 
-Resolve a pending approval. Idempotent: resolving an already-resolved ID returns the existing state.
+Resolve a pending approval. Resolution is **write-once**: the first decision stands forever. Re-sending the *same* decision returns `200` (idempotent no-op, safe for retried requests); sending the *opposite* decision returns `409` with `{"error":"already resolved","id":"ap_…","status":"approved"|"denied"}` and mutates nothing. A wrong decision is corrected by re-running the action through `/v1/check` (fresh approval id) — never by editing history. Each resolution also records how it arrived (`resolved_via`: `bearer` / `session` / `open`, plus the peer host) for incident reconstruction.
 
 ### Request (Bearer)
 
@@ -176,7 +179,7 @@ X-CSRF-Token: xyz…
 ### Response
 
 ```json
-{ "status": "approved" }    // or "denied"
+{ "id": "ap_1a2b…", "status": "approved" }    // or "denied"
 ```
 
 ### Status codes
@@ -187,7 +190,7 @@ X-CSRF-Token: xyz…
 | `401` | Missing Bearer or invalid session. |
 | `403` | Session valid but CSRF token missing/mismatched. |
 | `404` | No such approval ID. |
-| `409` | Already resolved with a different decision (some builds return `200` with original decision — inspect `status`). |
+| `409` | Already resolved with the opposite decision (write-once). Body carries the standing decision: `{"error":"already resolved","id":"ap_…","status":"approved"\|"denied"}`. |
 
 ---
 
@@ -200,16 +203,20 @@ Poll for approval resolution. This is what `guard.wait_for_approval` / `guard.wa
 ### Response
 
 ```json
-{
-  "id": "ap_1a2b…",
-  "resolved": true,
-  "decision": "ALLOW",
-  "request": { /* original ActionRequest */ },
-  "created_at": "2026-04-19T12:00:00Z"
-}
+{ "id": "ap_1a2b…", "status": "pending" }                              // still pending
+
+{ "id": "ap_1a2b…", "status": "resolved", "decision": "ALLOW" }        // resolved
 ```
 
-`resolved: false` → still pending. Poll every 2 s (SDK default).
+| Field | Present when |
+|---|---|
+| `id` | always. |
+| `status` | always — `"pending"` or `"resolved"`. |
+| `decision` | only when `status == "resolved"` — `"ALLOW"` or `"DENY"`. |
+
+`status: "pending"` → still pending. Poll every 2 s (SDK default). The
+original approval `request` and `created_at` are not returned here — use
+[`GET /api/pending`](#get-apipending) for those.
 
 ### Status codes
 
@@ -321,7 +328,7 @@ Returns `200` with no body. Safe to call with no session (no-op).
 ## `GET /health`
 
 ```json
-{ "status": "ok", "version": "0.9.0" }
+{ "status": "ok", "version": "1.0.0" }
 ```
 
 Always `200` once the HTTP server is accepting connections. Use for liveness probes (see [`DEPLOYMENT.md`](DEPLOYMENT.md)). The legacy `/health` body shape is unchanged in v0.5 — for the richer operator probe see `/v1/health` below.
@@ -337,7 +344,7 @@ Operator-grade health endpoint introduced in v0.5. Richer than `/health`: includ
 ```json
 {
   "status": "ok",
-  "version": "0.9.0",
+  "version": "1.0.0",
   "tenant": "local",
   "last_request_at": "2026-05-05T19:04:54.646Z",
   "last_policy_load_at": "2026-05-05T19:04:53.549Z",
@@ -400,13 +407,15 @@ O(1) atomic counter snapshot. Cheap; safe for per-page-load polling.
 
 ```json
 {
-  "total_checks": 12034,
-  "total_allowed": 10998,
-  "total_denied":  842,
-  "total_approvals": 194,
-  "pending_count": 3
+  "total": 12034,
+  "allowed": 10998,
+  "denied": 842,
+  "approvals": 194
 }
 ```
+
+For the pending-approval count, use the length of
+[`GET /api/pending`](#get-apipending).
 
 Prefer `/api/stream` (SSE) for real-time deltas — only call `/api/stats` on page load and on SSE reconnect.
 

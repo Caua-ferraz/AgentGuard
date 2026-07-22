@@ -128,6 +128,67 @@ func (c *Caller) CallV1Check(ctx context.Context, ar policy.ActionRequest, rules
 	return DecisionFromCheckResult(cr, rules), nil
 }
 
+// RecordForcedAudit POSTs a pre-decided DENY audit record to
+// <GuardURL>/v1/t/<TenantID>/audit so the central server appends it to the
+// audit trail verbatim (no policy evaluation). It is used by a transport proxy
+// that manufactures its own fail-closed refusal — e.g. the LLM API Proxy's
+// malformed-tool-call path — and needs the audit entry to reflect the DENY the
+// client actually received instead of the engine verdict a /v1/check would log.
+//
+// reason/rule are the verdict strings the client saw; rule is required by the
+// server. SchemaVersion is stamped "v1" when empty. Errors are returned for the
+// caller to log — the refusal to the client has already been sent, so a failed
+// record must never change client-visible behavior.
+func (c *Caller) RecordForcedAudit(ctx context.Context, ar policy.ActionRequest, reason, rule string) error {
+	httpClient := c.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: DefaultGuardHTTPTimeout}
+	}
+
+	tenant := c.TenantID
+	if tenant == "" {
+		tenant = "local"
+	}
+	endpoint := strings.TrimRight(c.GuardURL, "/") + "/v1/t/" + url.PathEscape(tenant) + "/audit"
+
+	rec := policy.AuditRecord{
+		SchemaVersion: "v1",
+		Request:       ar,
+		Reason:        reason,
+		Rule:          rule,
+	}
+	body, err := json.Marshal(rec)
+	if err != nil {
+		return fmt.Errorf("marshal /v1/audit body: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build /v1/audit request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if c.UserAgent != "" {
+		req.Header.Set("User-Agent", c.UserAgent)
+	}
+	if c.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("/v1/audit request: %w", err)
+	}
+	defer resp.Body.Close()
+	// Drain (bounded) so the connection can be reused; the response body is not
+	// needed — the server echoes the recorded CheckResult, which we ignore.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("/v1/audit HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // DecisionFromCheckResult maps a policy.CheckResult onto the Decision
 // shape. An unrecognised decision string is treated as a hard DENY
 // stamped with rules.Invalid so dashboards can alert on it.

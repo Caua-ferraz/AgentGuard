@@ -61,15 +61,17 @@ Size-triggered rotation via the logger. Each rotated file carries the same schem
 
 Default path: `<audit-log-path>.v040-backup`. Created by the v0.4.0 → v0.4.1 migration with mode `0600`. A byte-for-byte copy of the pre-migration headerless audit file, kept so an operator can downgrade to v0.4.0 by restoring this file over the migrated one.
 
-Lifecycle: written on migration and left untouched afterwards. The removal originally scheduled for v0.4.3 never shipped — the migration (and this backup convention) is still in the binary as of v0.9. Tracked in `docs/DEPRECATIONS.md` as `audit.backup.v040`. Operators who want to keep the backup long-term should still copy it off the server.
+Lifecycle: written on migration and left untouched afterwards. The removal originally scheduled for v0.4.3 never shipped — the migration (and this backup convention) is still in the binary as of v1.0. Tracked in `docs/DEPRECATIONS.md` as `audit.backup.v040`. Operators who want to keep the backup long-term should still copy it off the server.
 
 ### `agentguard.db` (+ `-wal` / `-shm` sidecars) — durable runtime store (v0.6+)
 
 Default path: `<data-dir>/agentguard.db` (CLI `--data-dir`, default `.`; or an explicit `--store-dsn`). SQLite in WAL mode, created automatically on first run unless `--persist=false`. Mode `0600` — the file and its sidecars are created owner-only, and files created looser by pre-fix versions are tightened on every open (audit 2026-06, M2).
 
-Tables (`pkg/store/sqlite.go`): `approvals`, `rate_buckets`, `session_costs`, `policies` — all tenant-keyed — plus `audit_entries` when running `--audit-backend=store`. A background syncer flushes in-memory state on a ≥1 s tick and rehydrates it on boot; the store is never on the `/v1/check` hot path.
+Tables (`pkg/store/sqlite.go`): `approvals` (since v1.0 including the one-shot consumption stamp `consumed_at` and the resolution-actor columns `resolved_via` / `resolved_from`), `rate_buckets`, `session_costs`, `policies` — all tenant-keyed — plus `audit_entries` when running `--audit-backend=store`, and the v1.0 multi-node reconciliation tables `rate_consumption` / `cost_consumption` (per-node consumption rows; only populated on the PostgreSQL backend). A background syncer flushes in-memory state on a ≥1 s tick and rehydrates it on boot; the store is never on the `/v1/check` hot path.
 
-Schema management differs from the JSONL artifacts above: there is no `_meta`/`schema_version` record — `SQLiteStore.Migrate` applies idempotent `CREATE TABLE IF NOT EXISTS` DDL at open. Back up the file with the process stopped or via `sqlite3 .backup`; copying `agentguard.db` alone mid-write (without its `-wal` sidecar) can produce a torn snapshot.
+Schema management differs from the JSONL artifacts above: there is no `_meta`/`schema_version` record — `SQLiteStore.Migrate` applies idempotent `CREATE TABLE IF NOT EXISTS` DDL at open, plus guarded additive `ALTER TABLE`s for columns introduced after a table first shipped (the v1.0 approval columns). Back up the file with the process stopped or via `sqlite3 .backup`; copying `agentguard.db` alone mid-write (without its `-wal` sidecar) can produce a torn snapshot.
+
+**PostgreSQL variant (v1.0):** with `--store-dsn postgres://…` the same schema lives in PostgreSQL (`pkg/store/postgres.go`, dialect deltas only) and there is no local database file — back up with your normal PostgreSQL tooling. Multiple replicas share it; each writes its own rows into the consumption tables keyed by `--node-id`.
 
 ## Items intentionally NOT on disk
 

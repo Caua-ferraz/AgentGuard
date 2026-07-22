@@ -105,11 +105,13 @@ agentguard serve \
 
 The v0.6 persistence knobs (`--persist`, `--store-dsn`, `--data-dir`, `--audit-backend`) are covered in [`CLI.md`](CLI.md#persistence--multi-tenancy-v06).
 
+**Multi-node (v1.0, PostgreSQL only):** `--reconcile-interval` (default `2s`) is the one knob that trades convergence for store traffic — it bounds both the distributed rate-limit overshoot (≈ `interval × peak rate` per extra replica) and the cross-node approval staleness (a resolution or one-shot consumption on another node lands within one interval). Halving it halves both windows and doubles reconcile queries; the `/v1/check` hot path is untouched either way. `--node-id` is identity, not tuning — just keep it distinct per replica.
+
 See [`CLI.md`](CLI.md) for the full list.
 
 ---
 
-## Hardcoded constants (as of v0.9)
+## Hardcoded constants (as of v1.0)
 
 These are **not configurable** yet. Listed so you know what ceiling you're running against. Changing any of these requires a code change.
 
@@ -125,6 +127,7 @@ These are **not configurable** yet. Listed so you know what ceiling you're runni
 | Histogram buckets (ms) | `0.25..10000` | `pkg/metrics/metrics.go` | Contract — re-bucketing invalidates historical Prometheus data. |
 | Notifier histogram buckets (s) | `0.005..10` | `pkg/metrics/metrics.go` | Same contract note. |
 | Audit scanner buffer | `1 MB` per line | `pkg/audit/logger.go` | Raised from stdlib default to tolerate long rows. |
+| `absoluteMaxBufferBytes` (LLM proxy) | `64 MiB` | `pkg/llmproxy/streaming.go` | Hard safety ceiling on the streaming buffers. A `MaxBufferBytes` of `0` disables the operator cap (`--max-buffer-bytes` itself rejects `0`; only reachable by embedding the package) but this ceiling still applies — the stream is refused fail-closed past it. |
 
 If you need any of these configurable in YAML, open an issue with the use case.
 

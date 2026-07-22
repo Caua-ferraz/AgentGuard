@@ -59,6 +59,15 @@ type ApprovalRecord struct {
 	Resolved   bool
 	Decision   string
 	ResolvedAt time.Time
+	// ConsumedAt persists the one-shot consumption stamp so a restart can
+	// never resurrect an already-spent ALLOW as replayable. Zero while
+	// unconsumed.
+	ConsumedAt time.Time
+	// ResolvedVia / ResolvedFrom persist the resolution actor stamp
+	// ("bearer" / "session" / "open" + peer host) for incident
+	// reconstruction. Empty while pending.
+	ResolvedVia  string
+	ResolvedFrom string
 }
 
 // BucketState is one token-bucket's persisted state. Key is the limiter's
@@ -87,6 +96,19 @@ type ApprovalStore interface {
 	// UpsertApprovals writes new/updated approvals (write-behind from
 	// ApprovalQueue snapshots). Idempotent on (tenant_id, id). Rejects any
 	// record with an empty TenantID.
+	//
+	// The upsert is a MONOTONIC merge, not last-write-wins — with multiple
+	// nodes flushing independent snapshots of the same (tenant_id, id), a
+	// stale node's view must never regress shared state another node
+	// advanced (the in-memory analog is proxy.ApplyRemote's merge):
+	//   - a resolved row is never overwritten by an unresolved one
+	//     (resolutions are write-once / terminal);
+	//   - a resolved DENY is never overwritten by a non-DENY
+	//     (sticky-DENY: the cluster, not just each node, converges to
+	//     DENY on a same-ID conflict);
+	//   - a non-empty consumed_at is never cleared (a spent one-shot ALLOW
+	//     stays spent, so a lagging node's flush cannot make it replayable
+	//     again for later hydrates/reconciles).
 	UpsertApprovals(ctx context.Context, recs []ApprovalRecord) error
 	// LoadApprovals returns every approval (pending and still-retained
 	// resolved) across all tenants — boot hydration only.

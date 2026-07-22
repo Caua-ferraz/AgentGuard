@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/store"
 )
@@ -76,4 +77,43 @@ func TestIntegration_HotPathLatencyWithPersistence(t *testing.T) {
 	if p99 >= 3.0 {
 		t.Errorf("hot-path p99 = %.3fms violates the <3ms budget with persistence on", p99)
 	}
+
+	// --- Signal 2 (folded in from the v1.0 branch): client-observed per-op
+	// latency, ns-precision, adaptive ----------------------------------------
+	// The X-AgentGuard-Total-Ms header above is µs-granular and floors to 0 on a
+	// coarse clock (Windows advances the monotonic clock only at the ~0.5ms
+	// system-timer tick), so it is not a legible headline there. Here we measure
+	// the /v1/check round-trip at nanosecond precision: on a fine clock each
+	// sample is one round-trip; on a coarse clock the sampler groups enough
+	// round-trips for the monotonic clock to advance and records the mean-per-op.
+	// The reported p99 is therefore always non-zero and legible in µs, which makes
+	// this test load-bearing on every OS (it does not degenerate to "0.000ms").
+	const clientTarget = 500
+	cs := make([]time.Duration, 0, clientTarget)
+	roundTrips := 0
+	for len(cs) < clientTarget && roundTrips < 40_000 {
+		start := time.Now()
+		calls := 0
+		var elapsed time.Duration
+		for {
+			s.postCheck(t, `{"scope":"shell","command":"ls -la","agent_id":"lat"}`)
+			calls++
+			elapsed = time.Since(start)
+			if elapsed > 0 || calls >= 100_000 {
+				break
+			}
+		}
+		roundTrips += calls
+		cs = append(cs, elapsed/time.Duration(calls))
+	}
+	if len(cs) < 100 {
+		t.Fatalf("collected only %d client latency samples (want >=100)", len(cs))
+	}
+	sort.Slice(cs, func(i, j int) bool { return cs[i] < cs[j] })
+	us := func(d time.Duration) float64 { return float64(d.Nanoseconds()) / 1000.0 }
+	cp50 := cs[len(cs)*50/100]
+	cp99 := cs[len(cs)*99/100]
+	cmax := cs[len(cs)-1]
+	t.Logf("client-observed /v1/check per-op latency (ns-precision, adaptive): p50=%.3fµs p99=%.3fµs max=%.3fµs (samples=%d, round-trips=%d)",
+		us(cp50), us(cp99), us(cmax), len(cs), roundTrips)
 }

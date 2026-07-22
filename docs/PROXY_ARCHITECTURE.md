@@ -293,7 +293,7 @@ on the same host or on agent-facing hosts pointing at the central
 server's `/v1/check` over the network. Set `--api-key` on the central
 server and pass it to every gateway/proxy via `--api-key`.
 
-### 5.3 Multi-tenant (shipped in v0.6, single-node)
+### 5.3 Multi-tenant (shipped in v0.6)
 
 Multi-tenancy is supported on a single central server since v0.6:
 
@@ -304,9 +304,19 @@ Multi-tenancy is supported on a single central server since v0.6:
   all sharded by tenant ID,
 - the proxies stamp their tenant via `--tenant-id` (default `local`).
 
-What remains out of scope is *distributed* multi-tenancy — multiple
-replicas sharing tenant state. The store is single-node
-(see [`COMPATIBILITY.md`](COMPATIBILITY.md)); run one replica.
+### 5.4 Multi-node (shipped in v1.0, PostgreSQL)
+
+Multiple central-server replicas can share state — tenant policies,
+approvals, rate-limit and cost consumption — by pointing `--store-dsn` at
+one PostgreSQL and giving each replica a `--node-id`. Each node's memory
+stays authoritative for its own `/v1/check` decisions (the hot path never
+performs a synchronous database call); a background reconciler merges the
+other nodes' state in every `--reconcile-interval` (default 2s). The
+consequences of that design are documented, not hidden: distributed
+rate/cost limiting is bounded-overshoot rather than globally strict, and
+cross-node approval visibility lags by at most one interval. See
+[`OPERATIONS.md`](OPERATIONS.md#multi-instance-deployments) and
+[`COMPATIBILITY.md`](COMPATIBILITY.md#topology).
 
 ---
 
@@ -394,7 +404,7 @@ The two proxies have very different surfaces here:
   ```json
   {
     "status": "ok",
-    "version": "0.9.0",
+    "version": "1.0.0",
     "transport": "llm_api_proxy",
     "uptime_s": 412
   }

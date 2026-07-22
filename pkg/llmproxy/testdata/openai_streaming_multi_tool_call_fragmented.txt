@@ -1,0 +1,47 @@
+: Synthesized 2026-07-14 from the OpenAI Chat Completions streaming
+: reference (docs/LLM_API_PROXY.md section 5.1). Realism coverage: TWO
+: parallel tool_calls streamed sequentially by tool_calls[i].index --
+: index 0 (search, {"query": "climate", "limit": 5}) fully then index 1
+: (send_email, {"to": "a@b.com", "body": "hi"}). Each call's arguments
+: are fragmented across several deltas split mid-string / mid-token; a
+: bare `:` keep-alive comment is interleaved. BOTH calls close at the
+: single trailing finish_reason:tool_calls (so one Completed carries
+: two CompletedToolCalls in index order), followed by a usage chunk and
+: data: [DONE].
+
+data: {"id":"chatcmpl-Multi2","object":"chat.completion.chunk","created":1730500100,"model":"gpt-4o-2024-08-06","system_fingerprint":"fp_def456","choices":[{"index":0,"delta":{"role":"assistant","content":null},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Multi2","object":"chat.completion.chunk","created":1730500100,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_s0","type":"function","function":{"name":"search","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Multi2","object":"chat.completion.chunk","created":1730500100,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"query\""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Multi2","object":"chat.completion.chunk","created":1730500100,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":": \"cli"}}]},"finish_reason":null}]}
+
+: keep-alive
+
+data: {"id":"chatcmpl-Multi2","object":"chat.completion.chunk","created":1730500100,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"mate\""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Multi2","object":"chat.completion.chunk","created":1730500100,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":", \"limit\""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Multi2","object":"chat.completion.chunk","created":1730500100,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":": 5}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Multi2","object":"chat.completion.chunk","created":1730500100,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_e1","type":"function","function":{"name":"send_email","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Multi2","object":"chat.completion.chunk","created":1730500100,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"to\""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Multi2","object":"chat.completion.chunk","created":1730500100,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":": \"a@"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Multi2","object":"chat.completion.chunk","created":1730500100,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"b.com\""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Multi2","object":"chat.completion.chunk","created":1730500100,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":", \"bo"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Multi2","object":"chat.completion.chunk","created":1730500100,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"dy\": \""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Multi2","object":"chat.completion.chunk","created":1730500100,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"hi\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Multi2","object":"chat.completion.chunk","created":1730500100,"model":"gpt-4o-2024-08-06","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"chatcmpl-Multi2","object":"chat.completion.chunk","created":1730500100,"model":"gpt-4o-2024-08-06","choices":[],"usage":{"prompt_tokens":95,"completion_tokens":44,"total_tokens":139}}
+
+data: [DONE]
+

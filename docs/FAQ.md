@@ -51,7 +51,7 @@ For production yes — TLS termination, connection pooling, static IP, and buffe
 
 ### Can I run multiple replicas?
 
-Technically yes, practically be careful. Rate-limit buckets and session-cost accumulators are **per-instance** — they do not share state. A load-balanced agent can burst past limits. Mitigations: pin sessions via load-balancer affinity, divide limits by replica count, or stick to one replica (usually plenty — AgentGuard handles 500+ RPS per vCPU). See [`OPERATIONS.md`](OPERATIONS.md#multi-instance-deployments).
+Yes — since v1.0, point every replica at PostgreSQL (`--store-dsn postgres://…`) with a distinct `--node-id`, and approvals, rate-limit buckets, and session costs are shared across the cluster via background reconciliation (default every 2s; the enforcement hot path never waits on the database). Know the semantics: distributed limiting is **bounded-overshoot** — brief bursts can exceed a cap by roughly `reconcile-interval × peak rate` per extra replica before nodes converge — and approvals resolved on one node reach the others within one reconcile interval, always converging to DENY on a conflict. On the default SQLite store, state stays **per-instance**: pin sessions via load-balancer affinity, divide limits by replica count, or stick to one replica (usually plenty — AgentGuard handles 500+ RPS per vCPU). See [`OPERATIONS.md`](OPERATIONS.md#multi-instance-deployments).
 
 ### My approval queue is empty after a restart. Where did the approvals go?
 
@@ -91,7 +91,7 @@ Yes — since v0.6 it ships as the durable-store backend: run with `--persist --
 
 ### Where's the admin API for managing approvers / RBAC?
 
-There isn't one. As of v0.9 there is still **one API key** — anyone with it has full access to approve/deny/audit/status and the dashboard. Multi-tenant policy and state isolation shipped in v0.6 (`/v1/t/{tenant}/...` routes plus the `agentguard tenant` CLI — see [`API.md`](API.md) and [`CLI.md`](CLI.md#agentguard-tenant-v06)), but per-approver identities and RBAC did not. For now, treat the API key like a root password.
+There isn't one. As of v1.0 there is still **one API key** — anyone with it has full access to approve/deny/audit/status and the dashboard. Multi-tenant policy and state isolation shipped in v0.6 (`/v1/t/{tenant}/...` routes plus the `agentguard tenant` CLI — see [`API.md`](API.md) and [`CLI.md`](CLI.md#agentguard-tenant-v06)), but per-approver identities and RBAC did not. For now, treat the API key like a root password.
 
 ### Can I edit policies from the dashboard?
 

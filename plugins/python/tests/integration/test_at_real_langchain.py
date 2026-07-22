@@ -273,7 +273,12 @@ class TestAgentLoopGate:
         agent = create_react_agent(fake_llm, tools=[agent_tool])
         agent.invoke({"messages": [("user", "two calls")]})
 
-        assert calls == ["first", "second"]
+        # The agent runtime executes parallel tool_calls concurrently, so
+        # `calls` records completion order — scheduler-dependent, like the
+        # sorted() on `commands` below already acknowledges. Compare sorted:
+        # the contract is "both tool_calls ran exactly once", not their
+        # relative ordering.
+        assert sorted(calls) == ["first", "second"]
         bodies = [
             json.loads(r["body"])
             for r in integration_mock.requests_to("/v1/check")

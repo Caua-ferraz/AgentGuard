@@ -1,0 +1,70 @@
+: Synthesized 2026-07-14 from the Anthropic Messages API streaming
+: reference (docs/LLM_API_PROXY.md section 5.2). Realism coverage:
+: parallel tool calling emitted as SERIAL content blocks -- a text
+: preamble (index 0), then tool_use get_weather (index 1,
+: {"city": "Paris"}), then tool_use list_files (index 2,
+: {"path": "/var/log", "recursive": true}). Each tool_use's input is
+: fragmented across several input_json_delta events; a ping is
+: interleaved between the two tool blocks. Because the accumulator
+: gates ONE tool_use per content_block_stop and the orchestrator
+: Reset()s between gates, a replaying test must Reset() on each
+: Completed to surface both calls. Closes with message_delta
+: (stop_reason:tool_use + usage) and message_stop.
+
+event: message_start
+data: {"type":"message_start","message":{"id":"msg_01MultiTU","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":531,"output_tokens":3}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I'll get the weather and list the logs."}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_multi_1","name":"get_weather","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"ci"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"ty\": \"Pa"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"ris\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_start
+data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_multi_2","name":"list_files","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"pa"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"th\": \"/var/"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"log\", \"rec"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"ursive\": tr"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"ue}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":2}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":94}}
+
+event: message_stop
+data: {"type":"message_stop"}
+

@@ -37,6 +37,16 @@ import (
 // HTTP /v1/check path measured in pkg/persist); the 3ms ceiling is deliberately
 // generous so only a genuine regression — not CI scheduling jitter — fails the
 // build. See also TestIntegration_HotPathLatencyWithPersistence (HTTP path).
+//
+// Timing note (why this is not just "time each call"): on a fine-grained
+// monotonic clock (Linux CI — the blocking gate's real environment) each sample
+// is exactly one Check, so this is a true per-call p99 at nanosecond precision.
+// On a coarse clock (Windows dev boxes advance the monotonic clock only at the
+// system-timer tick, ~0.5ms here), a sub-µs op reads 0, which would silently
+// degenerate the gate to "p99=0.000ms". To stay legible everywhere, the sampler
+// keeps calling Check until the clock advances and records the mean-per-call for
+// that span (adaptive sampler ported from the v1.0 persist integration gate), so
+// the reported p99 is always non-zero and the gate never quietly no-ops.
 func TestEngineCheck_P99LatencyGate(t *testing.T) {
 	eng := NewEngineFromPolicy(&Policy{
 		Version: "1", Name: "local",
@@ -81,30 +91,69 @@ func TestEngineCheck_P99LatencyGate(t *testing.T) {
 		eng.Check(shellReq, LocalTenantID)
 	}
 
-	const n = 20000
-	samples := make([]float64, n)
-	for i := 0; i < n; i++ {
-		req := shellReq
-		if i%4 == 0 {
-			req = costReq // mix in the write-lock cost path
-		}
+	// Adaptive, coarse-clock-safe sampler (ported from the v1.0 persist
+	// integration gate). On a fine clock each span is one Check, so this is a
+	// true per-call p99 at ns precision; on a coarse clock the span groups
+	// enough Checks for the monotonic clock to advance and records the
+	// mean-per-Check. Every 4th call mixes in the cost path so the engine write
+	// lock (the state the snapshotter contends on) is exercised under load.
+	const (
+		// targetSamples: ≥10000 for a meaningful p99. On a fine clock this is
+		// reached in ~targetSamples calls.
+		targetSamples = 10000
+		// maxCalls bounds the coarse-clock (Windows) runtime: Check is ~0.3µs
+		// and the tick is ~0.5ms, so ~1700 calls per sample. A fine clock
+		// reaches targetSamples long before this cap, so it never applies on CI.
+		maxCalls = 4_000_000
+	)
+	samples := make([]time.Duration, 0, targetSamples)
+	totalCalls := 0
+	for len(samples) < targetSamples && totalCalls < maxCalls {
 		start := time.Now()
-		eng.Check(req, LocalTenantID)
-		samples[i] = float64(time.Since(start).Nanoseconds()) / 1e6 // ms
+		calls := 0
+		var elapsed time.Duration
+		for {
+			req := shellReq
+			if calls%4 == 0 {
+				req = costReq // mix in the write-lock cost path
+			}
+			r := eng.Check(req, LocalTenantID)
+			if req.Scope == "shell" && r.Decision != Allow {
+				t.Fatalf("got decision %s, want ALLOW", r.Decision)
+			}
+			calls++
+			elapsed = time.Since(start)
+			if elapsed > 0 {
+				break // clock advanced; on a fine clock this is one call
+			}
+			if calls >= 1_000_000 {
+				break // guard against a pathological (non-advancing) clock
+			}
+		}
+		totalCalls += calls
+		samples = append(samples, elapsed/time.Duration(calls))
 	}
 
 	close(stop)
 	wg.Wait()
 
-	sort.Float64s(samples)
-	p50 := samples[n*50/100]
-	p99 := samples[n*99/100]
-	max := samples[n-1]
-	t.Logf("Engine.Check p99 gate (persistence active): p50=%.4fms p99=%.4fms max=%.4fms n=%d snapshots=%d",
-		p50, p99, max, n, atomic.LoadInt64(&snapshots))
+	if len(samples) < 200 {
+		t.Fatalf("collected only %d latency samples (want >=200); clock too coarse or Check too slow", len(samples))
+	}
 
-	const budgetMs = 3.0 // CLAUDE.md hot-path contract; generous vs. the sub-0.1ms baseline.
-	if p99 >= budgetMs {
-		t.Errorf("Engine.Check p99 = %.4fms exceeds the %.1fms hot-path budget — a regression has put blocking work on the /v1/check hot path", p99, budgetMs)
+	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	p50 := samples[len(samples)*50/100]
+	p99 := samples[len(samples)*99/100]
+	maxS := samples[len(samples)-1]
+
+	us := func(d time.Duration) float64 { return float64(d.Nanoseconds()) / 1000.0 }
+	t.Logf("Engine.Check p99 gate (persistence active): p50=%.3fµs p99=%.3fµs max=%.3fµs (samples=%d, calls=%d, snapshots=%d)",
+		us(p50), us(p99), us(maxS), len(samples), totalCalls, atomic.LoadInt64(&snapshots))
+
+	// Hot-path budget (CLAUDE.md §1): p99 < 3ms. Persistence is write-behind, so
+	// the active background snapshotter must not appear on this path.
+	const budget = 3 * time.Millisecond
+	if p99 >= budget {
+		t.Errorf("Engine.Check p99 = %.3fµs violates the <3ms hot-path budget — a regression has put blocking work on the /v1/check hot path", us(p99))
 	}
 }

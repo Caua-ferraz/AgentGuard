@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"runtime/debug"
 	"strconv"
@@ -115,6 +116,17 @@ type Config struct {
 	// Zero or negative falls back to MaxAuditQueryLimit. Wired from
 	// policy's proxy.audit.max_limit.
 	AuditMaxLimit int
+
+	// ApprovalValidity bounds how long a RESOLVED approval is honored by
+	// the /v1/check approval-id short-circuit, measured from ResolvedAt.
+	// Past the window the replay falls through to fresh policy evaluation
+	// (fail-safe: the action re-enters the approval flow under a new id).
+	// Zero disables the bound (an unconsumed resolution is honorable until
+	// the entry is purged). Wired from the --approval-validity serve flag;
+	// the CLI default is 5m — matching the SDKs' wait_for_approval poll
+	// window — while the zero value here keeps directly-constructed
+	// Configs (tests, embedders) on pre-flag behavior.
+	ApprovalValidity time.Duration
 }
 
 // Server is the AgentGuard HTTP proxy.
@@ -215,6 +227,21 @@ type PendingAction struct {
 	// store's resolved-approval GC (PurgeResolvedApprovals). Zero while pending;
 	// omitempty keeps single-tenant /api/pending payloads byte-stable.
 	ResolvedAt time.Time `json:"resolved_at,omitempty"`
+	// ConsumedAt is set the first time the /v1/check approval-id
+	// short-circuit honors this entry's resolved ALLOW. A consumed
+	// approval is a spent one-shot capability: subsequent replays fall
+	// through to fresh policy evaluation, so one human click can never
+	// authorize more than one execution. Zero while unconsumed; omitzero
+	// keeps pre-consumption payloads byte-stable on the wire.
+	ConsumedAt time.Time `json:"consumed_at,omitzero"`
+	// ResolvedVia / ResolvedFrom stamp HOW the resolution arrived —
+	// "bearer" (API key), "session" (dashboard cookie), or "open" (server
+	// running without --api-key) — and the peer address it came from.
+	// With single-key auth this is not identity, but it makes incident
+	// reconstruction possible and gives post-v1 multi-key auth a field to
+	// land in. Empty while pending.
+	ResolvedVia  string `json:"resolved_via,omitempty"`
+	ResolvedFrom string `json:"resolved_from,omitempty"`
 }
 
 // AuditEvent is sent over SSE to dashboard clients for any check result.
@@ -337,6 +364,16 @@ func NewServer(cfg Config) *Server {
 	mux.HandleFunc("/v1/status/", requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleStatus))
 	mux.HandleFunc("/v1/audit", requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleAuditQuery))
 
+	// Audit ingest (POST): append a pre-decided fail-closed refusal to the
+	// trail without running policy — the F1 audit-verdict fidelity path, used
+	// by a transport proxy that manufactures its own refusal (e.g. the LLM API
+	// Proxy's malformed-tool-call DENY). State-changing (writes an entry), so it
+	// requires Bearer OR (session + CSRF), matching approve/deny. The
+	// method-specific "POST /v1/audit" is strictly more specific than the
+	// methodless "/v1/audit" GET query above, so the mux routes POST here and
+	// GET to handleAuditQuery with no conflict.
+	mux.HandleFunc("POST /v1/audit", requireAuthOrSession(cfg.APIKey, s.sessions, true, s.handleAuditRecord))
+
 	// -----------------------------------------------------------------
 	// Tenant-aware mirrors of every operational route.
 	//
@@ -353,7 +390,7 @@ func NewServer(cfg Config) *Server {
 	// routes additionally require CSRF when authenticated via session.
 	//
 	// Method-prefixed wildcard syntax is Go 1.22+; the Dockerfile pins
-	// golang:1.22-alpine so this is safe.
+	// golang:1.25.12-alpine so this is safe.
 	mux.HandleFunc("POST /v1/t/{tenant}/check", s.withTenant(s.handleCheck))
 	mux.HandleFunc("POST /v1/t/{tenant}/approve/{id}",
 		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, true, s.handleApprove)))
@@ -363,6 +400,8 @@ func NewServer(cfg Config) *Server {
 		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleStatus)))
 	mux.HandleFunc("GET /v1/t/{tenant}/audit",
 		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleAuditQuery)))
+	mux.HandleFunc("POST /v1/t/{tenant}/audit",
+		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, true, s.handleAuditRecord)))
 
 	// Auth endpoints for dashboard login/logout.
 	mux.HandleFunc("/auth/login", s.handleLogin)
@@ -602,9 +641,29 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 				// Intentional fall-through: do NOT short-circuit, do NOT
 				// 4xx. Normal Engine.Check runs below.
 			} else {
-				result := s.resolvedApprovalToResult(req, pa)
-				s.logAndRespond(w, req, result, start, tenantID)
-				return
+				// Shape matches — now spend the capability atomically.
+				// ConsumeResolved re-checks state under the write lock so
+				// concurrent replays of one approved id can never both be
+				// honored: exactly one consumes the ALLOW, the rest fall
+				// through to fresh evaluation (which re-enters the
+				// approval flow — fail-safe, and no validity/consumption
+				// oracle is exposed, matching the mismatch path above).
+				cp, outcome := s.approval.ConsumeResolved(req.ApprovalID, tenantID, time.Now().UTC(), s.cfg.ApprovalValidity)
+				switch outcome {
+				case consumePending, consumeHonored:
+					result := s.resolvedApprovalToResult(req, cp)
+					s.logAndRespond(w, req, result, start, tenantID)
+					return
+				case consumeAlreadyConsumed:
+					metrics.IncApprovalReplayRefused("consumed")
+					log.Printf("approval_id %q replayed after its ALLOW was already consumed (one-shot); falling through to fresh policy evaluation", req.ApprovalID)
+				case consumeExpired:
+					metrics.IncApprovalReplayRefused("expired")
+					log.Printf("approval_id %q resolved longer than the approval-validity window ago; falling through to fresh policy evaluation", req.ApprovalID)
+				case consumeNotFound:
+					// Entry evicted between Lookup and Consume; treat as
+					// unknown id.
+				}
 			}
 		}
 		// Unknown approval_id — fall through to normal evaluation.
@@ -938,6 +997,54 @@ func approvalIDFromRequest(r *http.Request, legacyPrefix string) string {
 	return ""
 }
 
+// resolutionActor derives the (via, from) stamp for an approve/deny call:
+// which auth mechanism admitted it and the peer address it arrived from.
+// Coarse by design — with single-key auth there is no identity to record —
+// but enough to reconstruct "who could have clicked this" in an incident.
+func resolutionActor(r *http.Request) (via, from string) {
+	switch {
+	case r.Header.Get("Authorization") != "":
+		via = "bearer"
+	case hasSessionCookie(r):
+		via = "session"
+	default:
+		via = "open" // server running without --api-key
+	}
+	from = r.RemoteAddr
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		from = host
+	}
+	return via, from
+}
+
+// hasSessionCookie reports whether the request carries an ag_session cookie.
+func hasSessionCookie(r *http.Request) bool {
+	_, err := r.Cookie(SessionCookieName)
+	return err == nil
+}
+
+// writeResolveError maps a Resolve failure onto the wire: a write-once
+// conflict is 409 with a structured body (so dashboards/scripts can show
+// the standing decision); anything else keeps the legacy 404 plain-text.
+func writeResolveError(w http.ResponseWriter, err error) {
+	var conflict *ApprovalConflictError
+	if errors.As(err, &conflict) {
+		status := "denied"
+		if policy.Decision(conflict.Existing) == policy.Allow {
+			status = "approved"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":  "already resolved",
+			"id":     conflict.ID,
+			"status": status,
+		})
+		return
+	}
+	http.Error(w, err.Error(), http.StatusNotFound)
+}
+
 // handleApprove approves a pending action.
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -950,8 +1057,9 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing id", http.StatusBadRequest)
 		return
 	}
-	if err := s.approval.Resolve(id, policy.Allow, TenantIDFromContext(r.Context())); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+	via, from := resolutionActor(r)
+	if err := s.approval.ResolveWithActor(id, policy.Allow, TenantIDFromContext(r.Context()), via, from); err != nil {
+		writeResolveError(w, err)
 		return
 	}
 
@@ -971,8 +1079,9 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing id", http.StatusBadRequest)
 		return
 	}
-	if err := s.approval.Resolve(id, policy.Deny, TenantIDFromContext(r.Context())); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+	via, from := resolutionActor(r)
+	if err := s.approval.ResolveWithActor(id, policy.Deny, TenantIDFromContext(r.Context()), via, from); err != nil {
+		writeResolveError(w, err)
 		return
 	}
 
@@ -1025,6 +1134,84 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(entries)
+}
+
+// handleAuditRecord appends a pre-decided fail-closed refusal to the audit
+// trail WITHOUT running the policy engine. It is the ingest side of the F1
+// audit-verdict fidelity fix (C3): a transport proxy that manufactures its own
+// refusal — e.g. the LLM API Proxy's malformed-tool-call DENY — POSTs the
+// verdict the client actually received here, so the central audit log (the
+// single source of truth) reflects that DENY rather than the ALLOW a
+// fidelity-blind /v1/check would log after evaluating the garbage-projected
+// request.
+//
+// The endpoint records DENY only: Decision is hardcoded to policy.Deny, so a
+// caller can never inject an ALLOW into the trail. It reuses logAndRespond — the
+// same audit-write + SSE-broadcast chokepoint /v1/check uses — so recorded
+// entries are indistinguishable downstream (transport tag, tenant stamp, SSE
+// chip) from real gate entries. This handler is NOT on the hot path: it fires
+// only on the proxy's rare malformed-completion path, never on /v1/check.
+func (s *Server) handleAuditRecord(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	start := time.Now()
+
+	limit := s.maxRequestBodyBytes
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	var rec policy.AuditRecord
+	if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
+		// Distinguish "body too large" from other parse errors, mirroring
+		// handleCheck so the body-cap enforcement stays observable.
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			metrics.IncRequestRejected(metrics.RejectedBodyTooLarge)
+			http.Error(w, fmt.Sprintf("Request body too large (limit %d bytes)", limit), http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Schema negotiation mirrors handleCheck: empty defaults to v1; any other
+	// value is rejected so a future v2 record never silently misparses.
+	if rec.SchemaVersion == "" {
+		rec.SchemaVersion = SchemaVersionV1
+	} else if rec.SchemaVersion != SchemaVersionV1 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":    "unsupported schema_version; expected " + SchemaVersionV1,
+			"received": rec.SchemaVersion,
+		})
+		return
+	}
+
+	// Rule is required: a blank rule would produce an unattributable audit
+	// entry that dashboards and alerts cannot key on.
+	if strings.TrimSpace(rec.Rule) == "" {
+		http.Error(w, "rule is required", http.StatusBadRequest)
+		return
+	}
+
+	tenantID := TenantIDFromContext(r.Context())
+
+	// DENY only. The caller-supplied decision is intentionally not trusted:
+	// this endpoint exists solely to record a fail-closed refusal, so Decision
+	// is hardcoded and can never be an ALLOW.
+	result := policy.CheckResult{
+		Decision: policy.Deny,
+		Reason:   rec.Reason,
+		Rule:     rec.Rule,
+	}
+
+	// logAndRespond is the shared audit-write + SSE-broadcast + response
+	// chokepoint. Reusing it stamps the transport tag (from request meta), the
+	// tenant, the decision metric, and the timing headers exactly as a real
+	// gate entry would — keeping the trail uniform.
+	s.logAndRespond(w, rec.Request, result, start, tenantID)
 }
 
 // parseBoundedInt parses an optional query-string integer.
@@ -1352,6 +1539,64 @@ func (q *ApprovalQueue) Lookup(id, tenantID string) (*PendingAction, bool) {
 	return &cp, true
 }
 
+// consumeOutcome is the result of ConsumeResolved's atomic state check.
+type consumeOutcome int
+
+const (
+	// consumeNotFound: unknown id or another tenant's id (no oracle).
+	consumeNotFound consumeOutcome = iota
+	// consumePending: entry exists but no human has resolved it yet.
+	consumePending
+	// consumeHonored: the caller may act on the returned copy's decision.
+	// For ALLOW this call just spent the one-shot capability.
+	consumeHonored
+	// consumeAlreadyConsumed: the ALLOW was already spent by an earlier
+	// replay — the caller must fall through to fresh policy evaluation.
+	consumeAlreadyConsumed
+	// consumeExpired: resolved longer than the validity window ago — the
+	// caller must fall through to fresh policy evaluation.
+	consumeExpired
+)
+
+// ConsumeResolved is the write side of the /v1/check approval-id
+// short-circuit. It atomically checks {exists, tenant, resolved, within
+// validity, not yet consumed} and — for a resolved ALLOW — marks the entry
+// consumed, all under one lock, so concurrent replays of the same id can
+// never both be honored (exactly one wins; the rest see AlreadyConsumed).
+//
+// A resolved DENY is honored without consumption: replaying a deny is
+// harmless, and keeping it sticky within the validity window means a model
+// that retries after a human denial gets an immediate deny instead of
+// spawning a fresh approval request. validity <= 0 disables the expiry
+// check (Config.ApprovalValidity zero value).
+//
+// The returned *PendingAction is a defensive copy, valid for NotFound
+// (nil), Pending, and Honored.
+func (q *ApprovalQueue) ConsumeResolved(id, tenantID string, now time.Time, validity time.Duration) (*PendingAction, consumeOutcome) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	pa, ok := q.pending[id]
+	if !ok || !tenantsMatch(pa.TenantID, tenantID) {
+		return nil, consumeNotFound
+	}
+	if !pa.Resolved {
+		cp := *pa
+		return &cp, consumePending
+	}
+	if validity > 0 && now.Sub(pa.ResolvedAt) > validity {
+		return nil, consumeExpired
+	}
+	if policy.Decision(pa.Decision) == policy.Allow {
+		if !pa.ConsumedAt.IsZero() {
+			return nil, consumeAlreadyConsumed
+		}
+		pa.ConsumedAt = now
+	}
+	cp := *pa
+	return &cp, consumeHonored
+}
+
 // Add registers a new pending approval. If the queue is at capacity the
 // oldest resolved entry is evicted first (LRU on CreatedAt; resolution does
 // not rewind it, so the eviction target is the entry that has been around
@@ -1422,7 +1667,35 @@ func (q *ApprovalQueue) evictOldestResolvedLocked() bool {
 	return true
 }
 
+// ApprovalConflictError reports an attempt to overwrite an already-resolved
+// approval with the opposite decision. Resolution is write-once: a decision,
+// once made, is history — corrections happen by re-running the action through
+// /v1/check (fresh approval id), never by mutating the record. Without this
+// latch, any late, duplicated, or mistaken second click could silently flip a
+// DENY on a destructive action into an ALLOW that the agent's poll loop or
+// replay path would then honor.
+type ApprovalConflictError struct {
+	ID       string
+	Existing string // the decision already on record ("ALLOW" / "DENY")
+}
+
+func (e *ApprovalConflictError) Error() string {
+	return fmt.Sprintf("approval %s already resolved %s; decisions are write-once", e.ID, e.Existing)
+}
+
+// Resolve is ResolveWithActor without an actor stamp. Kept for callers
+// (and tests) that predate the stamp; the HTTP handlers use
+// ResolveWithActor.
 func (q *ApprovalQueue) Resolve(id string, decision policy.Decision, tenantID string) error {
+	return q.ResolveWithActor(id, decision, tenantID, "", "")
+}
+
+// ResolveWithActor resolves a pending approval, write-once. Repeating the
+// SAME decision is an idempotent no-op (nil error, no field mutation, no
+// duplicate SSE broadcast) so retried HTTP requests are harmless. The
+// OPPOSITE decision returns *ApprovalConflictError and mutates nothing.
+// via/from stamp how the resolution arrived (see PendingAction.ResolvedVia).
+func (q *ApprovalQueue) ResolveWithActor(id string, decision policy.Decision, tenantID, via, from string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -1433,9 +1706,18 @@ func (q *ApprovalQueue) Resolve(id string, decision policy.Decision, tenantID st
 		return fmt.Errorf("pending action %s not found", id)
 	}
 
+	if pa.Resolved {
+		if pa.Decision == string(decision) {
+			return nil // idempotent repeat; original stamp and timestamp stand
+		}
+		return &ApprovalConflictError{ID: id, Existing: pa.Decision}
+	}
+
 	pa.Resolved = true
 	pa.Decision = string(decision)
 	pa.ResolvedAt = time.Now().UTC()
+	pa.ResolvedVia = via
+	pa.ResolvedFrom = from
 
 	// Broadcast resolution to SSE clients of this tenant. Carry the original
 	// transport so dashboard JS keeps the same chip on the "resolved" event as
@@ -1511,6 +1793,121 @@ func (q *ApprovalQueue) Restore(actions []*PendingAction) {
 		}
 		cp := *pa
 		q.pending[pa.ID] = &cp
+	}
+}
+
+// remoteApplyChunk bounds how many remote approval records ApplyRemote merges
+// under a single q.mu write-lock acquisition. The hot-path Lookup takes
+// q.mu.RLock; holding the write lock for a whole O(n) re-hydrate pass would
+// stall every concurrent Lookup (CLAUDE.md §1). We acquire, merge ≤K, release,
+// repeat — mirroring ratelimit.applyChunk and policy.costApplyChunk (K=128).
+const remoteApplyChunk = 128
+
+// ApplyRemote merges remote approval records (loaded from the shared durable
+// store by the background reconcile goroutine) into the local queue. It is the
+// write half of multi-node approval cross-node visibility (v1.0) and runs ONLY
+// on that background goroutine — NEVER on the /v1/check hot path, so it adds no
+// request-path latency. The hot-path Lookup stays a pure in-memory RLock read
+// and is unchanged.
+//
+// Each element is a remote view of one entry, tenant-normalized exactly as the
+// queue stores it (the local tenant as ""), so the effective merge key is
+// (tenant, ID) and a remote row for tenant X can only ever touch entry (X, ID)
+// — no cross-tenant surfacing (CLAUDE.md §3).
+//
+// Locking: at most remoteApplyChunk (K=128) records are merged per write-lock
+// hold, so a concurrent Lookup blocks for O(K) map ops, not O(n).
+//
+// Per-key merge rules (fail-closed — the security crux). For each remote record
+// r the CURRENT local entry l is re-read UNDER the write lock (never from a
+// stale snapshot), so a concurrent local Resolve remains authoritative:
+//
+//   - l absent:                     INSERT r (respecting maxSize, like Restore).
+//   - l pending, r resolved:        adopt r (copy Decision+ResolvedAt+Result) — the visibility goal.
+//   - l resolved, r pending:        KEEP l — never resurrect a resolved action.
+//   - both resolved, diff decision: DENY wins, regardless of ResolvedAt (a deny is never overwritten by a remote allow).
+//   - both resolved, same decision: KEEP l — ResolvedAt is a tiebreak only; state is identical.
+//   - both pending:                 KEEP l — nothing to surface yet.
+//
+// A record whose ID is absent from `remote` is never passed here, so an
+// unflushed local-only pending survives untouched (the no-clobber guarantee).
+func (q *ApprovalQueue) ApplyRemote(remote []*PendingAction) {
+	for i := 0; i < len(remote); i += remoteApplyChunk {
+		end := i + remoteApplyChunk
+		if end > len(remote) {
+			end = len(remote)
+		}
+		q.mu.Lock()
+		for _, r := range remote[i:end] {
+			if r == nil {
+				continue
+			}
+			l, ok := q.pending[r.ID]
+			if !ok {
+				// exists remote, not local => INSERT, honoring the cap exactly as
+				// Restore does (drop when full — never evict a live entry here).
+				if q.maxSize > 0 && len(q.pending) >= q.maxSize {
+					continue
+				}
+				cp := *r
+				q.pending[r.ID] = &cp
+				continue
+			}
+			// A local entry sharing r's raw ID but owned by a DIFFERENT tenant
+			// must never be rewritten by r (CLAUDE.md §3). The store PKs approvals
+			// on (tenant_id, id), so two tenants can legitimately share a raw ID;
+			// the local map is keyed by ID alone, so guard here. Mismatch => leave
+			// the local entry alone (r is dropped rather than surfaced cross-tenant).
+			if !tenantsMatch(l.TenantID, r.TenantID) {
+				continue
+			}
+			mergeRemoteLocked(l, r)
+		}
+		q.mu.Unlock()
+	}
+}
+
+// mergeRemoteLocked applies the per-key merge rules for one remote record r
+// whose tenant already matches the live local entry l. Caller holds q.mu.Lock.
+// It mutates l in place; it never resurrects a resolved action and never lets a
+// remote allow overwrite a local deny (fail-closed).
+func mergeRemoteLocked(l, r *PendingAction) {
+	switch {
+	case !l.Resolved && r.Resolved:
+		// local pending, remote resolved => adopt the remote resolution,
+		// actor stamp included (the resolver lives on the other node).
+		l.Resolved = true
+		l.Decision = r.Decision
+		l.ResolvedAt = r.ResolvedAt
+		l.Result = r.Result
+		l.ResolvedVia = r.ResolvedVia
+		l.ResolvedFrom = r.ResolvedFrom
+	case l.Resolved && r.Resolved && l.Decision != r.Decision:
+		// Conflicting resolutions => DENY wins, regardless of ResolvedAt. Canonical
+		// decisions are only ALLOW/DENY, so a differing pair is exactly one of
+		// each; adopt the remote ONLY when it is the deny (local already-deny, or a
+		// non-canonical remote, is kept — never downgraded to a remote allow).
+		if l.Decision != string(policy.Deny) && r.Decision == string(policy.Deny) {
+			l.Resolved = true
+			l.Decision = r.Decision
+			l.ResolvedAt = r.ResolvedAt
+			l.Result = r.Result
+			l.ResolvedVia = r.ResolvedVia
+			l.ResolvedFrom = r.ResolvedFrom
+		}
+	default:
+		// l resolved & r pending           => keep l (never resurrect).
+		// both resolved, same decision       => keep l (identical state).
+		// both pending                        => keep l (nothing to surface).
+	}
+	// One-shot consumption is monotonic CLUSTER-wide, not per node: adopt a
+	// remote consumption stamp when this node has none (the resolved ALLOW
+	// was spent on another node — without this, one human click is honorable
+	// once per node), and never clear a local stamp. The DENY-wins analog
+	// for the spent-capability bit; applies in every branch, including
+	// same-decision "identical" merges where only the stamp differs.
+	if l.ConsumedAt.IsZero() && !r.ConsumedAt.IsZero() {
+		l.ConsumedAt = r.ConsumedAt
 	}
 }
 

@@ -78,6 +78,68 @@ func (l *Limiter) Restore(snaps []BucketSnapshot) {
 	}
 }
 
+// applyChunk bounds how many BucketDelta entries ApplyDeltas processes under a
+// single lock acquisition. The reconcile syncer may hand ApplyDeltas thousands
+// of deltas; holding l.mu for the whole O(n) pass would serialize every
+// concurrent Allow behind reconcile and blow the hot-path latency budget
+// (CLAUDE.md §1). Instead we acquire, apply K, release, and repeat — so a hot
+// Allow waits at most K map operations, never the full batch.
+const applyChunk = 128
+
+// BucketDelta is a background adjustment to one bucket's remaining tokens.
+// TokenAdjust is signed; a NEGATIVE value reduces the remaining tokens (used by
+// the multi-node reconcile syncer to subtract other nodes' consumption from
+// this node's local view so the cluster-wide limit is respected). It is applied
+// by ApplyDeltas, never on the request path.
+type BucketDelta struct {
+	Key         string
+	TokenAdjust int // negative = reduce remaining tokens
+}
+
+// ApplyDeltas adjusts the remaining tokens of already-tracked buckets in
+// bounded, chunked lock acquisitions. It is the write half of multi-node rate
+// reconciliation and is called ONLY from the background syncer goroutine — never
+// on the /v1/check hot path, so it cannot itself add hot-path latency.
+//
+// Semantics (CLAUDE.md §1/§4 safe):
+//   - Existing keys only. A delta whose key is not currently tracked is skipped;
+//     ApplyDeltas never synthesizes a bucket (it lacks max/window and doing so
+//     would let reconcile invent limits).
+//   - Chunked locking: at most applyChunk (K≈128) buckets are touched per lock
+//     hold, so a concurrent Allow blocks for O(K) map ops, not O(n).
+//   - Clamped to [0, max]: a negative adjust never drives remaining below zero;
+//     a (spurious) positive adjust never grants MORE than the bucket's capacity.
+//     For a firewall, granting above capacity would be a safety regression, so
+//     both ends are clamped even though reconcile only ever sends reductions.
+//   - It does NOT touch lastRefill/window/max, so the fixed-window rollover math
+//     in Allow is unaffected; on the next window reset tokens return to max and
+//     the reconcile rebaselines for the new epoch.
+func (l *Limiter) ApplyDeltas(deltas []BucketDelta) {
+	for i := 0; i < len(deltas); i += applyChunk {
+		end := i + applyChunk
+		if end > len(deltas) {
+			end = len(deltas)
+		}
+		l.mu.Lock()
+		for _, d := range deltas[i:end] {
+			if d.TokenAdjust == 0 {
+				continue
+			}
+			b, ok := l.buckets[d.Key]
+			if !ok {
+				continue // existing keys only — never invent a bucket
+			}
+			b.tokens += d.TokenAdjust
+			if b.tokens < 0 {
+				b.tokens = 0
+			} else if b.tokens > b.max {
+				b.tokens = b.max
+			}
+		}
+		l.mu.Unlock()
+	}
+}
+
 // Allow checks whether a request identified by key is within the rate limit.
 // maxRequests is the maximum number of requests allowed in the given window.
 // Returns nil if allowed, or an error describing the limit.

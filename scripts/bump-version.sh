@@ -28,6 +28,11 @@
 
 set -eo pipefail
 
+# grep -P refuses to run in multibyte non-UTF-8 locales (Git Bash on Windows
+# defaults to one), and check_canonical would read that error as "no leftover"
+# — a silent false-OK on the final verification. Pin a locale grep -P accepts.
+export LC_ALL=C.UTF-8
+
 if [ $# -ne 1 ]; then
   echo "Usage: ./scripts/bump-version.sh <new-version>  (e.g. 0.5.0)" >&2
   exit 1
@@ -66,7 +71,8 @@ REPLACEMENTS=(
   'plugins/python/pyproject.toml|s/(^version\s*=\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
   'plugins/python/agentguard/adapters/mcp.py|s/(^SDK_VERSION\s*=\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
   'plugins/typescript/package.json|s/(^\s*"version"\s*:\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
-  'Makefile|s/(^VERSION=)[0-9]+\.[0-9]+\.[0-9]+$/${1}'"$NEW"'/'
+  # \r? keeps the anchor working on CRLF working trees (Windows core.autocrlf).
+  'Makefile|s/(^VERSION=)[0-9]+\.[0-9]+\.[0-9]+(\r?)$/${1}'"$NEW"'${2}/'
   'docs/SETUP.md|s/("version":")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
   'docs/API.md|s/("version":\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
   'docs/MCP_GATEWAY.md|s/("version":\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
@@ -172,7 +178,7 @@ if [ -f 'plugins/typescript/package-lock.json' ]; then
     LEFTOVER=1
   fi
 fi
-check_canonical 'Makefile'                                  "^VERSION=$OLD\$"
+check_canonical 'Makefile'                                  "^VERSION=$OLD\r?\$"
 check_canonical 'docs/SETUP.md'                             "\"version\":\"$OLD\""
 check_canonical 'docs/API.md'                               "\"version\":\s*\"$OLD\""
 check_canonical 'docs/MCP_GATEWAY.md'                       "\"version\":\s*\"$OLD\""

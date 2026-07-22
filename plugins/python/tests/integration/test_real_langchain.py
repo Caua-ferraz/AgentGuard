@@ -166,8 +166,15 @@ class TestRealLangChainBatch:
 
         out = gt.batch(["a", "b", "c"])
 
+        # `out` order matches input order (LangChain's batch preserves
+        # input/output alignment) but `calls` records execution order:
+        # the underlying Runnable.batch fans the three invocations out on
+        # a ThreadPoolExecutor, so completion order is scheduler-dependent
+        # and flakes under load. Compare sorted — "all three inputs ran
+        # exactly once" — mirroring the same fix in
+        # tests/test_langchain.py::test_guardedtool_batch_all_allowed.
         assert out == ["echo:a", "echo:b", "echo:c"]
-        assert calls == ["a", "b", "c"]
+        assert sorted(calls) == ["a", "b", "c"]
         # Three checks (one per batch entry) before the underlying batch fires.
         assert len(integration_mock.requests_to("/v1/check")) == 3
 

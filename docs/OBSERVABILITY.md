@@ -92,7 +92,7 @@ The LLM proxy additionally records these series in its process-local registry (`
 
 The MCP gateway emits no metrics of its own; its decisions surface in the central server's audit stream and counters.
 
-**Approval-id replay defense (central server):** `agentguard_approval_replay_mismatch_total` — non-zero is a security alert.
+**Approval-id replay defense (central server):** `agentguard_approval_replay_mismatch_total` — non-zero is a security alert. Its companion `agentguard_approval_replay_refused_total{reason="consumed"|"expired"}` counts shape-matched replays refused by the approval state machine (approvals are one-shot and time-boxed by `--approval-validity`); a rising `consumed` count means something is trying to reuse one human approval for multiple executions.
 
 ---
 
@@ -188,13 +188,14 @@ Example `/api/stats` response:
 
 ```json
 {
-  "total_checks": 12034,
-  "total_allowed": 10998,
-  "total_denied":  842,
-  "total_approvals": 194,
-  "pending_count": 3
+  "total": 12034,
+  "allowed": 10998,
+  "denied": 842,
+  "approvals": 194
 }
 ```
+
+For the pending-approval count, use the length of `/api/pending`.
 
 Do **not** poll `/api/stats` in a tight loop; use `/api/stream` (SSE) for real-time updates and fall back to one `/api/stats` on reconnect.
 

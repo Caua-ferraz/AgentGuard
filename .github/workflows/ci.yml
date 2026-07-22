@@ -19,7 +19,17 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Cross-platform coverage for the Go suite ONLY. The other jobs stay
+    # ubuntu-latest: they are ecosystem/service-specific (Docker, Postgres
+    # service container, Python/Node toolchains) and matrixing them adds
+    # runner queue time + flakes without adding firewall coverage.
+    # fail-fast: false so one OS leg failing does not cancel the others —
+    # we want to see whether a break is Windows-only or all-platform.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,9 +39,11 @@ jobs:
           go-version: '1.25.12'
 
       - name: Build
+        shell: bash
         run: go build -v ./...
 
       - name: Test
+        shell: bash
         run: go test -v -race -coverprofile=coverage.out ./...
 
       # Hot-path p99 latency gate (CLAUDE.md: "Latency is God", <3ms p99).
@@ -48,14 +60,18 @@ jobs:
       - name: Upload coverage
         uses: actions/upload-artifact@v4
         with:
-          name: go-coverage
+          # Per-OS name: upload-artifact@v4 rejects two uploads sharing one
+          # name within a run, so the matrix legs must not collide.
+          name: go-coverage-${{ matrix.os }}
           path: coverage.out
           if-no-files-found: warn
 
       - name: Validate default policy
+        shell: bash
         run: go run ./cmd/agentguard validate --policy configs/default.yaml
 
       - name: Validate example policies
+        shell: bash
         run: |
           for f in configs/examples/*.yaml; do
             echo "Validating $f..."
@@ -236,26 +252,42 @@ jobs:
   # framework extra and runs only its targeted integration test file —
   # keeps install time bounded and isolates per-framework breakage.
   #
-  # Non-blocking (`continue-on-error: true`) BY DESIGN — reaffirmed for v1.0.
-  # These tests pin to LIVE upstream framework releases (langchain, crewai,
-  # browser-use), so a red leg usually means upstream drift, not an AgentGuard
-  # regression; gating PR merges on it would let an unrelated framework release
-  # block every merge. Failures still surface (the red leg + the weekly cron
-  # run), and the per-framework matrix isolates which one broke. The
-  # AgentGuard-owned contract is covered by the BLOCKING `python-test` job's
-  # adapter unit tests; this job is the higher-fidelity, lower-stability coupon.
+  # Per-matrix blocking as of v1.0 (sub-task 2d): langchain and crewai are
+  # REQUIRED (allow_failure: false ⇒ a red leg fails CI); browser-use stays
+  # advisory (allow_failure: true) because its `playwright install` pulls
+  # ~200MB of Chromium from a CDN and is the known flake. Original v0.5
+  # decision (whole job non-blocking) recorded in .audit/v05_decisions.md
+  # under "Integration-tests CI job non-blocking".
+  #
+  # Rationale for keeping browser-use advisory (carried from v0.9): these tests
+  # pin to LIVE upstream framework releases, so a red browser-use leg usually
+  # means upstream drift, not an AgentGuard regression — gating merges on it
+  # would let an unrelated framework release block every merge. Failures still
+  # surface (the red leg + the weekly cron run) and the per-framework matrix
+  # isolates which one broke. The AgentGuard-owned contract is covered by the
+  # BLOCKING `python-test` job's adapter unit tests AND — new in v1.0 — by the
+  # now-required langchain/crewai legs here; this job is the higher-fidelity,
+  # lower-stability coupon.
   #
   # The browser-use leg additionally requires Chromium binaries via
   # `playwright install`; if that step fails (network flake, missing
-  # libs), only that matrix row goes red.
+  # libs), only that matrix row goes red — and it does not fail CI.
   integration-tests:
     runs-on: ubuntu-latest
-    # Non-blocking by design (see header); weekly cron + PR annotation surface failures.
-    continue-on-error: true
+    # Per-matrix gating: langchain/crewai red ⇒ CI red; browser-use red ⇒
+    # CI still green. Driven by the allow_failure flag on each matrix entry.
+    continue-on-error: ${{ matrix.allow_failure }}
     strategy:
       fail-fast: false
       matrix:
         framework: [langchain, crewai, browser-use]
+        include:
+          - framework: langchain
+            allow_failure: false
+          - framework: crewai
+            allow_failure: false
+          - framework: browser-use
+            allow_failure: true
     steps:
       - uses: actions/checkout@v4
 
@@ -363,3 +395,69 @@ jobs:
             fi
           done
           docker rm -f agentguard-ci
+
+  # Postgres-backed integration tests. The pg-gated tests in pkg/store
+  # (postgres_test.go, consumption_test.go) SKIP when AGENTGUARD_PG_DSN is unset;
+  # here we stand up a real Postgres 16 service container and point the DSN at it
+  # so those tests — plus the reconcile tests in pkg/persist — actually run.
+  # Blocking (NOT continue-on-error): multi-node correctness (tenant isolation +
+  # cost/rate reconciliation) cannot ship unverified.
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: agentguard
+        ports:
+          - 5432:5432
+        # Gate the job's steps on the container being ready to accept
+        # connections, so the first test does not race the DB coming up.
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agentguard"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.12'
+
+      - name: Run Postgres-backed store + persist tests
+        env:
+          # Matches the service container above; sslmode=disable because the
+          # postgres:16-alpine image serves plaintext on the runner-local network.
+          AGENTGUARD_PG_DSN: postgres://postgres:postgres@localhost:5432/agentguard?sslmode=disable
+        run: go test ./pkg/store/... ./pkg/persist/... -count=1
+
+  # Hot-path latency gates (CLAUDE.md §1: p99 < 3ms). Run WITHOUT -race so the
+  # timings are realistic — the main `test` job already runs these under -race
+  # for correctness, and race instrumentation would distort latency. Blocking: a
+  # regression past the budget must fail CI, not warn.
+  latency-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.12'
+
+      - name: Hot-path p99 latency gates (<3ms)
+        # Three blocking gates: the persistence integration hot path, the pure
+        # Engine.Check hot path, and the concurrent soak — all asserting
+        # p99 < 3ms in-test. The soak's p99 assert enforces only under
+        # AGENTGUARD_SOAK_P99_GATE=1, set here where the test runs ISOLATED;
+        # inside the main `test` job's parallel `go test ./...` it is advisory,
+        # because sibling test binaries co-scheduling on the runner inflate the
+        # tail without indicting the hot path.
+        run: |
+          go test ./pkg/persist/ -run TestIntegration_HotPathLatencyWithPersistence -v -count=1
+          go test ./pkg/policy/ -run TestEngineCheck_P99LatencyGate -v -count=1
+          AGENTGUARD_SOAK_P99_GATE=1 go test ./pkg/persist/ -run TestIntegration_ConcurrentHotPathLatencyWithPersistence -v -count=1

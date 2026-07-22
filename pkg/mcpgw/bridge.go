@@ -317,6 +317,19 @@ func (b *Bridge) dispatchFrame(ctx context.Context, line []byte, wg *sync.WaitGr
 // handleNotification routes notifications to upstreams. Currently
 // broadcasts to all upstreams (cancellation, initialized). Per-upstream
 // targeted notifications are a future enhancement.
+//
+// KNOWN LIMITATION — notifications/cancelled is a best-effort no-op.
+// The cancellation's params.requestId is in the HOST id space, but
+// StdioUpstream.Send rewrites every request id to a gateway-internal id
+// that the host never sees (the upstream id space is per-connection —
+// see the Upstream.Send contract). A cancellation broadcast here can
+// therefore never match an in-flight upstream request, so the upstream
+// cannot act on it. The broadcast is harmless (the upstream ignores an
+// unknown requestId) but does nothing. Wiring real cancellation needs a
+// host<->upstream request-id map threaded through the transport so the
+// gateway can translate requestId on the way out; that is deferred
+// pending a design (do not build it as a drive-by). Documented as a
+// known limitation in docs/MCP_GATEWAY.md § 8.4.
 func (b *Bridge) handleNotification(ctx context.Context, method string, params json.RawMessage) {
 	n := &Notification{
 		JSONRPC: JSONRPCVersion,

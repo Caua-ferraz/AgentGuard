@@ -121,7 +121,8 @@ cd AgentGuard && go build -o agentguard ./cmd/agentguard
 # Or via Go install
 go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@latest
 
-# Or Docker
+# Or Docker (build the image from the repo's Dockerfile first)
+docker build -t agentguard:latest .
 docker run -d -p 8080:8080 \
   -v agentguard-audit:/var/lib/agentguard \
   agentguard:latest
@@ -190,8 +191,9 @@ AgentGuard is a policy enforcement and audit layer. It is **not** an OS sandbox.
 - **Two of the three layers are wire-level.** The MCP Gateway and LLM API Proxy sit between the agent and its tools / model. There is no opt-out short of pointing the client at a different MCP server or ignoring the SDK's base-URL configuration. Operators who control the agent's environment (env vars, network egress, MCP client config) get an enforcement boundary, not just an advisory one.
 - **The SDK layer is opt-in.** The agent must call `guard.check(...)` (directly, via `@guarded`, or via a framework adapter) — that makes it advisory. Use it when the wire-level layers are impractical (offline scripts, custom transports); pair it with the gateway / LLM proxy whenever both apply.
 - **AgentGuard does not sandbox the host or intercept syscalls.** A determined agent that controls its own runtime can bypass AgentGuard by ignoring `OPENAI_BASE_URL`, talking to a different MCP server, or shelling out directly. Combine AgentGuard with OS-level isolation (containers, seccomp, AppArmor, network egress rules) when the threat model includes a hostile agent.
-- **Pattern matching is string-glob, not semantic.** A deny rule for `rm -rf *` matches literal strings; an agent (or a creative human) can substitute equivalents (`find / -delete`, base64 payloads, etc.). Treat policies as a high-signal first filter, not a complete authorization model.
-- **Single-node (`replicas: 1`) is the supported topology.** The approval queue, rate-limiter, and cost accumulators persist to a local SQLite store and survive restarts (write-behind, off the hot path), but they are **per-instance — not shared across replicas**. This is a deliberate, stable posture for v0.9: run one replica and scale vertically. A PostgreSQL backend for multi-node / shared state is a **v1.0 requirement** (see [Roadmap](#roadmap) and [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md)). Set `--persist=false` for the legacy pure-in-memory behavior.
+- **Pattern matching is string-glob, not semantic.** A deny rule for `rm -rf *` matches literal strings; an agent (or a creative human) can substitute equivalents (`find / -delete`, base64 payloads, etc.). Treat policies as a high-signal first filter, not a complete authorization model. A single `*` also matches across `/`, so an **ALLOW** path pattern like `/workspace/*` grants the **whole subtree** (`/workspace/a/b/secret.env`), not just the top level — bound path allows with `**`. See [`docs/POLICY_REFERENCE.md`](docs/POLICY_REFERENCE.md#pattern-matching-semantics-read-this).
+- **The MCP Gateway brokers tools only.** It gates `tools/call` and aggregates `tools/list`, but it does **not** route `resources/*` or `prompts/*` (those capabilities are masked out of the handshake, not advertised), does **not** support server-initiated requests (`sampling/createMessage`, `roots/list`, `elicitation/create` from a downstream are dropped, never forwarded to the host), and treats `notifications/cancelled` as a best-effort no-op. A downstream MCP server that depends on those flows has its tools gated normally while those specific features silently do nothing. Streamable-HTTP transport is not implemented — the gateway is stdio-only on both sides. See [`docs/MCP_GATEWAY.md`](docs/MCP_GATEWAY.md#10-currently-out-of-scope).
+- **Single-node by default; multi-node via PostgreSQL (v1.0).** With the default SQLite store, the approval queue, rate-limiter, and cost accumulators persist locally and survive restarts (write-behind, off the hot path) but are **per-instance**. Point `--store-dsn` at PostgreSQL and give each replica a `--node-id` to share that state across replicas. Two honesty notes on the shared mode: distributed rate/cost limiting is **bounded-overshoot**, not globally strict — worst-case admissions can exceed a limit by ≈ `reconcile-interval × peak rate` per additional replica, a deliberate trade that keeps synchronous database calls off the enforcement hot path — and cross-node approval state converges within one `--reconcile-interval` (default 2s): an approval consumed on one node is spent cluster-wide once reconciled, and conflicting resolutions always converge to DENY. Set `--persist=false` for the legacy pure-in-memory behavior.
 
 ## Dashboard
 
@@ -210,7 +212,7 @@ Live SSE action feed, one-click approve/deny, running totals, agent context. Sta
 - [ ] **Pass `--tls-terminated-upstream`** if TLS is terminated upstream, or the dashboard login loops.
 - [ ] **Set `--allowed-origin`** to your frontend's exact origin.
 - [ ] **Mount a writable volume** for the audit log — no mount, log lost on restart.
-- [ ] **Stay on `replicas: 1`** — rate-limit buckets and session-cost accumulators are per-instance.
+- [ ] **Running more than one replica? Use PostgreSQL.** On the default SQLite store, rate-limit buckets and session-cost accumulators are per-instance; `replicas: > 1` lets an agent burst past per-scope limits. Set `--store-dsn postgres://…` plus a distinct `--node-id` per replica for shared state (bounded-overshoot limits — see [`docs/OPERATIONS.md`](docs/OPERATIONS.md)).
 
 Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS details, and day-2 operations: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) • [`docs/OPERATIONS.md`](docs/OPERATIONS.md) • [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
 
@@ -240,7 +242,7 @@ Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS deta
 | Troubleshooting | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) |
 | FAQ | [`docs/FAQ.md`](docs/FAQ.md) |
 | Config schema | [`docs/CONFIG.md`](docs/CONFIG.md) |
-| Compatibility & stability (v0.9 surface stabilization) | [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) |
+| Compatibility & stability (the v1.0 freeze) | [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) |
 | Migration from earlier versions | [`docs/MIGRATION.md`](docs/MIGRATION.md) |
 | Deprecations | [`docs/DEPRECATIONS.md`](docs/DEPRECATIONS.md) |
 | File formats + migrations | [`docs/FILE_FORMATS.md`](docs/FILE_FORMATS.md) |
@@ -248,12 +250,11 @@ Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS deta
 
 ## Roadmap
 
-### Where things stand (v0.9)
+### Where things stand (v1.0)
 
-Everything in the pitch above is shipped: the policy engine with all seven scopes, the three enforcement paths (MCP Gateway and LLM API Proxy since v0.5, SDKs + adapters throughout), audit logging with default-on rotation, the approval queue + dashboard, cost guardrails, rate limiting, persistent state and multi-tenant policies on a zero-config SQLite store (v0.6), cross-transport verdict consistency and outage durability (v0.7), and the v0.9 surface stabilization with a CI-enforced p99 latency gate. The release-by-release detail lives in [`CHANGELOG.md`](CHANGELOG.md); the stabilized surfaces and what 1.0 will freeze are in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
+Everything in the pitch above is shipped: the policy engine with all seven scopes, the three enforcement paths (MCP Gateway and LLM API Proxy since v0.5, SDKs + adapters throughout), audit logging with default-on rotation, the approval queue + dashboard, cost guardrails, rate limiting, persistent state and multi-tenant policies on a zero-config SQLite store (v0.6), cross-transport verdict consistency and outage durability (v0.7), the v0.9 surface stabilization with a CI-enforced p99 latency gate, and the v1.0 PostgreSQL multi-node backend — shared approvals / rate-limit / cost state across replicas via background reconcile, with the hardened approval lifecycle (write-once resolutions, one-shot time-boxed ALLOWs) enforced cluster-wide. The release-by-release detail lives in [`CHANGELOG.md`](CHANGELOG.md); the frozen surfaces and the v1.x additive-only promise are in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
 
 ### Planned
-- [ ] PostgreSQL store backend for multi-node / shared state (the v0.6 SQLite store is single-node)
 - [ ] Policy-as-code (test policies in CI/CD)
 - [ ] Multi-agent session correlation
 - [ ] Session replay in dashboard
