@@ -554,6 +554,24 @@ Pattern matching is where most policy bugs come from.
 
 `*` in a pattern without `**` is **any character sequence including `/`**. That is intentional for shell commands; it is a surprise when matching paths. For paths, prefer `**`.
 
+> **⚠ Over-broad ALLOW footgun — read this before writing path allows.**
+> Because a single `*` crosses `/`, an ALLOW rule like `paths: ["/workspace/*"]`
+> does **not** bound access to the top level of `/workspace`. It also matches
+> `/workspace/a/b/secret.env` and every other file at any depth — an allow you
+> believed was one directory deep silently grants the **entire subtree**.
+>
+> ```
+> paths: ["/workspace/*"]     # ⚠ ALSO matches /workspace/a/b/secret.env (whole subtree)
+> paths: ["/workspace/**"]    # segment-aware: every file under /workspace, as intended
+> ```
+>
+> The direction of the risk matters: on a **deny** rule an over-matching `*` makes
+> the deny *broader* (fail-safe), but on an **allow** rule it *widens* access
+> (fail-open). Audit ALLOW path rules for a bare `*` first, and write path bounds
+> with `**` so the depth is explicit. `agentguard serve` / policy load also emits
+> a non-fatal warning for exactly this pattern shape — see
+> [Load-time validation](#load-time-validation).
+
 ### Double-star `**` is segment-aware
 
 When the pattern contains `**`, the pattern and the input are split on `/`. `**` matches zero or more whole segments. Each non-`**` segment is still wildcard-matched with the same `*`/`?` rules.

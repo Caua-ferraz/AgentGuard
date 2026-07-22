@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.0.0] — 2026-07-18
+## [1.0.0] — 2026-07-21
 
 > **The validated 1.0 — multi-node, and the additive-only guarantee goes hard.** This is the release the v0.9 surface-stabilization was the step before. Two things define it. First, AgentGuard now runs as **more than one replica** against a shared **PostgreSQL** backend, with approval / rate-limit / cost state converging across nodes through a background reconcile loop — **without touching the `/v1/check` hot path** (no synchronous DB call was added; the <3 ms p99 budget is preserved and gated in CI). Second, the pre-1.0 validation window is over: from 1.0 the **additive-only** rule in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) is a hard guarantee for the 1.x line, not an intent. A single-node deployment upgrades as a binary/SDK swap — multi-node is entirely opt-in behind a Postgres `--store-dsn`. This release also folds in the security, validation-hardening, and doc-honesty work done on the road to the 1.0 mark. Operators upgrading should read [`MIGRATION.md`](docs/MIGRATION.md) § v0.9.0 → v1.0.0 for the two behavior changes that matter (write-once / one-shot approvals).
 

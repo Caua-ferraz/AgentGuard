@@ -80,9 +80,9 @@ func main() {
 	// (approvals, rate-limit buckets, cost accumulators) is written behind to a
 	// SQLite database so it survives restarts. The store is NEVER on the
 	// /v1/check hot path — a background syncer flushes snapshots on a ≥1s tick
-	// and hydrates the in-memory maps on boot. See docs/v0.6-ARCHITECTURE-PLAN.md.
+	// and hydrates the in-memory maps on boot. See docs/archive/v0.6-ARCHITECTURE-PLAN.md.
 	persistEnabled := serveCmd.Bool("persist", true, "Persist runtime state (approvals, rate-limit buckets, cost accumulators) to a durable store so it survives restarts. Set false for pure in-memory (pre-v0.6 behavior).")
-	storeDSN := serveCmd.String("store-dsn", "", "Durable store DSN. Empty => zero-config SQLite at <data-dir>/agentguard.db; a sqlite file path is also accepted. (Postgres is future work.)")
+	storeDSN := serveCmd.String("store-dsn", "", "Durable store DSN. Empty => zero-config SQLite at <data-dir>/agentguard.db; a sqlite file path is also accepted. A postgres:// or postgresql:// DSN selects the PostgreSQL backend (required for multi-node deployments).")
 	dataDir := serveCmd.String("data-dir", ".", "Directory for the zero-config SQLite database (agentguard.db). Ignored when --store-dsn is set or --persist=false.")
 	auditBackend := serveCmd.String("audit-backend", "file", `Audit storage: "file" (JSONL, default) or "store" (the SQLite store — unifies state+audit in one DB with indexed queries). "store" requires --persist.`)
 	// Multi-node reconciliation (v1.0). When multiple AgentGuard nodes share a
@@ -461,6 +461,30 @@ func openStore(cfg persistOpts) (persistentStore, string, error) {
 func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, approvalValidity time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts, persistCfg persistOpts, notifySpoolPath string) {
 	if baseURL == "" {
 		baseURL = fmt.Sprintf("http://localhost:%d", port)
+	}
+
+	// LOUD security warning: with no API key configured (flag empty AND
+	// AGENTGUARD_API_KEY empty), the control- and audit-plane endpoints are
+	// unauthenticated (see requireAuthOrSession in pkg/proxy/auth.go — an empty
+	// key short-circuits to allow). The server still binds localhost-only in this
+	// mode (proxy.Server.Start), but an operator who fronts it with a reverse
+	// proxy or passes --tls-terminated-upstream can expose these without an auth
+	// gate. Make the exposure impossible to miss at startup. This is additive
+	// visibility only — the default (start unauthenticated) is unchanged, and no
+	// endpoint is gated differently. Full multi-key / RBAC auth is deferred
+	// post-v1 (see TODO.md).
+	if apiKey == "" {
+		fmt.Fprint(os.Stderr, "\n"+
+			"================================ SECURITY WARNING ================================\n"+
+			"  No API key is set (--api-key empty and AGENTGUARD_API_KEY empty).\n"+
+			"  The control and audit endpoints are UNAUTHENTICATED:\n"+
+			"      POST /v1/approve   POST /v1/deny   GET /v1/status\n"+
+			"      GET  /v1/audit     POST /v1/audit  /api/* (dashboard, when --dashboard)\n"+
+			"  Anyone who can reach this server can approve or deny pending actions and\n"+
+			"  read or write the audit trail. The server binds to 127.0.0.1 only in this\n"+
+			"  mode; if you place it behind a reverse proxy or TLS terminator, set\n"+
+			"  --api-key (or AGENTGUARD_API_KEY) FIRST.\n"+
+			"=================================================================================\n\n")
 	}
 
 	// Warn the operator when session-cost TTL is disabled. The engine

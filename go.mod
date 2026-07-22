@@ -2,10 +2,11 @@ module github.com/Caua-ferraz/AgentGuard
 
 go 1.25.0
 
-// Pin the build toolchain to the patched stdlib release. go1.25.12 carries
-// the fix for GO-2026-5856 (crypto/tls Encrypted Client Hello privacy leak);
-// go1.25.11 and earlier trip the CI govulncheck gate.
-toolchain go1.25.12
+// Pin the build toolchain to the patched stdlib release. go1.26.5 carries the
+// stdlib fixes for GO-2026-4866 (crypto/x509 auth bypass) and GO-2026-4870 /
+// GO-2026-5856 (crypto/tls); building from source on go1.26.1 through go1.26.4
+// inherits one or more of these unpatched and trips the CI govulncheck gate.
+toolchain go1.26.5
 
 require (
 	github.com/fsnotify/fsnotify v1.10.1

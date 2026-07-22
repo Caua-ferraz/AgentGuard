@@ -68,7 +68,6 @@ open `claude_desktop_config.json`. Replace its contents with:
       "args": [
         "--upstream", "fs:npx -y @modelcontextprotocol/server-filesystem /tmp",
         "--guard-url", "http://127.0.0.1:8080",
-        "--api-key", "$AGENTGUARD_API_KEY",
         "--policy", "/absolute/path/to/AgentGuard/configs/default.yaml",
         "--policy-mode", "strict",
         "--fail-mode", "deny"
