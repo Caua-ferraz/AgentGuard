@@ -249,7 +249,16 @@ func TestBufferedAsync_RecoveryLoopDrains(t *testing.T) {
 	}
 	defer b.Close()
 
-	waitFor(t, 5*time.Second, func() bool { return cap.Count() >= 5 }, "5 pre-existing entries reach underlying")
+	// Synchronize on the drain bookkeeping, not on cap delivery. The recovery
+	// loop enqueues onto the work queue (workers then deliver to cap) but bumps
+	// drainedFromOverflow + the metric only AFTER the trailing Close/Remove
+	// syscalls. On a slow runner the workers can satisfy cap.Count() >= 5 before
+	// that bookkeeping runs, racing the assertions below. The metric is the
+	// last-written signal (incremented after the local counter, which in turn
+	// runs after the file removal), so waiting on it dominates all three checks.
+	waitFor(t, 5*time.Second, func() bool {
+		return metrics.AuditBufferedDrainedFromOverflowTotal()-drainedBefore >= 5
+	}, "recovery loop drains 5 pre-existing overflow entries")
 
 	if got := b.DrainedFromOverflow(); got < 5 {
 		t.Errorf("expected DrainedFromOverflow >= 5, got %d", got)
