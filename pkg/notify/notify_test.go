@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -805,6 +806,161 @@ func TestDispatcher_SpoolOnSaturation_ThenRecoveryDelivers(t *testing.T) {
 	}
 }
 
+// parkingNotifier parks in Notify until released, so a test can leave jobs
+// sitting in the dispatch queue at Close time.
+type parkingNotifier struct {
+	release chan struct{}
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (b *parkingNotifier) Notify(Event) error {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return nil
+}
+
+// mapNotifier is a NON-COMPARABLE Notifier: a struct value (not a pointer)
+// holding a map. Comparing two interface values with this dynamic type using
+// == panics at run time ("comparing uncomparable type"). It exists to pin the
+// shutdown-spool path against reintroducing a reverse lookup over d.notifiers.
+type mapNotifier struct {
+	seen map[string]int
+}
+
+func (mapNotifier) Notify(Event) error { return nil }
+
+// readSpooledIndices decodes the notifier indices recorded in a spool file.
+func readSpooledIndices(t *testing.T, path string) []int {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read spool %s: %v", path, err)
+	}
+	var out []int
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var job spooledJob
+		if err := json.Unmarshal([]byte(line), &job); err != nil {
+			t.Fatalf("decode spool line %q: %v", line, err)
+		}
+		out = append(out, job.NotifierIndex)
+	}
+	return out
+}
+
+// TestDispatcher_CloseSpoolsQueueRemainderWithCorrectIndex covers H10 plus the
+// index plumbing that replaced its reverse lookup.
+//
+// Close must spool whatever is still queued (H10: an orderly SIGTERM used to
+// drop it silently, while the queue-FULL path spooled to disk — durable when
+// overflowing, lossy when shutting down cleanly). And each spooled record must
+// carry the index of the notifier the job was actually bound for, because
+// spooledJob persists an index, not a notifier: a wrong index replays the event
+// against the wrong target on the next boot.
+func TestDispatcher_CloseSpoolsQueueRemainderWithCorrectIndex(t *testing.T) {
+	spool := filepath.Join(t.TempDir(), "notify-spool.jsonl")
+
+	blocker := &parkingNotifier{release: make(chan struct{}), entered: make(chan struct{})}
+	counting := &countingNotifier{}
+
+	d := NewDispatcherWithOptions(policy.NotificationCfg{}, DispatcherOptions{
+		Workers:   1,
+		QueueSize: 16,
+		SpoolPath: spool,
+		// A long recovery interval keeps the drain loop from racing the
+		// shutdown spool and re-enqueueing what we just wrote.
+		RecoveryInterval: time.Hour,
+		extraNotifiers:   []Notifier{blocker, counting},
+	})
+
+	// Pin the single worker inside blocker.Notify so everything sent after
+	// this point stays in the queue.
+	d.Send(Event{Type: "denied"})
+	select {
+	case <-blocker.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker never entered the blocking notifier")
+	}
+
+	const extra = 3
+	for i := 0; i < extra; i++ {
+		d.Send(Event{Type: "denied"})
+	}
+
+	spooledBefore := metrics.NotifySpooledTotal()
+	d.Close()
+	close(blocker.release)
+
+	indices := readSpooledIndices(t, spool)
+	if len(indices) == 0 {
+		t.Fatal("Close spooled nothing; queued events were dropped on shutdown (H10)")
+	}
+	if got := metrics.NotifySpooledTotal() - spooledBefore; got == 0 {
+		t.Error("shutdown spool did not advance the spooled counter")
+	}
+	// Two notifiers are configured, so every recorded index must address one
+	// of them, and both must appear (each Send enqueues one job per notifier).
+	seen := map[int]bool{}
+	for _, idx := range indices {
+		if idx < 0 || idx >= len(d.notifiers) {
+			t.Fatalf("spooled notifier index %d is out of range for %d notifiers — replay would hit the wrong target", idx, len(d.notifiers))
+		}
+		seen[idx] = true
+	}
+	if !seen[0] || !seen[1] {
+		t.Errorf("spooled indices %v; want both notifier 0 and 1 represented", indices)
+	}
+}
+
+// TestDispatcher_CloseSpoolWithNonComparableNotifier pins the fragility the
+// index plumbing removed: the shutdown spool must never compare Notifier
+// interface values with ==. Every notifier that ships today is a pointer, so
+// the original reverse lookup worked — but a value-type Notifier holding a map
+// makes == a run-time panic, and that panic would fire inside Close, on the
+// shutdown path, taking the flush with it.
+func TestDispatcher_CloseSpoolWithNonComparableNotifier(t *testing.T) {
+	spool := filepath.Join(t.TempDir(), "notify-spool.jsonl")
+
+	blocker := &parkingNotifier{release: make(chan struct{}), entered: make(chan struct{})}
+
+	d := NewDispatcherWithOptions(policy.NotificationCfg{}, DispatcherOptions{
+		Workers:          1,
+		QueueSize:        16,
+		SpoolPath:        spool,
+		RecoveryInterval: time.Hour,
+		// Two distinct non-comparable values; == on either pair panics.
+		extraNotifiers: []Notifier{
+			blocker,
+			mapNotifier{seen: map[string]int{"a": 1}},
+			mapNotifier{seen: map[string]int{"b": 2}},
+		},
+	})
+
+	d.Send(Event{Type: "denied"})
+	select {
+	case <-blocker.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker never entered the blocking notifier")
+	}
+	for i := 0; i < 3; i++ {
+		d.Send(Event{Type: "denied"})
+	}
+
+	// The assertion is simply that this returns: a == against an uncomparable
+	// dynamic type panics, and Close is not a place that may panic.
+	d.Close()
+	close(blocker.release)
+
+	for _, idx := range readSpooledIndices(t, spool) {
+		if idx < 0 || idx >= len(d.notifiers) {
+			t.Fatalf("spooled notifier index %d out of range for %d notifiers", idx, len(d.notifiers))
+		}
+	}
+}
+
 // TestDispatcher_SpoolDisabled_DropsAsBefore pins the legacy contract:
 // without --notify-spool, queue overflow still drops and counts.
 func TestDispatcher_SpoolDisabled_DropsAsBefore(t *testing.T) {
@@ -884,4 +1040,110 @@ func TestDispatcher_SpoolCorruptLineSkippedRemainderDelivered(t *testing.T) {
 	waitForCondition(t, 15*time.Second, func() bool {
 		return capt.Get().Result.Reason == "after corrupt line"
 	}, "valid spooled event following a corrupt line to be delivered")
+}
+
+// TestDispatcher_SpoolScannerErrorRetainsFile is the H11 regression test.
+//
+// A CORRUPT LINE and a SCANNER ERROR are different branches, and only the first
+// was covered. A corrupt line is skipped and the scan continues (the test
+// above). A scanner error — bufio.ErrTooLong on an over-long line, or a
+// transient I/O failure — ABORTS the scan partway, leaving every event past the
+// failure point unread.
+//
+// The bug: `os.Remove(draining)` ran unconditionally after the scan, so those
+// unread events were deleted. And because the file had already been renamed
+// away from spoolPath, there was no second chance — the data was simply gone,
+// with one log line to show for it.
+//
+// The fix keeps the file for operator recovery. Deliberately NOT auto-retried:
+// a permanent scanner error (an over-long line is permanent) would livelock the
+// drain on the same file and starve newly spooled events forever.
+func TestDispatcher_SpoolScannerErrorRetainsFile(t *testing.T) {
+	dir := t.TempDir()
+	spool := filepath.Join(dir, "notify-spool.jsonl")
+
+	// drainSpoolOnce caps the scanner at 1 MiB; a longer line yields
+	// bufio.ErrTooLong. Put a valid record AFTER it so the file demonstrably
+	// still holds undrained data at the moment of deletion.
+	overLong := strings.Repeat("A", 2*1024*1024)
+	content := `{"notifier_index":0,"event":{"type":"denied","result":{"decision":"DENY","reason":"before the error"}}}` + "\n" +
+		overLong + "\n" +
+		`{"notifier_index":0,"event":{"type":"denied","result":{"decision":"DENY","reason":"never reached"}}}` + "\n"
+	if err := os.WriteFile(spool, []byte(content), 0o600); err != nil {
+		t.Fatalf("seed spool: %v", err)
+	}
+
+	// RecoveryInterval is long so the background loop cannot race the explicit
+	// drain below; this test drives drainSpoolOnce directly.
+	capt := &capturingNotifier{}
+	d := NewDispatcherWithOptions(policy.NotificationCfg{}, DispatcherOptions{
+		Workers:          1,
+		QueueSize:        16,
+		SpoolPath:        spool,
+		RecoveryInterval: time.Hour,
+		extraNotifiers:   []Notifier{capt},
+	})
+	defer d.Close()
+
+	d.drainSpoolOnce()
+
+	// The draining file is renamed to "<spool>.draining.<nanos>". After a
+	// scanner error it must still be on disk.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	var draining []string
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".draining.") {
+			draining = append(draining, e.Name())
+		}
+	}
+	if len(draining) == 0 {
+		t.Fatal("the draining spool file was deleted after a scanner error — every event past " +
+			"the failure point is gone, and the file was already renamed so there is no second chance (H11)")
+	}
+
+	// And it must still contain the undrained tail, not be an empty husk.
+	raw, err := os.ReadFile(filepath.Join(dir, draining[0]))
+	if err != nil {
+		t.Fatalf("read retained draining file: %v", err)
+	}
+	if !strings.Contains(string(raw), "never reached") {
+		t.Error("retained file does not contain the undrained tail; it is not usable for recovery")
+	}
+}
+
+// TestDispatcher_SpoolCleanScanStillRemovesFile is the counterweight: retaining
+// on error must not turn into retaining always, or every successful drain would
+// leak a file and the spool directory would grow without bound.
+func TestDispatcher_SpoolCleanScanStillRemovesFile(t *testing.T) {
+	dir := t.TempDir()
+	spool := filepath.Join(dir, "notify-spool.jsonl")
+	content := `{"notifier_index":0,"event":{"type":"denied","result":{"decision":"DENY","reason":"clean"}}}` + "\n"
+	if err := os.WriteFile(spool, []byte(content), 0o600); err != nil {
+		t.Fatalf("seed spool: %v", err)
+	}
+
+	capt := &capturingNotifier{}
+	d := NewDispatcherWithOptions(policy.NotificationCfg{}, DispatcherOptions{
+		Workers:          1,
+		QueueSize:        16,
+		SpoolPath:        spool,
+		RecoveryInterval: time.Hour,
+		extraNotifiers:   []Notifier{capt},
+	})
+	defer d.Close()
+
+	d.drainSpoolOnce()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".draining.") {
+			t.Errorf("a clean scan must remove the draining file, found %q", e.Name())
+		}
+	}
 }

@@ -82,6 +82,15 @@ type Dispatcher struct {
 type dispatchJob struct {
 	notifier Notifier
 	event    Event
+	// index is the job's position in d.notifiers, captured at enqueue time.
+	// spoolJob records the index (see spooledJob), so the shutdown spool needs
+	// to map a job back to it. Carrying it here rather than searching
+	// d.notifiers for a matching Notifier avoids comparing interface values
+	// with ==, which panics at runtime if a Notifier is ever a non-comparable
+	// value type (a struct holding a map or slice). Every notifier today is a
+	// pointer, so that search worked — but it is a latent panic one
+	// implementation away, and the index is free to carry.
+	index int
 }
 
 // NewDispatcher builds a dispatcher from the policy notification config.
@@ -248,7 +257,48 @@ func (d *Dispatcher) Close() {
 			d.cancelCtx()
 		}
 		close(d.done)
+		d.spoolQueueRemainder()
 	})
+}
+
+// spoolQueueRemainder drains whatever is still sitting in the dispatch queue at
+// shutdown and writes it to the spool file, so an orderly SIGTERM does not lose
+// events the queue-full path would have made durable (audit H10). Called once
+// from Close, after `done` is closed so workers are no longer competing for the
+// queue; a non-blocking receive means a racing worker simply wins the job.
+//
+// No-op when spooling is disabled — without a spool file there is nowhere
+// durable to put them, which is the same posture as the queue-full path.
+func (d *Dispatcher) spoolQueueRemainder() {
+	if d.spoolPath == "" {
+		return
+	}
+	var spooled uint64
+	for {
+		select {
+		case job := <-d.queue:
+			// job.index was captured at enqueue time (see dispatchJob) — no
+			// reverse lookup, no interface comparison. Guard the range anyway:
+			// a spooled index that no longer addresses a configured notifier is
+			// unreplayable, and drainSpoolOnce would skip it on read.
+			idx := job.index
+			if idx < 0 || idx >= len(d.notifiers) {
+				log.Printf("notify: shutdown spool: notifier index %d out of range (dropping event)", idx)
+				continue
+			}
+			if err := d.spoolJob(idx, job.event); err != nil {
+				log.Printf("notify: shutdown spool append failed: %v (dropping event)", err)
+				continue
+			}
+			spooled++
+			metrics.IncNotifySpooled()
+		default:
+			if spooled > 0 {
+				log.Printf("notify: spooled %d queued event(s) at shutdown", spooled)
+			}
+			return
+		}
+	}
 }
 
 func targetToNotifier(t policy.NotifyTarget, eventFilter string, dispatchTimeout time.Duration, ctx context.Context) Notifier {
@@ -285,7 +335,7 @@ func (d *Dispatcher) Send(event Event) {
 
 	for i, n := range d.notifiers {
 		select {
-		case d.queue <- dispatchJob{notifier: n, event: event}:
+		case d.queue <- dispatchJob{notifier: n, event: event, index: i}:
 			// Sampling the depth right after enqueue gives a
 			// lock-free, enqueue-biased view — good enough for a gauge
 			// whose purpose is to answer "is the queue filling up?".
@@ -396,7 +446,7 @@ func (d *Dispatcher) drainSpoolOnce() {
 			continue
 		}
 		select {
-		case d.queue <- dispatchJob{notifier: d.notifiers[job.NotifierIndex], event: job.Event}:
+		case d.queue <- dispatchJob{notifier: d.notifiers[job.NotifierIndex], event: job.Event, index: job.NotifierIndex}:
 			requeued++
 		default:
 			// Still saturated — re-spill for the next tick.
@@ -408,7 +458,22 @@ func (d *Dispatcher) drainSpoolOnce() {
 	scanErr := scanner.Err()
 	f.Close()
 	if scanErr != nil {
-		log.Printf("notify: spool drain scanner: %v", scanErr)
+		// The scan stopped early (over-long line, transient I/O), so every
+		// event past the failure point is still unread. Deleting the file here
+		// would destroy them permanently — it has already been renamed away
+		// from spoolPath, so there is no second chance (audit H11). Keep it.
+		//
+		// Retained for operator recovery, NOT auto-retried: the next tick
+		// renames a fresh draining file from spoolPath and never revisits this
+		// one. Auto-retry is deliberately not done here because a permanent
+		// scanner error (bufio.ErrTooLong on an over-long line) would livelock
+		// the drain on the same file and starve newly spooled events. The file
+		// is left where an operator can inspect and replay it.
+		log.Printf("notify: spool drain scanner: %v — retained %s for recovery (%d event(s) requeued before the error); inspect and replay manually", scanErr, draining, requeued)
+		if requeued > 0 {
+			metrics.AddNotifyDespooled(requeued)
+		}
+		return
 	}
 	if err := os.Remove(draining); err != nil {
 		log.Printf("notify: remove draining spool: %v", err)

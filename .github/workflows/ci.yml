@@ -36,7 +36,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.12'
+          go-version: '1.26.7'
 
       - name: Build
         shell: bash
@@ -86,7 +86,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.12'
+          go-version: '1.26.7'
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v8
@@ -107,7 +107,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.12'
+          go-version: '1.26.7'
 
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
@@ -133,7 +133,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.12'
+          go-version: '1.26.7'
 
       # Blocking gate. Security is verified live against OSV.dev per exact
       # pinned version (DEPAUDIT_ONLINE=1); performance comes from the in-repo
@@ -199,7 +199,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.12'
+          go-version: '1.26.7'
 
       - name: Build agentguard binary for E2E tests
         run: go build -o agentguard ./cmd/agentguard
@@ -255,9 +255,9 @@ jobs:
   # Per-matrix blocking as of v1.0 (sub-task 2d): langchain and crewai are
   # REQUIRED (allow_failure: false ⇒ a red leg fails CI); browser-use stays
   # advisory (allow_failure: true) because its `playwright install` pulls
-  # ~200MB of Chromium from a CDN and is the known flake. Original v0.5
-  # decision (whole job non-blocking) recorded in .audit/v05_decisions.md
-  # under "Integration-tests CI job non-blocking".
+  # ~200MB of Chromium from a CDN and is the known flake. This supersedes the
+  # original v0.5 posture, where the WHOLE job was non-blocking; the rationale
+  # for keeping one leg advisory is spelled out immediately below.
   #
   # Rationale for keeping browser-use advisory (carried from v0.9): these tests
   # pin to LIVE upstream framework releases, so a red browser-use leg usually
@@ -294,7 +294,7 @@ jobs:
       - name: Set up Go (build agentguard binary)
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.12'
+          go-version: '1.26.7'
 
       - name: Build agentguard binary
         run: go build -o agentguard ./cmd/agentguard
@@ -426,7 +426,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.12'
+          go-version: '1.26.7'
 
       - name: Run Postgres-backed store + persist tests
         env:
@@ -447,7 +447,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.12'
+          go-version: '1.26.7'
 
       - name: Hot-path p99 latency gates (<3ms)
         # Three blocking gates: the persistence integration hot path, the pure

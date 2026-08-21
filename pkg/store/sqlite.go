@@ -80,7 +80,14 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	}
 
 	s := &SQLiteStore{db: db, path: path}
-	if err := s.Migrate(context.Background()); err != nil {
+	// Bounded like the Postgres constructor (audit H12). SQLite is local so a
+	// hang is far less likely, but a locked database file or a stalled network
+	// mount can still block indefinitely, and an unbounded boot hang is the
+	// worst possible failure shape. Same deadline keeps the two backends'
+	// startup behavior identical.
+	ctx, cancel := context.WithTimeout(context.Background(), migrateTimeout)
+	defer cancel()
+	if err := s.Migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}

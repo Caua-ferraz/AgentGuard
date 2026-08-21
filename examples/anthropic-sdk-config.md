@@ -90,11 +90,24 @@ with a synthetic `text` block (DENY / REQUIRE_APPROVAL). The
 | SDK | Set env / `base_url=` to | Path appended by SDK |
 |---|---|---|
 | OpenAI Python | `http://127.0.0.1:8081/v1` | `/chat/completions`, `/embeddings`, … |
-| Anthropic Python | `http://127.0.0.1:8081` | `/v1/messages`, `/v1/complete`, … |
+| Anthropic Python | `http://127.0.0.1:8081` | `/v1/messages` |
 
 If you mistakenly add `/v1` to `ANTHROPIC_BASE_URL`, requests land at
 `/v1/v1/messages` and the proxy returns 404. This is the most common
 configuration mistake — double-check the env var when debugging.
+
+### Supported endpoints
+
+The firewall routes `/v1/messages` (Anthropic), plus `/v1/chat/completions`,
+`/v1/completions`, `/v1/embeddings` and `/v1/models` (OpenAI shape).
+
+Anthropic's **legacy Text Completions** API (`/v1/complete`, reached via
+`client.completions.create()`) is **not supported** and returns 404. Use the
+Messages API (`client.messages.create()`) instead.
+
+An unsupported endpoint is *rejected*, never silently passed through — the
+firewall does not forward traffic it cannot inspect. Do not work around a 404 by
+routing that traffic around AgentGuard: that bypasses enforcement entirely.
 
 ## Verification
 

@@ -2050,19 +2050,64 @@ func (s *Server) withTraffic(next http.Handler) http.Handler {
 // generic 500 to the client. Without it, a panic inside Engine.Check or a
 // notifier callback would tear down the request goroutine but leave the
 // connection in an indeterminate state.
+// committedWriter tracks whether the response status line has been sent, so
+// a late error path can tell "nothing written yet" (safe to emit an error
+// envelope) from "already committed" (must stay silent).
+//
+// net/http drops a second WriteHeader as superfluous but STILL writes the
+// body that follows, which would concatenate an error object onto a partial
+// response — malformed bytes to the client (audit B20). The dashboard SSE
+// stream (handleEventStream) is the reachable case here: it flushes events
+// for the life of the connection, so any panic after the first event lands
+// on an already-committed response.
+//
+// Flush is forwarded explicitly because handleEventStream type-asserts its
+// ResponseWriter to http.Flusher; an embedded-only wrapper would fail that
+// assertion and break the dashboard stream.
+type committedWriter struct {
+	http.ResponseWriter
+	committed bool
+}
+
+func (c *committedWriter) WriteHeader(status int) {
+	c.committed = true
+	c.ResponseWriter.WriteHeader(status)
+}
+
+func (c *committedWriter) Write(b []byte) (int, error) {
+	c.committed = true
+	return c.ResponseWriter.Write(b)
+}
+
+func (c *committedWriter) Flush() {
+	if f, ok := c.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the underlying writer to http.ResponseController and any
+// future middleware that needs the concrete type.
+func (c *committedWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
+
 func recoverPanic(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cw := &committedWriter{ResponseWriter: w}
 		defer func() {
 			if rec := recover(); rec != nil {
 				log.Printf("PANIC %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
-				// Best-effort 500. If the handler already wrote headers,
-				// http stdlib swallows the WriteHeader and we just log.
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(`{"error":"internal server error"}`))
+				if cw.committed {
+					// Status (and likely body bytes) already sent; writing now
+					// would append onto a partial response. Stay silent and let
+					// the truncated body close.
+					log.Printf("PANIC %s %s: response already committed; closing without an error envelope", r.Method, r.URL.Path)
+					return
+				}
+				cw.Header().Set("Content-Type", "application/json")
+				cw.WriteHeader(http.StatusInternalServerError)
+				_, _ = cw.Write([]byte(`{"error":"internal server error"}`))
 			}
 		}()
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(cw, r)
 	})
 }
 

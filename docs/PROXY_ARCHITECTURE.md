@@ -344,9 +344,12 @@ invalid_response` / `deny:gateway:invalid_response`) so a misbehaving
 or version-skewed central server is visible on dashboards instead of
 silently passing through.
 
-The Python SDK (always fail-closed) and TypeScript SDK (configurable
-`failMode`) keep their existing behaviour — the new flag just brings the
-proxies into line.
+The Python SDK (fail-closed **by default**, overridable with the `fail_mode`
+constructor argument — `"deny"` or `"allow"`) and the TypeScript SDK
+(configurable `failMode`) keep their existing behaviour — the new flag just
+brings the proxies into line. Both SDKs default to denying when AgentGuard is
+unreachable; `"allow"` is an explicit opt-out for callers whose threat model
+treats the firewall as best-effort.
 
 ### 6.2 MCP gateway: downstream subprocess crashes
 

@@ -85,6 +85,14 @@ func main() {
 	storeDSN := serveCmd.String("store-dsn", "", "Durable store DSN. Empty => zero-config SQLite at <data-dir>/agentguard.db; a sqlite file path is also accepted. A postgres:// or postgresql:// DSN selects the PostgreSQL backend (required for multi-node deployments).")
 	dataDir := serveCmd.String("data-dir", ".", "Directory for the zero-config SQLite database (agentguard.db). Ignored when --store-dsn is set or --persist=false.")
 	auditBackend := serveCmd.String("audit-backend", "file", `Audit storage: "file" (JSONL, default) or "store" (the SQLite store — unifies state+audit in one DB with indexed queries). "store" requires --persist.`)
+	// Non-local tenant policies are cached in memory and served from that cache
+	// on the hot path. Without a periodic rebuild the cache is whatever the
+	// process loaded at boot, so `agentguard tenant put` on an EXISTING tenant
+	// would never reach a running server. This ticker is that rebuild; the swap
+	// is a single pointer assignment under the provider's write lock, off the
+	// request path. Ignored unless --persist (the multi-tenant provider only
+	// exists in persistence mode).
+	tenantPolicyRefresh := serveCmd.Duration("tenant-policy-refresh-interval", 30*time.Second, "How often to rebuild the non-local tenant policy cache from the store, so `agentguard tenant put` reaches a running server without a restart. 0 disables the rebuild (boot-time cache only). Ignored unless --persist.")
 	// Multi-node reconciliation (v1.0). When multiple AgentGuard nodes share a
 	// durable store, a background reconcile loop converges each node's local
 	// rate-limit / session-cost view toward the cluster-wide total (bounded
@@ -242,7 +250,7 @@ Flags:
 	case "serve":
 		_ = serveCmd.Parse(os.Args[2:]) // flag.ExitOnError handles errors
 		// Fall back to AGENTGUARD_API_KEY env if --api-key not supplied.
-		runServe(*policyFile, *port, *dashboard, *watch, *auditPath, resolveAPIKey(*apiKey), *baseURL, *allowedOrigin, *tlsTerminated, *sessionCostTTL, *sessionCostSweep, *approvalValidity, auditRotationOpts{
+		serveCode := runServe(*policyFile, *port, *dashboard, *watch, *auditPath, resolveAPIKey(*apiKey), *baseURL, *allowedOrigin, *tlsTerminated, *sessionCostTTL, *sessionCostSweep, *approvalValidity, auditRotationOpts{
 			MaxSizeMB:  *auditMaxSizeMB,
 			MaxBackups: *auditMaxBackups,
 			MaxAgeDays: *auditMaxAgeDays,
@@ -256,13 +264,19 @@ Flags:
 			Enabled: *debugPprof,
 			Port:    *debugPprofPort,
 		}, persistOpts{
-			Enabled:           *persistEnabled,
-			DSN:               *storeDSN,
-			DataDir:           *dataDir,
-			AuditBackend:      *auditBackend,
-			NodeID:            *nodeID,
-			ReconcileInterval: *reconcileInterval,
+			Enabled:             *persistEnabled,
+			DSN:                 *storeDSN,
+			DataDir:             *dataDir,
+			AuditBackend:        *auditBackend,
+			NodeID:              *nodeID,
+			ReconcileInterval:   *reconcileInterval,
+			TenantPolicyRefresh: *tenantPolicyRefresh,
 		}, *notifySpool)
+		// Applied here, not inside runServe: os.Exit skips defers, and every
+		// teardown in runServe has already run by the time it returns (audit H4).
+		if serveCode != 0 {
+			os.Exit(serveCode)
+		}
 
 	case "validate":
 		_ = validateCmd.Parse(os.Args[2:])
@@ -393,6 +407,11 @@ type persistOpts struct {
 	// zero ReconcileInterval disables reconciliation (single-node behavior).
 	NodeID            string
 	ReconcileInterval time.Duration
+
+	// TenantPolicyRefresh is how often the non-local tenant policy cache is
+	// rebuilt from the store. Zero keeps the boot-time cache forever, which
+	// means a tenant policy updated in the store never reaches this process.
+	TenantPolicyRefresh time.Duration
 }
 
 // defaultNodeID returns the OS hostname as the default multi-node node id,
@@ -458,7 +477,11 @@ func openStore(cfg persistOpts) (persistentStore, string, error) {
 	return s, path, nil
 }
 
-func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, approvalValidity time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts, persistCfg persistOpts, notifySpoolPath string) {
+// runServe returns the process exit code: 0 on a clean signal-driven shutdown,
+// 1 when the listener failed. The caller applies it with os.Exit AFTER this
+// function returns, so every deferred teardown here (persist flush, audit
+// drain, store close) has already run — os.Exit skips defers (audit H4).
+func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, approvalValidity time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts, persistCfg persistOpts, notifySpoolPath string) int {
 	if baseURL == "" {
 		baseURL = fmt.Sprintf("http://localhost:%d", port)
 	}
@@ -574,6 +597,18 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		if mtErr != nil {
 			log.Fatalf("Failed to initialize multi-tenant policy provider: %v", mtErr)
 		}
+		// Rebuild the tenant cache periodically. Without this the cache is
+		// frozen at boot and `agentguard tenant put` on an existing tenant
+		// never reaches this process (non-local tenants have no Watch channel).
+		// mtp.Close() also stops the ticker, so the deferred provider close
+		// below covers shutdown; the explicit stop keeps the lifetime obvious.
+		if persistCfg.TenantPolicyRefresh > 0 {
+			stopRefresh := mtp.StartAutoRefresh(persistCfg.TenantPolicyRefresh)
+			defer stopRefresh()
+			log.Printf("Tenant policy refresh: every %s", persistCfg.TenantPolicyRefresh)
+		} else {
+			log.Printf("WARNING: --tenant-policy-refresh-interval is 0; tenant policy updates will NOT reach this process until restart")
+		}
 		engineProvider = mtp
 	}
 
@@ -685,6 +720,9 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
+	// Buffered so the serve goroutine never blocks handing off its error.
+	serveErr := make(chan error, 1)
+
 	go func() {
 		log.Printf("AgentGuard v%s listening on :%d", version, port)
 		if dashboardEnabled {
@@ -692,13 +730,29 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		}
 		log.Printf("Health:    http://localhost:%d/health", port)
 		if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("Server error: %v", err)
+			// Hand the error to main rather than log.Fatalf here (audit H4):
+			// Fatalf calls os.Exit, which skips every defer in main — including
+			// `defer syncer.Close()` (the final persist flush) and the buffered
+			// audit drain. Losing those on a listener failure is exactly when
+			// the durable record matters most.
+			serveErr <- err
 		}
 	}()
 
-	<-stop
-	log.Println("Shutting down...")
+	exitCode := 0
+	select {
+	case <-stop:
+		log.Println("Shutting down...")
+	case err := <-serveErr:
+		log.Printf("Server error: %v", err)
+		log.Println("Shutting down...")
+		// Non-zero so a supervisor (systemd, Kubernetes) still sees a failed
+		// listener as a failure and restarts us. main applies it with os.Exit
+		// only AFTER this function returns, so every defer above has run.
+		exitCode = 1
+	}
 	srv.Shutdown()
+	return exitCode
 }
 
 // startPprofServer boots a localhost-bound HTTP listener that serves the

@@ -273,9 +273,19 @@ func (b *Bridge) dispatchFrame(ctx context.Context, line []byte, wg *sync.WaitGr
 		return
 	}
 
-	// Notification (no id field present at all).
-	if len(probe.ID) == 0 || string(probe.ID) == "null" {
+	// Notification: no id field present at all.
+	if len(probe.ID) == 0 {
 		b.handleNotification(ctx, probe.Method, probe.Params)
+		return
+	}
+
+	// An EXPLICIT `"id": null` is not a notification. MCP forbids a null
+	// request id, so this frame is malformed either way — but answering with a
+	// protocol error beats silence, which hangs a caller that did expect a
+	// reply (audit B19). Echo the null id back so the error is correlatable.
+	if string(probe.ID) == "null" {
+		b.writeResponse(NewResponseError(nil, ErrCodeInvalidRequest,
+			"request id must not be null", nil))
 		return
 	}
 

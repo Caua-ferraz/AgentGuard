@@ -219,11 +219,14 @@ func (u *StdioUpstream) Status() string {
 // drives Initialize itself so it can capture the negotiated protocol
 // version and forward it to the host).
 func (u *StdioUpstream) Start(ctx context.Context) error {
-	if err := u.spawnLocked(ctx); err != nil {
-		return err
-	}
+	err := u.spawnLocked(ctx)
+	// Launch the supervisor even when the first spawn failed (audit B16): its
+	// backoff loop owns respawn, so a transient error — an `npx` cold start, a
+	// momentary exec failure, a mount not yet ready — is retried instead of
+	// leaving the upstream permanently dead with nothing watching it. The error
+	// is still returned so the caller can log/fail per its own posture.
 	go u.supervise(ctx)
-	return nil
+	return err
 }
 
 // spawnLocked starts (or restarts) the subprocess. Caller must NOT
@@ -408,22 +411,28 @@ func (u *StdioUpstream) supervise(ctx context.Context) {
 	step := 0
 	for {
 		// Wait for the current cmd to exit.
+		//
+		// A nil cmd means the FIRST spawn never succeeded — u.cmd is assigned
+		// only on a successful spawn and is never cleared — so there is no exit
+		// to wait for. Rather than abandoning the upstream with no supervisor
+		// (audit B16), fall through to the backoff/respawn path below.
 		u.mu.RLock()
 		cmd := u.cmd
 		u.mu.RUnlock()
-		if cmd == nil {
-			return
-		}
-		err := cmd.Wait()
 
-		// Signal everyone waiting on procExited (Close, primarily)
-		// that the OS has reaped the process and pipes are drained.
-		u.procExitedMu.Lock()
-		exited := u.procExited
-		u.procExited = nil
-		u.procExitedMu.Unlock()
-		if exited != nil {
-			close(exited)
+		var waitErr error
+		if cmd != nil {
+			waitErr = cmd.Wait()
+
+			// Signal everyone waiting on procExited (Close, primarily)
+			// that the OS has reaped the process and pipes are drained.
+			u.procExitedMu.Lock()
+			exited := u.procExited
+			u.procExited = nil
+			u.procExitedMu.Unlock()
+			if exited != nil {
+				close(exited)
+			}
 		}
 
 		select {
@@ -434,15 +443,17 @@ func (u *StdioUpstream) supervise(ctx context.Context) {
 		default:
 		}
 
-		u.mu.Lock()
-		u.status = StatusDegraded
-		u.mu.Unlock()
-		u.logger.Infof("upstream %q: subprocess exited (%v); reconnecting", u.spec.Namespace, err)
+		if cmd != nil {
+			u.mu.Lock()
+			u.status = StatusDegraded
+			u.mu.Unlock()
+			u.logger.Infof("upstream %q: subprocess exited (%v); reconnecting", u.spec.Namespace, waitErr)
 
-		// Drain pending requests so callers don't hang forever waiting
-		// for a response from a dead subprocess. Each pending channel
-		// gets a synthetic upstream-unavailable error response.
-		u.failPending()
+			// Drain pending requests so callers don't hang forever waiting
+			// for a response from a dead subprocess. Each pending channel
+			// gets a synthetic upstream-unavailable error response.
+			u.failPending()
+		}
 
 		// Walk the backoff schedule, capped at the last entry.
 		wait := u.backoff[step]
@@ -635,17 +646,17 @@ func (u *StdioUpstream) Notify(ctx context.Context, n *Notification) error {
 		return fmt.Errorf("upstream %q is degraded", u.spec.Namespace)
 	}
 	n.JSONRPC = JSONRPCVersion
+	// Honor ctx BEFORE the write: once the bytes are on the pipe the
+	// notification has been delivered, and reporting a delivered
+	// fire-and-forget notification as failed makes the caller retry a
+	// side effect that already happened (audit B24).
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := u.writeFrame(n); err != nil {
 		return fmt.Errorf("write notification: %w", err)
 	}
-	// Honor ctx after the write — the write itself is small and
-	// the OS pipe buffer absorbs it instantly in practice.
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		return nil
-	}
+	return nil
 }
 
 // writeFrame marshals v and writes it to stdin with a `\n`

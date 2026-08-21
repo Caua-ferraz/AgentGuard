@@ -2,11 +2,25 @@ module github.com/Caua-ferraz/AgentGuard
 
 go 1.25.0
 
-// Pin the build toolchain to the patched stdlib release. go1.26.5 carries the
-// stdlib fixes for GO-2026-4866 (crypto/x509 auth bypass) and GO-2026-4870 /
-// GO-2026-5856 (crypto/tls); building from source on go1.26.1 through go1.26.4
-// inherits one or more of these unpatched and trips the CI govulncheck gate.
-toolchain go1.26.5
+// Pin the build toolchain to the patched stdlib release. Every AgentGuard
+// vulnerability to date has come from the stdlib, not a module dependency, so
+// this line is the project's single most load-bearing security control — and
+// `go test ./...` will NOT tell you when it goes stale. Only govulncheck does.
+//
+// go1.26.7 carries the stdlib fixes for, in addition to the earlier
+// GO-2026-4866 (crypto/x509 auth bypass) / GO-2026-4870 / GO-2026-5856
+// (crypto/tls):
+//   GO-2026-6218  net/url      quadratic complexity in resolvePath
+//   GO-2026-6090  crypto/tls   unbounded post-handshake messages
+//   GO-2026-6089  net/http     ReadHeaderTimeout skipped on the h2c check
+//   GO-2026-6088  encoding/xml unbounded recursion during decode
+//   GO-2026-5972  encoding/asn1 unbounded recursion
+//   GO-2026-5026  x/net/idna   ASCII-only Punycode labels not rejected
+//   GO-2026-5942  net          panic parsing an invalid SVCB/HTTPS RR
+//   GO-2026-6091  html/template JS regexp context tracking
+// The first six were reachable from AgentGuard's own call graph on go1.26.5;
+// all eight are fixed as of go1.26.6, and 1.26.7 is the current patch.
+toolchain go1.26.7
 
 require (
 	github.com/fsnotify/fsnotify v1.10.1
