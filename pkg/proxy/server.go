@@ -140,6 +140,11 @@ type Server struct {
 	// Nil when the sweeper is not running. Closed exactly once via sweeperStop.
 	sweeperDone chan struct{}
 	sweeperStop sync.Once
+	// priorIndex answers require_prior conditions without touching the audit
+	// log (audit B1) and with the tenant in the key (audit B27). Nil when the
+	// loaded policy contains no require_prior condition, which is the common
+	// case — no shipped policy uses one — so the index costs nothing to carry.
+	priorIndex *policy.PriorActionIndex
 	// Resolved tunables. Set once in NewServer from Config or package
 	// defaults so the hot paths (handleCheck, handleAuditQuery) do not
 	// re-evaluate fallbacks on every request.
@@ -290,6 +295,29 @@ func (a *auditHistoryAdapter) RecentActions(agentID string, scope string, since 
 	return result, nil
 }
 
+// hydratePriorIndex seeds the require_prior index from one replayed audit
+// entry at boot.
+//
+// Without this, an in-memory index would start empty on every restart and a
+// require_prior-gated ALLOW would silently stop firing until the agent redid
+// the prerequisite action — fail-closed, but a functional regression an
+// operator would notice and struggle to explain.
+//
+// It rides the audit replay that already runs at startup, so hydration adds no
+// I/O of its own. That replay resumes from a byte-offset checkpoint written at
+// the previous boot, which means the window recovered is "everything the last
+// run wrote" — precisely the entries a fresh process is missing. Entries from
+// further back are not recovered; with the index TTL at 24h they are almost
+// always outside any rule's time_window anyway.
+//
+// ALLOW only, matching the live path in logAndRespond.
+func hydratePriorIndex(idx *policy.PriorActionIndex, e audit.Entry) {
+	if idx == nil || e.Result.Decision != policy.Allow {
+		return
+	}
+	idx.Record(e.EffectiveTenant(), e.AgentID, e.Request.Scope, e.Request.Action, e.Request.Command, e.Timestamp)
+}
+
 // NewServer creates a new proxy server.
 func NewServer(cfg Config) *Server {
 	if cfg.APIKey == "" {
@@ -307,8 +335,15 @@ func NewServer(cfg Config) *Server {
 		startedAt:           time.Now(),
 	}
 
-	// Wire up history querier for conditional rule evaluation
+	// Wire up history querier for conditional rule evaluation.
+	//
+	// Both are installed: the tenant-scoped index is what actually answers
+	// require_prior (audit B27/B1), and the legacy adapter stays wired so an
+	// embedder that reaches for HistoryQuerier still finds it. Engine prefers
+	// the index whenever one is set.
 	cfg.Engine.SetHistoryQuerier(&auditHistoryAdapter{logger: cfg.Logger})
+	s.priorIndex = policy.NewPriorActionIndex(policy.DefaultPriorActionTTL)
+	cfg.Engine.SetPriorActionQuerier(s.priorIndex)
 
 	// Seed in-memory counters from the existing audit log so stats survive
 	// restarts. A large audit file rescanned from scratch on every boot can
@@ -327,6 +362,7 @@ func NewServer(cfg Config) *Server {
 		}
 		newOffset, err := audit.ReplayFrom(path, cp, func(e audit.Entry) {
 			metrics.IncDecision(string(e.Result.Decision))
+			hydratePriorIndex(s.priorIndex, e)
 			replayed++
 		})
 		if err != nil {
@@ -342,6 +378,7 @@ func NewServer(cfg Config) *Server {
 	} else if existing, err := cfg.Logger.Query(audit.QueryFilter{}); err == nil {
 		for _, e := range existing {
 			metrics.IncDecision(string(e.Result.Decision))
+			hydratePriorIndex(s.priorIndex, e)
 			replayed++
 		}
 	}
@@ -498,6 +535,10 @@ func (s *Server) runSessionCostSweeper(interval, ttl time.Duration) {
 			if n := s.cfg.Engine.SweepSessionCosts(ttl); n > 0 {
 				log.Printf("INFO: session-cost sweeper evicted %d entries (ttl=%s)", n, ttl)
 			}
+			// The require_prior index is keyed by client-chosen strings, so it
+			// gets the same TTL treatment as session costs. Sweeping here keeps
+			// the O(n) pass on a background goroutine and off /v1/check.
+			s.priorIndex.Sweep(time.Now())
 		}
 	}
 }
@@ -799,6 +840,18 @@ func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, 
 	// policyMs is the policy-decision cost (request decode → here, i.e. the
 	// Engine.Check path). It is also what the audit entry records as DurationMs.
 	policyMs := float64(duration.Microseconds()) / 1000.0
+
+	// Feed the require_prior index (audit B27/B1). This is the audit-write
+	// boundary, not the hot path: Engine.Check has already returned and e.mu is
+	// released, so the index's own lock cannot nest under the engine lock.
+	//
+	// ALLOW only — recording a denial would let a blocked attempt satisfy a
+	// later require_prior gate, inverting the condition's purpose. The tenant
+	// is passed explicitly rather than read from the entry, because the entry
+	// normalizes "local" to "" for on-disk compatibility.
+	if s.priorIndex != nil && result.Decision == policy.Allow {
+		s.priorIndex.Record(tenantID, req.AgentID, req.Scope, req.Action, req.Command, entry.Timestamp)
+	}
 
 	auditStart := time.Now()
 	if err := s.cfg.Logger.Log(entry); err != nil {
