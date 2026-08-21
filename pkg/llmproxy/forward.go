@@ -479,11 +479,14 @@ func (s *Server) forwardTo(ctx context.Context, w http.ResponseWriter, r *http.R
 	_, err = io.Copy(w, resp.Body)
 	if err != nil {
 		// If the client disconnected mid-copy that's not really
-		// our error, but io.Copy returns it anyway. The handler
-		// converts this to a 502 only for the headers-not-yet-sent
-		// case; once we WriteHeader'd, there's nothing useful we
-		// can send back, so we just log it via the return value.
-		return fmt.Errorf("copy response body: %w", err)
+		// our error, but io.Copy returns it anyway. Headers and a
+		// partial body are already on the wire, so the handler must
+		// NOT append an error envelope — that would concatenate JSON
+		// onto a partial body and hand the client malformed bytes
+		// (audit B20). Tagging with errResponseCommitted makes
+		// writeJSONError a no-op for exactly this case; the handler
+		// keeps its existing `return err` shape.
+		return fmt.Errorf("copy response body: %w: %w", errResponseCommitted, err)
 	}
 	return nil
 }

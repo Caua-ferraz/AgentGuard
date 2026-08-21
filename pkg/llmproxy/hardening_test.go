@@ -178,6 +178,200 @@ func TestServer_RecoverPanic_RoutesWired(t *testing.T) {
 	}
 }
 
+// ----- B20: never append an error envelope onto a committed response -----
+
+// newPanicTestServer builds a minimal Server for exercising recoverPanic.
+func newPanicTestServer(t *testing.T) *Server {
+	t.Helper()
+	cfg := &Config{
+		Listen:               "127.0.0.1:0",
+		UpstreamOpenAI:       "https://api.openai.com",
+		UpstreamAnthropic:    "https://api.anthropic.com",
+		GuardURL:             "http://127.0.0.1:8080",
+		TenantID:             "test",
+		FailMode:             "deny",
+		LogLevel:             "info",
+		MaxBufferBytes:       DefaultMaxBufferBytes,
+		MaxConcurrentStreams: DefaultMaxConcurrentStreams,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	srv.startTime = time.Now()
+	return srv
+}
+
+// TestServer_RecoverPanic_DoesNotAppendToCommittedBody is the B20 regression
+// test for the panic path.
+//
+// A panic AFTER the handler has flushed bytes used to append a JSON error
+// object onto the partial response: net/http drops the superfluous
+// WriteHeader but still writes the body that follows, so the client received
+// `<partial SSE stream><JSON error envelope>` concatenated. For a streaming
+// response that is malformed output the SDK cannot parse.
+//
+// The correct behaviour once the wire is committed is to write NOTHING and let
+// the truncated body close, which SDKs already treat as a disconnect.
+func TestServer_RecoverPanic_DoesNotAppendToCommittedBody(t *testing.T) {
+	srv := newPanicTestServer(t)
+
+	const committed = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
+
+	h := srv.recoverPanic(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(committed))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		panic("panic after the response was committed")
+	})
+
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest(http.MethodGet, "/stream", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (the committed status must survive)", rec.Code)
+	}
+	got := rec.Body.String()
+	if got != committed {
+		t.Errorf("body = %q, want exactly the committed bytes %q — an error envelope was appended onto a partial response (B20)", got, committed)
+	}
+	if strings.Contains(got, "agentguard_error") || strings.Contains(got, "internal server error") {
+		t.Errorf("error envelope leaked into a committed response body: %q", got)
+	}
+}
+
+// TestServer_RecoverPanic_UncommittedStillGets500 guards the other direction:
+// suppressing the envelope must apply ONLY once the wire is committed. A panic
+// before any write still owes the client a clean 500.
+func TestServer_RecoverPanic_UncommittedStillGets500(t *testing.T) {
+	srv := newPanicTestServer(t)
+
+	h := srv.recoverPanic(func(w http.ResponseWriter, r *http.Request) {
+		panic("panic before anything was written")
+	})
+
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest(http.MethodGet, "/boom", nil))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "agentguard_error") {
+		t.Errorf("body = %q, want the JSON error envelope", rec.Body.String())
+	}
+}
+
+// TestServer_RecoverPanic_ImplicitWriteCommits covers the subtle case: a bare
+// Write with no explicit WriteHeader sends an implicit 200, which commits the
+// response just as surely. If committedWriter only tracked WriteHeader, this
+// handler's panic would still corrupt the body.
+func TestServer_RecoverPanic_ImplicitWriteCommits(t *testing.T) {
+	srv := newPanicTestServer(t)
+
+	h := srv.recoverPanic(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("partial"))
+		panic("panic after an implicit 200")
+	})
+
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest(http.MethodGet, "/implicit", nil))
+
+	if got := rec.Body.String(); got != "partial" {
+		t.Errorf("body = %q, want %q — an implicit 200 must count as committed", got, "partial")
+	}
+}
+
+// TestPassThrough_UpstreamAbortsMidBodyAppendsNoEnvelope is the B20 regression
+// test for the path the original fix actually targeted: forwardTo's io.Copy.
+//
+// The Wave-1 fix tagged that error with errResponseCommitted so writeJSONError
+// no-ops — but nothing exercised it. The bug: forwardTo writes upstream headers
+// + status, starts copying, and if the upstream resets mid-body io.Copy returns
+// an error. The handler then called writeJSONError(502), whose second
+// WriteHeader net/http drops as superfluous while the JSON body it writes still
+// lands appended to the partial response. The client received
+// `<partial valid body><AgentGuard JSON error>` — malformed.
+func TestPassThrough_UpstreamAbortsMidBodyAppendsNoEnvelope(t *testing.T) {
+	const partial = `{"data":[{"embedding":[0.1,0.2`
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Promise more than we send, then abort the connection. io.Copy in
+		// forwardTo sees an unexpected EOF after the response is committed.
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "4096")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(partial))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		panic(http.ErrAbortHandler) // kills the connection without a normal close
+	}))
+	defer upstream.Close()
+
+	_, base, teardown := newTestServer(t, upstream, nil)
+	defer teardown()
+
+	resp, err := http.Post(base+"/v1/embeddings", "application/json", strings.NewReader(`{"input":"x","model":"m"}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// The read errors (the body is truncated) — that is expected and correct.
+	// What matters is what DID arrive.
+	got, _ := io.ReadAll(resp.Body)
+
+	if strings.Contains(string(got), "agentguard_error") {
+		t.Errorf("an AgentGuard error envelope was appended onto a committed, partially-sent body: %q", got)
+	}
+	if strings.Contains(string(got), `"error"`) {
+		t.Errorf("an error object was appended onto a committed body: %q", got)
+	}
+	// Whatever arrived must be a prefix of the upstream's bytes — never the
+	// upstream's bytes with something of ours concatenated on the end.
+	if len(got) > 0 && !strings.HasPrefix(partial, string(got)) && !strings.HasPrefix(string(got), partial) {
+		t.Errorf("client received bytes that are not a clean prefix/suffix of the upstream body: %q", got)
+	}
+}
+
+// TestServer_RecoverPanic_PreservesFlusher is the compatibility guard for the
+// wrapper. Every streaming path does `w.(http.Flusher)` and bails out with
+// "response writer does not support flushing" if the assertion fails — so a
+// wrapper that did not forward Flush would silently disable SSE on every
+// route. This asserts the wrapper stays flushable.
+func TestServer_RecoverPanic_PreservesFlusher(t *testing.T) {
+	srv := newPanicTestServer(t)
+
+	var sawFlusher, flushed bool
+	h := srv.recoverPanic(func(w http.ResponseWriter, r *http.Request) {
+		f, ok := w.(http.Flusher)
+		sawFlusher = ok
+		if ok {
+			_, _ = w.Write([]byte("x"))
+			f.Flush()
+			flushed = true
+		}
+	})
+
+	h(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/flush", nil))
+
+	if !sawFlusher {
+		t.Fatal("recoverPanic's wrapper broke the http.Flusher assertion — every streaming route would fail")
+	}
+	if !flushed {
+		t.Error("Flush was not reached")
+	}
+}
+
 // ----- H3: --max-concurrent-streams enforcement -----
 
 // streamingProxyHelper builds a streaming-capable proxy whose upstream

@@ -309,32 +309,76 @@ func (s *Server) routes() *http.ServeMux {
 	return mux
 }
 
+// committedWriter tracks whether the response status line has been sent,
+// so a late error path can tell "nothing written yet" (safe to emit an
+// error envelope) from "already committed" (must stay silent).
+//
+// Without this, net/http drops the second WriteHeader as superfluous but
+// STILL writes the body that follows it, concatenating an error object onto
+// a partial response and handing the client malformed bytes (audit B20).
+// The io.Copy site in forwardTo carries errResponseCommitted for the same
+// reason; this covers the paths that write directly.
+//
+// Flush is forwarded explicitly: the streaming loops type-assert their
+// ResponseWriter to http.Flusher, and an embedded-only wrapper would fail
+// that assertion and break SSE.
+type committedWriter struct {
+	http.ResponseWriter
+	committed bool
+}
+
+func (c *committedWriter) WriteHeader(status int) {
+	c.committed = true
+	c.ResponseWriter.WriteHeader(status)
+}
+
+func (c *committedWriter) Write(b []byte) (int, error) {
+	// An implicit 200 from a bare Write commits the response just as
+	// surely as an explicit WriteHeader.
+	c.committed = true
+	return c.ResponseWriter.Write(b)
+}
+
+func (c *committedWriter) Flush() {
+	if f, ok := c.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap lets errors.As-style unwrapping and future middleware reach the
+// underlying writer. Also satisfies http.ResponseController in Go 1.20+.
+func (c *committedWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
+
 // recoverPanic catches any panic raised by a downstream handler, logs
 // the stack trace, and (if no bytes have flushed yet) returns a JSON
 // 500 to the client. Streaming responses that have already begun
-// writing SSE bytes will see only the log line — once headers + bytes
-// are on the wire we can't safely inject a JSON error envelope without
-// corrupting the stream. The panic is contained either way; the
-// process keeps serving other in-flight requests.
+// writing SSE bytes get only the log line — once headers + bytes are on
+// the wire we cannot inject a JSON error envelope without corrupting the
+// stream, so we write NOTHING rather than appending onto a partial body
+// (audit B20). The panic is contained either way; the process keeps
+// serving other in-flight requests.
 //
 // Mirrors pkg/proxy/server.go:recoverPanic.
 func (s *Server) recoverPanic(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		cw := &committedWriter{ResponseWriter: w}
 		defer func() {
 			if rec := recover(); rec != nil {
 				log.Printf("llmproxy: PANIC %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
-				// Best-effort 500. If the handler already wrote
-				// headers (notably any streaming path that has
-				// flushed at least once), http stdlib swallows the
-				// WriteHeader and we just log; clients will see the
-				// stream end abruptly, which their SDKs already
-				// handle as a network-level disconnect.
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(`{"error":{"message":"internal server error","type":"agentguard_error"}}`))
+				if cw.committed {
+					// Status (and likely body bytes) already sent. Anything
+					// we write now lands appended to a partial response.
+					// Return and let the truncated body close — SDKs already
+					// treat that as a network-level disconnect.
+					log.Printf("llmproxy: response already committed; closing without an error envelope")
+					return
+				}
+				cw.Header().Set("Content-Type", "application/json")
+				cw.WriteHeader(http.StatusInternalServerError)
+				_, _ = cw.Write([]byte(`{"error":{"message":"internal server error","type":"agentguard_error"}}`))
 			}
 		}()
-		next(w, r)
+		next(cw, r)
 	}
 }
 
@@ -595,11 +639,28 @@ func isStreamingRequest(r *http.Request, bodyStream bool) bool {
 	return strings.Contains(strings.ToLower(accept), "text/event-stream")
 }
 
+// errResponseCommitted tags an error that occurred AFTER the response status
+// and (part of) the body were already written to the client. Once the wire is
+// committed there is no way to send a meaningful error — the only correct move
+// is to stop writing and let the truncated body close, which clients already
+// treat as a network-level disconnect. writeJSONError honors this tag.
+var errResponseCommitted = errors.New("response already committed")
+
 // writeJSONError writes an error envelope shaped like
 // OpenAI/Anthropic's so SDK client error-handling code engages
 // normally. status is the HTTP status code; err's text becomes the
 // `message`.
+//
+// No-ops when err is tagged errResponseCommitted: the status line and a partial
+// body are already on the wire, so the second WriteHeader would be dropped by
+// net/http ("superfluous") while the JSON body still got appended to the
+// partial response — handing the client `<partial body><error envelope>`
+// concatenated (audit B20).
 func writeJSONError(w http.ResponseWriter, status int, err error) {
+	if errors.Is(err, errResponseCommitted) {
+		log.Printf("llmproxy: %v (response already committed; closing without an error envelope)", err)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{

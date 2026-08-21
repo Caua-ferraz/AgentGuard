@@ -18,8 +18,8 @@
 // Why re-export rather than redefine: making this package canonical
 // would force pkg/policy (which is imported by every part of the system,
 // including pkg/proxy/schema/v1 itself) to depend on it, creating an
-// import cycle. The decision is recorded in .audit/v05_decisions.md
-// under "Wire-schema canonical-type location".
+// import cycle. That constraint is the whole reason for the re-export —
+// it is structural, not a preference, so it holds for v2 as well.
 //
 // Backward-compatibility contract for v1:
 //   - No field is ever removed.

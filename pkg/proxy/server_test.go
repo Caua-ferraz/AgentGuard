@@ -1803,6 +1803,65 @@ func TestRecoverMiddleware(t *testing.T) {
 	resp.Body.Close()
 }
 
+// TestRecoverMiddleware_DoesNotAppendToCommittedBody is the B20 regression test
+// for this package's panic path.
+//
+// The reachable case is the dashboard SSE stream (handleEventStream): it holds
+// the connection open and flushes events for its lifetime, so any panic after
+// the first event lands on an already-committed response. net/http drops the
+// second WriteHeader as superfluous but still writes the body after it, so the
+// client used to receive `<partial SSE stream>{"error":"internal server
+// error"}` concatenated. Once committed, the only correct move is silence.
+func TestRecoverMiddleware_DoesNotAppendToCommittedBody(t *testing.T) {
+	const committed = "event: check\ndata: {\"decision\":\"ALLOW\"}\n\n"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(committed))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		panic("panic mid-stream")
+	})
+	h := recoverPanic(withCORS("")(withLogging(mux)))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/stream", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (the committed status must survive)", rec.Code)
+	}
+	if got := rec.Body.String(); got != committed {
+		t.Errorf("body = %q, want exactly %q — an error envelope was appended onto a committed SSE stream (B20)", got, committed)
+	}
+}
+
+// TestRecoverMiddleware_PreservesFlusher guards the wrapper's compatibility:
+// handleEventStream asserts w.(http.Flusher) and 500s when the assertion
+// fails, so a wrapper that dropped Flush would break the dashboard stream on
+// every request.
+func TestRecoverMiddleware_PreservesFlusher(t *testing.T) {
+	var sawFlusher bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/flush", func(w http.ResponseWriter, r *http.Request) {
+		f, ok := w.(http.Flusher)
+		sawFlusher = ok
+		if ok {
+			_, _ = w.Write([]byte("x"))
+			f.Flush()
+		}
+	})
+	h := recoverPanic(withCORS("")(withLogging(mux)))
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/flush", nil))
+
+	if !sawFlusher {
+		t.Fatal("recoverPanic's wrapper broke the http.Flusher assertion — the dashboard SSE stream would fail")
+	}
+}
+
 // TestRateLimitDoubleCount closes R3 #21. A rate-limited request must
 // increment ChecksTotal and DeniedTotal exactly once each (not twice as
 // in v0.4.x where IncRateLimited and IncDecision both bumped them).

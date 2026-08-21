@@ -155,14 +155,35 @@ policy_suite() {
 }
 
 python_suite() {
-  local PY=""
+  # Probe for an interpreter that can actually INSTALL, not merely one that
+  # answers --version. A bare `python` on PATH is routinely an unrelated
+  # virtualenv with no pip, and this suite's first action is a pip install —
+  # so a --version-only check happily selects an interpreter that cannot run
+  # the suite, and the whole thing fails with a confusing "No module named
+  # pip" instead of skipping cleanly.
+  #
+  # `py` is the Windows Python launcher and the canonical entry point there;
+  # it is tried explicitly because on Windows `python3` is usually a Microsoft
+  # Store stub that fails and `python` may be any venv that happens to be
+  # first on PATH. Matches this script's existing Windows support (see the
+  # .exe handling for AGENTGUARD_BIN).
+  PY_CMD=()
+  local c
+  for c in python3 python py; do
+    command -v "$c" >/dev/null 2>&1 || continue
+    if [ "$c" = "py" ]; then
+      if py -3 -m pip --version >/dev/null 2>&1; then
+        PY_CMD=(py -3)
+        break
+      fi
+    elif "$c" -m pip --version >/dev/null 2>&1; then
+      PY_CMD=("$c")
+      break
+    fi
+  done
 
-  if command -v python3 >/dev/null 2>&1 && python3 --version >/dev/null 2>&1; then
-    PY=python3
-  elif command -v python >/dev/null 2>&1 && python --version >/dev/null 2>&1; then
-    PY=python
-  else
-    echo "python not installed" >&2
+  if [ ${#PY_CMD[@]} -eq 0 ]; then
+    echo "no python interpreter with pip found (tried python3, python, py -3)" >&2
     return 77
   fi
 
@@ -171,8 +192,8 @@ python_suite() {
 
   (
     cd plugins/python &&
-    "$PY" -m pip install --quiet -e ".[dev]" &&
-    "$PY" -m pytest -v --cov=agentguard
+    "${PY_CMD[@]}" -m pip install --quiet -e ".[dev]" &&
+    "${PY_CMD[@]}" -m pytest -v --cov=agentguard
   )
 }
 

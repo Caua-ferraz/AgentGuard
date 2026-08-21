@@ -1750,8 +1750,8 @@ func matchRule(rule Rule, req ActionRequest) bool {
 // globMatch performs glob pattern matching supporting * and **.
 //
 // Pattern semantics — STABLE CONTRACT (closes R3 #11 by documenting the
-// asymmetry; see .audit/v05_decisions.md "Glob ** semantics for paths vs
-// domains" for the choice):
+// asymmetry between path and domain matching; the rules below ARE the
+// specification — there is no other document to consult):
 //
 //  1. Path patterns are segment-aware ONLY when they contain `**`:
 //     - A pattern containing `**` is split on `/`. Each segment except `**`

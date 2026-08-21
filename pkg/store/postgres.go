@@ -44,6 +44,15 @@ const (
 	pgConnMaxLifetime = time.Hour
 )
 
+// migrateTimeout bounds the schema migration run from a store constructor
+// (audit H12). sql.Open does not dial, so Migrate's first round-trip is where a
+// bad or blackholed DSN actually shows up — and with context.Background() that
+// wait was unbounded, hanging boot forever with no way to interrupt it. A
+// bounded deadline turns "hangs silently" into "fails startup with an error the
+// operator can read". Generous enough for a real migration on a cold database;
+// this runs once per process, never on a request path.
+const migrateTimeout = 30 * time.Second
+
 // NewPostgresStore opens the Postgres database identified by dsn (a
 // "postgres://" / "postgresql://" URL or a libpq keyword/value string), sets a
 // modest cold-path connection pool, and runs the schema migration. Connectivity
@@ -60,8 +69,13 @@ func NewPostgresStore(dsn string) (*PostgresStore, error) {
 	db.SetConnMaxLifetime(pgConnMaxLifetime)
 
 	s := &PostgresStore{db: db, dsn: dsn}
-	if err := s.Migrate(context.Background()); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), migrateTimeout)
+	defer cancel()
+	if err := s.Migrate(ctx); err != nil {
 		_ = db.Close()
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("store: postgres migration did not complete within %s (unreachable or unresponsive DSN): %w", migrateTimeout, err)
+		}
 		return nil, err
 	}
 	return s, nil

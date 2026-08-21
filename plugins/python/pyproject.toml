@@ -43,8 +43,7 @@ Issues = "https://github.com/Caua-ferraz/AgentGuard/issues"
 # v0.4.x's "0.1+" floor allowed silent rot when frameworks renamed methods
 # or added new bypass paths. The CI integration-tests job runs against the
 # pinned major every week; the upper bound is bumped only after a new major
-# is verified end-to-end. Decision recorded in .audit/v05_decisions.md
-# under "Framework extras version pins".
+# is verified end-to-end.
 #
 # Floors reflect the API surface that AgentGuard's adapters were hardened
 # against (A11/A12/A13). Ceilings are the next major boundary so a future

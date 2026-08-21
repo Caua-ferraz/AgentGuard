@@ -65,24 +65,29 @@ func driveCheckViaMux(t *testing.T, srv *Server, method, path, body string) (pol
 	return result, w.Code
 }
 
-// TestAT_B1_Adversarial_TenantIDDoesntCount documents the v0.5
-// behavior of cross-tenant approval replay. ActionRequest carries no
-// tenant field (R-Arch A2/A3 — tenant is plumbed through the URL path
-// + context, not the wire shape). ApprovalQueue.Lookup is also a
-// single global map by id. As a consequence: an attacker who learns an
-// approval_id approved via one tenant URL and submits a matching-shape
-// retry against a different tenant URL WILL short-circuit to the
-// cached decision IFF both tenants resolve through the engine's policy
-// provider. This is a documented v0.6 gap, not a v0.5 bug — the audit
-// (V05_AUDIT_REPORT.md, "Defer to v0.6") explicitly defers tenant-
-// scoped approval lookup.
+// TestAT_B1_Adversarial_TenantIDDoesntCount pins that the tenant is NOT
+// one of the fields matchesOriginalRequest compares — replay validation is
+// purely shape-based.
 //
-// AT pins this behavior on the legacy /v1/check ↔ /v1/t/local/check
-// pair: both routes resolve to LocalTenantID, both inputs go through
-// the same global ApprovalQueue, and matchesOriginalRequest compares
-// only the seven shape fields. A v0.6 fix that adds tenant scoping to
-// either matchesOriginalRequest or ApprovalQueue.Lookup would flip the
-// assertion in this test.
+// ActionRequest carries no tenant field (R-Arch A2/A3 — tenant is plumbed
+// through the URL path + context, not the wire shape), so two requests that
+// differ only by which route carried them are indistinguishable to
+// matchesOriginalRequest.
+//
+// That is safe because tenant isolation is enforced one layer up rather than
+// in the shape comparison: ApprovalQueue.Lookup takes a tenantID and returns
+// "not found" for an id owned by another tenant, so a foreign approval_id
+// never reaches matchesOriginalRequest at all. Cross-tenant isolation is
+// covered by TestApprovalQueueTenantIsolation and the state-machine tests;
+// this test deliberately covers the complementary case.
+//
+// So the pair below is SAME-tenant on purpose: the legacy /v1/check and
+// /v1/t/local/check routes both resolve to LocalTenantID. It asserts that
+// crossing between the legacy and tenant-aware URL families does not by
+// itself break a legitimate retry. To turn this into a true cross-tenant
+// probe you would need two distinct tenants — and then the expected result
+// is the opposite (no short-circuit), which is what the isolation tests
+// already assert.
 func TestAT_B1_Adversarial_TenantIDDoesntCount(t *testing.T) {
 	srv := newReplayTestServer(t)
 
@@ -93,9 +98,9 @@ func TestAT_B1_Adversarial_TenantIDDoesntCount(t *testing.T) {
 	mismatchBefore := metrics.ApprovalReplayMismatchTotal()
 
 	// Retry via the tenant-aware /v1/t/local/check route. Same logical
-	// tenant; if any future tenant-scoping work lands and tenants are
-	// distinct identities, this test would need to flip to a true
-	// cross-tenant pair.
+	// tenant on purpose — see the doc comment: a DIFFERENT tenant is
+	// rejected by ApprovalQueue.Lookup before shape comparison runs, and
+	// that path is covered by TestApprovalQueueTenantIsolation.
 	body := fmt.Sprintf(
 		`{"scope":"shell","command":"sudo apt install vim","agent_id":"agent_a","approval_id":%q}`,
 		approvalID,
@@ -105,24 +110,16 @@ func TestAT_B1_Adversarial_TenantIDDoesntCount(t *testing.T) {
 		t.Fatalf("expected 200, got %d", code)
 	}
 
-	// v0.5 documented behavior: short-circuit happens because the seven
-	// compared fields all match. The fact that the seed used the legacy
-	// route and the retry used the tenant-aware route is not part of
-	// the comparison.
+	// The short-circuit happens because the seven compared fields all match.
+	// Which URL family carried the request is not part of the comparison, so
+	// a legitimate retry is not punished for switching routes.
 	if result.Rule != "allow:approved" {
-		t.Errorf("v0.5 documented behavior: matching-shape retry across legacy and tenant-aware routes short-circuits to allow:approved; got rule=%q decision=%s. If matchesOriginalRequest now compares tenant id, update this test.",
+		t.Errorf("matching-shape retry across the legacy and tenant-aware routes should short-circuit to allow:approved; got rule=%q decision=%s. If matchesOriginalRequest started comparing tenant id, update this test.",
 			result.Rule, result.Decision)
 	}
 	if got := metrics.ApprovalReplayMismatchTotal(); got != mismatchBefore {
 		t.Errorf("ApprovalReplayMismatchTotal incremented (got %d, want %d) — fields match; counter must NOT bump", got, mismatchBefore)
 	}
-
-	// Document for the v0.6 worker: TODO(v0.7, #tenant-scoped-approval-lookup)
-	// — when ActionRequest gains a TenantID field (or
-	// ApprovalQueue.Lookup grows a tenant arg), extend
-	// matchesOriginalRequest and flip this test to assert that an
-	// approval_id minted under tenant A short-circuits ONLY when
-	// retried under tenant A.
 }
 
 // TestAT_B1_Adversarial_CaseSensitivity asserts that case-different

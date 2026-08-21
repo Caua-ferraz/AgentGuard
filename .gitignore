@@ -61,3 +61,6 @@ package-lock.json
 CLAUDE.md
 TODO.md
 .claude/
+
+# Local failure-audit fix notes (not for publication)
+local_fixes/

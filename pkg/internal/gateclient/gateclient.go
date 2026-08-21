@@ -111,10 +111,19 @@ func (c *Caller) CallV1Check(ctx context.Context, ar policy.ActionRequest, rules
 
 	// Cap the response body so a misbehaving server doesn't OOM the
 	// proxy. /v1/check responses are O(few hundred bytes).
+	//
+	// Read maxResp+1 so an oversized body is DETECTED rather than silently
+	// truncated mid-JSON: a plain LimitReader returns a clean EOF at the cap,
+	// the decode below fails, and the caller would apply its fail-mode default
+	// in place of the real verdict (audit B25). Same +1 pattern the proxy
+	// already uses for request bodies.
 	const maxResp = 64 * 1024
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResp))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResp+1))
 	if err != nil {
 		return Decision{}, fmt.Errorf("read /v1/check body: %w", err)
+	}
+	if len(raw) > maxResp {
+		return Decision{}, fmt.Errorf("/v1/check response exceeds %d bytes; refusing to act on a truncated verdict", maxResp)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return Decision{}, fmt.Errorf("/v1/check HTTP %d: %s", resp.StatusCode, truncateForError(string(raw)))
