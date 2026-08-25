@@ -41,6 +41,12 @@ func main() {
 	protoVersion := flag.String("proto-version", "2025-11-25", "protocolVersion to return on initialize")
 	crashAfterN := flag.Int("crash-after-n", 0, "exit non-zero after handling N requests; 0 = never")
 	notifyListChanged := flag.Bool("notify-list-changed-on-call", false, "emit notifications/tools/list_changed after each tools/call response")
+	// hugeLineAfterN models an upstream that emits a single stdout line larger
+	// than the gateway's frame cap -- a big file read, a screenshot, a dataset
+	// dump. Ordinary MCP tool output, not an attack. Default 0 keeps this
+	// inert for every other test that shares this binary.
+	hugeLineAfterN := flag.Int("huge-line-after-n", 0, "after handling N requests, emit one oversized stdout line; 0 = never")
+	hugeLineBytes := flag.Int("huge-line-bytes", 5*1024*1024, "size of the oversized stdout line")
 	flag.Parse()
 
 	logf := func(format string, args ...interface{}) {
@@ -77,6 +83,14 @@ func main() {
 			if *crashAfterN > 0 && int(n) > *crashAfterN {
 				logf("crash-after-n triggered, exiting non-zero")
 				os.Exit(2)
+			}
+			if *hugeLineAfterN > 0 && int(n) > *hugeLineAfterN {
+				logf("huge-line-after-n triggered, emitting %d-byte line", *hugeLineBytes)
+				out.WriteString(strings.Repeat("Z", *hugeLineBytes))
+				out.WriteString("\n")
+				out.Flush()
+				// Keep serving. The process stays ALIVE -- that is the whole
+				// point: the reader dies while the subprocess does not.
 			}
 		}
 
