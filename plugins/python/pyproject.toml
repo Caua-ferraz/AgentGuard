@@ -71,7 +71,7 @@ browser-use = [
 ]
 # MCP SDK is on the 1.x line. Earlier 0.9.1 release predates the stable
 # Python SDK shape; the floor includes both for compatibility.
-mcp = ["mcp>=0.9,<2.0"]
+mcp = ["mcp>=0.9,<3.0"]
 # Convenience: install every adapter extra in one go (pip install ".[all]").
 # Self-reference picks up the version-pinned extras above.
 all = ["agentguardproxy[langchain,crewai,browser-use,mcp]"]
