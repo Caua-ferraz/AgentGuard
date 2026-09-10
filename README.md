@@ -124,9 +124,16 @@ go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@latest
 # Or Docker (build the image from the repo's Dockerfile first)
 docker build -t agentguard:latest .
 docker run -d -p 8080:8080 \
+  -e AGENTGUARD_API_KEY="$AGENTGUARD_API_KEY" \
   -v agentguard-audit:/var/lib/agentguard \
   agentguard:latest
 ```
+
+> **The `-e AGENTGUARD_API_KEY` is required, not optional.** Without an API key
+> AgentGuard binds to `127.0.0.1` — which inside a container is the *container’s*
+> own loopback, so `-p 8080:8080` publishes a port nothing is listening on and the
+> host gets connection-refused. Set the key, or use `--network host` if you really
+> do want a loopback-only server.
 
 Prerequisites: Go 1.25+, Python 3.10+ (optional, for the SDK; 3.8 and 3.9 are unsupported — upstream EOL October 2024 and October 2025). See [`docs/SETUP.md`](docs/SETUP.md) for details.
 
@@ -172,7 +179,7 @@ AgentGuard is the **wire-level checkpoint** between your agent and everything it
                                      └──────────────────────┘  │
                                                                │     ┌──────────────────┐
    OpenAI / Anthropic                ┌──────────────────────┐  │     │ AgentGuard server│
-   SDK code                 ───────▶ │ agentguard-llm-proxy │ ─┼───▶│ (agentguard      │
+   SDK code                 ───────▶ │ agentguard-llm-proxy │ ─┼────▶│ (agentguard      │
    (OPENAI_BASE_URL,…)               │                      │  │     │  serve)          │
                                      └──────────────────────┘  │     ├──────────────────┤
                                                                │     │ policy · audit · │
@@ -243,6 +250,7 @@ Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS deta
 | FAQ | [`docs/FAQ.md`](docs/FAQ.md) |
 | Config schema | [`docs/CONFIG.md`](docs/CONFIG.md) |
 | Compatibility & stability (the v1.0 freeze) | [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) |
+| Threat model (actors, trust boundaries, non-goals) | [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) |
 | Migration from earlier versions | [`docs/MIGRATION.md`](docs/MIGRATION.md) |
 | Deprecations | [`docs/DEPRECATIONS.md`](docs/DEPRECATIONS.md) |
 | File formats + migrations | [`docs/FILE_FORMATS.md`](docs/FILE_FORMATS.md) |

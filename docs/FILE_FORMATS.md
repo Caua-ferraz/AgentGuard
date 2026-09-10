@@ -41,21 +41,24 @@ Default path: `audit.jsonl` (CLI `--audit-log`). JSON-Lines, one record per line
 
 The field is purely additive: schema_version remains `2`. Pre-v0.5 readers ignore unknown top-level keys without error. v0.5+ writers MUST set `Transport` on every new entry; the central server's `/v1/check` handler stamps it from `meta["transport"]` on the inbound request, defaulting to `"sdk"` when the field is absent. External audit consumers implementing against this format MUST tolerate the field's absence on legacy data and SHOULD preserve it round-trip when re-serialising entries.
 
-### `.replay-checkpoint` — audit replay checkpoint
+### `<audit-log>.replay-checkpoint` — audit replay checkpoint
 
-Default path: `<audit-dir>/.replay-checkpoint`. Single JSON record. Written after each successful `Logger.Log` flush.
+Default path: `<audit-log>.replay-checkpoint` — `audit.CheckpointSuffix` appended to the audit log path, e.g. `audit.jsonl.replay-checkpoint`. Single JSON record, written atomically (temp file + rename) by the server **once per boot**, after the startup replay finishes. `agentguard migrate --reset-checkpoint` and the v0.4.0 → v0.4.1 migration delete this exact file; there is no schema-version envelope.
 
-| schema_version | release | shape |
-|---|---|---|
-| 1 | v0.4.1+ | `{"schema_version": 1, "file": {"inode": <int>, "path": "<abs path>"}, "offset": <byte offset>, "last_record_timestamp": "<RFC3339>"}` |
+| release | shape |
+|---|---|
+| v0.4.1 – v1.0.0 | `{"offset": <bytes>, "audit_size": <bytes>}` |
+| v1.0.1+ | `{"offset": <bytes>, "audit_size": <bytes>, "file_id": "<live file's _meta.created_at>", "counts": {"total": N, "allow": N, "deny": N, "require_approval": N}}` |
 
-On boot the server uses the checkpoint to resume replay without re-scanning the whole audit file. Inode mismatch triggers rotation-chain following via the `rotated_from` header in each file. A corrupt checkpoint causes the server to refuse startup; recover with `agentguard migrate --reset-checkpoint` (which discards the checkpoint and forces a full replay) or by deleting the file manually.
+`file_id` says which live file `offset` refers to (rotation stamps every new live file with a fresh `_meta.created_at`); it is absent for headerless legacy files. `counts` is the lifetime decision tally as of `offset`: the next boot seeds `agentguard_checks_total` and its siblings from it and replays only the entries written afterwards, which is how the counters survive restarts. A v1.0.0 checkpoint (no `counts`) is still accepted and triggers one full replay of the live file to establish the tally. The tally starts at the first boot that wrote a checkpoint; archives that already existed before that boot are not scanned.
+
+On boot: a matching `file_id` resumes at `offset`. A different one means the log rotated in between, and the seeder walks `_meta.rotated_from` back through the archives (gzip or plain) to the checkpointed segment, replaying it from `offset` and every newer segment from the start; if that segment was already pruned, everything still reachable is replayed and `counts` is carried forward. A missing, corrupt, or truncation-stale checkpoint never blocks startup — it triggers a full replay of the live file. Force that explicitly with `agentguard migrate --reset-checkpoint --audit-log <path>` or by deleting the file.
 
 ### `<audit-dir>/audit-<timestamp>.jsonl[.gz]` — rotated audit files
 
 #### Rotated file headers
 
-Size-triggered rotation via the logger. Each rotated file carries the same schema-2 header as the live file, with `_meta.rotated_from` set to the path of the file whose tail rolled into it. Compression is applied to rotated files only; the live file stays uncompressed to keep appends cheap. Startup replay walks the chain backwards via `_meta.rotated_from` until it reaches the segment indexed by `.replay-checkpoint`.
+Size-triggered rotation via the logger. Each rotated file carries the same schema-2 header as the live file, with `_meta.rotated_from` set to the path of the file whose tail rolled into it. Compression is applied to rotated files only; the live file stays uncompressed to keep appends cheap. Startup replay walks the chain backwards via `_meta.rotated_from` until it reaches the segment identified by the replay checkpoint's `file_id`.
 
 ### `.v040-backup` — one-time rollback artifact
 

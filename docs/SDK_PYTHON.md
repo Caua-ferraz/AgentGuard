@@ -95,8 +95,11 @@ guard.check(
     session_id: str = "",
     est_cost: float = 0.0,
     meta: Optional[dict] = None,
+    approval_id: str = "",
 ) -> CheckResult
 ```
+
+`approval_id` replays a previously issued approval after `wait_for_approval` resolved ALLOW — the server consumes the one-shot capability, enforces `--approval-validity`, reserves cost, and audits the execution as `allow:approved` (see [`APPROVAL_WORKFLOW.md`](APPROVAL_WORKFLOW.md#5-agent-replays-the-approval-through-v1check)). Omitted from the body when empty.
 
 All fields past `scope` are keyword-only. Fill the ones your scope cares about:
 
@@ -159,7 +162,7 @@ CheckResult(decision="ALLOW", reason="AgentGuard unreachable (allow): <original 
 | `wait_for_approval(timeout=300)` | 300s | Wall-clock deadline for the whole poll loop. |
 | `wait_for_approval(poll_interval=2)` | 2s | Sleep between polls. |
 
-`wait_for_approval` quietly swallows individual poll failures (`URLError`) and keeps retrying until the deadline — the assumption is that the server is momentarily unreachable but will come back within the approval window. A final deadline miss returns `CheckResult(decision="DENY", reason="Approval timed out")`, which the `@guarded(wait_for_approval=True)` wrapper surfaces as `AgentGuardApprovalTimeout`.
+`wait_for_approval` quietly swallows individual poll failures (`URLError`, other `OSError`s, and a body that is not JSON) and keeps retrying until the deadline — the assumption is that the server is momentarily unreachable but will come back within the approval window. A final deadline miss returns `CheckResult(decision="DENY", reason="Approval timed out")`, which the `@guarded(wait_for_approval=True)` wrapper surfaces as `AgentGuardApprovalTimeout`.
 
 **Pick `timeout` higher than your human-SLA.** If approvers need 15 minutes on average, `timeout=300` will fire false negatives.
 
@@ -231,7 +234,7 @@ Behavior:
 4. Branches on the decision:
    - `ALLOW` → runs the wrapped function.
    - `REQUIRE_APPROVAL` + `wait_for_approval=False` → raises `AgentGuardApprovalRequired` immediately.
-   - `REQUIRE_APPROVAL` + `wait_for_approval=True` → blocks on `wait_for_approval`. Resolved ALLOW runs the function; resolved DENY raises `AgentGuardDenied`; timeout raises `AgentGuardApprovalTimeout`.
+   - `REQUIRE_APPROVAL` + `wait_for_approval=True` → blocks on `wait_for_approval`. A resolved ALLOW is replayed through `guard.check(..., approval_id=...)` (consuming the one-shot approval and reserving cost) and the function runs only if that replay allows; a resolved DENY or a denied replay raises `AgentGuardDenied`; a refused replay that re-entered the approval flow raises `AgentGuardApprovalRequired` with the new id; timeout raises `AgentGuardApprovalTimeout`.
    - `DENY` → raises `AgentGuardDenied`.
 
 Any `**check_kwargs` you pass are forwarded verbatim to `Guard.check()`. Useful for pinning `session_id=`, `meta=`, etc.

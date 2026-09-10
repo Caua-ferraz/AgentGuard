@@ -248,16 +248,33 @@ A resolved **ALLOW** is a single-use, time-boxed capability:
 
 ---
 
-## 5. Agent re-runs `/v1/check`
+## 5. Agent replays the approval through `/v1/check`
 
-The SDK returns a `CheckResult` carrying the resolution. **The original `check()` call is not the one that "executes" — the agent must either:**
+`wait_for_approval` returns the resolution it read from `/v1/status/{id}`. That read is passive — it spends nothing. **The execution is authorized by replaying the approval through `/v1/check` with `approval_id` set** and the same scope and operationally-meaningful fields as the original request. The replay is what:
 
-- Act on `result.allowed` directly (trusting the resolution), or
-- Re-run `check()` with the same parameters so the cost reservation / rate-limit accounting fires.
+- consumes the one-shot ALLOW and enforces `--approval-validity` (§4),
+- reserves cost for **cost-scoped** actions — the original check returned `REQUIRE_APPROVAL` before `checkCost` ran, so nothing was reserved against `sessionCosts[session_id]`,
+- writes the `allow:approved` audit entry that ties the execution to the human decision.
 
-For **cost scope** specifically, **you must re-run check()** — the approval does not reserve cost. The re-run will hit `checkCost` and reserve atomically against `sessionCosts[session_id]`.
+Acting on the status poll's `result.allowed` alone skips all three: the approval is never spent, no cost is reserved, and the audit log shows a resolution with no execution behind it.
 
-For most other scopes, the approval is sufficient and you can execute the action directly.
+```python
+final = guard.wait_for_approval(result.approval_id, timeout=300)
+if final.allowed:
+    replay = guard.check("shell", command=cmd, approval_id=result.approval_id)
+    if replay.allowed:                     # matched_rule == "allow:approved"
+        execute(cmd)
+```
+
+```typescript
+const final = await guard.waitForApproval(result.approvalId!, 300_000);
+if (final.allowed) {
+  const replay = await guard.check('shell', { command: cmd, approvalId: result.approvalId });
+  if (replay.allowed) await execute(cmd);
+}
+```
+
+A refused replay (id already consumed, or older than `--approval-validity`) is not an error on the wire: the request falls through to fresh policy evaluation and comes back as `REQUIRE_APPROVAL` under a **new** id. Treat that as a new approval request, never as permission.
 
 ### SDK convenience: `guarded` with `wait_for_approval=True`
 
@@ -277,7 +294,7 @@ const gated = guarded(guard, 'cost', makeExpensiveCall, {
 });
 ```
 
-The decorator/HOF internally: `check` → if REQUIRE_APPROVAL, `wait_for_approval` → on ALLOW resolution, re-run `check` (so cost reserves) → run the wrapped function. On DENY resolution or timeout, it raises `AgentGuardDenied` / `AgentGuardApprovalTimeout`.
+The decorator/HOF internally: `check` → if REQUIRE_APPROVAL, `wait_for_approval` → on ALLOW resolution, replay `check` with `approval_id` (consuming the approval and reserving cost) → run the wrapped function only if the replay allows. A DENY resolution, a denied replay, or a timeout raises `AgentGuardDenied` / `AgentGuardApprovalTimeout`; a refused replay that re-entered the approval flow raises `AgentGuardApprovalRequired` carrying the **new** id — the wrapper never waits a second time on its own.
 
 ---
 
@@ -309,7 +326,7 @@ Every resolution is recorded in the audit log with `decision: ALLOW` or `DENY` a
 | `approval_url` in Slack is `http://localhost:8080` behind a proxy | `--base-url` not set | Start server with `--base-url https://guardrails.example`. |
 | Approval works in dashboard but `POST /v1/approve/{id}` from script returns 401 | Missing Bearer | Set `Authorization: Bearer $KEY`. |
 | Approvals "stuck" after a restart | Running with `--persist=false`, or the entry was created inside the final store-sync window before a crash | Re-issue `check()` from the agent; resolving stale IDs is a no-op. |
-| Agent sees ALLOW but action fails at cost check | Cost only reserves on `check()` re-run after approval | Either re-run check, or use the `guarded` wrapper with `wait_for_approval=True`. |
+| Agent sees ALLOW but action fails at cost check | Cost only reserves on the `check(approval_id=...)` replay after approval | Replay the approval (§5); the `guarded` wrapper with `wait_for_approval=True` does it for you. |
 
 ---
 

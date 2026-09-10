@@ -45,7 +45,7 @@ v0.4.0 does not understand the schema-2 header and will refuse to read a migrate
 
 ### Behavioral changes worth knowing about
 
-- **Audit replay is checkpointed.** First start takes as long as it used to (one full replay). Subsequent starts are near-instant — the server resumes from `<audit-dir>/.replay-checkpoint`.
+- **Audit replay is checkpointed.** First start takes as long as it used to (one full replay). Subsequent starts are near-instant — the server resumes from `<audit-log>.replay-checkpoint`.
 - **Audit rotation primitives ship in `pkg/audit` but are not wired by default in v0.4.1.** Continue to rotate `audit.jsonl` externally on this release. Rotation will be wired by default in v0.5; the rotator gzips rotated files and carries a `_meta.rotated_from` pointer so startup replay follows the chain.
 - **ApprovalQueue eviction is LRU**, not bulk-drop. Under extreme load with no resolved entries and a full queue, new approvals return `503` with `Retry-After`. The previous behavior was silent state loss. If you scrape `agentguard_approvals_evicted_total{reason}` you will see the events.
 - **Session store rejects new logins at the cap** instead of silently evicting the oldest session. If you routinely run with more than ~1000 concurrent dashboard sessions you will see `503` on new logins; sign out idle tabs to free slots.
@@ -57,15 +57,15 @@ v0.4.0 does not understand the schema-2 header and will refuse to read a migrate
 
 Check `/metrics` for `agentguard_deprecations_used_total` before upgrading to v0.5.0.
 
-### Corrupt-checkpoint recovery
+### Forcing a full replay
 
-If the server refuses to start with a message about a corrupt replay checkpoint:
+The server never refuses to start because of the checkpoint: a missing, corrupt, or stale one triggers a full replay automatically. To force one explicitly (for example after restoring an audit file from backup):
 
 ```bash
 agentguard migrate --reset-checkpoint --audit-log <path>
 ```
 
-This deletes the checkpoint. The next server start performs a full replay (as with v0.4.0) and writes a fresh checkpoint.
+This deletes `<path>.replay-checkpoint` — the file `agentguard serve` reads — and prints `checkpoint removed` or `no checkpoint found`. The next server start performs a full replay (as with v0.4.0) and writes a fresh checkpoint.
 
 ---
 
@@ -128,9 +128,9 @@ Steps:
 4. Restore your previous external rotation configuration if you turned it off.
 5. Start the v0.4.1 server.
 
-### Corrupt-checkpoint recovery
+### Forcing a full replay
 
-Same as v0.4.0 → v0.4.1: `agentguard migrate --reset-checkpoint --audit-log <path>` deletes the checkpoint. The next server start performs a full replay (now walking the rotation chain) and writes a fresh checkpoint.
+Same as v0.4.0 → v0.4.1: `agentguard migrate --reset-checkpoint --audit-log <path>` deletes `<path>.replay-checkpoint`. The next server start performs a full replay (now walking the rotation chain) and writes a fresh checkpoint.
 
 ---
 
@@ -151,11 +151,11 @@ Same as v0.4.0 → v0.4.1: `agentguard migrate --reset-checkpoint --audit-log <p
 
 2. **Update the framework adapters.** If you wrote v0.5.0 code that worked around the composition-wrapper isinstance issue (e.g., `Tool.from_function(func=lambda x: gt.invoke(x))` for LangChain, or skipped `Agent(tools=[GuardedCrewTool(...)])`), you can now pass the wrappers in directly. The v0.5.1 adapters subclass `langchain_core.tools.BaseTool` and `crewai.tools.BaseTool` natively. See [`ADAPTERS.md`](ADAPTERS.md).
 
-3. **Optionally silence the new update notice.** Every subcommand of the `agentguard` binary asynchronously checks the GitHub Releases API at startup and prints a single stderr line if a newer release is published. Set `AGENTGUARD_NO_UPDATE_CHECK=1` in scripted environments where stderr noise is unwanted. See [`CLI.md`](CLI.md#update-notice-on-startup-v051).
+3. **Optionally silence the new update notice.** Every subcommand of the `agentguard` binary (since v1.0.1: every subcommand except `serve`) asynchronously checks the GitHub Releases API at startup and prints a single stderr line if a newer release is published. Set `AGENTGUARD_NO_UPDATE_CHECK=1` in scripted environments where stderr noise is unwanted. See [`CLI.md`](CLI.md#update-notice-on-startup-v051).
 
 ### New surfaces
 
-- **`AGENTGUARD_NO_UPDATE_CHECK`** environment variable — disables the v0.5.1 startup update-notice on all three binaries.
+- **`AGENTGUARD_NO_UPDATE_CHECK`** environment variable — disables the v0.5.1 startup update-notice. Only the `agentguard` binary performs the check; the MCP gateway and LLM proxy never did.
 - **`make test-all` / `scripts/test-all.sh`** — single entry point for Go + policy YAML + Python SDK + TypeScript SDK suites with PASS / FAIL / SKIP summary. See [`CONTRIBUTING.md`](CONTRIBUTING.md#running-the-full-test-suite).
 
 ### Rollback to v0.5.0
