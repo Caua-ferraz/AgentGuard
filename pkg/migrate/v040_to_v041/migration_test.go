@@ -313,3 +313,63 @@ func TestBackupDirOverride(t *testing.T) {
 		t.Errorf("backup must not be placed next to audit log when BackupDir is set; stat: %v", err)
 	}
 }
+
+// TestMigrate_AlreadyV2IsNoop: the `--id` operator override reaches Migrate
+// even when Detect() reported false. A file that already carries a schema
+// header must be left byte-for-byte alone — a second `_meta` line would
+// shift every byte offset the server's replay checkpoint relies on — and
+// the checkpoint must not be invalidated for a rewrite that did not happen.
+func TestMigrate_AlreadyV2IsNoop(t *testing.T) {
+	m := &Migration{}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "audit.jsonl")
+	l, err := audit.NewFileLogger(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Log(audit.Entry{AgentID: "already-v2"}); err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
+	before, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env := migrate.Env{AuditLogPath: p, CheckpointPath: audit.CheckpointPath(p)}
+	if err := os.WriteFile(env.CheckpointPath, []byte(`{"offset":1,"audit_size":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	for round := 1; round <= 2; round++ {
+		res, err := m.Migrate(context.Background(), env, false)
+		if err != nil {
+			t.Fatalf("round %d: Migrate on a v2 file must not fail: %v", round, err)
+		}
+		after, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(after) != string(before) {
+			t.Fatalf("round %d: Migrate rewrote an already-migrated file:\n%s", round, after)
+		}
+		if _, err := os.Stat(p + BackupSuffix); !os.IsNotExist(err) {
+			t.Errorf("round %d: no backup may be written when nothing was migrated; stat: %v", round, err)
+		}
+		if _, err := os.Stat(env.CheckpointPath); err != nil {
+			t.Errorf("round %d: checkpoint must survive a no-op migration: %v", round, err)
+		}
+		found := false
+		for _, n := range res.Notes {
+			if strings.Contains(n, "already carries") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("round %d: result must say the file was already migrated; notes=%v", round, res.Notes)
+		}
+	}
+	if err := m.Verify(context.Background(), env); err != nil {
+		t.Errorf("Verify after no-op: %v", err)
+	}
+}

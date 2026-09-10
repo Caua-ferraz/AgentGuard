@@ -127,6 +127,21 @@ func (m *Migration) Migrate(ctx context.Context, env migrate.Env, dryRun bool) (
 	}
 	res.Stats["original_bytes"] = info.Size()
 
+	// Idempotency guard. The framework's --id override runs Migrate even
+	// when Detect() reported false, and a second `_meta` line would shift
+	// every byte offset the replay checkpoint relies on. A file that already
+	// carries a schema header has nothing to migrate: say so and touch
+	// nothing (no backup, no rewrite, no checkpoint invalidation).
+	meta, err := audit.ReadMeta(env.AuditLogPath)
+	if err != nil {
+		return res, fmt.Errorf("read meta: %w", err)
+	}
+	if meta != nil {
+		res.Notes = append(res.Notes, fmt.Sprintf(
+			"audit log already carries schema_version=%d; nothing to rewrite", meta.SchemaVersion))
+		return res, nil
+	}
+
 	if dryRun {
 		logOrDefault(env).Printf("migrate %s: would prepend _meta and write backup to %s (%d bytes)",
 			m.ID(), backupPath, info.Size())

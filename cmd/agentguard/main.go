@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	_ "net/http/pprof" // pprof handlers register on http.DefaultServeMux when --debug-pprof is set
@@ -17,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
 	"github.com/Caua-ferraz/AgentGuard/pkg/migrate"
 	_ "github.com/Caua-ferraz/AgentGuard/pkg/migrate/v040_to_v041" // register the v0.4.0 → v0.4.1 audit schema migration
 	"github.com/Caua-ferraz/AgentGuard/pkg/notify"
@@ -36,7 +38,7 @@ func main() {
 	// GitHub for the latest release. It prints one line to stderr if the
 	// running binary is older. Disabled on dev builds and via
 	// AGENTGUARD_NO_UPDATE_CHECK=1. See update_check.go.
-	updateDone := startUpdateCheck(version)
+	updateDone := startUpdateCheck(version, commit, subcommandOf(os.Args))
 
 	// Subcommands
 	serveCmd := flag.NewFlagSet("serve", flag.ExitOnError)
@@ -217,7 +219,7 @@ Environment:
 
 	migrateCmd := flag.NewFlagSet("migrate", flag.ExitOnError)
 	migrateAuditPath := migrateCmd.String("audit-log", "audit.jsonl", "Path to audit log file")
-	migrateCheckpoint := migrateCmd.String("checkpoint", "", "Path to replay checkpoint (default: <audit-dir>/.replay-checkpoint)")
+	migrateCheckpoint := migrateCmd.String("checkpoint", "", "Path to the replay checkpoint the server reads at boot (default: <audit-log>"+audit.CheckpointSuffix+", i.e. the file `agentguard serve` writes)")
 	migrateBackupDir := migrateCmd.String("backup-dir", "", "Directory for rollback backups (default: same dir as --audit-log)")
 	migrateDryRun := migrateCmd.Bool("dry-run", false, "Log intended actions without touching disk")
 	migrateList := migrateCmd.Bool("list", false, "List registered migrations and exit")
@@ -977,46 +979,102 @@ func runAuditQuery(baseURL, agent, decision, scope, transport string, limit int,
 }
 
 // runMigrate implements the `agentguard migrate` subcommand. It is a thin
-// wrapper that wires the CLI flags into migrate.RunCLI — the framework
-// handles registry lookup, dry-run semantics, and logging.
+// wrapper that applies executeMigrate's exit code; every decision lives in
+// executeMigrate so tests can drive the real path computation without
+// os.Exit.
+func runMigrate(auditPath, checkpointPath, backupDir string, dryRun, list bool, id string, resetCheckpoint bool) {
+	code := executeMigrate(migrateCmdOpts{
+		AuditPath:       auditPath,
+		CheckpointPath:  checkpointPath,
+		BackupDir:       backupDir,
+		DryRun:          dryRun,
+		List:            list,
+		ID:              id,
+		ResetCheckpoint: resetCheckpoint,
+	}, os.Stdout, os.Stderr)
+	if code != 0 {
+		os.Exit(code)
+	}
+}
+
+// migrateCmdOpts carries the parsed `agentguard migrate` flags.
+type migrateCmdOpts struct {
+	AuditPath       string
+	CheckpointPath  string // empty => defaultCheckpointPath(AuditPath)
+	BackupDir       string // empty => directory of AuditPath
+	DryRun          bool
+	List            bool
+	ID              string
+	ResetCheckpoint bool
+}
+
+// defaultCheckpointPath is the checkpoint file `agentguard serve` actually
+// reads and writes for a given audit log. It MUST go through
+// audit.CheckpointPath: the migrate subcommand once computed
+// `<audit-dir>/.replay-checkpoint` here while the server used
+// `<audit-log>.replay-checkpoint`, so `--reset-checkpoint` deleted a file
+// that never existed and reported success (review R2).
+func defaultCheckpointPath(auditPath string) string {
+	return audit.CheckpointPath(auditPath)
+}
+
+// executeMigrate is the testable core of `agentguard migrate`. Returns the
+// process exit code: 0 on success, 1 on any failure.
 //
 // The --reset-checkpoint flag deletes the replay checkpoint before running
 // any migration, forcing the next server start to do a full replay. This is
 // the escape hatch for operators who suspect the checkpoint is corrupt or
-// was written by an incompatible build.
-func runMigrate(auditPath, checkpointPath, backupDir string, dryRun, list bool, id string, resetCheckpoint bool) {
-	if checkpointPath == "" {
-		// Default to <audit-dir>/.replay-checkpoint.
-		dir := filepathDir(auditPath)
-		checkpointPath = filepathJoin(dir, ".replay-checkpoint")
+// was written by an incompatible build. It reports honestly: "removed" only
+// when a file was actually deleted, "no checkpoint found" otherwise.
+func executeMigrate(o migrateCmdOpts, stdout, stderr io.Writer) int {
+	if o.AuditPath == "" {
+		fmt.Fprintln(stderr, "migrate: --audit-log is required")
+		return 1
 	}
-	if backupDir == "" {
-		backupDir = filepathDir(auditPath)
+	if o.CheckpointPath == "" {
+		o.CheckpointPath = defaultCheckpointPath(o.AuditPath)
+	}
+	if o.BackupDir == "" {
+		o.BackupDir = filepath.Dir(o.AuditPath)
 	}
 
-	if resetCheckpoint {
-		if err := os.Remove(checkpointPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintf(os.Stderr, "migrate: could not remove checkpoint %s: %v\n", checkpointPath, err)
-			os.Exit(1)
+	if o.ResetCheckpoint {
+		switch err := os.Remove(o.CheckpointPath); {
+		case err == nil:
+			fmt.Fprintf(stdout, "migrate: checkpoint removed (%s)\n", o.CheckpointPath)
+		case errors.Is(err, os.ErrNotExist):
+			fmt.Fprintf(stdout, "migrate: no checkpoint found at %s (nothing to reset)\n", o.CheckpointPath)
+		default:
+			fmt.Fprintf(stderr, "migrate: could not remove checkpoint %s: %v\n", o.CheckpointPath, err)
+			return 1
 		}
-		fmt.Printf("migrate: checkpoint removed (%s)\n", checkpointPath)
 	}
 
 	env := migrate.Env{
-		AuditLogPath:   auditPath,
-		CheckpointPath: checkpointPath,
-		BackupDir:      backupDir,
-		Stdout:         os.Stdout,
+		AuditLogPath:   o.AuditPath,
+		CheckpointPath: o.CheckpointPath,
+		BackupDir:      o.BackupDir,
+		Logger:         log.New(stderr, "", log.LstdFlags),
+		Stdout:         stdout,
 	}
 	opts := migrate.CLIOptions{
-		DryRun: dryRun,
-		ID:     id,
-		List:   list,
+		DryRun: o.DryRun,
+		ID:     o.ID,
+		List:   o.List,
 	}
 	if err := migrate.RunCLI(context.Background(), env, opts); err != nil {
-		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "migrate: %v\n", err)
+		return 1
 	}
+	return 0
+}
+
+// subcommandOf returns the subcommand token of a CLI argv ("" when absent).
+func subcommandOf(args []string) string {
+	if len(args) < 2 {
+		return ""
+	}
+	return args[1]
 }
 
 // runTenant implements `agentguard tenant <put|list|rm>` — the operator
@@ -1177,10 +1235,3 @@ Subcommands:
 Run 'agentguard tenant <subcommand> -h' for details on each subcommand.
 `)
 }
-
-// filepathDir and filepathJoin wrap path/filepath so runMigrate stays
-// readable without adding another top-level import block rewrite. They are
-// here (rather than in a helpers file) because they are the only uses in
-// main.go today — pulling them into a shared file would be premature.
-func filepathDir(p string) string     { return filepath.Dir(p) }
-func filepathJoin(a, b string) string { return filepath.Join(a, b) }

@@ -68,7 +68,7 @@ func buildAuditPipeline(auditPath string, storeAudit bool, st store.Store, rotOp
 		// rename.
 		migEnv := migrate.Env{
 			AuditLogPath:   auditPath,
-			CheckpointPath: auditPath + audit.CheckpointSuffix,
+			CheckpointPath: audit.CheckpointPath(auditPath),
 		}
 		if err := migrate.RunStartup(context.Background(), migEnv); err != nil {
 			return nil, fmt.Errorf("startup migration: %w", err)
