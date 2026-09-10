@@ -360,20 +360,25 @@ func NewServer(cfg Config) *Server {
 		if cpErr != nil {
 			log.Printf("WARN: audit checkpoint read failed (%v); replaying full log", cpErr)
 		}
-		newOffset, err := audit.ReplayFrom(path, cp, func(e audit.Entry) {
-			metrics.IncDecision(string(e.Result.Decision))
+		// ReplayWithCheckpoint carries the lifetime decision tally forward
+		// in the checkpoint and follows the rotation chain, so the counters
+		// seeded below equal what a never-restarted process would show.
+		// Entries are deliberately NOT counted in the callback — the tally
+		// in `next` already includes them; counting here too would make
+		// every resumed boot double-count.
+		next, err := audit.ReplayWithCheckpoint(path, cp, func(e audit.Entry) {
 			hydratePriorIndex(s.priorIndex, e)
 			replayed++
 		})
+		if next.Counts != nil {
+			seedDecisionCounters(*next.Counts)
+		}
 		if err != nil {
 			log.Printf("WARN: audit replay failed (%v); counters may be under-seeded", err)
-		} else if newOffset > 0 {
+		} else if next.Offset > 0 {
 			// Best-effort: a failed checkpoint write just means the next
 			// boot re-scans. No need to surface the error at startup.
-			_ = audit.WriteCheckpoint(path, audit.Checkpoint{
-				Offset:    newOffset,
-				AuditSize: newOffset,
-			})
+			_ = audit.WriteCheckpoint(path, next)
 		}
 	} else if existing, err := cfg.Logger.Query(audit.QueryFilter{}); err == nil {
 		for _, e := range existing {
@@ -2529,3 +2534,14 @@ var loginHTML = `<!DOCTYPE html>
   </script>
 </body>
 </html>`
+
+// seedDecisionCounters applies a persisted lifetime decision tally to the
+// process counters at boot — the equivalent of replaying every counted entry
+// through metrics.IncDecision without re-reading it. Boot-time only; never
+// on the request path.
+func seedDecisionCounters(c audit.DecisionCounts) {
+	metrics.AddDecision(string(policy.Allow), c.Allow)
+	metrics.AddDecision(string(policy.Deny), c.Deny)
+	metrics.AddDecision(string(policy.RequireApproval), c.RequireApproval)
+	metrics.AddDecision("", c.Other())
+}

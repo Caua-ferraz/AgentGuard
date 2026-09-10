@@ -22,7 +22,7 @@ Rotated files carry a `_meta.rotated_from` chain pointing to the previous segmen
 Two follow-on consequences regardless of who rotates:
 
 1. **Disk usage** grows proportional to request volume × retention. A busy deployment can produce hundreds of MB per day; the defaults bound this to ~500 MiB across 5 backups.
-2. **Startup replay** re-reads the active file plus a checkpointed prefix of the rotation chain. `NewServer` calls `Logger.Query({})` once at boot and replays every entry through `metrics.IncDecision` so `/metrics` and `/api/stats` survive restarts with accurate counters. A multi-GB log delays counter accuracy until the scan completes.
+2. **Startup replay** seeds the decision counters from the replay checkpoint (`<audit-log>.replay-checkpoint`, which carries the lifetime tally) and re-reads only the entries written since it was last written — following the `_meta.rotated_from` chain through any archives rotated in between — so `/metrics` and `/api/stats` survive restarts with the totals a never-restarted process would show. The first boot after upgrading from v1.0.0, or after `agentguard migrate --reset-checkpoint`, replays the whole live file once; a multi-GB live file delays counter accuracy until that scan completes. The `--audit-backend=store` logger has no checkpoint and re-queries the store on every boot.
 
 ### External shipping (compatible with default rotation)
 

@@ -33,6 +33,16 @@ class MockAgentGuardHandler(BaseHTTPRequestHandler):
     }
     status_response = {"id": "ap_123", "status": "pending"}
 
+    # Sequenced responses. When non-empty, each /v1/check (resp. each
+    # /v1/status/*) pops the next item instead of using the static response
+    # above. ``status_raw_queue`` items are (code, content_type, body_bytes)
+    # so a test can serve a non-JSON poll body. ``request_log`` records every
+    # request as {"method", "path", "body"} in arrival order.
+    check_response_queue: list = []
+    status_response_queue: list = []
+    status_raw_queue: list = []
+    request_log: list = []
+
     # Capture the last request body and headers for assertions
     last_request_body = None
     last_request_headers = None
@@ -42,9 +52,15 @@ class MockAgentGuardHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(content_length) if content_length else b""
         MockAgentGuardHandler.last_request_body = body
         MockAgentGuardHandler.last_request_headers = dict(self.headers)
+        MockAgentGuardHandler.request_log.append(
+            {"method": "POST", "path": self.path, "body": body}
+        )
 
         if self.path == "/v1/check":
-            self._json_response(200, self.check_response)
+            if MockAgentGuardHandler.check_response_queue:
+                self._json_response(200, MockAgentGuardHandler.check_response_queue.pop(0))
+            else:
+                self._json_response(200, self.check_response)
         elif self.path.startswith("/v1/approve/"):
             aid = self.path.split("/")[-1]
             self._json_response(200, {"status": "approved", "id": aid})
@@ -55,8 +71,20 @@ class MockAgentGuardHandler(BaseHTTPRequestHandler):
             self._json_response(404, {"error": "not found"})
 
     def do_GET(self):
+        MockAgentGuardHandler.request_log.append(
+            {"method": "GET", "path": self.path, "body": b""}
+        )
         if self.path.startswith("/v1/status/"):
-            self._json_response(200, self.status_response)
+            if MockAgentGuardHandler.status_raw_queue:
+                code, ctype, raw = MockAgentGuardHandler.status_raw_queue.pop(0)
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.end_headers()
+                self.wfile.write(raw)
+            elif MockAgentGuardHandler.status_response_queue:
+                self._json_response(200, MockAgentGuardHandler.status_response_queue.pop(0))
+            else:
+                self._json_response(200, self.status_response)
         else:
             self._json_response(404, {"error": "not found"})
 
@@ -110,5 +138,9 @@ def mock_server():
         "matched_rule": "allow:test",
     }
     MockAgentGuardHandler.status_response = {"id": "ap_123", "status": "pending"}
+    MockAgentGuardHandler.check_response_queue = []
+    MockAgentGuardHandler.status_response_queue = []
+    MockAgentGuardHandler.status_raw_queue = []
+    MockAgentGuardHandler.request_log = []
     MockAgentGuardHandler.last_request_body = None
     MockAgentGuardHandler.last_request_headers = None

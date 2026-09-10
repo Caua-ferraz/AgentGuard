@@ -563,3 +563,16 @@ func (b *BufferedAsyncLogger) flushOverflowOnce(timeout time.Duration) {
 
 // The notifier-side counterpart of this overflow design lives in
 // pkg/notify (DispatcherOptions.SpoolPath / --notify-spool).
+
+// Path returns the audit file path of the wrapped logger when it is
+// file-backed (a *FileLogger, or anything else exposing Path()), and ""
+// otherwise. The server's startup seeder keys its replay checkpoint off
+// this: without it the production pipeline — which always wraps the
+// FileLogger in a BufferedAsyncLogger — could never resume from a
+// checkpoint and re-scanned the whole live file on every boot.
+func (b *BufferedAsyncLogger) Path() string {
+	if pr, ok := b.underlying.(interface{ Path() string }); ok {
+		return pr.Path()
+	}
+	return ""
+}

@@ -6,6 +6,8 @@ This guide covers the four decisions you **must** get right before exposing Agen
 2. [Running behind a TLS-terminating reverse proxy](#2-behind-a-tls-terminating-reverse-proxy)
 3. [Configuring CORS](#3-cors)
 4. [Understanding the unauthenticated `/v1/check` endpoint](#4-v1check-is-intentionally-open)
+5. [Deploying the MCP Gateway and LLM API Proxy](#5-deploying-the-mcp-gateway-and-llm-api-proxy-v05)
+6. [Outbound connections](#6-outbound-connections)
 
 Each section shows the exact flag/setting, the failure mode if you skip it, and a worked example.
 
@@ -267,6 +269,19 @@ agentguard-mcp-gateway --upstream "fs:npx -y @modelcontextprotocol/server-filesy
 - Pin proxy binary and AgentGuard server to the same minor version; wire protocol is stable within `0.x.y`, not across majors.
 
 Examples (systemd unit, Kubernetes sidecar, MCP client configs): [`QUICKSTART_MCP.md`](QUICKSTART_MCP.md), [`QUICKSTART_LLM_PROXY.md`](QUICKSTART_LLM_PROXY.md). Wire-format reference: [`MCP_GATEWAY.md`](MCP_GATEWAY.md), [`LLM_API_PROXY.md`](LLM_API_PROXY.md).
+
+---
+
+## 6. Outbound connections
+
+`agentguard serve` opens exactly the outbound connections you configure and nothing else:
+
+| Connection | Configured by | Notes |
+|---|---|---|
+| Durable store | `--store-dsn` | PostgreSQL only; the default SQLite store is a local file. |
+| Notifiers (webhook, Slack) | `notifications:` in the policy YAML | Payloads pass through the notifier redactor. |
+
+There is no telemetry, no crash reporting, and no update check from `serve`. The interactive `agentguard` subcommands (`check`, `status`, `migrate`, …) do query the GitHub Releases API once at startup for the update notice; set `AGENTGUARD_NO_UPDATE_CHECK=1` in scripted or air-gapped environments ([`CLI.md`](CLI.md#update-notice-on-startup-v051)). The MCP gateway connects only to `--guard-url` and the downstream MCP servers it spawns; the LLM proxy connects only to `--guard-url` and the configured upstream provider. The complete actor and boundary list is in [`THREAT_MODEL.md`](THREAT_MODEL.md).
 
 ---
 

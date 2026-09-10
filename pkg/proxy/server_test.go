@@ -1702,9 +1702,13 @@ func TestNewServer_WritesStartupCheckpoint(t *testing.T) {
 	}
 }
 
-// TestNewServer_ResumesFromCheckpoint: a pre-existing checkpoint covering
-// the full file must prevent NewServer's seed loop from double-counting
-// when new entries arrive only after the checkpoint was written.
+// TestNewServer_ResumesFromCheckpoint pins the restart contract for the
+// decision counters: a boot that resumes from the checkpoint the previous
+// boot wrote must report the SAME lifetime totals — neither doubled (the
+// pre-checkpoint entries replayed again) nor zeroed (the pre-checkpoint
+// entries forgotten). Counters are process-local, so "previous boot" is
+// simulated with metrics.Reset(); the checkpoint on disk is the only thing
+// that survives between the two NewServer calls, exactly as in production.
 func TestNewServer_ResumesFromCheckpoint(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")
@@ -1725,34 +1729,49 @@ func TestNewServer_ResumesFromCheckpoint(t *testing.T) {
 	}
 	seed.Close()
 
-	// Pretend a previous boot already processed everything.
-	info, err := fileSize(logPath)
+	boot := func() {
+		logger, err := audit.NewFileLogger(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { logger.Close() })
+		_ = NewServer(Config{
+			Engine:   policy.NewEngineFromPolicy(&policy.Policy{Version: "1", Name: "x"}),
+			Logger:   logger,
+			Notifier: notify.NewDispatcher(policy.NotificationCfg{}),
+			Version:  "test",
+		})
+	}
+
+	// First boot: no checkpoint yet, full replay.
+	metrics.Reset()
+	boot()
+	if got := metrics.AllowedTotal(); got != 5 {
+		t.Fatalf("first boot: AllowedTotal = %d, want 5", got)
+	}
+	cp, err := audit.ReadCheckpoint(logPath)
+	if err != nil || cp == nil {
+		t.Fatalf("first boot must persist a checkpoint, got cp=%v err=%v", cp, err)
+	}
+	if cp.Counts == nil || cp.Counts.Total != 5 || cp.Counts.Allow != 5 {
+		t.Fatalf("checkpoint must carry the lifetime tally, got %+v", cp.Counts)
+	}
+	size, err := fileSize(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := audit.WriteCheckpoint(logPath, audit.Checkpoint{Offset: info, AuditSize: info}); err != nil {
-		t.Fatal(err)
+	if cp.Offset != size {
+		t.Errorf("checkpoint offset = %d, want file size %d", cp.Offset, size)
 	}
 
-	// Snapshot the allowed counter before boot — the seeder must not bump it.
-	before := metrics.AllowedTotal()
-
-	logger, err := audit.NewFileLogger(logPath)
-	if err != nil {
-		t.Fatal(err)
+	// "Restart": a fresh process has zero counters and only the checkpoint.
+	metrics.Reset()
+	boot()
+	if got := metrics.AllowedTotal(); got != 5 {
+		t.Errorf("resumed boot: AllowedTotal = %d, want 5 (0 means the checkpointed entries were forgotten; 10 means they were double-counted)", got)
 	}
-	t.Cleanup(func() { logger.Close() })
-
-	_ = NewServer(Config{
-		Engine:   policy.NewEngineFromPolicy(&policy.Policy{Version: "1", Name: "x"}),
-		Logger:   logger,
-		Notifier: notify.NewDispatcher(policy.NotificationCfg{}),
-		Version:  "test",
-	})
-
-	after := metrics.AllowedTotal()
-	if after != before {
-		t.Errorf("checkpointed file must be skipped on boot; AllowedTotal went from %d to %d", before, after)
+	if got := metrics.ChecksTotal(); got != 5 {
+		t.Errorf("resumed boot: ChecksTotal = %d, want 5", got)
 	}
 }
 

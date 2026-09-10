@@ -254,6 +254,7 @@ class Guard:
         session_id: str = "",
         est_cost: float = 0.0,
         meta: Optional[dict] = None,
+        approval_id: str = "",
     ) -> CheckResult:
         """Check an action against the policy.
 
@@ -267,6 +268,14 @@ class Guard:
             session_id: Session identifier for session-level cost tracking
             est_cost: Estimated cost of this action in USD (for cost scope)
             meta: Additional metadata
+            approval_id: Replay of a previously issued approval. Set it on
+                the re-check after :meth:`wait_for_approval` resolved ALLOW,
+                with the same scope and fields as the original request: the
+                server then consumes the one-shot approval, enforces
+                ``--approval-validity``, reserves cost for cost-scoped
+                actions, and audits the execution as ``allow:approved``.
+                A refused replay (consumed or expired) comes back as a fresh
+                ``REQUIRE_APPROVAL`` under a new id. Omitted when empty.
 
         Returns:
             CheckResult with the policy decision
@@ -291,6 +300,8 @@ class Guard:
             payload["est_cost"] = est_cost
         if meta:
             payload["meta"] = meta
+        if approval_id:
+            payload["approval_id"] = approval_id
 
         data = json.dumps(payload).encode("utf-8")
         req = request.Request(
@@ -488,9 +499,12 @@ class Guard:
                         status=e.code,
                     )
                 # Other HTTPErrors (5xx, transient): keep polling.
-            except error.URLError:
-                # Connection-level error (DNS, connection refused, TLS).
-                # Keep polling — the proxy may come back up before the deadline.
+            except (error.URLError, OSError, ValueError):
+                # Connection-level error (DNS, refused, TLS), a post-connect
+                # transport failure, or a body that is not JSON (a middlebox
+                # error page served with a 200). Keep polling — the proxy may
+                # come back before the deadline, and a malformed poll body
+                # must never raise out of the waiting agent.
                 pass
             # Jittered sleep: 80%..120% of poll_interval. random.random() is
             # OK for jitter — non-cryptographic, just spreading retries.

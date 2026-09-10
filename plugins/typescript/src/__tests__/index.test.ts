@@ -546,6 +546,12 @@ describe("guarded() with waitForApproval", () => {
         reason: "human approved",
       })
     );
+    // 3rd call: the replay of the approval through /v1/check. The status
+    // poll is read-only — this is the call that spends the one-shot ALLOW,
+    // reserves cost and audits the execution.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ decision: "ALLOW", reason: "approved", matched_rule: "allow:approved" })
+    );
     const guard = new AgentGuard();
     const fn = jest.fn(async (...args) => `ran ${String(args[0])}`);
     const safe = guarded(guard, "shell", fn as unknown as AnyAsyncFn, {
@@ -555,6 +561,10 @@ describe("guarded() with waitForApproval", () => {
     });
     await expect(safe("deploy")).resolves.toBe("ran deploy");
     expect(fn).toHaveBeenCalledTimes(1);
+    // The replay must carry the approval id, or the server never consumes it.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const replayBody = parseBody(fetchMock.mock.calls[2][1]);
+    expect(replayBody.approval_id).toBe("ap_wait_ok");
   });
 
   test("throws AgentGuardDeniedError when approval resolves DENY", async () => {

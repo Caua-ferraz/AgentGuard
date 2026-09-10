@@ -363,12 +363,12 @@ Run registered on-disk audit-schema migrations. Each migration has a `Detect()` 
 | Flag | Default | Description |
 |---|---|---|
 | `--audit-log <path>` | `audit.jsonl` | Audit log to migrate in place. |
-| `--checkpoint <path>` | `<audit-dir>/.replay-checkpoint` | Replay checkpoint used by the boot seeding path. |
+| `--checkpoint <path>` | `<audit-log>.replay-checkpoint` | The replay checkpoint `agentguard serve` reads at boot — `audit.CheckpointSuffix` appended to the audit log path, i.e. the very file the startup seeder writes. |
 | `--backup-dir <path>` | `<audit-dir>` | Where rollback copies are written. |
 | `--dry-run` | off | Log intended actions without writing. |
 | `--list` | off | Print registered migrations and exit. |
 | `--id <name>` | *(none)* | Run only the named migration, even if `Detect()` returns false (operator override). |
-| `--reset-checkpoint` | off | Delete the replay checkpoint first (forces full replay on next server start). |
+| `--reset-checkpoint` | off | Delete the replay checkpoint first (forces a full replay on the next server start). Prints `checkpoint removed (<path>)` when a file was deleted and `no checkpoint found at <path>` otherwise — it never reports success for a file that was not there. |
 
 ```bash
 agentguard migrate --list
@@ -391,13 +391,13 @@ The `version` string is baked in at build time via `-ldflags "-X main.version=..
 
 ### Update notice on startup (v0.5.1+)
 
-Every subcommand kicks off an async best-effort check against the GitHub Releases API at startup (800 ms budget). If a newer release exists, one line lands on stderr before subcommand output; otherwise silent.
+The interactive subcommands (`check`, `validate`, `approve`, `deny`, `status`, `audit`, `migrate`, `tenant`, `version`) kick off an async best-effort check against the GitHub Releases API at startup (800 ms wait budget, 1.5 s HTTP timeout). If a newer release exists, one line lands on stderr before subcommand output; otherwise silent.
 
 ```
 Notice: agentguard v1.0.0 is deprecated, version v1.0.1 available — https://github.com/Caua-ferraz/AgentGuard/releases/latest
 ```
 
-Skipped when the binary was built with `commit=dev`, when `AGENTGUARD_NO_UPDATE_CHECK` is set to any value other than `0`, or when the HTTP request fails. Never touches stdout, never affects exit codes.
+`serve` never performs the check: the enforcement server opens no outbound connection the operator did not configure (see [`THREAT_MODEL.md`](THREAT_MODEL.md#outbound-connections)). The check is also skipped when the binary was built with `commit=dev` or a version string containing `dev` (what a plain `go build` without the Makefile's ldflags produces), when `AGENTGUARD_NO_UPDATE_CHECK` is set to any value other than `0`, or when the HTTP request fails. Never touches stdout, never affects exit codes. Only the `agentguard` binary has the check; the MCP gateway and LLM proxy never had one.
 
 ---
 
@@ -407,7 +407,7 @@ Skipped when the binary was built with `commit=dev`, when `AGENTGUARD_NO_UPDATE_
 |---|---|---|
 | `AGENTGUARD_API_KEY` | `approve`, `deny`, `status`, `audit` (when `--api-key` unset) | empty |
 | `AGENTGUARD_URL` | SDKs (not the CLI) | `http://localhost:8080` |
-| `AGENTGUARD_NO_UPDATE_CHECK` | All subcommands — disables the GitHub Releases startup check when set to any value other than `0` | unset |
+| `AGENTGUARD_NO_UPDATE_CHECK` | Every subcommand except `serve` (which never checks) — disables the GitHub Releases startup check when set to any value other than `0` | unset |
 
 The CLI does **not** read `AGENTGUARD_URL` — pass `--url` explicitly. Only the Python/TypeScript SDKs honor that env var.
 

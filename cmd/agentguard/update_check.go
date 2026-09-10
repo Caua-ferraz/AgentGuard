@@ -21,10 +21,19 @@ import (
 //   - MUST NOT slow down or interfere with the command — bounded wait,
 //     all errors swallowed.
 //   - No new external dependencies.
+//   - The `serve` subcommand never performs the check. The enforcement
+//     server's outbound connections must be exactly the ones the operator
+//     configured (policy notifiers, the durable store, nothing else) — see
+//     docs/THREAT_MODEL.md. Interactive subcommands keep the notice.
 const (
-	updateCheckEndpoint = "https://api.github.com/repos/Caua-ferraz/AgentGuard/releases/latest"
-	updateHTTPTimeout   = 1500 * time.Millisecond
+	defaultUpdateCheckEndpoint = "https://api.github.com/repos/Caua-ferraz/AgentGuard/releases/latest"
+	updateHTTPTimeout          = 1500 * time.Millisecond
 )
+
+// updateCheckEndpoint is the URL the check queries. A variable (not a
+// const) only so tests can point it at a local server; production code
+// never reassigns it.
+var updateCheckEndpoint = defaultUpdateCheckEndpoint
 
 // updatePrinted ensures the notice is emitted at most once per process,
 // even if both the goroutine and the wait path race on draining.
@@ -36,10 +45,12 @@ var updatePrinted atomic.Bool
 // so the print lands before subcommand output.
 //
 // Returns a channel that is closed when the goroutine exits. Always non-
-// nil so callers can select on it unconditionally.
-func startUpdateCheck(currentVersion string) <-chan struct{} {
+// nil so callers can select on it unconditionally. When the check is
+// skipped (see shouldSkipUpdateCheck) the channel is already closed and
+// no network request is ever made.
+func startUpdateCheck(currentVersion, currentCommit, subcommand string) <-chan struct{} {
 	done := make(chan struct{})
-	if shouldSkipUpdateCheck(currentVersion) {
+	if shouldSkipUpdateCheck(currentVersion, currentCommit, subcommand) {
 		close(done)
 		return done
 	}
@@ -67,8 +78,18 @@ func waitForUpdateCheck(done <-chan struct{}, timeout time.Duration) {
 	}
 }
 
-func shouldSkipUpdateCheck(currentVersion string) bool {
-	if currentVersion == "" || strings.Contains(currentVersion, "dev") {
+// shouldSkipUpdateCheck reports whether this invocation must not call out.
+//
+//   - `serve`: never. The long-running enforcement server makes no outbound
+//     connection of its own.
+//   - Dev builds: an untagged version string ("dev" anywhere in it) or the
+//     Makefile's "dev" commit fallback (no git metadata at build time).
+//   - AGENTGUARD_NO_UPDATE_CHECK set to anything other than "0".
+func shouldSkipUpdateCheck(currentVersion, currentCommit, subcommand string) bool {
+	if subcommand == "serve" {
+		return true
+	}
+	if currentVersion == "" || strings.Contains(currentVersion, "dev") || currentCommit == "dev" {
 		return true
 	}
 	if v := os.Getenv("AGENTGUARD_NO_UPDATE_CHECK"); v != "" && v != "0" {

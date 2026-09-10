@@ -80,7 +80,16 @@ interface CapturedSleeps {
 }
 
 /**
- * Spy on setTimeout to capture every requested delay. Always schedule
+ * Request-timeout marker. Every SDK request arms an abort timer with the
+ * client `timeout`, so a setTimeout spy sees two kinds of delay: the jitter
+ * sleep under test and that per-request timer. Constructing the guard with
+ * this distinctive value (far outside the jitter band) lets the spy drop the
+ * timer samples and keep the statistics honest.
+ */
+const REQUEST_TIMEOUT = 4321;
+
+/**
+ * Spy on setTimeout to capture every requested jitter delay. Always schedule
  * the callback with delay 0 so the loop progresses at microtask speed.
  * The fetch mock side flips to "resolved" once `target` samples have
  * been recorded, which is what unwinds `waitForApproval` cleanly.
@@ -91,7 +100,8 @@ function spyOnSetTimeout(): CapturedSleeps {
   const spy = jest
     .spyOn(global, "setTimeout")
     .mockImplementation(((cb: () => void, ms: number) => {
-      sleeps.push(ms);
+      // Skip the per-request abort timer; only jitter sleeps are sampled.
+      if (ms !== REQUEST_TIMEOUT) sleeps.push(ms);
       // Always schedule with delay 0 so the loop runs at microtask speed.
       return original(cb, 0);
     }) as typeof global.setTimeout);
@@ -135,7 +145,7 @@ describe("waitForApproval jitter — distribution shape", () => {
     pendingThenResolvedFetch(TARGET, sleeps);
 
     try {
-      const g = new AgentGuard({ apiKey: "k" });
+      const g = new AgentGuard({ apiKey: "k", timeout: REQUEST_TIMEOUT });
       // The fetch mock flips to "resolved" once TARGET sleeps have been
       // recorded, so the loop exits well before timeoutMs.
       await g.waitForApproval("ap_jit", 30_000, POLL);
@@ -170,7 +180,7 @@ describe("waitForApproval jitter — distribution shape", () => {
     pendingThenResolvedFetch(TARGET, sleeps);
 
     try {
-      const g = new AgentGuard({ apiKey: "k" });
+      const g = new AgentGuard({ apiKey: "k", timeout: REQUEST_TIMEOUT });
       await g.waitForApproval("ap_jit", 30_000, 100);
     } finally {
       restore();
@@ -191,7 +201,7 @@ describe("waitForApproval jitter — distribution shape", () => {
     pendingThenResolvedFetch(TARGET, sleeps);
 
     try {
-      const g = new AgentGuard({ apiKey: "k" });
+      const g = new AgentGuard({ apiKey: "k", timeout: REQUEST_TIMEOUT });
       await g.waitForApproval("ap_jit", 30_000, POLL);
     } finally {
       restore();

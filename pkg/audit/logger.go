@@ -376,8 +376,14 @@ func ReadMeta(path string) (*MetaRecord, error) {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
+	return readMetaFrom(f, path)
+}
 
-	br := bufio.NewReader(f)
+// readMetaFrom is ReadMeta over an already-open reader, so the startup
+// replay can read the header of a gzip-compressed archive through the same
+// parser (see readMetaAny in checkpoint.go). path is only used in messages.
+func readMetaFrom(r io.Reader, path string) (*MetaRecord, error) {
+	br := bufio.NewReader(r)
 	line, err := br.ReadBytes('\n')
 	if err != nil && err != io.EOF {
 		return nil, fmt.Errorf("read first line: %w", err)

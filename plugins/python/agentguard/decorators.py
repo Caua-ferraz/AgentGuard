@@ -67,8 +67,15 @@ def guarded(
 
     On REQUIRE_APPROVAL, with ``wait_for_approval=True`` the wrapper calls
     :meth:`Guard.wait_for_approval` and then dispatches on the resolved
-    decision: ALLOW runs the function, DENY raises :class:`AgentGuardDenied`,
-    a synthetic "Approval timed out" raises :class:`AgentGuardApprovalTimeout`.
+    decision. A resolved ALLOW is *replayed* through ``guard.check`` with
+    ``approval_id`` set — that replay is what consumes the one-shot
+    approval, enforces ``--approval-validity``, reserves cost for
+    cost-scoped actions, and audits the execution — and the function runs
+    only if the replay allows. A resolved DENY or a denied replay raises
+    :class:`AgentGuardDenied`; a refused replay that re-entered the approval
+    flow raises :class:`AgentGuardApprovalRequired` carrying the new id (the
+    wrapper never waits a second time on its own); a synthetic "Approval
+    timed out" raises :class:`AgentGuardApprovalTimeout`.
     With ``wait_for_approval=False`` (default), the wrapper raises
     :class:`AgentGuardApprovalRequired` immediately. That class extends
     ``PermissionError``, so existing ``except PermissionError:`` handlers
@@ -109,7 +116,34 @@ def guarded(
                         poll_interval=approval_poll_interval,
                     )
                     if resolved.allowed:
-                        return func(*args, **kwargs)
+                        # Replay the approval through /v1/check. The status
+                        # poll is read-only; only this replay spends the
+                        # one-shot capability, applies --approval-validity,
+                        # reserves cost, and writes the allow:approved audit
+                        # entry for the execution.
+                        replay = g.check(
+                            scope,
+                            command=str(cmd),
+                            approval_id=result.approval_id,
+                            **check_kwargs,
+                        )
+                        if replay.allowed:
+                            return func(*args, **kwargs)
+                        if replay.needs_approval:
+                            # Consumed or expired: the server re-entered the
+                            # approval flow under a new id. Surface it rather
+                            # than waiting again, or a refused replay would
+                            # loop forever.
+                            raise AgentGuardApprovalRequired(
+                                f"Action requires approval. Approve at: {replay.approval_url}",
+                                result=replay,
+                                approval_id=replay.approval_id,
+                                approval_url=replay.approval_url,
+                            )
+                        raise AgentGuardDenied(
+                            f"Action denied by AgentGuard: {replay.reason}",
+                            result=replay,
+                        )
                     if resolved.denied and resolved.reason == "Approval timed out":
                         raise AgentGuardApprovalTimeout(
                             f"Approval for {result.approval_id} timed out after "

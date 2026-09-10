@@ -53,6 +53,18 @@ const (
 // this runs once per process, never on a request path.
 const migrateTimeout = 30 * time.Second
 
+// pgMigrateLockKey namespaces the transaction-scoped advisory lock that
+// serialises schema migration across replicas (see Migrate).
+//
+// The value is arbitrary but MUST stay stable forever: two binaries using
+// different keys would not exclude each other, which is precisely the failure
+// the lock exists to prevent — including during a rolling upgrade, when both
+// versions run at once. It spells "AG_MIG" in ASCII so a collision with some
+// other application's advisory lock on a shared database is vanishingly
+// unlikely. Advisory locks live in their own namespace and never block table
+// access, so holding it costs nothing outside migration.
+const pgMigrateLockKey int64 = 0x41475F4D4947
+
 // NewPostgresStore opens the Postgres database identified by dsn (a
 // "postgres://" / "postgresql://" URL or a libpq keyword/value string), sets a
 // modest cold-path connection pool, and runs the schema migration. Connectivity
@@ -196,6 +208,33 @@ var pgSchemaStmts = []string{
 // failure leaves the schema untouched.
 func (s *PostgresStore) Migrate(ctx context.Context) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
+		// Serialise the whole migration across replicas BEFORE any DDL runs.
+		//
+		// Two distinct races, both of which killed replicas at boot:
+		//
+		//   - Empty database: `CREATE TABLE IF NOT EXISTS` is not atomic
+		//     against a concurrent creator, so two nodes starting together
+		//     collide on the pg_type unique index and one fails with
+		//     SQLSTATE 23505. Measured on 5 of 6 three-replica cold starts.
+		//   - Existing schema: the `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
+		//     statements below still take ACCESS EXCLUSIVE locks even when
+		//     the columns are already present, so concurrent migration
+		//     transactions deadlock (SQLSTATE 40P01) with nothing to do.
+		//     That exposes every rolling restart, not just the first deploy.
+		//
+		// Either way the losing replica's constructor returns an error and
+		// the node exits. A single node was never affected, which is what
+		// identifies this as a race rather than a schema fault.
+		//
+		// pg_advisory_xact_lock blocks until the lock is free and is released
+		// automatically on commit or rollback, so there is no unlock path to
+		// miss and a crashed migrator cannot wedge the cluster. Taking it as
+		// the first statement means every node acquires in the same order,
+		// which is what removes the deadlock; the constructor's
+		// migrateTimeout bounds how long a node waits for its turn.
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, pgMigrateLockKey); err != nil {
+			return fmt.Errorf("store: migrate: acquire advisory lock: %w", err)
+		}
 		for _, stmt := range pgSchemaStmts {
 			if _, err := tx.ExecContext(ctx, stmt); err != nil {
 				return fmt.Errorf("store: migrate: %w", err)
