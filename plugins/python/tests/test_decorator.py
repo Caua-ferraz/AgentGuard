@@ -191,16 +191,22 @@ class TestGuardedWaitForApproval:
     """Opt-in ``wait_for_approval=True`` dispatches on the resolved decision.
 
     The mock server's ``status_response`` controls what
-    :meth:`Guard.wait_for_approval` observes on each poll.
+    :meth:`Guard.wait_for_approval` observes on each poll. A resolved ALLOW
+    is then replayed through ``/v1/check`` with ``approval_id`` — see
+    tests/test_approval_replay.py for the full replay contract.
     """
 
     def test_waits_and_runs_on_allow(self, mock_server):
-        MockAgentGuardHandler.check_response = {
-            "decision": "REQUIRE_APPROVAL",
-            "reason": "needs review",
-            "approval_id": "ap_wait1",
-            "approval_url": "http://example.com/approve/ap_wait1",
-        }
+        MockAgentGuardHandler.check_response_queue = [
+            {
+                "decision": "REQUIRE_APPROVAL",
+                "reason": "needs review",
+                "approval_id": "ap_wait1",
+                "approval_url": "http://example.com/approve/ap_wait1",
+            },
+            # The replay: this is the call that spends the one-shot ALLOW.
+            {"decision": "ALLOW", "reason": "approved", "matched_rule": "allow:approved"},
+        ]
         MockAgentGuardHandler.status_response = {
             "id": "ap_wait1",
             "status": "resolved",
@@ -224,6 +230,15 @@ class TestGuardedWaitForApproval:
 
         assert my_func("deploy") == "ran"
         assert calls == ["deploy"]
+        # The wrapper must have replayed the approval, not run off the poll.
+        import json as _json
+        checks = [
+            _json.loads(r["body"])
+            for r in MockAgentGuardHandler.request_log
+            if r["method"] == "POST" and r["path"] == "/v1/check"
+        ]
+        assert len(checks) == 2
+        assert checks[1]["approval_id"] == "ap_wait1"
 
     def test_waits_and_raises_on_deny(self, mock_server):
         MockAgentGuardHandler.check_response = {

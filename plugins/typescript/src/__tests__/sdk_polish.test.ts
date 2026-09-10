@@ -309,19 +309,23 @@ describe("waitForApproval jitter", () => {
       })
     );
 
-    // Spy on setTimeout to capture every delay the SDK requests.
+    // Spy on setTimeout to capture every delay the SDK requests. Each
+    // request also arms an abort timer with the client `timeout`; the guard
+    // below uses a distinctive value so those samples can be dropped and
+    // only jitter sleeps are asserted on.
+    const REQUEST_TIMEOUT = 4321;
     const origSetTimeout = global.setTimeout;
     const sleeps: number[] = [];
     const spy = jest
       .spyOn(global, "setTimeout")
       .mockImplementation(((cb: () => void, ms: number) => {
-        sleeps.push(ms);
+        if (ms !== REQUEST_TIMEOUT) sleeps.push(ms);
         // Schedule the callback as a microtask so the loop progresses fast.
         return origSetTimeout(cb, 0);
       }) as typeof global.setTimeout);
 
     try {
-      const g = new AgentGuard({ apiKey: "k" });
+      const g = new AgentGuard({ apiKey: "k", timeout: REQUEST_TIMEOUT });
       const r = await g.waitForApproval("ap_x", 30, 100);
       expect(r.denied).toBe(true);
     } finally {
@@ -343,17 +347,18 @@ describe("waitForApproval jitter", () => {
         headers: { "Content-Type": "application/json" },
       })
     );
+    const REQUEST_TIMEOUT = 4321;
     const origSetTimeout = global.setTimeout;
     const sleeps: number[] = [];
     const spy = jest
       .spyOn(global, "setTimeout")
       .mockImplementation(((cb: () => void, ms: number) => {
-        sleeps.push(ms);
+        if (ms !== REQUEST_TIMEOUT) sleeps.push(ms);
         return origSetTimeout(cb, 0);
       }) as typeof global.setTimeout);
 
     try {
-      const g = new AgentGuard();
+      const g = new AgentGuard({ timeout: REQUEST_TIMEOUT });
       await g.waitForApproval("ap_x", 30, 100);
     } finally {
       spy.mockRestore();

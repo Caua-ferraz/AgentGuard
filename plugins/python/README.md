@@ -40,7 +40,11 @@ elif result.needs_approval:
     # Block until a human resolves it, or 5 min deadline, whichever first
     final = guard.wait_for_approval(result.approval_id, timeout=300)
     if final.allowed:
-        execute(command)
+        # Replay the approval: consumes the one-shot ALLOW, reserves cost,
+        # and audits the execution. The status poll alone spends nothing.
+        replay = guard.check("shell", command=command, approval_id=result.approval_id)
+        if replay.allowed:
+            execute(command)
 else:
     print(f"Blocked: {result.reason}")
 ```

@@ -31,6 +31,18 @@ export interface CheckOptions {
   /** Estimated cost of this action in USD (for cost scope). */
   estCost?: number;
   meta?: Record<string, string>;
+  /**
+   * Replay of a previously issued approval → request body `approval_id`.
+   *
+   * Set it on the re-check after {@link AgentGuard.waitForApproval} resolved
+   * ALLOW, with the same scope and fields as the original request. That
+   * replay is what consumes the one-shot approval, enforces
+   * `--approval-validity`, reserves cost for cost-scoped actions, and audits
+   * the execution as `allow:approved`. Polling `/v1/status` is read-only and
+   * spends nothing. A refused replay (consumed or expired) comes back as a
+   * fresh REQUIRE_APPROVAL under a new id.
+   */
+  approvalId?: string;
 }
 
 export interface CheckResult {
@@ -356,6 +368,31 @@ export class AgentGuard {
   }
 
   /**
+   * `fetch` with the client timeout applied to the WHOLE exchange — connect,
+   * headers, **and** the body read performed by `consume`.
+   *
+   * The timer is cleared in a `finally`, after `consume` has finished with
+   * the response. Clearing it as soon as the headers arrive (what `check`
+   * used to do) left a server that answers promptly and then stalls
+   * mid-body able to hang the calling agent forever. `approve`, `deny` and
+   * every `waitForApproval` poll had no timeout at all.
+   */
+  private async withTimeout<T>(
+    url: string,
+    init: RequestInit,
+    consume: (res: Response) => Promise<T>
+  ): Promise<T> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeout);
+    try {
+      const res = await fetch(url, { ...init, signal: controller.signal });
+      return await consume(res);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * Check an action against the AgentGuard policy.
    */
   async check(scope: string, options: CheckOptions = {}): Promise<CheckResult> {
@@ -372,67 +409,66 @@ export class AgentGuard {
     if (options.sessionId) payload.session_id = options.sessionId;
     if (options.estCost !== undefined && options.estCost !== 0) payload.est_cost = options.estCost;
     if (options.meta) payload.meta = options.meta;
+    if (options.approvalId) payload.approval_id = options.approvalId;
 
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.timeout);
+      return await this.withTimeout(
+        this.url("/check"),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+        async (response) => {
+          // Honest response validation. A misconfigured reverse proxy
+          // returning HTML or a chunked text body would either explode or
+          // — worse — successfully decode a malformed JSON payload missing
+          // `decision`, masking the actual issue. We positively assert each
+          // layer.
+          if (!response.ok) {
+            return this.failModeResult(
+              `AgentGuard returned status ${response.status}`
+            );
+          }
 
-      const response = await fetch(this.url("/check"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
+          const ctype = (response.headers.get("Content-Type") ?? "").toLowerCase();
+          if (!ctype.startsWith("application/json")) {
+            return this.failModeResult(
+              `AgentGuard returned unexpected content-type ${JSON.stringify(ctype)}`
+            );
+          }
 
-      clearTimeout(timer);
+          let raw: unknown;
+          try {
+            raw = await response.json();
+          } catch (e) {
+            return this.failModeResult(
+              `AgentGuard returned non-JSON body: ${
+                e instanceof Error ? e.message : String(e)
+              }`
+            );
+          }
 
-      // Honest response validation. A misconfigured reverse proxy
-      // returning HTML or a chunked text body would either explode or
-      // — worse — successfully decode a malformed JSON payload missing
-      // `decision`, masking the actual issue. We positively assert each
-      // layer.
-      if (!response.ok) {
-        return this.failModeResult(
-          `AgentGuard returned status ${response.status}`
-        );
-      }
+          if (
+            raw === null ||
+            typeof raw !== "object" ||
+            typeof (raw as { decision?: unknown }).decision !== "string"
+          ) {
+            return this.failModeResult(
+              `AgentGuard returned malformed response body (missing 'decision')`
+            );
+          }
 
-      const ctype = (response.headers.get("Content-Type") ?? "").toLowerCase();
-      if (!ctype.startsWith("application/json")) {
-        return this.failModeResult(
-          `AgentGuard returned unexpected content-type ${JSON.stringify(ctype)}`
-        );
-      }
-
-      let raw: unknown;
-      try {
-        raw = await response.json();
-      } catch (e) {
-        return this.failModeResult(
-          `AgentGuard returned non-JSON body: ${
-            e instanceof Error ? e.message : String(e)
-          }`
-        );
-      }
-
-      if (
-        raw === null ||
-        typeof raw !== "object" ||
-        typeof (raw as { decision?: unknown }).decision !== "string"
-      ) {
-        return this.failModeResult(
-          `AgentGuard returned malformed response body (missing 'decision')`
-        );
-      }
-
-      const data = raw as CheckResponseJSON;
-      return new CheckResultImpl({
-        decision: data.decision,
-        reason: data.reason,
-        matchedRule: data.matched_rule,
-        approvalId: data.approval_id,
-        approvalUrl: data.approval_url,
-      });
+          const data = raw as CheckResponseJSON;
+          return new CheckResultImpl({
+            decision: data.decision,
+            reason: data.reason,
+            matchedRule: data.matched_rule,
+            approvalId: data.approval_id,
+            approvalUrl: data.approval_url,
+          });
+        }
+      );
     } catch (err) {
       // Fail closed (deny) by default when AgentGuard is unreachable.
       return this.failModeResult(
@@ -463,11 +499,11 @@ export class AgentGuard {
    */
   async approve(approvalId: string): Promise<boolean> {
     try {
-      const res = await fetch(this.url(`/approve/${approvalId}`), {
-        method: "POST",
-        headers: this.authHeaders(),
-      });
-      return res.ok;
+      return await this.withTimeout(
+        this.url(`/approve/${approvalId}`),
+        { method: "POST", headers: this.authHeaders() },
+        async (res) => res.ok
+      );
     } catch {
       return false;
     }
@@ -478,11 +514,11 @@ export class AgentGuard {
    */
   async deny(approvalId: string): Promise<boolean> {
     try {
-      const res = await fetch(this.url(`/deny/${approvalId}`), {
-        method: "POST",
-        headers: this.authHeaders(),
-      });
-      return res.ok;
+      return await this.withTimeout(
+        this.url(`/deny/${approvalId}`),
+        { method: "POST", headers: this.authHeaders() },
+        async (res) => res.ok
+      );
     } catch {
       return false;
     }
@@ -503,33 +539,38 @@ export class AgentGuard {
 
     while (Date.now() < deadline) {
       try {
-        const res = await fetch(
+        const resolved = await this.withTimeout(
           this.url(`/status/${approvalId}`),
-          { headers: this.authHeaders() }
-        );
-        // 401/403 means the API key is broken. Continuing to poll
-        // would just spin until the deadline elapses and return a
-        // synthetic "Approval timed out" DENY, hiding the real cause.
-        if (res.status === 401 || res.status === 403) {
-          throw new AgentGuardAuthError(
-            `AgentGuard rejected status poll for ${approvalId} ` +
-              `with HTTP ${res.status} (check apiKey)`,
-            res.status
-          );
-        }
-        if (res.ok) {
-          const data = (await res.json()) as StatusResponseJSON;
-          if (data.status === "resolved" && (data.decision === "ALLOW" || data.decision === "DENY")) {
-            return new CheckResultImpl({
-              decision: data.decision,
-              reason: data.reason ?? "resolved",
-            });
+          { headers: this.authHeaders() },
+          async (res) => {
+            // 401/403 means the API key is broken. Continuing to poll
+            // would just spin until the deadline elapses and return a
+            // synthetic "Approval timed out" DENY, hiding the real cause.
+            if (res.status === 401 || res.status === 403) {
+              throw new AgentGuardAuthError(
+                `AgentGuard rejected status poll for ${approvalId} ` +
+                  `with HTTP ${res.status} (check apiKey)`,
+                res.status
+              );
+            }
+            if (!res.ok) return undefined;
+            const data = (await res.json()) as StatusResponseJSON;
+            if (data.status === "resolved" && (data.decision === "ALLOW" || data.decision === "DENY")) {
+              return new CheckResultImpl({
+                decision: data.decision,
+                reason: data.reason ?? "resolved",
+              });
+            }
+            return undefined;
           }
-        }
+        );
+        if (resolved) return resolved;
       } catch (e) {
         // AgentGuardAuthError must propagate so the caller sees the auth
         // failure immediately. Other transport errors (DNS, ECONNREFUSED,
-        // 5xx surfaced above) are swallowed and retried until deadline.
+        // 5xx surfaced above, a per-poll timeout, or a body that is not
+        // JSON) are swallowed and retried until the deadline — a malformed
+        // poll body must never reject out of the waiting agent.
         if (e instanceof AgentGuardAuthError) throw e;
       }
 
@@ -652,7 +693,32 @@ export function guarded<T extends (...args: unknown[]) => Promise<unknown>>(
           approvalPollIntervalMs
         );
         if (resolved.allowed) {
-          return fn(...args);
+          // Replay the approval through /v1/check. The status poll is
+          // read-only; only this replay spends the one-shot capability,
+          // applies --approval-validity, reserves cost, and writes the
+          // allow:approved audit entry for the execution.
+          const replay = await guard.check(scope, {
+            ...options,
+            approvalId: result.approvalId ?? "",
+          });
+          if (replay.allowed) {
+            return fn(...args);
+          }
+          if (replay.needsApproval) {
+            // Consumed or expired: the server re-entered the approval flow
+            // under a new id. Surface it rather than waiting again, or a
+            // refused replay would loop forever.
+            throw new AgentGuardApprovalRequiredError(
+              `Action requires approval. Approve at: ${replay.approvalUrl}`,
+              replay,
+              replay.approvalId ?? "",
+              replay.approvalUrl ?? ""
+            );
+          }
+          throw new AgentGuardDeniedError(
+            `Action denied by AgentGuard: ${replay.reason}`,
+            replay
+          );
         }
         if (resolved.denied && resolved.reason === "Approval timed out") {
           throw new AgentGuardApprovalTimeoutError(

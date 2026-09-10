@@ -36,7 +36,12 @@ if (result.allowed) {
 } else if (result.needsApproval) {
   console.log(`Approve at: ${result.approvalUrl}`);
   const resolved = await guard.waitForApproval(result.approvalId!, 300_000);
-  if (resolved.allowed) await execute(cmd);
+  if (resolved.allowed) {
+    // Replay the approval: consumes the one-shot ALLOW, reserves cost, and
+    // audits the execution. The status poll alone spends nothing.
+    const replay = await guard.check('shell', { command: cmd, approvalId: result.approvalId });
+    if (replay.allowed) await execute(cmd);
+  }
 } else {
   console.log(`Blocked: ${result.reason}`);
 }
@@ -163,6 +168,7 @@ interface CheckOptions {
   sessionId?: string;   // → request body `session_id`
   estCost?: number;     // → `est_cost`; dropped if === 0
   meta?: Record<string, string>;
+  approvalId?: string;  // → `approval_id`; replays an approval (see below)
 }
 ```
 
