@@ -496,6 +496,55 @@ corruption that matters resurfaces at completion, where it now denies.
 (Before v1.0 a malformed completion was silently dropped — no refusal, no
 audit entry, and the stream went dark for the rest of the connection.)
 
+#### Undecodable non-streaming bodies that carry a tool call fail closed
+
+A **non-streaming** response is gated by decoding it into the typed
+response struct and inspecting the tool calls it contains. A body that
+fails that decode is forwarded verbatim — AgentGuard never rewrites an
+already-corrupt wire — with one exception, added after audit finding B6.
+
+Go's decoder is stricter than a client SDK's in one specific way: it
+aborts on a **type-mismatched** field the struct declares, such as
+`"created": "1730000000"` where the spec says integer. A Python or
+TypeScript SDK parsing the same bytes ignores the odd field and executes
+the `tool_calls` sitting beside it. So "AgentGuard cannot decode it" did
+not imply "the client cannot use it", and the gap forwarded a tool call
+the firewall never evaluated.
+
+Before falling back to passthrough the proxy now asks the narrower
+question — does this body carry a tool call at all? — using a probe that
+constrains only the path to `tool_calls` / `tool_use` and nothing else.
+If one is present the response is refused under the fixed rule
+`deny:llm_api_proxy:undecodable_tool_call`. If none is present the body
+passes through exactly as before.
+
+**Where to see it.** The refusal is recorded in the **central audit
+trail** with the DENY the client actually received, via the same
+`/v1/audit` ingest path the malformed-tool-call refusal uses — so it
+arrives tagged `transport: llm_api_proxy` under that stable rule string,
+which is the signal to alert on. The proxy also increments
+`agentguard_llmproxy_undecodable_tool_call_total{provider}`, but that
+lives in the proxy's process-local registry and **has no scrape
+endpoint** (see [`OBSERVABILITY.md`](OBSERVABILITY.md)), so it is useful
+only to in-process embedders today. Alert on the audit rule, not the
+counter.
+
+Two details worth knowing:
+
+- The refusal is **not** subject to `--fail-mode allow`, matching the
+  duplicate-JSON-key deny. `--fail-mode` governs an unreachable guard;
+  here the guard is healthy and simply cannot see what the client will
+  execute, so honouring `allow` would reopen the bypass.
+- A JSON `null` or an unknown extra field is **not** a type error — Go
+  ignores both — so neither diverts a response down this path. Only a
+  wrong-typed value does. A provider adding fields never trips it.
+
+A non-zero rate on that counter usually means an OpenAI-compatible shim
+(vLLM, Ollama, LiteLLM, a cloud gateway) is stringifying a numeric field.
+Worth fixing at the source: each one is a call your agent did not get to
+make. Streaming responses are unaffected — they are gated by the
+accumulator, which has its own fail-closed defences.
+
 ##### Audit fidelity
 
 For a proxy-manufactured refusal (the malformed-completion DENY above),
