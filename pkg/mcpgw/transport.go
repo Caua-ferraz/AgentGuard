@@ -300,10 +300,27 @@ func (u *StdioUpstream) spawnLocked(ctx context.Context) error {
 // wants a capability the gateway does not proxy. See
 // docs/MCP_GATEWAY.md § 10.
 func (u *StdioUpstream) readLoop(r io.Reader) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), MaxStdoutLineBytes)
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	reader := bufio.NewReaderSize(r, 64*1024)
+	var readErr error
+	for {
+		line, _, err := readFrame(reader, MaxStdoutLineBytes)
+		if errors.Is(err, errFrameTooLong) {
+			// An upstream line past the cap is ordinary MCP output -- a large
+			// file read, a screenshot, a dataset dump. It used to kill the
+			// reader outright while the subprocess kept running, wedging the
+			// upstream behind an OK status (audit B12). Drop the frame and
+			// keep reading; the pending request it belonged to still times
+			// out on its own deadline, which is a bounded, visible failure.
+			u.logger.Infof("upstream %q: dropping oversized stdout frame (cap %d bytes)",
+				u.spec.Namespace, MaxStdoutLineBytes)
+			continue
+		}
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				readErr = err
+			}
+			break
+		}
 		if len(line) == 0 {
 			continue
 		}
@@ -354,11 +371,49 @@ func (u *StdioUpstream) readLoop(r io.Reader) {
 		}
 		u.logger.Debugf("upstream %q: unsolicited frame dropped: %s", u.spec.Namespace, string(line))
 	}
-	if err := scanner.Err(); err != nil {
-		u.logger.Infof("upstream %q: stdout reader exited: %v", u.spec.Namespace, err)
+	if readErr != nil {
+		u.logger.Infof("upstream %q: stdout reader exited: %v", u.spec.Namespace, readErr)
 	}
-	// Mark the upstream as needing reconnect. The supervisor picks
-	// this up via cmd.Wait().
+	// Mark the upstream as needing reconnect. The supervisor picks this up via
+	// cmd.Wait() -- but ONLY if the process actually exited. A single stdout
+	// line over MaxStdoutLineBytes kills bufio.Scanner while the subprocess
+	// keeps running, so cmd.Wait() never returns, the status stays StatusOK,
+	// send()'s degraded guard never fires, and every call is dispatched into a
+	// pipe nobody reads (audit B12). Force the exit so the EXISTING respawn
+	// path runs, rather than assuming a dead reader means a dead process.
+	u.readerExited()
+}
+
+// readerExited degrades the upstream and forces the subprocess to exit so the
+// supervisor's cmd.Wait() returns. Safe to call when the process is already
+// gone (the kill is a no-op error) and when no process was ever spawned
+// (nil cmd is reachable -- a first-spawn failure leaves the supervisor running
+// with no cmd, audit B16).
+func (u *StdioUpstream) readerExited() {
+	select {
+	case <-u.done:
+		// Deliberate shutdown: Close owns the teardown, including the status
+		// transition to StatusStopped. Racing it here would resurrect a
+		// closed upstream as "degraded".
+		return
+	default:
+	}
+
+	u.mu.Lock()
+	if u.status == StatusStopped {
+		u.mu.Unlock()
+		return
+	}
+	u.status = StatusDegraded
+	cmd := u.cmd
+	u.mu.Unlock()
+
+	// Unblock callers now instead of letting each one burn its own timeout.
+	u.failPending()
+
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
 }
 
 // frameMethod extracts the JSON-RPC `method` field from a raw frame,

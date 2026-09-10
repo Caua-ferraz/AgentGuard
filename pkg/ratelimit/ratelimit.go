@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -13,12 +14,32 @@ const (
 	// MaxBuckets is the maximum number of rate limit buckets kept in memory.
 	// When exceeded, stale buckets (fully refilled and older than their window) are evicted.
 	MaxBuckets = 10000
+
+	// sweepInterval bounds how often the O(n) stale scan may run. Without it
+	// the scan fired on EVERY Allow once the map was full, turning a ~70ns
+	// 0-alloc hot path into a ~130us locked scan that serialized every
+	// rate-limit check process-wide (audit B3).
+	sweepInterval = time.Second
+
+	// sampleSize is how many buckets evictSampledLocked inspects to pick a
+	// victim. Go randomizes map iteration, so this is an approximate-LRU
+	// sample: O(sampleSize), not O(n), and allocation-free.
+	sampleSize = 8
+
+	// maxReclaimPerCall bounds the eviction work a single Allow may do, so no
+	// one request pays for an oversized map. Each miss evicts at least one and
+	// inserts exactly one, so the map cannot grow once it reaches capacity.
+	maxReclaimPerCall = 64
 )
 
 // Limiter implements a token-bucket rate limiter keyed by scope and agent.
 type Limiter struct {
 	mu      sync.Mutex
 	buckets map[string]*bucket
+
+	// lastSweep is when evictStaleLocked last ran. Left at its zero value by
+	// New so the first reclamation is never delayed.
+	lastSweep time.Time
 }
 
 type bucket struct {
@@ -75,6 +96,26 @@ func (l *Limiter) Restore(snaps []BucketSnapshot) {
 	defer l.mu.Unlock()
 	for _, s := range snaps {
 		l.buckets[s.Key] = &bucket{tokens: s.Tokens, max: s.Max, window: s.Window, lastRefill: s.LastRefill}
+	}
+
+	// Hydration must respect the same bound as the request path. The store
+	// query behind these snapshots is unbounded, so a deployment with more
+	// live keys than MaxBuckets inside its bucket TTL would otherwise boot
+	// straight into the over-capacity state -- no attacker needed, and it
+	// would survive every restart (audit B3).
+	now := time.Now()
+	before := len(l.buckets)
+	if before > MaxBuckets {
+		l.evictStaleLocked(now)
+		l.lastSweep = now
+		for len(l.buckets) > MaxBuckets {
+			if !l.evictSampledLocked() {
+				break
+			}
+		}
+		log.Printf("WARNING: rate-limit hydration restored %d buckets, above the in-memory cap of %d; "+
+			"trimmed to %d (least-recently-refilled dropped). Those callers start with a fresh bucket. "+
+			"Consider a shorter bucket TTL.", before, MaxBuckets, len(l.buckets))
 	}
 }
 
@@ -147,44 +188,114 @@ func (l *Limiter) Allow(key string, maxRequests int, window time.Duration) error
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// Evict stale buckets when at capacity
-	if len(l.buckets) >= MaxBuckets {
-		l.evictStaleLocked()
-	}
+	now := time.Now()
 
-	b, ok := l.buckets[key]
-	if !ok {
-		b = &bucket{
-			tokens:     maxRequests - 1, // consume one token now
-			max:        maxRequests,
-			lastRefill: time.Now(),
-			window:     window,
+	if b, ok := l.buckets[key]; ok {
+		// A hot-reloaded policy must take effect on a LIVE bucket, not only
+		// after it goes idle. Preserve what the caller has already consumed
+		// and re-baseline against the new cap (audit B23).
+		if b.max != maxRequests || b.window != window {
+			consumed := b.max - b.tokens
+			if consumed < 0 {
+				consumed = 0
+			}
+			b.max = maxRequests
+			b.window = window
+			b.tokens = maxRequests - consumed
+			if b.tokens < 0 {
+				b.tokens = 0
+			}
+			if b.tokens > maxRequests {
+				b.tokens = maxRequests
+			}
 		}
-		l.buckets[key] = b
+
+		// Refill tokens if the window has elapsed. The window > 0 guard keeps
+		// a corrupt restored row (Window: 0) from panicking on divide-by-zero;
+		// such a bucket simply never refills.
+		elapsed := now.Sub(b.lastRefill)
+		if b.window > 0 && elapsed >= b.window {
+			periods := int(elapsed / b.window)
+			b.tokens = b.max
+			b.lastRefill = b.lastRefill.Add(time.Duration(periods) * b.window)
+		}
+
+		if b.tokens <= 0 {
+			return fmt.Errorf("rate limit exceeded: %d requests per %s", b.max, b.window)
+		}
+		b.tokens--
 		return nil
 	}
 
-	// Refill tokens if the window has elapsed
-	now := time.Now()
-	elapsed := now.Sub(b.lastRefill)
-	if elapsed >= b.window {
-		periods := int(elapsed / b.window)
-		b.tokens = b.max
-		b.lastRefill = b.lastRefill.Add(time.Duration(periods) * b.window)
+	// MISS -- the only path that can grow the map, and therefore the only
+	// place capacity needs checking. Hits (the overwhelming majority of real
+	// traffic) now pay nothing for reclamation; previously every call ran the
+	// capacity check and, at capacity, a full O(n) scan (audit B3).
+	if len(l.buckets) >= MaxBuckets {
+		l.reclaimLocked(now)
 	}
-
-	if b.tokens <= 0 {
-		return fmt.Errorf("rate limit exceeded: %d requests per %s", b.max, b.window)
+	l.buckets[key] = &bucket{
+		tokens:     maxRequests - 1, // consume one token now
+		max:        maxRequests,
+		lastRefill: now,
+		window:     window,
 	}
-
-	b.tokens--
 	return nil
+}
+
+// reclaimLocked frees capacity for one incoming bucket. Must hold l.mu.
+//
+// Two tiers, deliberately ordered cheapest-effective-first:
+//
+//  1. The stale scan, rate-limited to once per sweepInterval. It is O(n) but
+//     amortized, and it is the only tier that can free many buckets at once.
+//  2. Approximate-LRU sampling, which runs when the scan was skipped or freed
+//     nothing -- the state a real deployment reaches organically once it has
+//     more live keys than MaxBuckets inside one window. This is what actually
+//     makes MaxBuckets a bound rather than a suggestion.
+func (l *Limiter) reclaimLocked(now time.Time) {
+	if now.Sub(l.lastSweep) >= sweepInterval {
+		l.lastSweep = now
+		l.evictStaleLocked(now)
+	}
+	for i := 0; i < maxReclaimPerCall && len(l.buckets) >= MaxBuckets; i++ {
+		if !l.evictSampledLocked() {
+			return
+		}
+	}
+}
+
+// evictSampledLocked deletes the least-recently-refilled bucket among a small
+// random sample, reporting whether it evicted anything. Go randomizes map
+// iteration order, so ranging and breaking after sampleSize entries IS the
+// sample. O(sampleSize) and allocation-free: the victim key is a string header
+// copy, and ranging a map does not allocate. Must hold l.mu.
+func (l *Limiter) evictSampledLocked() bool {
+	var (
+		victimKey string
+		victimAt  time.Time
+		found     bool
+		seen      int
+	)
+	for k, b := range l.buckets {
+		if !found || b.lastRefill.Before(victimAt) {
+			victimKey, victimAt, found = k, b.lastRefill, true
+		}
+		if seen++; seen >= sampleSize {
+			break
+		}
+	}
+	if !found {
+		return false
+	}
+	delete(l.buckets, victimKey)
+	metrics.IncRateLimitBucketEvicted(scopeFromKey(victimKey))
+	return true
 }
 
 // evictStaleLocked removes buckets whose window has fully elapsed (they would
 // be fully refilled on next access). Must be called with l.mu held.
-func (l *Limiter) evictStaleLocked() {
-	now := time.Now()
+func (l *Limiter) evictStaleLocked(now time.Time) {
 	for key, b := range l.buckets {
 		if now.Sub(b.lastRefill) >= b.window {
 			delete(l.buckets, key)

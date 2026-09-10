@@ -1,6 +1,9 @@
 package policy
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // BenchmarkEngineCheck_Local is the baseline hot-path policy evaluation for the
 // local tenant.
@@ -40,5 +43,64 @@ func BenchmarkMultiTenantProvider_Get(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = prov.Get("acme")
+	}
+}
+
+// BenchmarkEngineCheck_RequirePrior measures the condition path that audit
+// B1/B27 rewrote. The previous implementation opened the audit file and
+// JSON-parsed every line here, while holding e.mu — so there was no meaningful
+// "before" number to compare against; it scaled with the log, not the input.
+//
+// What these pin is that the replacement stays on the hot path's terms:
+// allocation-free lookups that do not push Engine.Check past its 6 allocs/op
+// budget (CLAUDE.md §1).
+func BenchmarkEngineCheck_RequirePrior(b *testing.B) {
+	eng := NewEngineFromPolicy(&Policy{
+		Version: "1", Name: "bench",
+		Rules: []RuleSet{{
+			Scope: "shell",
+			Allow: []Rule{{
+				Pattern:    "write *",
+				Conditions: []Condition{{RequirePrior: "read_file", TimeWindow: "1h"}},
+			}},
+		}},
+	})
+	idx := NewPriorActionIndex(time.Hour)
+	eng.SetPriorActionQuerier(idx)
+	idx.Record(LocalTenantID, "agent-1", "shell", "read_file", "", time.Now())
+
+	req := ActionRequest{Scope: "shell", Command: "write out.txt", AgentID: "agent-1"}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		eng.Check(req, LocalTenantID)
+	}
+}
+
+// BenchmarkEngineCheck_RequirePriorGlob is the same check with a glob pattern,
+// which takes the scan branch instead of the O(1) exact hit. The scan is
+// bounded by the actions one agent took in one scope, never by the audit log.
+func BenchmarkEngineCheck_RequirePriorGlob(b *testing.B) {
+	eng := NewEngineFromPolicy(&Policy{
+		Version: "1", Name: "bench",
+		Rules: []RuleSet{{
+			Scope: "shell",
+			Allow: []Rule{{
+				Pattern:    "write *",
+				Conditions: []Condition{{RequirePrior: "read_*", TimeWindow: "1h"}},
+			}},
+		}},
+	})
+	idx := NewPriorActionIndex(time.Hour)
+	eng.SetPriorActionQuerier(idx)
+	// A realistic spread of distinct actions for one agent in one scope.
+	now := time.Now()
+	for _, a := range []string{"read_file", "list_dir", "stat_file", "write_file", "delete_file"} {
+		idx.Record(LocalTenantID, "agent-1", "shell", a, "", now)
+	}
+
+	req := ActionRequest{Scope: "shell", Command: "write out.txt", AgentID: "agent-1"}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		eng.Check(req, LocalTenantID)
 	}
 }

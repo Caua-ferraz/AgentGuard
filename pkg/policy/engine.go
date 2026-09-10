@@ -791,11 +791,14 @@ type sessionCostKey struct {
 // reads of the cache use Engine.mu so a concurrent reload cannot tear a
 // pointer swap.
 type Engine struct {
-	mu           sync.RWMutex
-	provider     PolicyProvider
-	policy       *Policy // cached snapshot for LocalTenantID; refreshed by watchStop
-	watchStop    func()
-	history      HistoryQuerier
+	mu        sync.RWMutex
+	provider  PolicyProvider
+	policy    *Policy // cached snapshot for LocalTenantID; refreshed by watchStop
+	watchStop func()
+	history   HistoryQuerier
+	// priorQuerier is the tenant-scoped replacement for history. When set it
+	// wins; history remains only as the legacy fallback (audit B27/B1).
+	priorQuerier PriorActionQuerier
 	sessionCosts map[sessionCostKey]sessionCostEntry // (tenant, session_id) -> entry
 
 	// lastPolicyLoadAtNs records the unix-nanosecond timestamp of the most
@@ -1299,7 +1302,7 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 
 		// 1. Check deny rules first
 		for _, rule := range rs.Deny {
-			if matchRule(rule, req) && e.matchConditions(rule, req) {
+			if matchRule(rule, req) && e.matchConditions(rule, req, tenantID) {
 				msg := rule.Message
 				if msg == "" {
 					msg = fmt.Sprintf("Action denied by %s deny rule", rs.Scope)
@@ -1314,7 +1317,7 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 
 		// 2. Check require_approval rules
 		for _, rule := range rs.RequireApproval {
-			if matchRule(rule, req) && e.matchConditions(rule, req) {
+			if matchRule(rule, req) && e.matchConditions(rule, req, tenantID) {
 				return CheckResult{
 					Decision: RequireApproval,
 					Reason:   fmt.Sprintf("Matches approval rule in %s scope", rs.Scope),
@@ -1325,7 +1328,7 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 
 		// 3. Check allow rules
 		for _, rule := range rs.Allow {
-			if matchRule(rule, req) && e.matchConditions(rule, req) {
+			if matchRule(rule, req) && e.matchConditions(rule, req, tenantID) {
 				return CheckResult{
 					Decision: Allow,
 					Reason:   fmt.Sprintf("Allowed by %s rule", rs.Scope),
@@ -1896,7 +1899,7 @@ func wildcardMatch(pattern, value string) bool {
 // this path is only reachable for in-process policies that bypass loading
 // (tests, embedders constructing Policy literals). We keep the no-op pass-
 // through to stay tolerant rather than fail-closed in those cases.
-func (e *Engine) matchConditions(rule Rule, req ActionRequest) bool {
+func (e *Engine) matchConditions(rule Rule, req ActionRequest, tenantID string) bool {
 	if len(rule.Conditions) == 0 {
 		return true
 	}
@@ -1906,7 +1909,7 @@ func (e *Engine) matchConditions(rule Rule, req ActionRequest) bool {
 			// TimeWindow-only (or empty Condition): nothing to verify.
 			continue
 		}
-		if !e.checkRequirePrior(cond, req) {
+		if !e.checkRequirePrior(cond, req, tenantID) {
 			return false
 		}
 	}
@@ -1914,10 +1917,21 @@ func (e *Engine) matchConditions(rule Rule, req ActionRequest) bool {
 }
 
 // checkRequirePrior verifies that a prior action matching the condition was
-// recently allowed. Uses the history querier if available; returns false
-// (condition not met) if no querier is configured.
-func (e *Engine) checkRequirePrior(cond Condition, req ActionRequest) bool {
-	if e.history == nil {
+// recently allowed, scoped to tenantID.
+//
+// Two implementations, in priority order:
+//
+//  1. PriorActionQuerier (preferred) — tenant-scoped, O(1) for a literal
+//     pattern, no allocation, no I/O. Closes audit B27 (cross-tenant history)
+//     and B1 (synchronous audit-log scan under e.mu).
+//  2. HistoryQuerier (legacy fallback) — kept because the interface is frozen
+//     v1.0 surface and an embedder may have wired only this one. It carries no
+//     tenant, so it is announced once at WARNING level rather than silently
+//     answering a tenant-scoped question with cross-tenant data.
+//
+// Returns false (condition not met) when neither is configured.
+func (e *Engine) checkRequirePrior(cond Condition, req ActionRequest, tenantID string) bool {
+	if e.priorQuerier == nil && e.history == nil {
 		return false
 	}
 
@@ -1927,8 +1941,24 @@ func (e *Engine) checkRequirePrior(cond Condition, req ActionRequest) bool {
 			window = d
 		}
 	}
-
 	since := time.Now().Add(-window)
+
+	if e.priorQuerier != nil {
+		ok, err := e.priorQuerier.HasPriorAllow(tenantID, req.AgentID, req.Scope, cond.RequirePrior, since)
+		if err != nil {
+			// TODO(audit B2): a querier error is currently swallowed into
+			// "condition not met", which is fail-open for a require_prior-gated
+			// DENY and fail-closed for a gated ALLOW. The fix is polarity-aware
+			// (fail closed in BOTH directions by treating the condition as met
+			// for a deny rule), which needs the rule's polarity threaded in.
+			// Deliberately out of scope here so B27/B1 ship as one reviewable
+			// change; behavior is unchanged from the legacy path.
+			return false
+		}
+		return ok
+	}
+
+	warnLegacyHistoryPath()
 	entries, err := e.history.RecentActions(req.AgentID, req.Scope, since)
 	if err != nil {
 		return false

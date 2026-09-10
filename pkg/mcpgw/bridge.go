@@ -204,8 +204,7 @@ func (b *Bridge) Run(ctx context.Context, in io.Reader, out io.Writer, errLog io
 	}
 	defer b.closeUpstreams()
 
-	scanner := bufio.NewScanner(in)
-	scanner.Buffer(make([]byte, 64*1024), MaxStdoutLineBytes)
+	reader := bufio.NewReaderSize(in, 64*1024)
 
 	// Each tools/call gets its own goroutine so a slow upstream
 	// doesn't block the next frame. Other methods are dispatched
@@ -217,18 +216,36 @@ func (b *Bridge) Run(ctx context.Context, in io.Reader, out io.Writer, errLog io
 	scanErrCh := make(chan error, 1)
 	go func() {
 		defer close(scanCh)
-		for scanner.Scan() {
-			line := scanner.Bytes()
+		for {
+			line, prefix, err := readFrame(reader, MaxStdoutLineBytes)
+
+			if errors.Is(err, errFrameTooLong) {
+				// A frame past the cap is a PER-FRAME failure, not a
+				// process-wide one. Previously this ended Run, and main turns
+				// a Run error into os.Exit(1) -- so one oversized client frame
+				// took down the whole gateway and every session on it
+				// (audit B10). Answer it if we can identify it, so the caller
+				// is not left waiting on a frame we refused, then carry on.
+				if id := peekFrameID(prefix); id != nil {
+					b.writeResponse(NewResponseError(id, ErrCodeInvalidRequest,
+						"frame exceeds the maximum size the gateway accepts", nil))
+				}
+				b.logger.Infof("dropping oversized frame (cap %d bytes)", MaxStdoutLineBytes)
+				continue
+			}
+			if err != nil {
+				if !errors.Is(err, io.EOF) {
+					scanErrCh <- err
+				}
+				return
+			}
 			if len(line) == 0 {
 				continue
 			}
-			// Copy because Scanner reuses its buffer.
+			// Copy: readFrame's slice is only valid until the next call.
 			cp := make([]byte, len(line))
 			copy(cp, line)
 			scanCh <- cp
-		}
-		if err := scanner.Err(); err != nil {
-			scanErrCh <- err
 		}
 	}()
 

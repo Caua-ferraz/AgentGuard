@@ -67,65 +67,228 @@ func TestLimiter_WindowRefill(t *testing.T) {
 	}
 }
 
-func TestLimiter_EvictsStale(t *testing.T) {
+// ---------------------------------------------------------------------------
+// Capacity contract.
+//
+// These tests assert what the limiter is SUPPOSED to guarantee, not what the
+// current algorithm happens to do. MaxBuckets is documented as "the maximum
+// number of rate limit buckets kept in memory", so the binding contract is:
+//
+//   C1. BucketCount() never exceeds MaxBuckets, whatever the caller does.
+//   C2. A bucket whose window has fully elapsed must not permanently occupy
+//       capacity -- it is reclaimable.
+//   C3. Reclamation is attributed to the scope that owned the bucket.
+//   C4. Allow stays allocation-free at capacity, not merely when the map is
+//       small (CLAUDE.md hot-path invariant).
+//
+// Deliberately NOT asserted: how many buckets a single reclamation frees, when
+// reclamation runs, or which victim is chosen. Those are implementation
+// choices; pinning them is what let an unbounded map ship green.
+// ---------------------------------------------------------------------------
+
+// C2: a fully-elapsed bucket must not permanently occupy capacity.
+func TestLimiter_StaleBucketsAreReclaimable(t *testing.T) {
 	l := New()
 	window := 50 * time.Millisecond
 
-	// Fill up to MaxBuckets
 	for i := 0; i < MaxBuckets; i++ {
-		_ = l.Allow(fmt.Sprintf("key-%d", i), 1, window)
+		_ = l.Allow(fmt.Sprintf("shell:local:key-%d", i), 1, window)
 	}
-
-	if l.BucketCount() != MaxBuckets {
-		t.Fatalf("expected %d buckets, got %d", MaxBuckets, l.BucketCount())
-	}
-
-	// Wait for all buckets to become stale
+	// Every bucket is now past its window.
 	time.Sleep(60 * time.Millisecond)
 
-	// Next Allow hits the capacity check and triggers eviction
-	_ = l.Allow("trigger", 1, window)
-
-	// All stale buckets evicted, only "trigger" remains
-	if got := l.BucketCount(); got != 1 {
-		t.Errorf("expected 1 bucket after eviction, got %d", got)
+	// Keep offering NEW keys. If stale buckets were unreclaimable the map
+	// would grow without bound; the contract is that it does not.
+	for i := 0; i < 100; i++ {
+		_ = l.Allow(fmt.Sprintf("shell:local:fresh-%d", i), 1, window)
+	}
+	if got := l.BucketCount(); got > MaxBuckets {
+		t.Errorf("BucketCount = %d, exceeds MaxBuckets = %d: stale buckets were not reclaimed", got, MaxBuckets)
+	}
+	if got := l.BucketCount(); got == 0 {
+		t.Errorf("BucketCount = 0: reclamation dropped the live buckets too")
 	}
 }
 
-// TestLimiter_EvictionIncrementsMetricByScope: evictStaleLocked must tag
-// each eviction with the scope portion of the bucket key so operators can
-// see which scope is churning buckets the fastest.
-func TestLimiter_EvictionIncrementsMetricByScope(t *testing.T) {
+// C2, stated as the guarantee a caller can actually observe: a bucket that is
+// fully elapsed must not keep occupying capacity once the limiter is under
+// pressure. It matters because the alternative victim is a LIVE bucket, and
+// evicting one of those hands a caller who already spent their budget a fresh
+// one -- a rate-limit bypass. Asserts the outcome, not which tier delivers it.
+func TestLimiter_ElapsedBucketsDoNotHoldCapacity(t *testing.T) {
+	l := New()
+	short := 50 * time.Millisecond
+	long := time.Hour
+
+	// A live caller that has exhausted its budget, created FIRST so it is the
+	// least-recently-refilled bucket in the map -- i.e. the most attractive
+	// victim to any recency-based reclamation.
+	const live = "shell:local:live"
+	for i := 0; i < 5; i++ {
+		if err := l.Allow(live, 5, long); err != nil {
+			t.Fatalf("setup: live request %d should pass: %v", i+1, err)
+		}
+	}
+	if err := l.Allow(live, 5, long); err == nil {
+		t.Fatal("setup: live caller should be exhausted after 5 of 5")
+	}
+
+	for i := 0; i < MaxBuckets-10; i++ {
+		_ = l.Allow(fmt.Sprintf("shell:local:short-%d", i), 1, short)
+	}
+	time.Sleep(60 * time.Millisecond) // only the short-window buckets elapse
+
+	// Drive past capacity so reclamation has to choose victims.
+	for i := 0; i < 200; i++ {
+		_ = l.Allow(fmt.Sprintf("shell:local:new-%d", i), 1, long)
+	}
+
+	var elapsed int
+	for _, snap := range l.Snapshot() {
+		if snap.Window > 0 && time.Since(snap.LastRefill) >= snap.Window {
+			elapsed++
+		}
+	}
+	if elapsed > 0 {
+		t.Errorf("%d fully-elapsed buckets still occupy capacity under pressure; "+
+			"they would be refilled to full on next use and are free to reclaim, so holding them "+
+			"forces reclamation to evict LIVE buckets instead (audit B3)", elapsed)
+	}
+
+	// And the live caller must not have been handed a fresh budget.
+	if err := l.Allow(live, 5, long); err == nil {
+		t.Error("the exhausted live bucket was reclaimed, resetting that caller's limit -- " +
+			"a rate-limit bypass")
+	}
+}
+
+// C1 -- THE EDGE. Capacity is reached while NOTHING is reclaimable, which is
+// the state a real deployment reaches organically (many distinct
+// scope:tenant:agent keys inside one window) and the state an attacker reaches
+// deliberately by varying agent_id. The map must still not exceed MaxBuckets.
+func TestLimiter_BoundedAtCapacityWithNothingStale(t *testing.T) {
+	l := New()
+	// A window long enough that no bucket can go stale during the test.
+	window := time.Hour
+
+	const overshoot = 5000
+	for i := 0; i < MaxBuckets+overshoot; i++ {
+		_ = l.Allow(fmt.Sprintf("shell:local:agent-%d", i), 60, window)
+	}
+
+	if got := l.BucketCount(); got > MaxBuckets {
+		t.Errorf("BucketCount = %d, exceeds MaxBuckets = %d by %d "+
+			"MaxBuckets does not bound the map when nothing is reclaimable: every distinct "+
+			"key an unauthenticated caller supplies adds a bucket permanently, and each "+
+			"subsequent Allow pays an O(n) scan under the limiter lock (audit B3).",
+			got, MaxBuckets, got-MaxBuckets)
+	}
+}
+
+// C1 for the hydration path. Restore replays whatever the store hands back;
+// LoadBuckets issues an unbounded SELECT, so a deployment with more live keys
+// than MaxBuckets inside BucketTTL hydrates straight past the cap at boot --
+// with no attacker involved, and it survives every restart.
+func TestLimiter_RestoreRespectsCapacity(t *testing.T) {
+	l := New()
+	const rows = MaxBuckets * 5
+	snaps := make([]BucketSnapshot, 0, rows)
+	now := time.Now()
+	for i := 0; i < rows; i++ {
+		snaps = append(snaps, BucketSnapshot{
+			Key:        fmt.Sprintf("shell:local:agent-%d", i),
+			Tokens:     60,
+			Max:        60,
+			Window:     time.Hour,
+			LastRefill: now,
+		})
+	}
+
+	l.Restore(snaps)
+
+	if got := l.BucketCount(); got > MaxBuckets {
+		t.Errorf("after Restore of %d rows BucketCount = %d, exceeds MaxBuckets = %d "+
+			"boot hydration bypasses the capacity bound entirely (audit B3).",
+			rows, got, MaxBuckets)
+	}
+}
+
+// C3: reclamation is attributed to the scope that owned the bucket, so an
+// operator can see which scope is churning. Asserts ATTRIBUTION, not absolute
+// counts -- absolute counts would pin the reclamation strategy.
+func TestLimiter_ReclamationIsAttributedByScope(t *testing.T) {
 	l := New()
 	window := 50 * time.Millisecond
 
-	// Fill with two scopes so the labeled counter gets exercised.
 	for i := 0; i < MaxBuckets/2; i++ {
 		_ = l.Allow(fmt.Sprintf("shell:agent-%d", i), 1, window)
 	}
 	for i := 0; i < MaxBuckets/2; i++ {
 		_ = l.Allow(fmt.Sprintf("network:agent-%d", i), 1, window)
 	}
-	if l.BucketCount() != MaxBuckets {
-		t.Fatalf("expected %d buckets, got %d", MaxBuckets, l.BucketCount())
-	}
 
 	beforeShell := metrics.RateLimitBucketEvictedFor("shell")
 	beforeNet := metrics.RateLimitBucketEvictedFor("network")
+	beforeUnrelated := metrics.RateLimitBucketEvictedFor("browser")
 
 	time.Sleep(60 * time.Millisecond)
-
-	// Trigger eviction. Any scope works for the trigger itself.
 	_ = l.Allow("shell:trigger", 1, window)
 
-	afterShell := metrics.RateLimitBucketEvictedFor("shell")
-	afterNet := metrics.RateLimitBucketEvictedFor("network")
+	gotShell := metrics.RateLimitBucketEvictedFor("shell") - beforeShell
+	gotNet := metrics.RateLimitBucketEvictedFor("network") - beforeNet
+	gotUnrelated := metrics.RateLimitBucketEvictedFor("browser") - beforeUnrelated
 
-	if got := afterShell - beforeShell; got != uint64(MaxBuckets/2) {
-		t.Errorf("shell evictions = %d, want %d", got, MaxBuckets/2)
+	if gotShell == 0 {
+		t.Errorf("no evictions attributed to scope %q despite %d stale buckets in it", "shell", MaxBuckets/2)
 	}
-	if got := afterNet - beforeNet; got != uint64(MaxBuckets/2) {
-		t.Errorf("network evictions = %d, want %d", got, MaxBuckets/2)
+	if gotNet == 0 {
+		t.Errorf("no evictions attributed to scope %q despite %d stale buckets in it", "network", MaxBuckets/2)
+	}
+	if gotUnrelated != 0 {
+		t.Errorf("%d evictions attributed to scope %q, which owned no buckets", gotUnrelated, "browser")
+	}
+	// Attribution must not exceed what that scope actually held.
+	if gotShell > uint64(MaxBuckets/2)+1 {
+		t.Errorf("shell evictions = %d, more than the %d buckets that scope ever held", gotShell, MaxBuckets/2)
+	}
+	if gotNet > uint64(MaxBuckets/2) {
+		t.Errorf("network evictions = %d, more than the %d buckets that scope ever held", gotNet, MaxBuckets/2)
+	}
+}
+
+// A reloaded policy must actually take effect. Allow receives the CURRENT
+// maxRequests/window on every call; a live bucket that keeps enforcing the
+// limit it was born with means a tightened policy silently does not apply
+// (audit B23).
+func TestLimiter_LiveBucketAdoptsReloadedLimit(t *testing.T) {
+	l := New()
+	const key = "shell:local:bot"
+
+	// Born under a limit of 10; consume 2.
+	for i := 0; i < 2; i++ {
+		if err := l.Allow(key, 10, time.Hour); err != nil {
+			t.Fatalf("under the original limit request %d should pass: %v", i+1, err)
+		}
+	}
+
+	// Operator tightens the policy to 2/hour. The bucket is live and the
+	// caller has already spent 2 -- it must now be exhausted.
+	if err := l.Allow(key, 2, time.Hour); err == nil {
+		t.Error("after tightening the limit to 2/hour with 2 already consumed, " +
+			"the next request must be denied; the live bucket is still enforcing " +
+			"the limit it was created with (audit B23)")
+	}
+
+	// Loosening must apply just as promptly.
+	l2 := New()
+	if err := l2.Allow(key, 1, time.Hour); err != nil {
+		t.Fatalf("first request under limit 1 should pass: %v", err)
+	}
+	if err := l2.Allow(key, 1, time.Hour); err == nil {
+		t.Fatal("second request under limit 1 must be denied")
+	}
+	if err := l2.Allow(key, 5, time.Hour); err != nil {
+		t.Errorf("after loosening the limit to 5/hour the next request should pass, got: %v", err)
 	}
 }
 
