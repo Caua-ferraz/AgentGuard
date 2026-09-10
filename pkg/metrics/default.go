@@ -12,13 +12,16 @@ import (
 // -- Decision counters --
 
 func IncDecision(decision string) { Default.IncDecision(decision) }
-func IncRateLimited()             { Default.IncRateLimited() }
-func IncApprovalReplayMismatch()  { Default.IncApprovalReplayMismatch() }
-func ChecksTotal() uint64         { return Default.ChecksTotal() }
-func AllowedTotal() uint64        { return Default.AllowedTotal() }
-func DeniedTotal() uint64         { return Default.DeniedTotal() }
-func ApprovalTotal() uint64       { return Default.ApprovalTotal() }
-func RateLimitedTotal() uint64    { return Default.RateLimitedTotal() }
+func AddDecision(decision string, n uint64) {
+	Default.AddDecision(decision, n)
+}
+func IncRateLimited()            { Default.IncRateLimited() }
+func IncApprovalReplayMismatch() { Default.IncApprovalReplayMismatch() }
+func ChecksTotal() uint64        { return Default.ChecksTotal() }
+func AllowedTotal() uint64       { return Default.AllowedTotal() }
+func DeniedTotal() uint64        { return Default.DeniedTotal() }
+func ApprovalTotal() uint64      { return Default.ApprovalTotal() }
+func RateLimitedTotal() uint64   { return Default.RateLimitedTotal() }
 func ApprovalReplayMismatchTotal() uint64 {
 	return Default.ApprovalReplayMismatchTotal()
 }

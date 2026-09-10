@@ -372,3 +372,34 @@ func TestDefaultShims_HitDefaultRegistry(t *testing.T) {
 		t.Errorf("ChecksTotal after Reset = %d, want 0", got)
 	}
 }
+
+// TestAddDecision_MatchesRepeatedIncDecision: seeding n decisions at once
+// (the startup replay's checkpoint path) must be indistinguishable from n
+// IncDecision calls for every decision string, including unknown ones that
+// only bump the total. Pinned on the full exposition so a drift in either
+// helper shows up as a byte diff.
+func TestAddDecision_MatchesRepeatedIncDecision(t *testing.T) {
+	deprecation.Reset()
+	bulk := NewRegistry()
+	incremental := NewRegistry()
+	for _, d := range []string{"ALLOW", "DENY", "REQUIRE_APPROVAL", "", "SOMETHING_NEW"} {
+		bulk.AddDecision(d, 3)
+		for i := 0; i < 3; i++ {
+			incremental.IncDecision(d)
+		}
+	}
+	bulk.AddDecision("ALLOW", 0) // zero is a no-op, never a series reset
+
+	if got, want := bulk.ChecksTotal(), uint64(15); got != want {
+		t.Errorf("ChecksTotal = %d, want %d", got, want)
+	}
+	if got, want := bulk.AllowedTotal(), uint64(3); got != want {
+		t.Errorf("AllowedTotal = %d, want %d", got, want)
+	}
+	var a, b bytes.Buffer
+	bulk.WritePrometheus(&a)
+	incremental.WritePrometheus(&b)
+	if a.String() != b.String() {
+		t.Errorf("AddDecision and IncDecision diverge:\n--- bulk ---\n%s\n--- incremental ---\n%s", a.String(), b.String())
+	}
+}

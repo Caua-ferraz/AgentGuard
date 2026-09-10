@@ -258,6 +258,27 @@ func (r *Registry) IncDecision(decision string) {
 	}
 }
 
+// AddDecision bulk-increments the decision counters by n, exactly as n
+// IncDecision(decision) calls would. It exists for the startup replay, which
+// seeds the counters from the lifetime tally persisted in the audit replay
+// checkpoint rather than re-reading the whole log; an unknown decision
+// string (including "") bumps only the total, mirroring IncDecision. Not a
+// hot-path function.
+func (r *Registry) AddDecision(decision string, n uint64) {
+	if n == 0 {
+		return
+	}
+	atomic.AddUint64(&r.checksTotal, n)
+	switch decision {
+	case "ALLOW":
+		atomic.AddUint64(&r.allowedTotal, n)
+	case "DENY":
+		atomic.AddUint64(&r.deniedTotal, n)
+	case "REQUIRE_APPROVAL":
+		atomic.AddUint64(&r.approvalTotal, n)
+	}
+}
+
 // IncRateLimited increments the rate-limit-specific counter.
 //
 // It used to also bump the checks/denied totals, which double-counted
