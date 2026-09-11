@@ -1,7 +1,7 @@
 package llmproxy
 
-// streaming_protocol_test.go pins three v1.0 audit findings in the two
-// SSE accumulators and the stream loops that drive them. All three share
+// streaming_protocol_test.go pins four v1.0 audit findings in the two
+// SSE accumulators and the stream loops that drive them. All four share
 // one theme: a stream the firewall cannot gate must end in a refusal,
 // never in ungated bytes and never in silence.
 //
@@ -13,6 +13,10 @@ package llmproxy
 //	    client got an empty response, the gate never ran and nothing was
 //	    audited. Note the fix is NOT to flush them — that would be the
 //	    bypass — but to run the completion path: gate, or refuse.
+//	B18 OpenAI: tool_call state is keyed by tool_calls[i].index, which is
+//	    unique only WITHIN a choice. With n>1, two choices' fragments
+//	    merged into one argument string nobody executes, and a sibling
+//	    choice's finish_reason could close the cycle early.
 //	B21 Anthropic: `{ }` as content_block_start.input was compared with
 //	    bytes.Equal against "{}", so an empty seed carrying insignificant
 //	    whitespace was mistaken for real arguments and the next
@@ -405,6 +409,145 @@ func TestB21_WhitespaceSeedStreamGatesEndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(got, "toolu_ws") {
 		t.Errorf("ALLOWed tool_use block did not reach the client: %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------
+// B18 — tool calls across multiple choices
+// ---------------------------------------------------------------------
+
+// TestB18_ToolCallsOnSecondChoice_FailClosed pins the collision. With
+// n>1 both choices number their tool calls from 0, so the accumulator's
+// tool_calls[i].index key merged them: the gate evaluated a splice of
+// two different calls' arguments — a string no client ever executes —
+// while the two real calls went unexamined.
+func TestB18_ToolCallsOnSecondChoice_FailClosed(t *testing.T) {
+	t.Run("separate-events", func(t *testing.T) {
+		acc := NewOpenAIToolCallAccumulator(0)
+		if res, err := acc.FeedEvent([]byte(pvOpenAIToolDelta(0, 0, "call_a", "bash", `{"cmd":"ls"}`))); err != nil || !res.Accumulating {
+			t.Fatalf("choice 0 delta: res=%+v err=%v", res, err)
+		}
+		res, err := acc.FeedEvent([]byte(pvOpenAIToolDelta(1, 0, "call_b", "bash", `{"cmd":"rm -rf /"}`)))
+		if err != nil {
+			t.Fatalf("choice 1 delta: %v", err)
+		}
+		if !res.ProtocolViolation {
+			t.Fatalf("tool_calls on a second choice returned %+v, want ProtocolViolation (B18: the two calls would merge)", res)
+		}
+		if res.violation != violationMultiChoiceToolCalls {
+			t.Errorf("violation kind = %d, want violationMultiChoiceToolCalls (%d)", res.violation, violationMultiChoiceToolCalls)
+		}
+	})
+
+	t.Run("same-event", func(t *testing.T) {
+		acc := NewOpenAIToolCallAccumulator(0)
+		ev := `data: {"choices":[` +
+			`{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"bash","arguments":"{\"cmd\":\"ls\"}"}}]},"finish_reason":null},` +
+			`{"index":1,"delta":{"tool_calls":[{"index":0,"id":"call_b","type":"function","function":{"name":"bash","arguments":"{\"cmd\":\"rm -rf /\"}"}}]},"finish_reason":null}` +
+			`]}` + "\n\n"
+		res, err := acc.FeedEvent([]byte(ev))
+		if err != nil {
+			t.Fatalf("two-choice event: %v", err)
+		}
+		if !res.ProtocolViolation {
+			t.Fatalf("two choices with tool_calls in ONE event returned %+v, want ProtocolViolation", res)
+		}
+	})
+}
+
+// TestB18_SingleChoiceStreamUnaffected is the counterweight that matters
+// most: n=1 is what every mainstream agent framework sends, and the B18
+// guard must be invisible to it.
+func TestB18_SingleChoiceStreamUnaffected(t *testing.T) {
+	acc := NewOpenAIToolCallAccumulator(0)
+	events := []string{
+		pvOpenAIContent(0, "thinking"),
+		pvOpenAIToolDelta(0, 0, "call_1", "bash", `{"cmd":`),
+		pvOpenAIToolDelta(0, 0, "", "", `"ls"}`),
+		// A second tool call on the SAME choice — legal, and must not
+		// be confused with a second CHOICE.
+		pvOpenAIToolDelta(0, 1, "call_2", "cat", `{"path":"/etc/hosts"}`),
+		pvOpenAIFinish(0, "tool_calls"),
+	}
+	var last FeedResult
+	for i, ev := range events {
+		res, err := acc.FeedEvent([]byte(ev))
+		if err != nil {
+			t.Fatalf("event %d: %v", i, err)
+		}
+		if res.ProtocolViolation {
+			t.Fatalf("event %d on a single-choice stream was refused (B18 over-refused): %s", i, ev)
+		}
+		last = res
+	}
+	if !last.Completed || len(last.CompletedToolCalls) != 2 {
+		t.Fatalf("final res=%+v, want Completed with 2 calls", last)
+	}
+	if got := strings.TrimSpace(string(last.CompletedToolCalls[0].RawArguments)); got != `{"cmd":"ls"}` {
+		t.Errorf("call 0 arguments = %q, want %q", got, `{"cmd":"ls"}`)
+	}
+	if got := strings.TrimSpace(string(last.CompletedToolCalls[1].RawArguments)); got != `{"path":"/etc/hosts"}` {
+		t.Errorf("call 1 arguments = %q, want %q", got, `{"path":"/etc/hosts"}`)
+	}
+}
+
+// TestB18_SiblingChoiceFinishDoesNotCloseCycle pins the second half of
+// B18. hasFinishReason accepted a finish_reason from ANY choice, so with
+// n>1 a sibling choice finishing first closed the tool-call cycle while
+// its arguments were still streaming: the gate saw `{"cmd":"l`, which
+// does not parse, and a healthy stream was refused as malformed.
+func TestB18_SiblingChoiceFinishDoesNotCloseCycle(t *testing.T) {
+	acc := NewOpenAIToolCallAccumulator(0)
+
+	if res, err := acc.FeedEvent([]byte(pvOpenAIToolDelta(0, 0, "call_1", "bash", `{"cmd":"l`))); err != nil || !res.Accumulating {
+		t.Fatalf("partial args: res=%+v err=%v", res, err)
+	}
+	// Sibling choice 1 finishes while choice 0 is mid-arguments.
+	res, err := acc.FeedEvent([]byte(pvOpenAIFinish(1, "stop")))
+	if err != nil {
+		t.Fatalf("sibling finish: %v", err)
+	}
+	if res.Completed {
+		t.Fatalf("a sibling choice's finish_reason closed the cycle early (B18): res=%+v", res)
+	}
+	if !res.Accumulating {
+		t.Errorf("sibling finish: res=%+v, want Accumulating", res)
+	}
+	// The owning choice streams the rest and closes.
+	if _, err := acc.FeedEvent([]byte(pvOpenAIToolDelta(0, 0, "", "", `s"}`))); err != nil {
+		t.Fatalf("rest of args: %v", err)
+	}
+	res, err = acc.FeedEvent([]byte(pvOpenAIFinish(0, "tool_calls")))
+	if err != nil {
+		t.Fatalf("owning finish: %v", err)
+	}
+	if !res.Completed || len(res.CompletedToolCalls) != 1 {
+		t.Fatalf("owning finish: res=%+v, want Completed with 1 call", res)
+	}
+	if got := strings.TrimSpace(string(res.CompletedToolCalls[0].RawArguments)); got != `{"cmd":"ls"}` {
+		t.Errorf("gated arguments = %q, want the COMPLETE %q", got, `{"cmd":"ls"}`)
+	}
+}
+
+// TestB18_MultiChoiceToolCalls_RefusesEndToEnd proves neither call's
+// bytes reach the client and the refusal names the defect.
+func TestB18_MultiChoiceToolCalls_RefusesEndToEnd(t *testing.T) {
+	stream := pvOpenAIToolDelta(0, 0, "call_first", "bash", `{"cmd":"ls"}`) +
+		pvOpenAIToolDelta(1, 0, "call_second", "bash", `{"cmd":"rm -rf /"}`) +
+		pvOpenAIFinish(0, "tool_calls") +
+		"data: [DONE]\n\n"
+
+	spy := &pvCallSpy{decision: Decision{Allow: true, Rule: "allow:test"}}
+	got := pvRunStream(t, "openai", stream, spy)
+
+	if strings.Contains(got, "call_first") || strings.Contains(got, "call_second") {
+		t.Errorf("a tool_call leaked from an ungateable multi-choice stream: %q", got)
+	}
+	if strings.Contains(got, "rm -rf /") {
+		t.Errorf("tool arguments leaked from an ungateable multi-choice stream: %q", got)
+	}
+	if !strings.Contains(got, "deny:llm_api_proxy:multi_choice_tool_calls") {
+		t.Errorf("expected the multi_choice_tool_calls refusal rule; got %q", got)
 	}
 }
 

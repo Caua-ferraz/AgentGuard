@@ -498,11 +498,10 @@ func (s *Server) runOpenAIStreamLoop(w http.ResponseWriter, flusher http.Flusher
 				s.denyMalformedOpenAI(w, flusher, r, acc, result.CompletedToolCalls)
 
 			case result.ProtocolViolation:
-				// Defensive: the OpenAI accumulator does not currently emit
-				// this (its tool_calls all close together at finish_reason, so
-				// there is no interleave window). Handled here so a future
-				// parser change can never silently drop the signal and leak an
-				// ungated call. Fail closed with a synthetic refusal.
+				// The accumulator found a stream it cannot gate without
+				// risking a bypass — today tool_calls spread across more
+				// than one choice (audit B18). Fail closed with a
+				// synthetic refusal naming the specific defect.
 				metrics.IncLLMProxyProtocolViolation("openai")
 				refusal := s.buildRefusal("openai",
 					protocolViolationDecision("openai", result.violation),
@@ -637,6 +636,12 @@ func protocolViolationDecision(provider string, kind protocolViolationKind) Deci
 			Allow:  false,
 			Reason: "upstream tool_use stream is malformed (tool input outside any tool_use block); refused",
 			Rule:   "deny:llm_api_proxy:orphaned_tool_input",
+		}
+	case violationMultiChoiceToolCalls:
+		return Decision{
+			Allow:  false,
+			Reason: "upstream returned tool calls on multiple choices; refused",
+			Rule:   "deny:llm_api_proxy:multi_choice_tool_calls",
 		}
 	default:
 		if provider == "anthropic" {

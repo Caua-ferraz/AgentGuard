@@ -135,6 +135,12 @@ const (
 	// fragments belong to a call the firewall never saw start, so there
 	// is no cycle that could gate them.
 	violationOrphanedToolInput
+
+	// violationMultiChoiceToolCalls (audit B18, OpenAI): tool_call deltas
+	// arrived on more than one choice. tool_calls[i].index is unique only
+	// WITHIN a choice, so two choices' fragments would merge into one
+	// argument string the firewall gates and no client executes.
+	violationMultiChoiceToolCalls
 )
 
 // OpenAIToolCallAccumulator stitches streaming tool_call fragments
@@ -170,6 +176,13 @@ type OpenAIToolCallAccumulator struct {
 	// Reset clears it, so a stream carrying several tool_call cycles
 	// still completes once per cycle.
 	completed bool
+
+	// toolCallChoice is the `choices[].index` that carried the tool_call
+	// deltas of the in-flight cycle, or -1 when none has been seen yet
+	// (audit B18). It scopes two decisions to the choice that actually
+	// owns the call: a SECOND choice carrying tool_calls is a protocol
+	// violation, and only THIS choice's finish_reason closes the cycle.
+	toolCallChoice int
 }
 
 // NewOpenAIToolCallAccumulator constructs a fresh accumulator with
@@ -180,6 +193,7 @@ func NewOpenAIToolCallAccumulator(maxBufferBytes int) *OpenAIToolCallAccumulator
 	return &OpenAIToolCallAccumulator{
 		maxBufferBytes: maxBufferBytes,
 		byIndex:        map[int]*openAIToolCallState{},
+		toolCallChoice: -1,
 	}
 }
 
@@ -199,6 +213,7 @@ func (a *OpenAIToolCallAccumulator) Reset() {
 	a.bufferedBytes = 0
 	a.active = false
 	a.completed = false
+	a.toolCallChoice = -1
 }
 
 // complete closes the in-flight gating cycle exactly once: it assembles
@@ -296,17 +311,16 @@ func (a *OpenAIToolCallAccumulator) FeedEvent(rawEvent []byte) (FeedResult, erro
 		return FeedResult{}, fmt.Errorf("openai parser: malformed delta JSON: %w", err)
 	}
 
-	// Look across all choices: tool_call deltas and finish_reason can
-	// land on any choice index. In practice OpenAI sends one choice at
-	// a time for a streaming response, but we don't rely on it.
+	// Look across all choices: tool_call deltas can land on any choice
+	// index. In practice OpenAI sends one choice at a time for a
+	// streaming response, but we don't rely on it. The finish_reason
+	// question is asked later, via finishObserved, because the answer
+	// depends on which choice owns the in-flight call (audit B18).
 	hasToolCallDelta := false
-	finishReasonToolCalls := false
 	for _, ch := range env.Choices {
 		if len(ch.Delta.ToolCalls) > 0 {
 			hasToolCallDelta = true
-		}
-		if ch.FinishReason == "tool_calls" {
-			finishReasonToolCalls = true
+			break
 		}
 	}
 
@@ -331,6 +345,24 @@ func (a *OpenAIToolCallAccumulator) FeedEvent(rawEvent []byte) (FeedResult, erro
 		// Accumulate fragments before deciding to buffer (cheaper to
 		// abort on overflow without storing the event).
 		for _, ch := range env.Choices {
+			if len(ch.Delta.ToolCalls) == 0 {
+				continue
+			}
+			// SECURITY (audit B18): tool_call state is keyed by
+			// tool_calls[i].index, which is unique only WITHIN one
+			// choice. With n>1 both choices number their calls from 0,
+			// so their argument fragments would concatenate into a
+			// single state: the gate would evaluate a splice of two
+			// calls that no client executes, while the two real calls
+			// reach the client unexamined. We cannot separate them
+			// after the fact, so the first choice to carry tool_calls
+			// claims the cycle and a second one fails the stream
+			// closed. n=1 — every mainstream agent framework — never
+			// reaches this branch.
+			if a.toolCallChoice >= 0 && ch.Index != a.toolCallChoice {
+				return FeedResult{ProtocolViolation: true, violation: violationMultiChoiceToolCalls}, nil
+			}
+			a.toolCallChoice = ch.Index
 			for _, tc := range ch.Delta.ToolCalls {
 				st, ok := a.byIndex[tc.Index]
 				if !ok {
@@ -376,7 +408,7 @@ func (a *OpenAIToolCallAccumulator) FeedEvent(rawEvent []byte) (FeedResult, erro
 		// If THIS same event also carries finish_reason (tool_calls or
 		// any other terminal reason while we were active), close the
 		// cycle now — the closing arg fragment is already applied above.
-		if finishReasonToolCalls || hasFinishReason(env) {
+		if a.finishObserved(env) {
 			return a.complete()
 		}
 		return appendRes, nil
@@ -393,7 +425,7 @@ func (a *OpenAIToolCallAccumulator) FeedEvent(rawEvent []byte) (FeedResult, erro
 			return appendRes, err
 		}
 
-		if finishReasonToolCalls || hasFinishReason(env) {
+		if a.finishObserved(env) {
 			// complete()'s error surfaces invalid-JSON-arguments cases
 			// to the caller. The orchestrator still proceeds with
 			// gating using RawArguments — the policy hook decides how
@@ -476,12 +508,26 @@ func (a *OpenAIToolCallAccumulator) assembleCompletedCalls() ([]ToolCallCheck, e
 	return out, firstErr
 }
 
-// hasFinishReason returns true if any choice has a non-empty
-// finish_reason. Used to detect end-of-cycle when finish_reason isn't
-// "tool_calls" but is still terminal (e.g. "stop") — we must close
-// the buffered cycle to avoid hanging the stream.
-func hasFinishReason(env openAIDeltaEnvelope) bool {
+// finishObserved reports whether env carries a terminal finish_reason
+// that should close the in-flight gating cycle. Any non-empty value
+// counts, not just "tool_calls": a cycle that ends on "stop" or "length"
+// must still close, or the accumulator dangles and the stream hangs.
+//
+// Scope (audit B18): once a choice owns the in-flight tool_call, only
+// THAT choice's finish_reason closes the cycle. With n>1 a sibling
+// choice routinely finishes while the tool-call choice is still
+// streaming arguments; closing on the sibling would gate a truncated
+// argument string and refuse a stream that was never malformed. Before
+// any tool_call is seen (toolCallChoice < 0) the original any-choice
+// behaviour applies, which is what n=1 always gets.
+//
+// An upstream that never sends the owning choice's finish_reason is
+// caught by CloseAtEOF rather than hanging.
+func (a *OpenAIToolCallAccumulator) finishObserved(env openAIDeltaEnvelope) bool {
 	for _, ch := range env.Choices {
+		if a.toolCallChoice >= 0 && ch.Index != a.toolCallChoice {
+			continue
+		}
 		if ch.FinishReason != "" {
 			return true
 		}
