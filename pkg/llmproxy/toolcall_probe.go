@@ -1,7 +1,6 @@
 package llmproxy
 
-// Lenient tool-call detection for bodies the typed decoders reject
-// (audit finding B6).
+// Lenient tool-call detection for bodies the typed decoders reject.
 //
 // The non-streaming gated path decodes an upstream response into
 // ChatCompletionResponse / AnthropicMessagesResponse and gates whatever
@@ -14,8 +13,8 @@ package llmproxy
 // field the target struct declares — `"created":"1730000000"` where
 // Created is an int64, `"stop_reason":5` where it is a string — while a
 // Python or TypeScript SDK parsing the same bytes ignores the odd field
-// and happily executes the tool_calls sitting next to it. The result was
-// a tool call the firewall never evaluated. No attacker is required: an
+// and happily executes the tool_calls sitting next to it. The result is
+// a tool call the firewall never evaluates. No attacker is required: an
 // OpenAI-compatible shim (vLLM, Ollama, LiteLLM, a cloud gateway) that
 // stringifies one numeric field is enough, and pointing the proxy at one
 // is a supported configuration via --upstream-openai.

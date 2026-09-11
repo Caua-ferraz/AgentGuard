@@ -1,6 +1,6 @@
 // Package persist wires AgentGuard's in-memory fast-path state to a durable
-// store.Store using the write-behind dual-tier model (docs/v0.6-ARCHITECTURE-
-// PLAN.md §2.3–2.4).
+// store.Store using a write-behind dual-tier model: memory is
+// authoritative, the store is caught up asynchronously.
 //
 // The Syncer is the ONLY component that bridges memory and disk. It:
 //   - Hydrate(): on boot, loads persisted state back into the in-memory maps
@@ -157,7 +157,7 @@ type Syncer struct {
 // New builds a Syncer, clamping the flush interval to the 1s floor. When
 // ReconcileInterval>0, NodeID is set, and the store exposes the reconcile
 // capability, the multi-node reconciler is armed; otherwise it stays disabled
-// and the syncer behaves exactly as the v0.6 write-behind-only syncer.
+// and the syncer behaves as a write-behind-only syncer.
 func New(cfg Config) *Syncer {
 	if cfg.FlushInterval < MinFlushInterval {
 		cfg.FlushInterval = MinFlushInterval
@@ -246,7 +246,7 @@ func (s *Syncer) run() {
 
 	// The reconcile ticker exists only when reconciliation is armed. A nil
 	// channel in the select simply never fires, so single-node / SQLite / no-caps
-	// deployments run the exact v0.6 flush+purge loop with zero extra work.
+	// deployments run the plain flush+purge loop with zero extra work.
 	var reconcileC <-chan time.Time
 	if s.rc != nil || s.ra != nil {
 		rt := time.NewTicker(s.cfg.ReconcileInterval)

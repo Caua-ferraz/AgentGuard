@@ -78,12 +78,12 @@ func main() {
 	// will not lower behind a flag.
 	debugPprof := serveCmd.Bool("debug-pprof", false, "Expose Go pprof handlers on a separate localhost-only listener (--debug-pprof-port). Off by default; enable for performance investigations only.")
 	debugPprofPort := serveCmd.Int("debug-pprof-port", 6060, "Port for the localhost-only pprof listener. Ignored unless --debug-pprof is set.")
-	// Durable persistence (v0.6). Zero-config by default: runtime state
+	// Durable persistence. Zero-config by default: runtime state
 	// (approvals, rate-limit buckets, cost accumulators) is written behind to a
 	// SQLite database so it survives restarts. The store is NEVER on the
 	// /v1/check hot path — a background syncer flushes snapshots on a ≥1s tick
-	// and hydrates the in-memory maps on boot. See docs/archive/v0.6-ARCHITECTURE-PLAN.md.
-	persistEnabled := serveCmd.Bool("persist", true, "Persist runtime state (approvals, rate-limit buckets, cost accumulators) to a durable store so it survives restarts. Set false for pure in-memory (pre-v0.6 behavior).")
+	// and hydrates the in-memory maps on boot.
+	persistEnabled := serveCmd.Bool("persist", true, "Persist runtime state (approvals, rate-limit buckets, cost accumulators) to a durable store so it survives restarts. Set false for pure in-memory.")
 	storeDSN := serveCmd.String("store-dsn", "", "Durable store DSN. Empty => zero-config SQLite at <data-dir>/agentguard.db; a sqlite file path is also accepted. A postgres:// or postgresql:// DSN selects the PostgreSQL backend (required for multi-node deployments).")
 	dataDir := serveCmd.String("data-dir", ".", "Directory for the zero-config SQLite database (agentguard.db). Ignored when --store-dsn is set or --persist=false.")
 	auditBackend := serveCmd.String("audit-backend", "file", `Audit storage: "file" (JSONL, default) or "store" (the SQLite store — unifies state+audit in one DB with indexed queries). "store" requires --persist.`)
@@ -275,7 +275,7 @@ Flags:
 			TenantPolicyRefresh: *tenantPolicyRefresh,
 		}, *notifySpool)
 		// Applied here, not inside runServe: os.Exit skips defers, and every
-		// teardown in runServe has already run by the time it returns (audit H4).
+		// teardown in runServe has already run by the time it returns.
 		if serveCode != 0 {
 			os.Exit(serveCode)
 		}
@@ -397,7 +397,7 @@ type pprofOpts struct {
 	Port    int
 }
 
-// persistOpts mirrors the v0.6 persistence CLI flags. Held in a struct so
+// persistOpts mirrors the persistence CLI flags. Held in a struct so
 // runServe's signature stays bounded.
 type persistOpts struct {
 	Enabled      bool
@@ -482,7 +482,7 @@ func openStore(cfg persistOpts) (persistentStore, string, error) {
 // runServe returns the process exit code: 0 on a clean signal-driven shutdown,
 // 1 when the listener failed. The caller applies it with os.Exit AFTER this
 // function returns, so every deferred teardown here (persist flush, audit
-// drain, store close) has already run — os.Exit skips defers (audit H4).
+// drain, store close) has already run — os.Exit skips defers.
 func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, approvalValidity time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts, persistCfg persistOpts, notifySpoolPath string) int {
 	if baseURL == "" {
 		baseURL = fmt.Sprintf("http://localhost:%d", port)
@@ -548,7 +548,7 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 	}
 	log.Printf("Loaded policy: %s (%d rules across %d scopes)", pol.Name, pol.RuleCount(), pol.ScopeCount())
 
-	// Open the durable store (v0.6). Zero-config by default: a SQLite database
+	// Open the durable store. Zero-config by default: a SQLite database
 	// at <data-dir>/agentguard.db. Deferred Close is registered HERE (early) so
 	// — via Go's LIFO defer order — the store is the LAST thing torn down, after
 	// the syncer's final flush and the buffered audit logger's drain (both
@@ -673,7 +673,7 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		AuditMaxLimit:            pol.AuditMaxLimit(),
 	})
 
-	// Wire the write-behind persistence syncer (v0.6). It hydrates the
+	// Wire the write-behind persistence syncer. It hydrates the
 	// in-memory state from the store on boot, then flushes snapshots on a ≥1s
 	// background tick. It NEVER runs on the request path. The deferred Close
 	// performs a final flush; registered AFTER store.Close (defer LIFO) so the
@@ -732,7 +732,7 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		}
 		log.Printf("Health:    http://localhost:%d/health", port)
 		if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			// Hand the error to main rather than log.Fatalf here (audit H4):
+			// Hand the error to main rather than log.Fatalf here:
 			// Fatalf calls os.Exit, which skips every defer in main — including
 			// `defer syncer.Close()` (the final persist flush) and the buffered
 			// audit drain. Losing those on a listener failure is exactly when
@@ -1078,7 +1078,7 @@ func subcommandOf(args []string) string {
 }
 
 // runTenant implements `agentguard tenant <put|list|rm>` — the operator
-// interface for registering per-tenant policies in the durable store (v0.6
+// interface for registering per-tenant policies in the durable store (
 // multi-tenancy). It opens the store directly (the server need not be running;
 // SQLite WAL permits a concurrent writer, and a running server picks up a new
 // tenant on its next lookup).

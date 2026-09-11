@@ -15,8 +15,8 @@ import (
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
-// SQLiteStore is the single-node, zero-config Store backend (docs/v0.6-
-// ARCHITECTURE-PLAN.md §2.4). It owns one database file holding every
+// SQLiteStore is the single-node, zero-config Store backend. It owns one
+// database file holding every
 // persistence table, opened in WAL mode so the eventual direct-reading
 // dashboard can read concurrently with the write-behind syncer.
 //
@@ -80,7 +80,7 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	}
 
 	s := &SQLiteStore{db: db, path: path}
-	// Bounded like the Postgres constructor (audit H12). SQLite is local so a
+	// Bounded like the Postgres constructor. SQLite is local so a
 	// hang is far less likely, but a locked database file or a stalled network
 	// mount can still block indefinitely, and an unbounded boot hang is the
 	// worst possible failure shape. Same deadline keeps the two backends'
@@ -201,7 +201,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
-	// approvals one-shot/actor columns (post-v0.9.0 approval hardening).
+	// approvals one-shot/actor columns.
 	additive := []string{
 		`ALTER TABLE approvals ADD COLUMN consumed_at   TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE approvals ADD COLUMN resolved_via  TEXT NOT NULL DEFAULT ''`,

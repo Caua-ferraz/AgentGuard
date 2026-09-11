@@ -152,7 +152,7 @@ func TestLimiter_ElapsedBucketsDoNotHoldCapacity(t *testing.T) {
 	if elapsed > 0 {
 		t.Errorf("%d fully-elapsed buckets still occupy capacity under pressure; "+
 			"they would be refilled to full on next use and are free to reclaim, so holding them "+
-			"forces reclamation to evict LIVE buckets instead (audit B3)", elapsed)
+			"forces reclamation to evict LIVE buckets instead", elapsed)
 	}
 
 	// And the live caller must not have been handed a fresh budget.
@@ -180,7 +180,7 @@ func TestLimiter_BoundedAtCapacityWithNothingStale(t *testing.T) {
 		t.Errorf("BucketCount = %d, exceeds MaxBuckets = %d by %d "+
 			"MaxBuckets does not bound the map when nothing is reclaimable: every distinct "+
 			"key an unauthenticated caller supplies adds a bucket permanently, and each "+
-			"subsequent Allow pays an O(n) scan under the limiter lock (audit B3).",
+			"subsequent Allow pays an O(n) scan under the limiter lock.",
 			got, MaxBuckets, got-MaxBuckets)
 	}
 }
@@ -208,7 +208,7 @@ func TestLimiter_RestoreRespectsCapacity(t *testing.T) {
 
 	if got := l.BucketCount(); got > MaxBuckets {
 		t.Errorf("after Restore of %d rows BucketCount = %d, exceeds MaxBuckets = %d "+
-			"boot hydration bypasses the capacity bound entirely (audit B3).",
+			"boot hydration bypasses the capacity bound entirely.",
 			rows, got, MaxBuckets)
 	}
 }
@@ -258,8 +258,7 @@ func TestLimiter_ReclamationIsAttributedByScope(t *testing.T) {
 
 // A reloaded policy must actually take effect. Allow receives the CURRENT
 // maxRequests/window on every call; a live bucket that keeps enforcing the
-// limit it was born with means a tightened policy silently does not apply
-// (audit B23).
+// limit it was born with means a tightened policy silently does not apply.
 func TestLimiter_LiveBucketAdoptsReloadedLimit(t *testing.T) {
 	l := New()
 	const key = "shell:local:bot"
@@ -276,7 +275,7 @@ func TestLimiter_LiveBucketAdoptsReloadedLimit(t *testing.T) {
 	if err := l.Allow(key, 2, time.Hour); err == nil {
 		t.Error("after tightening the limit to 2/hour with 2 already consumed, " +
 			"the next request must be denied; the live bucket is still enforcing " +
-			"the limit it was created with (audit B23)")
+			"the limit it was created with")
 	}
 
 	// Loosening must apply just as promptly.

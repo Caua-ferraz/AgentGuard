@@ -16,9 +16,8 @@ import (
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
-// PostgresStore is the multi-node Store backend (docs/v0.6-ARCHITECTURE-PLAN.md
-// §2.4 forward-looks to this for the "validated v1.0" Postgres/multi-node
-// target). It mirrors SQLiteStore column-for-column and semantics-for-semantics,
+// PostgresStore is the multi-node Store backend. It mirrors SQLiteStore
+// column-for-column and semantics-for-semantics,
 // adapting only the SQL dialect (positional $N placeholders, native types,
 // BIGSERIAL audit id). Times are stored as RFC3339Nano TEXT and integers/bools
 // via the same helpers SQLiteStore uses, so a row round-trips identically across
@@ -45,7 +44,7 @@ const (
 )
 
 // migrateTimeout bounds the schema migration run from a store constructor
-// (audit H12). sql.Open does not dial, so Migrate's first round-trip is where a
+// sql.Open does not dial, so Migrate's first round-trip is where a
 // bad or blackholed DSN actually shows up — and with context.Background() that
 // wait was unbounded, hanging boot forever with no way to interrupt it. A
 // bounded deadline turns "hangs silently" into "fails startup with an error the
@@ -124,7 +123,7 @@ var pgSchemaStmts = []string{
 	    PRIMARY KEY (tenant_id, id)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_approvals_resolved ON approvals(resolved, resolved_at)`,
-	// approvals one-shot/actor columns (post-v0.9.0 approval hardening) for
+	// approvals one-shot/actor columns for
 	// DBs whose approvals table predates them; Postgres has native
 	// IF NOT EXISTS so no duplicate-column dance is needed (mirror of
 	// SQLiteStore.Migrate's guarded ALTERs).

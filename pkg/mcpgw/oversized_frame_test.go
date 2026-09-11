@@ -71,7 +71,7 @@ func TestUpstream_SurvivesOversizedStdoutLine(t *testing.T) {
 	if callErr != nil && callCtx.Err() != nil {
 		t.Errorf("Send hung until the caller's deadline (%v) instead of failing fast; "+
 			"readLoop exited on the oversized line but cmd.Wait() never returned, so status "+
-			"stayed %q and nothing marked the upstream unusable (audit B12)", callErr, up.Status())
+			"stayed %q and nothing marked the upstream unusable", callErr, up.Status())
 	}
 
 	// F3: within a reasonable window the upstream must reach a state that is
@@ -92,7 +92,7 @@ func TestUpstream_SurvivesOversizedStdoutLine(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Errorf("upstream never became honest: status=%q but calls do not succeed; "+
-		"it is wedged while still advertising itself as usable (audit B12)", up.Status())
+		"it is wedged while still advertising itself as usable", up.Status())
 }
 
 // F1 + F2: one oversized HOST frame must not take the gateway down, and a
@@ -166,7 +166,7 @@ func TestBridge_SurvivesOversizedHostFrame(t *testing.T) {
 				t.Fatalf("gateway stopped serving after one oversized frame (%v): the valid "+
 					"tools/list behind it was never answered. Run() returning on an oversized "+
 					"frame becomes os.Exit(1) in main, so one client frame is a full-gateway "+
-					"outage (audit B10). oversized-frame reply seen: %v", f.err, sawOversizedReply)
+					"outage. oversized-frame reply seen: %v", f.err, sawOversizedReply)
 			}
 			switch idKey(f.resp.ID) {
 			case idKey(float64(2)):
@@ -176,7 +176,7 @@ func TestBridge_SurvivesOversizedHostFrame(t *testing.T) {
 			}
 		case <-deadline:
 			t.Fatalf("timed out waiting for the follow-up frame to be served "+
-				"(oversized-frame reply seen: %v) — the gateway did not survive (audit B10)",
+				"(oversized-frame reply seen: %v) — the gateway did not survive",
 				sawOversizedReply)
 		}
 	}

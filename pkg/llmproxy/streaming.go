@@ -197,7 +197,7 @@ func readSSEEvent(r *bufio.Reader, maxEventBytes int) ([]byte, error) {
 var errSSEEventTooLarge = errors.New("sse event exceeded buffer cap")
 
 // absoluteMaxBufferBytes is the hard safety ceiling on the streaming
-// buffers (audit L1). ParseConfig rejects --max-buffer-bytes <= 0, but a
+// buffers. ParseConfig rejects --max-buffer-bytes <= 0, but a
 // Config built directly (tests, embedders) can carry MaxBufferBytes == 0
 // meaning "no operator-configured cap" — without a ceiling, an upstream
 // that never terminates an SSE event would grow the per-event read
@@ -221,7 +221,7 @@ func hardCappedBufferBytes(computed int) int {
 // nil: ALLOW. This makes the streaming pipe testable without the gate
 // wired and matches the rest of the package's nil-safety pattern.
 func (s *Server) runPolicyCheck(ctx context.Context, tc ToolCallCheck) (Decision, error) {
-	// SECURITY (audit H3): reject tool-call arguments that contain duplicate
+	// SECURITY: reject tool-call arguments that contain duplicate
 	// JSON keys before evaluating policy. The gate projects from a Go map
 	// (last-wins on duplicates) while the ALLOW path replays the raw argument
 	// bytes; a first-wins downstream executor would then act on a different
@@ -498,17 +498,14 @@ func (s *Server) runOpenAIStreamLoop(w http.ResponseWriter, flusher http.Flusher
 				s.denyMalformedOpenAI(w, flusher, r, acc, result.CompletedToolCalls)
 
 			case result.ProtocolViolation:
-				// Defensive: the OpenAI accumulator does not currently emit
-				// this (its tool_calls all close together at finish_reason, so
-				// there is no interleave window). Handled here so a future
-				// parser change can never silently drop the signal and leak an
-				// ungated call. Fail closed with a synthetic refusal.
+				// The accumulator found a stream it cannot gate without
+				// risking a bypass — today tool_calls spread across more
+				// than one choice. Fail closed with a
+				// synthetic refusal naming the specific defect.
 				metrics.IncLLMProxyProtocolViolation("openai")
-				refusal := s.buildRefusal("openai", Decision{
-					Allow:  false,
-					Reason: "upstream tool_call stream is malformed; refused",
-					Rule:   "deny:llm_api_proxy:tool_use_interleaved",
-				}, &RefusalContext{Provider: "openai", AnthropicToolUseIndex: -1})
+				refusal := s.buildRefusal("openai",
+					protocolViolationDecision("openai", result.violation),
+					&RefusalContext{Provider: "openai", AnthropicToolUseIndex: -1})
 				_, _ = w.Write(refusal)
 				flusher.Flush()
 				return
@@ -534,11 +531,15 @@ func (s *Server) runOpenAIStreamLoop(w http.ResponseWriter, flusher http.Flusher
 				flusher.Flush()
 
 			case result.Accumulating:
-				// Held in acc.bufferedEvents; do not flush.
+				// Held in acc.bufferedEvents; do not flush. If the
+				// stream ends while they are still held, the EOF branch
+				// below finalizes the cycle — it must never drop them
+				// silently.
 			}
 		}
 
 		if isEOF {
+			s.closeOpenAIStreamAtEOF(w, flusher, r, acc)
 			return
 		}
 		if err != nil {
@@ -618,6 +619,87 @@ func (s *Server) gateAndFlushOpenAI(w http.ResponseWriter, flusher http.Flusher,
 	flusher.Flush()
 	acc.Reset()
 	return true
+}
+
+// protocolViolationDecision renders the fail-closed verdict for a
+// parser-signalled protocol violation. The kind comes from the
+// accumulator so the client-visible Reason and the operator-visible Rule
+// name the actual defect instead of one catch-all message.
+//
+// The zero kind reproduces the pre-existing interleaved-tool_use refusal
+// VERBATIM, per provider, so refusals already shipped under v1.0 stay
+// byte-identical on the wire.
+func protocolViolationDecision(provider string, kind protocolViolationKind) Decision {
+	switch kind {
+	case violationOrphanedToolInput:
+		return Decision{
+			Allow:  false,
+			Reason: "upstream tool_use stream is malformed (tool input outside any tool_use block); refused",
+			Rule:   "deny:llm_api_proxy:orphaned_tool_input",
+		}
+	case violationMultiChoiceToolCalls:
+		return Decision{
+			Allow:  false,
+			Reason: "upstream returned tool calls on multiple choices; refused",
+			Rule:   "deny:llm_api_proxy:multi_choice_tool_calls",
+		}
+	default:
+		if provider == "anthropic" {
+			return Decision{
+				Allow:  false,
+				Reason: "upstream tool_use stream is malformed (interleaved or conflicting tool_use blocks); refused",
+				Rule:   "deny:llm_api_proxy:tool_use_interleaved",
+			}
+		}
+		return Decision{
+			Allow:  false,
+			Reason: "upstream tool_call stream is malformed; refused",
+			Rule:   "deny:llm_api_proxy:tool_use_interleaved",
+		}
+	}
+}
+
+// closeOpenAIStreamAtEOF finalizes a gating cycle still in flight when
+// upstream hit EOF: a dropped connection, or a provider that ended
+// the stream without a terminal finish_reason.
+//
+// The buffered events are the UNGATED tool call, which rules out both
+// obvious endings: dropping them leaves the client an empty response
+// with no gate run and nothing audited, and flushing them is a real
+// bypass. The cycle goes through the SAME gate-or-refuse path a
+// finish_reason takes — truncated arguments fail to parse and land on
+// the malformed refusal (deny + audit), complete arguments are gated
+// normally and replayed only on ALLOW. Nothing reaches the client
+// ungated on any branch.
+//
+// Runs once per stream, at EOF, so it adds nothing to the per-event
+// loop.
+func (s *Server) closeOpenAIStreamAtEOF(w http.ResponseWriter, flusher http.Flusher, r *http.Request, acc *OpenAIToolCallAccumulator) {
+	result, ferr := acc.CloseAtEOF()
+	if !result.Completed {
+		return
+	}
+	if ferr != nil {
+		s.denyMalformedOpenAI(w, flusher, r, acc, result.CompletedToolCalls)
+		return
+	}
+	s.gateAndFlushOpenAI(w, flusher, r, acc, result.CompletedToolCalls)
+}
+
+// closeAnthropicStreamAtEOF mirrors closeOpenAIStreamAtEOF: a tool_use
+// block still open when upstream hit EOF is gated or refused, never
+// dropped and never flushed ungated. See that function for the
+// reasoning.
+func (s *Server) closeAnthropicStreamAtEOF(w http.ResponseWriter, flusher http.Flusher, r *http.Request, acc *AnthropicAccumulator) {
+	result, ferr := acc.CloseAtEOF()
+	if !result.Completed {
+		return
+	}
+	if ferr != nil {
+		s.denyMalformedAnthropic(w, flusher, r, acc, result.CompletedToolCalls)
+		return
+	}
+	s.gateAndFlushAnthropic(w, flusher, r, acc, result.CompletedToolCalls)
 }
 
 // malformedToolCallDecision is the fail-closed verdict the streaming
@@ -775,17 +857,17 @@ func (s *Server) runAnthropicStreamLoop(w http.ResponseWriter, flusher http.Flus
 				s.denyMalformedAnthropic(w, flusher, r, acc, result.CompletedToolCalls)
 
 			case result.ProtocolViolation:
-				// SECURITY (audit H1/H2): the upstream emitted a structurally
-				// unsafe tool_use stream (interleaved second tool_use, or
-				// start-input conflicting with streamed deltas). We cannot
-				// gate it without risking an ungated call, so we fail closed:
-				// discard the buffered bytes and emit a synthetic refusal.
+				// SECURITY: the upstream emitted a
+				// structurally unsafe tool_use stream — an interleaved
+				// second tool_use, a start-input conflicting with streamed
+				// deltas, or tool input arriving with no block open. We
+				// cannot gate it without risking an ungated call, so we
+				// fail closed: discard the buffered bytes and emit a
+				// synthetic refusal naming the specific defect.
 				metrics.IncLLMProxyProtocolViolation("anthropic")
-				refusal := s.buildRefusal("anthropic", Decision{
-					Allow:  false,
-					Reason: "upstream tool_use stream is malformed (interleaved or conflicting tool_use blocks); refused",
-					Rule:   "deny:llm_api_proxy:tool_use_interleaved",
-				}, &RefusalContext{Provider: "anthropic", AnthropicToolUseIndex: acc.ActiveToolUseIndex()})
+				refusal := s.buildRefusal("anthropic",
+					protocolViolationDecision("anthropic", result.violation),
+					&RefusalContext{Provider: "anthropic", AnthropicToolUseIndex: acc.ActiveToolUseIndex()})
 				_, _ = w.Write(refusal)
 				flusher.Flush()
 				return
@@ -811,11 +893,13 @@ func (s *Server) runAnthropicStreamLoop(w http.ResponseWriter, flusher http.Flus
 				flusher.Flush()
 
 			case result.Accumulating:
-				// Held in acc.bufferedEvents.
+				// Held in acc.bufferedEvents. The EOF branch below
+				// finalizes them if the stream ends first.
 			}
 		}
 
 		if isEOF {
+			s.closeAnthropicStreamAtEOF(w, flusher, r, acc)
 			return
 		}
 		if err != nil {

@@ -3,7 +3,6 @@ package audit
 // Tests for the v0.6 tenant_id addition to the audit schema: the
 // EffectiveTenant() default, byte-identity of single-tenant ("local")
 // output, and tenant-scoped Query filtering. See
-// docs/v0.6-ARCHITECTURE-PLAN.md § 3.3–3.4.
 
 import (
 	"encoding/json"

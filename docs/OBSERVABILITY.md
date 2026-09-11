@@ -88,7 +88,7 @@ The LLM proxy additionally records these series in its process-local registry (`
 | `agentguard_llmproxy_streams_rejected_total` | counter | — | Streaming requests refused with 503 at the concurrent-stream cap. |
 | `agentguard_llmproxy_buffer_overflow_total` | counter | `provider` | Streaming tool-call buffer exceeded `--max-buffer-bytes`; converted to a synthetic refusal. |
 | `agentguard_llmproxy_non_streaming_overflow_total` | counter | `provider` | Same, for non-streaming responses. |
-| `agentguard_llmproxy_protocol_violation_total` | counter | `provider` | Streams refused fail-closed because the upstream's content-block ordering was unsafe to gate. |
+| `agentguard_llmproxy_protocol_violation_total` | counter | `provider` | Streams refused fail-closed because the upstream's tool-call structure could not be bound to a gateable call: interleaved or conflicting `tool_use` blocks, tool input arriving with no block open (audit B7), or tool calls spread across several OpenAI choices (audit B18). The client-visible rule string names which — see `docs/LLM_API_PROXY.md` §5.4. |
 | `agentguard_llmproxy_undecodable_tool_call_total` | counter | `provider` | Non-streaming responses refused fail-closed because the body failed strict decode yet still carried a tool call a lenient client SDK would have executed ungated (audit B6). Non-zero usually means an OpenAI-compatible shim is emitting a wrong-typed field. |
 
 The MCP gateway emits no metrics of its own; its decisions surface in the central server's audit stream and counters.

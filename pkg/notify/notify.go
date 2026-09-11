@@ -73,8 +73,8 @@ type Dispatcher struct {
 	// a recovery goroutine re-enqueues spooled jobs when capacity
 	// returns. Mirrors the audit BufferedAsyncLogger's overflow design.
 	// Leftover spool from a crashed/stopped process is picked up on the
-	// next start (same path). Empty spoolPath disables (drop-on-full,
-	// the pre-v0.7 behaviour).
+	// next start (same path). Empty spoolPath disables it (
+	// drop-on-full).
 	spoolPath string
 	spoolMu   sync.Mutex
 }
@@ -263,7 +263,7 @@ func (d *Dispatcher) Close() {
 
 // spoolQueueRemainder drains whatever is still sitting in the dispatch queue at
 // shutdown and writes it to the spool file, so an orderly SIGTERM does not lose
-// events the queue-full path would have made durable (audit H10). Called once
+// events the queue-full path would have made durable. Called once
 // from Close, after `done` is closed so workers are no longer competing for the
 // queue; a non-blocking receive means a racing worker simply wins the job.
 //
@@ -461,7 +461,7 @@ func (d *Dispatcher) drainSpoolOnce() {
 		// The scan stopped early (over-long line, transient I/O), so every
 		// event past the failure point is still unread. Deleting the file here
 		// would destroy them permanently — it has already been renamed away
-		// from spoolPath, so there is no second chance (audit H11). Keep it.
+		// from spoolPath, so there is no second chance. Keep it.
 		//
 		// Retained for operator recovery, NOT auto-retried: the next tick
 		// renames a fresh draining file from spoolPath and never revisits this

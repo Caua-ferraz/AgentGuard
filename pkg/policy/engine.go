@@ -772,7 +772,7 @@ type sessionCostEntry struct {
 
 // sessionCostKey partitions the cost accumulator by (tenant, session) so two
 // tenants that happen to reuse the same session_id never share a budget
-// (v0.6 multi-tenancy). A struct key is collision-free regardless of what
+// A struct key is collision-free regardless of what
 // characters tenant/session IDs contain — unlike a concatenated string key.
 type sessionCostKey struct {
 	tenant  string
@@ -797,7 +797,7 @@ type Engine struct {
 	watchStop func()
 	history   HistoryQuerier
 	// priorQuerier is the tenant-scoped replacement for history. When set it
-	// wins; history remains only as the legacy fallback (audit B27/B1).
+	// wins; history remains only as the legacy fallback.
 	priorQuerier PriorActionQuerier
 	sessionCosts map[sessionCostKey]sessionCostEntry // (tenant, session_id) -> entry
 
@@ -931,7 +931,7 @@ func (e *Engine) SetHistoryQuerier(h HistoryQuerier) {
 //
 // Backward-compat: this single-tenant signature is preserved for embedders;
 // it resolves to LocalTenantID. Tenant-aware out-of-band accounting uses
-// recordCost directly (the v0.6 Store syncer will expose this when needed).
+// recordCost directly (the Store syncer will expose this when needed).
 func (e *Engine) RecordCost(sessionID string, cost float64) {
 	e.recordCost(LocalTenantID, sessionID, cost)
 }
@@ -1286,7 +1286,7 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 		// req.Domain), and Action (against req.Action — typically
 		// "form_input"). Default-deny applies when no rule matches.
 		//
-		// TODO(v0.7, #data-pii): regex / classifier-based PII patterns
+		// TODO(#data-pii): regex / classifier-based PII patterns
 		// (SSN, credit-card numbers, AWS keys) baked into a built-in
 		// rule library so operators don't have to spell them out.
 		if rs.Scope == "filesystem" && req.Path != "" {
@@ -1752,7 +1752,7 @@ func matchRule(rule Rule, req ActionRequest) bool {
 
 // globMatch performs glob pattern matching supporting * and **.
 //
-// Pattern semantics — STABLE CONTRACT (closes R3 #11 by documenting the
+// Pattern semantics — STABLE CONTRACT (documenting the
 // asymmetry between path and domain matching; the rules below ARE the
 // specification — there is no other document to consult):
 //
@@ -1922,8 +1922,8 @@ func (e *Engine) matchConditions(rule Rule, req ActionRequest, tenantID string) 
 // Two implementations, in priority order:
 //
 //  1. PriorActionQuerier (preferred) — tenant-scoped, O(1) for a literal
-//     pattern, no allocation, no I/O. Closes audit B27 (cross-tenant history)
-//     and B1 (synchronous audit-log scan under e.mu).
+//     pattern, no allocation, no I/O. Neither cross-tenant nor
+//     synchronous: no audit-log scan runs under e.mu.
 //  2. HistoryQuerier (legacy fallback) — kept because the interface is frozen
 //     v1.0 surface and an embedder may have wired only this one. It carries no
 //     tenant, so it is announced once at WARNING level rather than silently
@@ -1946,7 +1946,7 @@ func (e *Engine) checkRequirePrior(cond Condition, req ActionRequest, tenantID s
 	if e.priorQuerier != nil {
 		ok, err := e.priorQuerier.HasPriorAllow(tenantID, req.AgentID, req.Scope, cond.RequirePrior, since)
 		if err != nil {
-			// TODO(audit B2): a querier error is currently swallowed into
+			// TODO: a querier error is currently swallowed into
 			// "condition not met", which is fail-open for a require_prior-gated
 			// DENY and fail-closed for a gated ALLOW. The fix is polarity-aware
 			// (fail closed in BOTH directions by treating the condition as met

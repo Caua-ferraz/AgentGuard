@@ -9,16 +9,16 @@ package proxy
 //
 // Both families flow through the same handler chain. The handler reads the
 // effective tenant via TenantIDFromContext, defaulting to LocalTenantID when
-// nothing is set (the legacy path). As of v0.6 the tenant value partitions
+// nothing is set (the legacy path). The tenant value partitions
 // every per-request store: Engine.Check (policy + cost accumulator), the
 // rate limiter (bucket key "scope:tenant:agent"), the ApprovalQueue
 // (Lookup/Resolve/List/SSE), and the audit query (QueryFilter.TenantID).
 // Legacy /v1/... routes resolve to the "local" tenant, so single-tenant
 // deployments are unchanged.
 //
-// Remaining v0.6 work is durability, not isolation: the Store interface and
-// write-behind syncer (docs/v0.6-ARCHITECTURE-PLAN.md §2.3–2.4) persist this
-// now-tenant-keyed in-memory state to SQLite/Postgres.
+// Durability of that tenant-keyed state is a separate concern, handled
+// off the hot path: pkg/store persists it to SQLite/Postgres and
+// pkg/persist runs the write-behind syncer.
 
 import (
 	"context"

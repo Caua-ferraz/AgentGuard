@@ -200,13 +200,13 @@ func (s *Server) forwardWithToolCallGating(
 	// model wasn't going to call a tool the parser still works (empty
 	// tool_calls / tool_use slice).
 	//
-	// One exception, audit B6: a body that fails strict decode but still
-	// carries a tool call is NOT forwarded. Go rejects a type-mismatched
-	// field that a lenient client SDK ignores, so "we can't decode it"
-	// does not imply "the client can't execute it" — that gap let an
-	// ungated tool call reach the agent. hasLenientToolCall answers the
-	// narrower question, and only on this failure branch, so a body that
-	// decodes normally pays nothing for the check.
+	// One exception: a body that fails strict decode but still carries a
+	// tool call is NOT forwarded. Go rejects a type-mismatched field that
+	// a lenient client SDK ignores, so "we can't decode it" does not imply
+	// "the client can't execute it", and that gap would let an ungated
+	// tool call reach the agent. hasLenientToolCall answers the narrower
+	// question, and only on this failure branch, so a body that decodes
+	// normally pays nothing for the check.
 	switch provider {
 	case "openai":
 		var parsed ChatCompletionResponse
@@ -505,7 +505,7 @@ func (s *Server) forwardTo(ctx context.Context, w http.ResponseWriter, r *http.R
 		// partial body are already on the wire, so the handler must
 		// NOT append an error envelope — that would concatenate JSON
 		// onto a partial body and hand the client malformed bytes
-		// (audit B20). Tagging with errResponseCommitted makes
+		// Tagging with errResponseCommitted makes
 		// writeJSONError a no-op for exactly this case; the handler
 		// keeps its existing `return err` shape.
 		return fmt.Errorf("copy response body: %w: %w", errResponseCommitted, err)

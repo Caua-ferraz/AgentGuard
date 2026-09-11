@@ -141,7 +141,7 @@ type Server struct {
 	sweeperDone chan struct{}
 	sweeperStop sync.Once
 	// priorIndex answers require_prior conditions without touching the audit
-	// log (audit B1) and with the tenant in the key (audit B27). Nil when the
+	// log and with the tenant in the key. Nil when the
 	// loaded policy contains no require_prior condition, which is the common
 	// case — no shipped policy uses one — so the index costs nothing to carry.
 	priorIndex *policy.PriorActionIndex
@@ -338,7 +338,7 @@ func NewServer(cfg Config) *Server {
 	// Wire up history querier for conditional rule evaluation.
 	//
 	// Both are installed: the tenant-scoped index is what actually answers
-	// require_prior (audit B27/B1), and the legacy adapter stays wired so an
+	// require_prior, and the legacy adapter stays wired so an
 	// embedder that reaches for HistoryQuerier still finds it. Engine prefers
 	// the index whenever one is set.
 	cfg.Engine.SetHistoryQuerier(&auditHistoryAdapter{logger: cfg.Logger})
@@ -670,8 +670,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 			// On mismatch, fall through to normal Engine.Check rather
 			// than returning a 4xx — the latter would let an attacker
 			// distinguish "id valid but action wrong" from "id unknown",
-			// turning the endpoint into an oracle. Closes audit B1
-			// (R-Sec H1 + R-Stub C3, two reviewers, same finding).
+			// turning the endpoint into an oracle.
 			if !matchesOriginalRequest(req, pa.Request) {
 				metrics.IncApprovalReplayMismatch()
 				log.Printf("approval_id %q replayed against mismatched action: agent=%q vs %q, scope=%q vs %q, command=%q vs %q, path=%q vs %q, domain=%q vs %q, url=%q vs %q, action=%q vs %q (falling through to fresh policy evaluation)",
@@ -837,7 +836,7 @@ func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, 
 	}
 	// Stamp the tenant the action was evaluated against. The default "local"
 	// tenant is stored as "" (omitempty) so single-tenant audit output stays
-	// byte-identical to pre-v0.6 files; audit.Entry.EffectiveTenant() resolves
+	// byte-identical to files written before multi-tenancy; audit.Entry.EffectiveTenant() resolves
 	// "" → "local" on read. Non-local tenants are written verbatim.
 	if tenantID != "" && tenantID != policy.LocalTenantID {
 		entry.TenantID = tenantID
@@ -846,7 +845,7 @@ func (s *Server) logAndRespond(w http.ResponseWriter, req policy.ActionRequest, 
 	// Engine.Check path). It is also what the audit entry records as DurationMs.
 	policyMs := float64(duration.Microseconds()) / 1000.0
 
-	// Feed the require_prior index (audit B27/B1). This is the audit-write
+	// Feed the require_prior index. This is the audit-write
 	// boundary, not the hot path: Engine.Check has already returned and e.mu is
 	// released, so the index's own lock cannot nest under the engine lock.
 	//
@@ -2114,7 +2113,7 @@ func (s *Server) withTraffic(next http.Handler) http.Handler {
 //
 // net/http drops a second WriteHeader as superfluous but STILL writes the
 // body that follows, which would concatenate an error object onto a partial
-// response — malformed bytes to the client (audit B20). The dashboard SSE
+// response — malformed bytes to the client. The dashboard SSE
 // stream (handleEventStream) is the reachable case here: it flushes events
 // for the life of the connection, so any panic after the first event lands
 // on an already-committed response.

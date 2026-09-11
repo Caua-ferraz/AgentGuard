@@ -23,7 +23,7 @@ package llmproxy
 //   3. The TestAT_CapturedFixtures_OpenAI sub-test below will pick it
 //      up automatically.
 //
-// TODO(v0.7, #llm-real-captured-fixtures): include captured fixtures
+// TODO(#llm-real-captured-fixtures): include captured fixtures
 // from real OpenAI + Anthropic API calls in the regression suite.
 
 import (

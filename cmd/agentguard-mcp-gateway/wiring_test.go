@@ -9,7 +9,7 @@ package main
 // gateway would forward every tool call unevaluated, and the only trace would
 // be an `allow:policy_hook_unwired` rule string on decisions nobody is reading.
 //
-// There is no startup guard that refuses to serve unwired (audit B5), so the
+// There is no startup guard that refuses to serve unwired, so the
 // binary's correctness rests entirely on every code path assigning the hook.
 // Until now nothing enforced that — this package had no tests at all.
 //
@@ -97,7 +97,7 @@ func TestMain_WiresPolicyCheck(t *testing.T) {
 
 	if got := countHookAssignments(f); got == 0 {
 		t.Fatalf("main.go never assigns .%s — a Bridge with no policy hook ALLOWS every "+
-			"tools/call, and nothing at startup refuses to serve in that state (audit B5)", hookField)
+			"tools/call, and nothing at startup refuses to serve in that state", hookField)
 	}
 	if !containsGateConstruction(f) {
 		t.Fatalf("main.go never calls %s; if the gate constructor was renamed, update the "+
@@ -233,13 +233,13 @@ func TestMain_HookWiringIsUniformAcrossGateBranches(t *testing.T) {
 	if len(wired) > 0 && len(bare) > 0 {
 		t.Errorf("policy-hook wiring is inconsistent across gate-constructing branches: "+
 			"wired at %v but NOT at %v. The un-wired path reaches Run() with a nil hook, "+
-			"which ALLOWS every request unevaluated (audit B5). Either wire every branch, "+
+			"which ALLOWS every request unevaluated. Either wire every branch, "+
 			"or wire once after the if/else — not a mixture.", wired, bare)
 	}
 
 	// The post-branch shape is only safe if the assignment actually exists.
 	if len(wired) == 0 && countHookAssignments(f) == 0 {
 		t.Error("no branch wires the policy hook and there is no assignment after the " +
-			"if/else either — nothing ever wires it (audit B5)")
+			"if/else either — nothing ever wires it")
 	}
 }

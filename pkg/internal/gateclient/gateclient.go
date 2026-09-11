@@ -115,7 +115,7 @@ func (c *Caller) CallV1Check(ctx context.Context, ar policy.ActionRequest, rules
 	// Read maxResp+1 so an oversized body is DETECTED rather than silently
 	// truncated mid-JSON: a plain LimitReader returns a clean EOF at the cap,
 	// the decode below fails, and the caller would apply its fail-mode default
-	// in place of the real verdict (audit B25). Same +1 pattern the proxy
+	// in place of the real verdict. Same +1 pattern the proxy
 	// already uses for request bodies.
 	const maxResp = 64 * 1024
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResp+1))

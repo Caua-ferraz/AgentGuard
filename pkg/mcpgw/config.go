@@ -91,7 +91,7 @@ type Config struct {
 // SplitCommandLine). Currently only stdio is supported; the
 // Transport field is reserved for a future Streamable-HTTP impl.
 //
-// TODO(v0.7, #mcp-streamable-http): add Transport == "http" with a
+// TODO(#mcp-streamable-http): add Transport == "http" with a
 // URL field, paired with a different Upstream impl in transport.go.
 type UpstreamSpec struct {
 	Namespace string // e.g. "fs", "github"

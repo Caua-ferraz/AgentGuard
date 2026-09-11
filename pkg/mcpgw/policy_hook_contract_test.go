@@ -1,6 +1,6 @@
 package mcpgw
 
-// Contract tests for the nil-PolicyCheck behaviour (audit B5).
+// Contract tests for the nil-PolicyCheck behaviour.
 //
 // A Bridge constructed without PolicyCheck ALLOWS every tools/call. That is a
 // deliberate test-ergonomics default, not an accident — but it is an S1
