@@ -1,6 +1,6 @@
 package llmproxy
 
-// Contract tests for the nil-PolicyCheck behaviour (audit B5), the llmproxy
+// Contract tests for the nil-PolicyCheck behaviour, the llmproxy
 // twin of pkg/mcpgw/policy_hook_contract_test.go.
 //
 // Same posture: these are tripwires, not cages. They pin the current
@@ -104,7 +104,7 @@ func TestRunPolicyCheck_DuplicateKeysDenyEvenWithNilHook(t *testing.T) {
 	}
 	if dec.Allow {
 		t.Fatal("duplicate JSON keys were ALLOWED with no hook wired — the parser-differential " +
-			"defense must run BEFORE the nil-hook default, not after it (audit H3/B5)")
+			"defense must run BEFORE the nil-hook default, not after it")
 	}
 	if !strings.Contains(dec.Rule, "duplicate") {
 		t.Errorf("rule = %q, want it to identify the duplicate-key refusal", dec.Rule)
@@ -131,7 +131,7 @@ func TestRunPolicyCheck_DuplicateKeysDenyOverridesWiredAllow(t *testing.T) {
 	}
 	if dec.Allow {
 		t.Fatal("a permissive wired hook overrode the duplicate-key hard deny; that refusal is " +
-			"documented as unconditional (audit H3)")
+			"documented as unconditional")
 	}
 }
 

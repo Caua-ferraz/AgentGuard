@@ -64,7 +64,7 @@ func NewMultiTenantProvider(base PolicyProvider, source PolicySource) (*MultiTen
 // Called once at construction and may be re-invoked (e.g. by an admin endpoint
 // or a periodic ticker) to pick up tenant policy changes.
 //
-// Fault isolation (audit B22): a load or parse error for ONE tenant no longer
+// Fault isolation: a load or parse error for ONE tenant no longer
 // aborts the whole refresh. Previously any single failure returned before the
 // cache swap, so one tenant's bad edit froze policy propagation for EVERY
 // tenant — a stale-everywhere failure whose only signal was the returned error.

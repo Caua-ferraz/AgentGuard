@@ -85,7 +85,7 @@ func TestCheck_RequirePriorIsTenantScoped(t *testing.T) {
 	got := eng.Check(req, "tenant-a")
 	if got.Decision == Allow {
 		t.Fatalf("tenant-a was ALLOWED on tenant-b's history (rule=%q) — cross-tenant "+
-			"require_prior leak, CLAUDE.md invariant #3 (audit B27)", got.Rule)
+			"require_prior leak, CLAUDE.md invariant #3", got.Rule)
 	}
 	if got.Rule == "deny:tenant:not_found" {
 		t.Fatalf("tenant-a was denied for the wrong reason (%q): this test must exercise the "+

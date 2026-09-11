@@ -315,7 +315,7 @@ func (s *Server) routes() *http.ServeMux {
 //
 // Without this, net/http drops the second WriteHeader as superfluous but
 // STILL writes the body that follows it, concatenating an error object onto
-// a partial response and handing the client malformed bytes (audit B20).
+// a partial response and handing the client malformed bytes.
 // The io.Copy site in forwardTo carries errResponseCommitted for the same
 // reason; this covers the paths that write directly.
 //
@@ -355,7 +355,7 @@ func (c *committedWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter
 // writing SSE bytes get only the log line — once headers + bytes are on
 // the wire we cannot inject a JSON error envelope without corrupting the
 // stream, so we write NOTHING rather than appending onto a partial body
-// (audit B20). The panic is contained either way; the process keeps
+// The panic is contained either way; the process keeps
 // serving other in-flight requests.
 //
 // Mirrors pkg/proxy/server.go:recoverPanic.
@@ -655,7 +655,7 @@ var errResponseCommitted = errors.New("response already committed")
 // body are already on the wire, so the second WriteHeader would be dropped by
 // net/http ("superfluous") while the JSON body still got appended to the
 // partial response — handing the client `<partial body><error envelope>`
-// concatenated (audit B20).
+// concatenated.
 func writeJSONError(w http.ResponseWriter, status int, err error) {
 	if errors.Is(err, errResponseCommitted) {
 		log.Printf("llmproxy: %v (response already committed; closing without an error envelope)", err)

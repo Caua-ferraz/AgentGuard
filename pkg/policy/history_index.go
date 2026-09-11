@@ -10,7 +10,7 @@ import (
 // "was an action matching this pattern ALLOWed for this (tenant, agent, scope)
 // since time T?"
 //
-// WHY AN INDEX AND NOT A HISTORY BUFFER (audit B1 + B27).
+// WHY AN INDEX AND NOT A HISTORY BUFFER.
 //
 // The previous implementation answered that question by querying the audit
 // log: FileLogger.Query opened the file and JSON-parsed every line, and it did
@@ -31,8 +31,8 @@ import (
 // Ordering is irrelevant to the predicate, and EstCost was dead weight.
 //
 // BOUNDEDNESS. The keys are client-chosen strings (agent_id, tool names), so
-// this map has exactly the shape that made ratelimit's bucket map unbounded
-// (audit B3). It therefore ships with a TTL and hard caps from day one, and
+// this map has exactly the shape that made ratelimit's bucket map
+// unbounded. It therefore ships with a TTL and hard caps from day one, and
 // the sweep runs off the request path.
 type PriorActionIndex struct {
 	mu sync.RWMutex

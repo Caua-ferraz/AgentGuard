@@ -18,7 +18,7 @@ const (
 	// sweepInterval bounds how often the O(n) stale scan may run. Without it
 	// the scan fired on EVERY Allow once the map was full, turning a ~70ns
 	// 0-alloc hot path into a ~130us locked scan that serialized every
-	// rate-limit check process-wide (audit B3).
+	// rate-limit check process-wide.
 	sweepInterval = time.Second
 
 	// sampleSize is how many buckets evictSampledLocked inspects to pick a
@@ -102,7 +102,7 @@ func (l *Limiter) Restore(snaps []BucketSnapshot) {
 	// query behind these snapshots is unbounded, so a deployment with more
 	// live keys than MaxBuckets inside its bucket TTL would otherwise boot
 	// straight into the over-capacity state -- no attacker needed, and it
-	// would survive every restart (audit B3).
+	// would survive every restart.
 	now := time.Now()
 	before := len(l.buckets)
 	if before > MaxBuckets {
@@ -193,7 +193,7 @@ func (l *Limiter) Allow(key string, maxRequests int, window time.Duration) error
 	if b, ok := l.buckets[key]; ok {
 		// A hot-reloaded policy must take effect on a LIVE bucket, not only
 		// after it goes idle. Preserve what the caller has already consumed
-		// and re-baseline against the new cap (audit B23).
+		// and re-baseline against the new cap.
 		if b.max != maxRequests || b.window != window {
 			consumed := b.max - b.tokens
 			if consumed < 0 {
@@ -230,7 +230,7 @@ func (l *Limiter) Allow(key string, maxRequests int, window time.Duration) error
 	// MISS -- the only path that can grow the map, and therefore the only
 	// place capacity needs checking. Hits (the overwhelming majority of real
 	// traffic) now pay nothing for reclamation; previously every call ran the
-	// capacity check and, at capacity, a full O(n) scan (audit B3).
+	// capacity check and, at capacity, a full O(n) scan.
 	if len(l.buckets) >= MaxBuckets {
 		l.reclaimLocked(now)
 	}
@@ -305,7 +305,7 @@ func (l *Limiter) evictStaleLocked(now time.Time) {
 }
 
 // scopeFromKey extracts the scope prefix from a limiter key. The proxy keys
-// buckets as "scope:tenant:agent_id" (tenant added in v0.6); scope is kept
+// buckets as "scope:tenant:agent_id"; scope is kept
 // first precisely so this extractor stays a single IndexByte with no parser
 // change. Unknown formats return "unknown" so the counter stays well-labeled.
 // The scope is the only bounded-cardinality piece of the key, which is why the

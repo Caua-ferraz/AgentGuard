@@ -15,9 +15,8 @@ import (
 // bufio.ErrTooLong the Scanner is permanently dead -- it recovers zero
 // subsequent tokens and offers no way to resynchronize. Both read loops used a
 // Scanner, so one oversized frame ended the loop: on the host side that
-// returned from Bridge.Run, which main turns into os.Exit(1) (audit B10); on
-// the upstream side it killed readLoop while the subprocess kept running
-// (audit B12).
+// returned from Bridge.Run, which main turns into os.Exit(1); on
+// the upstream side it killed readLoop while the subprocess kept running.
 var errFrameTooLong = errors.New("mcpgw: frame exceeds maximum size")
 
 // framePrefixBytes is how much of an oversized frame is retained so a request

@@ -286,17 +286,10 @@ func (r *Registry) AddDecision(decision string, n uint64) {
 	}
 }
 
-// IncRateLimited increments the rate-limit-specific counter.
-//
-// It used to also bump the checks/denied totals, which double-counted
-// rate-limited requests because logAndRespond unconditionally calls
-// IncDecision("DENY") for the synthetic rate-limit DENY result. As of v0.5
-// the unified logAndRespond path owns those totals for every decision
-// (including the synthetic rate-limit DENY); IncRateLimited only touches
-// the rate-limit-specific series.
-//
-// Closes R3 #21 (audit finding "rate-limited requests double-count
-// ChecksTotal and DeniedTotal").
+// IncRateLimited increments the rate-limit-specific counter, and only
+// that one. logAndRespond owns the checks/denied totals for every
+// decision including the synthetic rate-limit DENY, so bumping them
+// here as well would double-count every rate-limited request.
 func (r *Registry) IncRateLimited() { atomic.AddUint64(&r.rateLimitedTotal, 1) }
 
 // IncApprovalReplayMismatch increments
@@ -314,14 +307,14 @@ func (r *Registry) IncRateLimited() { atomic.AddUint64(&r.rateLimitedTotal, 1) }
 // reusing ids across distinct actions or an attacker who learned an
 // approved id is replaying it against unrelated commands.
 //
-// See V05 audit B1 (R-Sec H1, R-Stub C3) for the underlying gating-
-// bypass finding the validator closes.
+// The shape validator this counter reports on is what stops an approved
+// id from authorising an unrelated action.
 func (r *Registry) IncApprovalReplayMismatch() {
 	atomic.AddUint64(&r.approvalReplayMismatchTotal, 1)
 }
 
 // Read accessors for the decision counters. These replaced the exported
-// raw uint64 vars (pre-v0.6.1 callers did metrics.X()).
+// raw uint64 vars.
 func (r *Registry) ChecksTotal() uint64   { return atomic.LoadUint64(&r.checksTotal) }
 func (r *Registry) AllowedTotal() uint64  { return atomic.LoadUint64(&r.allowedTotal) }
 func (r *Registry) DeniedTotal() uint64   { return atomic.LoadUint64(&r.deniedTotal) }
@@ -827,7 +820,7 @@ func (r *Registry) ObserveAuditWriteDuration(ms float64) { r.auditWriteDuration.
 // buckets, anything over 1 s all lands in +Inf and p99 loses resolution.
 //
 // These boundaries are treated as a stable contract: re-bucketing
-// invalidates historical Prometheus data (see CHANGELOG v0.4.1). Only
+// invalidates historical Prometheus data. Only
 // append new boundaries at the tail; do not edit or reorder existing ones.
 var durationBuckets = []float64{
 	0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000,
@@ -916,7 +909,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		"Number of requests denied by the rate limiter.",
 		atomic.LoadUint64(&r.rateLimitedTotal))
 	writeCounter(w, "agentguard_approval_replay_mismatch_total",
-		"approval_id round-trips whose retry request shape did not match the original PendingAction.Request and therefore fell through to fresh policy evaluation. Non-zero values indicate either a buggy gateway or an attempted replay attack — see audit B1.",
+		"approval_id round-trips whose retry request shape did not match the original PendingAction.Request and therefore fell through to fresh policy evaluation. Non-zero values indicate either a buggy gateway or an attempted replay attack.",
 		atomic.LoadUint64(&r.approvalReplayMismatchTotal))
 	r.writeApprovalReplayRefused(w)
 
@@ -1009,7 +1002,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		"LLM-proxy streams refused fail-closed because the upstream's content-block ordering was structurally unsafe to gate (e.g. an interleaved second tool_use), by provider.",
 		"provider", snapshotStringMap(&r.llmProxyProtocolViolationMu, r.llmProxyProtocolViolationCount))
 	writeLabeledCounter(w, "agentguard_llmproxy_undecodable_tool_call_total",
-		"LLM-proxy non-streaming responses refused fail-closed because the body failed strict decode yet still carried a tool call, which a lenient client SDK would have executed ungated (audit B6), by provider.",
+		"LLM-proxy non-streaming responses refused fail-closed because the body failed strict decode yet still carried a tool call, which a lenient client SDK would have executed ungated, by provider.",
 		"provider", snapshotStringMap(&r.llmProxyUndecodableToolCallMu, r.llmProxyUndecodableToolCallCount))
 	writeDeprecations(w)
 }

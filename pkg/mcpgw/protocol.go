@@ -450,7 +450,7 @@ func NegotiateProtocolVersion(clientRequested string, supported []string) string
 // `resources` and `prompts` capabilities are intentionally masked OUT —
 // even when an upstream advertises them, the gateway does NOT expose
 // them to the client because resources/* and prompts/* method routing
-// is not yet implemented (see TODO(v0.7, #mcp-resources)). Advertising
+// is not yet implemented (see TODO(#mcp-resources)). Advertising
 // them today would mislead the client into showing resources that every
 // read would reject with MethodNotFound (the default case in
 // Bridge.dispatchFrame returns ErrCodeMethodNotFound for unrouted methods).

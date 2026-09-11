@@ -3,7 +3,6 @@ package policy
 // Verifies the v0.6 cost accumulator is partitioned by (tenant, session): two
 // tenants reusing the same session_id keep independent budgets, and the
 // preserved single-tenant accessors resolve to LocalTenantID. See
-// docs/v0.6-ARCHITECTURE-PLAN.md § 3.4 (#6).
 
 import "testing"
 

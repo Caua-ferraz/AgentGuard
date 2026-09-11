@@ -27,7 +27,7 @@
 //     including synthetic deny:gateway:fail_closed entries when the
 //     gate falls back due to /v1/check unreachable.
 //
-// TODO(v0.7, #mcp-gateway-events): operator-grade gateway-level audit
+// TODO(#mcp-gateway-events): operator-grade gateway-level audit
 // endpoint. Current best guess is a small `/v1/operator/event` endpoint
 // scoped to notify-class events (degraded upstream, frame error,
 // startup failure) with its own retention + auth posture distinct from

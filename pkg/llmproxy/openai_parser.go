@@ -122,7 +122,7 @@ type FeedResult struct {
 type protocolViolationKind uint8
 
 const (
-	// violationInterleavedToolUse (audit H1/H2, Anthropic): a second
+	// violationInterleavedToolUse (Anthropic): a second
 	// tool_use content block opened before the first closed, or a block's
 	// start-seeded input conflicts with streamed input_json_deltas.
 	// Anthropic emits content blocks serially; an interleaved second
@@ -130,13 +130,13 @@ const (
 	// cycle resets the accumulator.
 	violationInterleavedToolUse protocolViolationKind = iota
 
-	// violationOrphanedToolInput (audit B7, Anthropic): an
+	// violationOrphanedToolInput (Anthropic): an
 	// input_json_delta arrived while no tool_use block was open. The
 	// fragments belong to a call the firewall never saw start, so there
 	// is no cycle that could gate them.
 	violationOrphanedToolInput
 
-	// violationMultiChoiceToolCalls (audit B18, OpenAI): tool_call deltas
+	// violationMultiChoiceToolCalls (OpenAI): tool_call deltas
 	// arrived on more than one choice. tool_calls[i].index is unique only
 	// WITHIN a choice, so two choices' fragments would merge into one
 	// argument string the firewall gates and no client executes.
@@ -171,7 +171,7 @@ type OpenAIToolCallAccumulator struct {
 	active bool
 
 	// completed latches once this cycle has signalled Completed, so the
-	// two end-of-stream closers added for audit B17 (`[DONE]` and
+	// two end-of-stream closers (`[DONE]` and
 	// CloseAtEOF) cannot re-signal a cycle finish_reason already closed.
 	// Reset clears it, so a stream carrying several tool_call cycles
 	// still completes once per cycle.
@@ -179,7 +179,7 @@ type OpenAIToolCallAccumulator struct {
 
 	// toolCallChoice is the `choices[].index` that carried the tool_call
 	// deltas of the in-flight cycle, or -1 when none has been seen yet
-	// (audit B18). It scopes two decisions to the choice that actually
+	// It scopes two decisions to the choice that actually
 	// owns the call: a SECOND choice carrying tool_calls is a protocol
 	// violation, and only THIS choice's finish_reason closes the cycle.
 	toolCallChoice int
@@ -230,17 +230,18 @@ func (a *OpenAIToolCallAccumulator) complete() (FeedResult, error) {
 }
 
 // CloseAtEOF finalizes an in-flight gating cycle when the upstream
-// stream ends without a terminal finish_reason (audit B17): a dropped
-// connection, a provider that closes after `[DONE]` without one, or a
-// truncated response.
+// stream ends without a terminal finish_reason: a dropped connection,
+// a provider that closes after `[DONE]` without one, or a truncated
+// response.
 //
-// The orchestrator MUST call it once at EOF and route a Completed result
-// through the same gate-or-refuse path a finish_reason takes. Flushing
-// the buffered events instead would be a fail-open — those bytes are the
-// ungated tool_call — and dropping them (the pre-fix behaviour) left the
-// client with an empty response and the firewall with no audit trail.
-// Truncated arguments do not parse, so the returned error routes the
-// cycle to the F1 malformed refusal, which denies and audits.
+// The orchestrator MUST call it once at EOF and route a Completed
+// result through the same gate-or-refuse path a finish_reason takes.
+// The buffered events are the UNGATED tool call, so neither of the two
+// obvious shortcuts is safe: flushing them is a fail-open, and
+// discarding them leaves the client with an empty response and the
+// firewall with no audit trail. Truncated arguments do not parse, so
+// the returned error routes the cycle to the malformed refusal, which
+// denies and audits.
 //
 // Returns the zero FeedResult when nothing is in flight, the common case
 // for a stream that closed cleanly and already Reset. Runs once per
@@ -277,19 +278,18 @@ func (a *OpenAIToolCallAccumulator) FeedEvent(rawEvent []byte) (FeedResult, erro
 	// via finish_reason: "tool_calls" first), [DONE] forces the
 	// stream to end and we have to surface it.
 	if isDone {
-		// `[DONE]` while a tool_call cycle is still open (audit B17):
-		// the upstream ended the stream without a terminal
-		// finish_reason. Degenerate — most providers emit finish_reason
-		// first — but `[DONE]` IS the end of stream, so close the cycle
-		// here rather than wait for the transport EOF.
+		// `[DONE]` while a tool_call cycle is still open: the upstream
+		// ended the stream without a terminal finish_reason.
+		// Degenerate — most providers emit finish_reason first — but
+		// `[DONE]` IS the end of stream, so close the cycle here rather
+		// than wait for the transport EOF.
 		//
-		// The buffered bytes must NOT be flushed "as-is" (what the
-		// comment here used to promise): they are the ungated tool_call,
-		// and flushing them is the bypass. Buffer `[DONE]` itself so it
-		// replays in order on ALLOW, then return Completed so the
-		// orchestrator gates the cycle like any other completion —
-		// truncated arguments fail to parse and route to the F1
-		// fail-closed refusal.
+		// The buffered bytes must NOT be flushed as-is: they are the
+		// ungated tool_call, and flushing them is the bypass. Buffer
+		// `[DONE]` itself so it replays in order on ALLOW, then return
+		// Completed so the orchestrator gates the cycle like any other
+		// completion — truncated arguments fail to parse and route to
+		// the fail-closed malformed refusal.
 		if a.active && !a.completed {
 			res, err := a.appendBuffered(rawEvent)
 			if err != nil || res.OverflowBufferBytes {
@@ -315,7 +315,7 @@ func (a *OpenAIToolCallAccumulator) FeedEvent(rawEvent []byte) (FeedResult, erro
 	// index. In practice OpenAI sends one choice at a time for a
 	// streaming response, but we don't rely on it. The finish_reason
 	// question is asked later, via finishObserved, because the answer
-	// depends on which choice owns the in-flight call (audit B18).
+	// depends on which choice owns the in-flight call.
 	hasToolCallDelta := false
 	for _, ch := range env.Choices {
 		if len(ch.Delta.ToolCalls) > 0 {
@@ -331,7 +331,7 @@ func (a *OpenAIToolCallAccumulator) FeedEvent(rawEvent []byte) (FeedResult, erro
 	//      Completed result with assembled tool calls.
 	//   4. Pure content delta with no active cycle → pass through.
 	//
-	// CRITICAL ORDERING (audit B3): when an event carries BOTH a
+	// CRITICAL ORDERING: when an event carries BOTH a
 	// tool_call delta AND finish_reason in the same envelope, we must
 	// apply the delta to the accumulator BEFORE we decide on completion.
 	// Real OpenAI streams sometimes pack the closing arg fragment and
@@ -348,7 +348,7 @@ func (a *OpenAIToolCallAccumulator) FeedEvent(rawEvent []byte) (FeedResult, erro
 			if len(ch.Delta.ToolCalls) == 0 {
 				continue
 			}
-			// SECURITY (audit B18): tool_call state is keyed by
+			// SECURITY: tool_call state is keyed by
 			// tool_calls[i].index, which is unique only WITHIN one
 			// choice. With n>1 both choices number their calls from 0,
 			// so their argument fragments would concatenate into a
@@ -374,7 +374,7 @@ func (a *OpenAIToolCallAccumulator) FeedEvent(rawEvent []byte) (FeedResult, erro
 				}
 				if tc.Function != nil {
 					st.HasFunction = true
-					// SECURITY (audit M1): take the FIRST non-empty function
+					// SECURITY: take the FIRST non-empty function
 					// name, not the last. OpenAI emits the name once in the
 					// first fragment for a given tool_calls[i].index; a
 					// non-conformant upstream that sends a second, different
@@ -513,7 +513,7 @@ func (a *OpenAIToolCallAccumulator) assembleCompletedCalls() ([]ToolCallCheck, e
 // counts, not just "tool_calls": a cycle that ends on "stop" or "length"
 // must still close, or the accumulator dangles and the stream hangs.
 //
-// Scope (audit B18): once a choice owns the in-flight tool_call, only
+// Scope: once a choice owns the in-flight tool_call, only
 // THAT choice's finish_reason closes the cycle. With n>1 a sibling
 // choice routinely finishes while the tool-call choice is still
 // streaming arguments; closing on the sibling would gate a truncated

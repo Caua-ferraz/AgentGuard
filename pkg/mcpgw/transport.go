@@ -171,7 +171,7 @@ type StdioUpstreamOptions struct {
 	// consumer cannot stall the stdout reader) for every unsolicited
 	// notification frame the upstream emits. The bridge uses it to
 	// forward notifications/tools/list_changed to the host. nil drops
-	// notifications, the pre-v0.7 behaviour.
+	// notifications.
 	OnNotification func(method string)
 }
 
@@ -220,7 +220,7 @@ func (u *StdioUpstream) Status() string {
 // version and forward it to the host).
 func (u *StdioUpstream) Start(ctx context.Context) error {
 	err := u.spawnLocked(ctx)
-	// Launch the supervisor even when the first spawn failed (audit B16): its
+	// Launch the supervisor even when the first spawn failed: its
 	// backoff loop owns respawn, so a transient error — an `npx` cold start, a
 	// momentary exec failure, a mount not yet ready — is retried instead of
 	// leaving the upstream permanently dead with nothing watching it. The error
@@ -308,7 +308,7 @@ func (u *StdioUpstream) readLoop(r io.Reader) {
 			// An upstream line past the cap is ordinary MCP output -- a large
 			// file read, a screenshot, a dataset dump. It used to kill the
 			// reader outright while the subprocess kept running, wedging the
-			// upstream behind an OK status (audit B12). Drop the frame and
+			// upstream behind an OK status. Drop the frame and
 			// keep reading; the pending request it belonged to still times
 			// out on its own deadline, which is a bounded, visible failure.
 			u.logger.Infof("upstream %q: dropping oversized stdout frame (cap %d bytes)",
@@ -379,7 +379,7 @@ func (u *StdioUpstream) readLoop(r io.Reader) {
 	// line over MaxStdoutLineBytes kills bufio.Scanner while the subprocess
 	// keeps running, so cmd.Wait() never returns, the status stays StatusOK,
 	// send()'s degraded guard never fires, and every call is dispatched into a
-	// pipe nobody reads (audit B12). Force the exit so the EXISTING respawn
+	// pipe nobody reads. Force the exit so the EXISTING respawn
 	// path runs, rather than assuming a dead reader means a dead process.
 	u.readerExited()
 }
@@ -388,7 +388,7 @@ func (u *StdioUpstream) readLoop(r io.Reader) {
 // supervisor's cmd.Wait() returns. Safe to call when the process is already
 // gone (the kill is a no-op error) and when no process was ever spawned
 // (nil cmd is reachable -- a first-spawn failure leaves the supervisor running
-// with no cmd, audit B16).
+// with no cmd).
 func (u *StdioUpstream) readerExited() {
 	select {
 	case <-u.done:
@@ -469,8 +469,8 @@ func (u *StdioUpstream) supervise(ctx context.Context) {
 		//
 		// A nil cmd means the FIRST spawn never succeeded — u.cmd is assigned
 		// only on a successful spawn and is never cleared — so there is no exit
-		// to wait for. Rather than abandoning the upstream with no supervisor
-		// (audit B16), fall through to the backoff/respawn path below.
+		// to wait for. Rather than abandoning the upstream with no
+		// supervisor, fall through to the backoff/respawn path below.
 		u.mu.RLock()
 		cmd := u.cmd
 		u.mu.RUnlock()
@@ -704,7 +704,7 @@ func (u *StdioUpstream) Notify(ctx context.Context, n *Notification) error {
 	// Honor ctx BEFORE the write: once the bytes are on the pipe the
 	// notification has been delivered, and reporting a delivered
 	// fire-and-forget notification as failed makes the caller retry a
-	// side effect that already happened (audit B24).
+	// side effect that already happened.
 	if err := ctx.Err(); err != nil {
 		return err
 	}

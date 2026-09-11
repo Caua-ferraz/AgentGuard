@@ -2,7 +2,7 @@ package persist
 
 // Fault-injection tests for the write-behind Syncer (review item C1 + M4).
 //
-// The dual-tier design (docs/v0.6-ARCHITECTURE-PLAN.md §2.3) promises that
+// The dual-tier design promises that
 // memory is authoritative and a store outage is survivable: a failed flush must
 // surface its error, leave the in-memory accumulators untouched, NOT kill the
 // background loop, and retry on the next tick once the store recovers. The

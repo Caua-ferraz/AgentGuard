@@ -76,7 +76,7 @@ type anthropicBlockState struct {
 	InputJSON bytes.Buffer
 	Closed    bool
 	// startSeeded is true when the tool_use's arguments were seeded from a
-	// non-empty content_block_start.input (audit H2). A conformant Anthropic
+	// non-empty content_block_start.input. A conformant Anthropic
 	// stream never does this (start input is always `{}` and the real
 	// arguments stream via input_json_delta), so if startSeeded is true AND
 	// an input_json_delta later arrives for the same block the two argument
@@ -108,8 +108,8 @@ type AnthropicAccumulator struct {
 	activeToolUseIndex int
 
 	// completed latches once this cycle has signalled Completed, so the
-	// end-of-stream closer added for audit B17 (CloseAtEOF) cannot
-	// re-signal a cycle content_block_stop already closed. Reset clears
+	// end-of-stream closer (CloseAtEOF) cannot re-signal a cycle
+	// content_block_stop already closed. Reset clears
 	// it, so a message carrying several tool_use blocks still completes
 	// once per block.
 	completed bool
@@ -167,7 +167,7 @@ func (a *AnthropicAccumulator) complete() (FeedResult, error) {
 
 // CloseAtEOF finalizes an in-flight gating cycle when the upstream
 // stream ends without the content_block_stop that would normally close
-// it (audit B17). Mirrors the OpenAI sibling: the orchestrator calls it
+// it. Mirrors the OpenAI sibling: the orchestrator calls it
 // once, at EOF, and MUST route a Completed result through the same
 // gate-or-refuse path a content_block_stop takes. Returns the zero
 // FeedResult when no tool_use is in flight, which is the common case —
@@ -209,7 +209,7 @@ func (a *AnthropicAccumulator) FeedEvent(rawEvent []byte) (FeedResult, error) {
 		// pass through. If it's a text block while a tool_use is
 		// already buffering, keep buffering (preserve order).
 		if env.ContentBlock != nil && env.ContentBlock.Type == "tool_use" {
-			// SECURITY (audit H1): a second tool_use content block must
+			// SECURITY: a second tool_use content block must
 			// never open while one is still buffering. Anthropic emits
 			// content blocks serially — each block's content_block_stop
 			// (which gates it and Resets the accumulator) lands before the
@@ -228,8 +228,8 @@ func (a *AnthropicAccumulator) FeedEvent(rawEvent []byte) (FeedResult, error) {
 				ID:    env.ContentBlock.ID,
 				Name:  env.ContentBlock.Name,
 			}
-			// Seed arguments from content_block.input when present
-			// (audit H2): a conformant Anthropic stream sends `input:{}` at
+			// Seed arguments from content_block.input when present: a
+			// conformant Anthropic stream sends `input:{}` at
 			// start and streams the real arguments via input_json_delta, but
 			// a non-conformant/adversarial upstream can put the real
 			// arguments in the start event and emit no delta. If we ignored
@@ -237,14 +237,12 @@ func (a *AnthropicAccumulator) FeedEvent(rawEvent []byte) (FeedResult, error) {
 			// client SDK, which seeds tool input from the start block,
 			// executes the real arguments. Seed the buffer so the gate sees
 			// what the client will.
-			// "Empty" is a STRUCTURAL question, not a byte-equality one
-			// (audit B21): `{ }`, `{\n}` and `{}` are the same empty
-			// object to every JSON reader, but a bytes.Equal against
-			// "{}" only recognises the last one. Treating `{ }` as a
-			// real seed set startSeeded, and the very next
-			// input_json_delta — the conformant way Anthropic streams
-			// arguments — then tripped the H2 conflict check and
-			// refused a legitimate stream.
+			// "Empty" is a structural question, not a byte-equality
+			// one: an empty object may carry insignificant whitespace
+			// and is still empty to every JSON reader. Comparing bytes
+			// would read `{ }` as real arguments, set startSeeded, and
+			// make the next input_json_delta — the conformant way
+			// Anthropic streams them — trip the conflict check below.
 			if seed := bytes.TrimSpace(env.ContentBlock.Input); len(seed) > 0 && !isEmptyJSONObject(seed) {
 				st.InputJSON.Write(seed)
 				st.startSeeded = true
@@ -285,7 +283,7 @@ func (a *AnthropicAccumulator) FeedEvent(rawEvent []byte) (FeedResult, error) {
 					st = &anthropicBlockState{Index: env.Index, Type: "tool_use"}
 					a.blocks[env.Index] = st
 				}
-				// SECURITY (audit H2): arguments seeded from a non-empty
+				// SECURITY: arguments seeded from a non-empty
 				// content_block_start.input must not also be streamed via
 				// input_json_delta — the two sources would concatenate into
 				// invalid JSON and the gate could end up evaluating a
@@ -304,17 +302,15 @@ func (a *AnthropicAccumulator) FeedEvent(rawEvent []byte) (FeedResult, error) {
 		}
 		// Idle: no tool_use block is buffering.
 		//
-		// SECURITY (audit B7): an input_json_delta is only meaningful
-		// INSIDE an open tool_use content block — Anthropic emits
-		// content_block_start{type:tool_use} first and closes with
-		// content_block_stop, and the block index is what binds the
-		// fragments to a call. One arriving while idle is tool-call
-		// ARGUMENT text that no gate cycle will ever see: we never
-		// opened a block for it, so there is nothing to assemble, check
-		// or refuse, and forwarding it verbatim hands a client that
-		// reconstructs input from deltas alone a set of arguments the
-		// firewall never inspected. We cannot gate a block we never saw
-		// open, so we fail closed and let the orchestrator refuse.
+		// SECURITY: an input_json_delta is only meaningful INSIDE an
+		// open tool_use content block — the block index is what binds
+		// the fragments to a call. One arriving while idle carries
+		// tool-call ARGUMENT text no gate cycle will ever see: no
+		// block was opened for it, so there is nothing to assemble or
+		// check, and forwarding it hands a client that rebuilds tool
+		// input from deltas alone a set of arguments the firewall
+		// never inspected. We cannot gate a block we never saw open,
+		// so we fail closed and let the orchestrator refuse.
 		if env.Delta != nil && env.Delta.Type == "input_json_delta" {
 			return FeedResult{ProtocolViolation: true, violation: violationOrphanedToolInput}, nil
 		}

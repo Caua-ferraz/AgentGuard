@@ -22,7 +22,7 @@ const ArchiveTimestampFormat = "20060102T150405Z"
 
 // RotationConfig configures size-triggered rotation for FileLogger.
 //
-// The zero value disables rotation entirely — v0.4.0 behaviour.
+// The zero value disables rotation entirely.
 //
 // When MaxSize > 0, after every successful Log() the current file size is
 // checked and rotateLocked() fires if the file meets or exceeds MaxSize.

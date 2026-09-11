@@ -56,9 +56,9 @@ type Entry struct {
 	// wire for the default "local" tenant (and for entries written by binaries
 	// predating multi-tenancy) — readers MUST resolve it via EffectiveTenant().
 	// The `omitempty` tag keeps single-tenant ("local") output byte-identical
-	// to pre-v0.6 audit files, so byte-identity fixtures stay green; the field
-	// is additive and does NOT bump the audit schema_version (still 2), exactly
-	// like Transport. See docs/v0.6-ARCHITECTURE-PLAN.md § 3.3–3.4.
+	// to files written before multi-tenancy, so byte-identity fixtures stay
+	// green; the field is additive and does NOT bump the audit
+	// schema_version (still 2), exactly like Transport.
 	TenantID   string               `json:"tenant_id,omitempty"`
 	SessionID  string               `json:"session_id"`
 	AgentID    string               `json:"agent_id"`
@@ -117,7 +117,7 @@ type Logger interface {
 type QueryFilter struct {
 	// TenantID scopes the query to one tenant. Compared against
 	// Entry.EffectiveTenant so entries stored with an empty tenant_id (the
-	// default "local" tenant, and pre-v0.6 entries) match the value "local".
+	// default "local" tenant, and entries predating multi-tenancy) match the value "local".
 	// Empty disables the filter (returns all tenants — operator/global view).
 	TenantID  string     `json:"tenant_id,omitempty"`
 	AgentID   string     `json:"agent_id,omitempty"`

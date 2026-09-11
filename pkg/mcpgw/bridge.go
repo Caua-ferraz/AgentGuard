@@ -223,8 +223,8 @@ func (b *Bridge) Run(ctx context.Context, in io.Reader, out io.Writer, errLog io
 				// A frame past the cap is a PER-FRAME failure, not a
 				// process-wide one. Previously this ended Run, and main turns
 				// a Run error into os.Exit(1) -- so one oversized client frame
-				// took down the whole gateway and every session on it
-				// (audit B10). Answer it if we can identify it, so the caller
+				// took down the whole gateway and every session on it. Answer
+				// it if we can identify it, so the caller
 				// is not left waiting on a frame we refused, then carry on.
 				if id := peekFrameID(prefix); id != nil {
 					b.writeResponse(NewResponseError(id, ErrCodeInvalidRequest,
@@ -299,7 +299,7 @@ func (b *Bridge) dispatchFrame(ctx context.Context, line []byte, wg *sync.WaitGr
 	// An EXPLICIT `"id": null` is not a notification. MCP forbids a null
 	// request id, so this frame is malformed either way — but answering with a
 	// protocol error beats silence, which hangs a caller that did expect a
-	// reply (audit B19). Echo the null id back so the error is correlatable.
+	// reply. Echo the null id back so the error is correlatable.
 	if string(probe.ID) == "null" {
 		b.writeResponse(NewResponseError(nil, ErrCodeInvalidRequest,
 			"request id must not be null", nil))
@@ -334,7 +334,7 @@ func (b *Bridge) dispatchFrame(ctx context.Context, line []byte, wg *sync.WaitGr
 		b.writeResponse(b.handleLoggingSetLevel(ctx, id, probe.Params))
 	default:
 		// resources/* and prompts/* are not yet routed.
-		// TODO(v0.7, #mcp-resources): forward resources/* and
+		// TODO(#mcp-resources): forward resources/* and
 		// prompts/* with namespace-prefixed URIs.
 		b.writeResponse(NewResponseError(id, ErrCodeMethodNotFound,
 			fmt.Sprintf("method %q not supported by gateway", probe.Method), nil))
@@ -447,7 +447,7 @@ func (b *Bridge) handleInitialize(ctx context.Context, id RequestID, raw json.Ra
 // walking each upstream's cursor until exhausted before returning.
 // Cursor opacity is preserved.
 //
-// TODO(v0.7, #mcp-pagination): forward host cursor selectively per
+// TODO(#mcp-pagination): forward host cursor selectively per
 // namespace + multiplex nextCursor as base64({"ns":..., "cursor":...}).
 // Deliberately deferred: the collapse behaviour above is spec-correct
 // (cursor opacity preserved, all tools returned); multiplexed cursors
@@ -711,7 +711,7 @@ func (b *Bridge) handleLoggingSetLevel(ctx context.Context, id RequestID, raw js
 // runPolicyCheck invokes the PolicyCheck hook, falling back to a
 // nil-safe ALLOW when no hook is wired (early-bring-up mode).
 //
-// TODO(v0.7, #mcp-meta-fallback): in-process state for clients that
+// TODO(#mcp-meta-fallback): in-process state for clients that
 // strip `_meta` (some MCP host implementations may not preserve
 // custom `_meta` keys). The recommended path is the meta round-trip
 // per docs/MCP_GATEWAY.md § 6.2; this fallback is the escape hatch.

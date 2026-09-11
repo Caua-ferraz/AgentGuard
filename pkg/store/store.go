@@ -1,6 +1,6 @@
-// Package store is AgentGuard's durable, multi-tenant persistence tier — the
-// "cold path" behind the in-memory fast path described in
-// docs/v0.6-ARCHITECTURE-PLAN.md (§2.3 write-behind dual-tier).
+// Package store is AgentGuard's durable, multi-tenant persistence tier —
+// the "cold path" behind the in-memory fast path. pkg/persist owns the
+// write-behind bridge between the two.
 //
 // CONTRACT (see CLAUDE.md):
 //   - Implementations MUST NOT be called on the streaming proxy hot path. The

@@ -38,7 +38,7 @@ func newGatedServer(t *testing.T) *Server {
 	})
 	if srv.priorIndex == nil {
 		t.Fatal("NewServer did not install a prior-action index; require_prior would fall back " +
-			"to the tenant-blind audit scan (audit B27/B1)")
+			"to the tenant-blind audit scan")
 	}
 	return srv
 }
@@ -124,6 +124,6 @@ func TestPriorIndex_TenantScopedThroughRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if ok {
-		t.Error("another tenant can see this tenant's prior action at the same agent_id (audit B27)")
+		t.Error("another tenant can see this tenant's prior action at the same agent_id")
 	}
 }

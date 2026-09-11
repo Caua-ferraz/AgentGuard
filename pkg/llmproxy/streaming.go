@@ -197,7 +197,7 @@ func readSSEEvent(r *bufio.Reader, maxEventBytes int) ([]byte, error) {
 var errSSEEventTooLarge = errors.New("sse event exceeded buffer cap")
 
 // absoluteMaxBufferBytes is the hard safety ceiling on the streaming
-// buffers (audit L1). ParseConfig rejects --max-buffer-bytes <= 0, but a
+// buffers. ParseConfig rejects --max-buffer-bytes <= 0, but a
 // Config built directly (tests, embedders) can carry MaxBufferBytes == 0
 // meaning "no operator-configured cap" — without a ceiling, an upstream
 // that never terminates an SSE event would grow the per-event read
@@ -221,7 +221,7 @@ func hardCappedBufferBytes(computed int) int {
 // nil: ALLOW. This makes the streaming pipe testable without the gate
 // wired and matches the rest of the package's nil-safety pattern.
 func (s *Server) runPolicyCheck(ctx context.Context, tc ToolCallCheck) (Decision, error) {
-	// SECURITY (audit H3): reject tool-call arguments that contain duplicate
+	// SECURITY: reject tool-call arguments that contain duplicate
 	// JSON keys before evaluating policy. The gate projects from a Go map
 	// (last-wins on duplicates) while the ALLOW path replays the raw argument
 	// bytes; a first-wins downstream executor would then act on a different
@@ -500,7 +500,7 @@ func (s *Server) runOpenAIStreamLoop(w http.ResponseWriter, flusher http.Flusher
 			case result.ProtocolViolation:
 				// The accumulator found a stream it cannot gate without
 				// risking a bypass — today tool_calls spread across more
-				// than one choice (audit B18). Fail closed with a
+				// than one choice. Fail closed with a
 				// synthetic refusal naming the specific defect.
 				metrics.IncLLMProxyProtocolViolation("openai")
 				refusal := s.buildRefusal("openai",
@@ -534,7 +534,7 @@ func (s *Server) runOpenAIStreamLoop(w http.ResponseWriter, flusher http.Flusher
 				// Held in acc.bufferedEvents; do not flush. If the
 				// stream ends while they are still held, the EOF branch
 				// below finalizes the cycle — it must never drop them
-				// silently (audit B17).
+				// silently.
 			}
 		}
 
@@ -660,20 +660,16 @@ func protocolViolationDecision(provider string, kind protocolViolationKind) Deci
 }
 
 // closeOpenAIStreamAtEOF finalizes a gating cycle still in flight when
-// upstream hit EOF (audit B17): a dropped connection, or a provider that
-// ended the stream without a terminal finish_reason.
+// upstream hit EOF: a dropped connection, or a provider that ended
+// the stream without a terminal finish_reason.
 //
-// Before this existed the loop simply returned, and the buffered
-// events — the ungated tool_call — were dropped on the floor: the client
-// saw an empty response, the gate never ran, and nothing was audited.
-// The firewall went dark exactly where a truncated tool call was in
-// flight.
-//
-// Flushing them instead would be the opposite error and a real bypass,
-// so the cycle goes through the SAME gate-or-refuse path a finish_reason
-// takes: truncated arguments fail to parse and land on the F1
-// malformed refusal (deny + audit), complete arguments are gated
-// normally and only replayed on ALLOW. Nothing reaches the client
+// The buffered events are the UNGATED tool call, which rules out both
+// obvious endings: dropping them leaves the client an empty response
+// with no gate run and nothing audited, and flushing them is a real
+// bypass. The cycle goes through the SAME gate-or-refuse path a
+// finish_reason takes — truncated arguments fail to parse and land on
+// the malformed refusal (deny + audit), complete arguments are gated
+// normally and replayed only on ALLOW. Nothing reaches the client
 // ungated on any branch.
 //
 // Runs once per stream, at EOF, so it adds nothing to the per-event
@@ -861,7 +857,7 @@ func (s *Server) runAnthropicStreamLoop(w http.ResponseWriter, flusher http.Flus
 				s.denyMalformedAnthropic(w, flusher, r, acc, result.CompletedToolCalls)
 
 			case result.ProtocolViolation:
-				// SECURITY (audit H1/H2/B7): the upstream emitted a
+				// SECURITY: the upstream emitted a
 				// structurally unsafe tool_use stream — an interleaved
 				// second tool_use, a start-input conflicting with streamed
 				// deltas, or tool input arriving with no block open. We
@@ -898,7 +894,7 @@ func (s *Server) runAnthropicStreamLoop(w http.ResponseWriter, flusher http.Flus
 
 			case result.Accumulating:
 				// Held in acc.bufferedEvents. The EOF branch below
-				// finalizes them if the stream ends first (audit B17).
+				// finalizes them if the stream ends first.
 			}
 		}
 
