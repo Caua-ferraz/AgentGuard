@@ -129,6 +129,12 @@ const (
 	// tool_use would pass through ungated once the first block's gate
 	// cycle resets the accumulator.
 	violationInterleavedToolUse protocolViolationKind = iota
+
+	// violationOrphanedToolInput (audit B7, Anthropic): an
+	// input_json_delta arrived while no tool_use block was open. The
+	// fragments belong to a call the firewall never saw start, so there
+	// is no cycle that could gate them.
+	violationOrphanedToolInput
 )
 
 // OpenAIToolCallAccumulator stitches streaming tool_call fragments

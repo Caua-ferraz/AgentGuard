@@ -628,6 +628,12 @@ func (s *Server) gateAndFlushOpenAI(w http.ResponseWriter, flusher http.Flusher,
 // byte-identical on the wire.
 func protocolViolationDecision(provider string, kind protocolViolationKind) Decision {
 	switch kind {
+	case violationOrphanedToolInput:
+		return Decision{
+			Allow:  false,
+			Reason: "upstream tool_use stream is malformed (tool input outside any tool_use block); refused",
+			Rule:   "deny:llm_api_proxy:orphaned_tool_input",
+		}
 	default:
 		if provider == "anthropic" {
 			return Decision{
@@ -799,11 +805,13 @@ func (s *Server) runAnthropicStreamLoop(w http.ResponseWriter, flusher http.Flus
 				s.denyMalformedAnthropic(w, flusher, r, acc, result.CompletedToolCalls)
 
 			case result.ProtocolViolation:
-				// SECURITY (audit H1/H2): the upstream emitted a structurally
-				// unsafe tool_use stream (interleaved second tool_use, or
-				// start-input conflicting with streamed deltas). We cannot
-				// gate it without risking an ungated call, so we fail closed:
-				// discard the buffered bytes and emit a synthetic refusal.
+				// SECURITY (audit H1/H2/B7): the upstream emitted a
+				// structurally unsafe tool_use stream — an interleaved
+				// second tool_use, a start-input conflicting with streamed
+				// deltas, or tool input arriving with no block open. We
+				// cannot gate it without risking an ungated call, so we
+				// fail closed: discard the buffered bytes and emit a
+				// synthetic refusal naming the specific defect.
 				metrics.IncLLMProxyProtocolViolation("anthropic")
 				refusal := s.buildRefusal("anthropic",
 					protocolViolationDecision("anthropic", result.violation),

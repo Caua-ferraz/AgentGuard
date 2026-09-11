@@ -200,7 +200,15 @@ func (a *AnthropicAccumulator) FeedEvent(rawEvent []byte) (FeedResult, error) {
 			// client SDK, which seeds tool input from the start block,
 			// executes the real arguments. Seed the buffer so the gate sees
 			// what the client will.
-			if seed := bytes.TrimSpace(env.ContentBlock.Input); len(seed) > 0 && !bytes.Equal(seed, []byte("{}")) {
+			// "Empty" is a STRUCTURAL question, not a byte-equality one
+			// (audit B21): `{ }`, `{\n}` and `{}` are the same empty
+			// object to every JSON reader, but a bytes.Equal against
+			// "{}" only recognises the last one. Treating `{ }` as a
+			// real seed set startSeeded, and the very next
+			// input_json_delta — the conformant way Anthropic streams
+			// arguments — then tripped the H2 conflict check and
+			// refused a legitimate stream.
+			if seed := bytes.TrimSpace(env.ContentBlock.Input); len(seed) > 0 && !isEmptyJSONObject(seed) {
 				st.InputJSON.Write(seed)
 				st.startSeeded = true
 			}
@@ -257,8 +265,23 @@ func (a *AnthropicAccumulator) FeedEvent(rawEvent []byte) (FeedResult, error) {
 			}
 			return a.appendBuffered(rawEvent)
 		}
-		// Idle: text deltas (and unexpected input_json_deltas)
-		// pass through. We don't gate text blocks.
+		// Idle: no tool_use block is buffering.
+		//
+		// SECURITY (audit B7): an input_json_delta is only meaningful
+		// INSIDE an open tool_use content block — Anthropic emits
+		// content_block_start{type:tool_use} first and closes with
+		// content_block_stop, and the block index is what binds the
+		// fragments to a call. One arriving while idle is tool-call
+		// ARGUMENT text that no gate cycle will ever see: we never
+		// opened a block for it, so there is nothing to assemble, check
+		// or refuse, and forwarding it verbatim hands a client that
+		// reconstructs input from deltas alone a set of arguments the
+		// firewall never inspected. We cannot gate a block we never saw
+		// open, so we fail closed and let the orchestrator refuse.
+		if env.Delta != nil && env.Delta.Type == "input_json_delta" {
+			return FeedResult{ProtocolViolation: true, violation: violationOrphanedToolInput}, nil
+		}
+		// Text deltas pass through — we don't gate text blocks.
 		return FeedResult{PassThrough: true}, nil
 
 	case "content_block_stop":
@@ -345,6 +368,33 @@ func (a *AnthropicAccumulator) assembleCompletedCalls() ([]ToolCallCheck, error)
 		RawArguments: json.RawMessage(args),
 	}
 	return []ToolCallCheck{tc}, firstErr
+}
+
+// isEmptyJSONObject reports whether seed is a JSON object with no
+// members, ignoring insignificant whitespace: `{}`, `{ }`, `{\n\t}` all
+// qualify. Callers pass an already-TrimSpace'd slice, so only the
+// INTERIOR needs scanning.
+//
+// Deliberately a byte scan and not a json.Unmarshal: this runs on the
+// content_block_start branch of the streaming hot path, and unmarshalling
+// into a map would allocate one per tool_use block to answer a question
+// three byte comparisons settle. Nothing here allocates.
+//
+// A malformed seed (`{}}`, `{`) reports false and is therefore treated as
+// a real seed — the fail-closed direction, since it will fail the
+// argument parse at gate time rather than be silently ignored.
+func isEmptyJSONObject(seed []byte) bool {
+	if len(seed) < 2 || seed[0] != '{' || seed[len(seed)-1] != '}' {
+		return false
+	}
+	for _, c := range seed[1 : len(seed)-1] {
+		switch c {
+		case ' ', '\t', '\n', '\r':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // totalAnthropicArgsLen sums InputJSON bytes across all tool_use
