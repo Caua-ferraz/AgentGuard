@@ -183,7 +183,7 @@ func (a *AnthropicAccumulator) FeedEvent(rawEvent []byte) (FeedResult, error) {
 			// so we fail closed: signal a protocol violation and let the
 			// orchestrator refuse the whole stream.
 			if a.activeToolUseIndex >= 0 {
-				return FeedResult{ProtocolViolation: true}, nil
+				return FeedResult{ProtocolViolation: true, violation: violationInterleavedToolUse}, nil
 			}
 			st := &anthropicBlockState{
 				Index: env.Index,
@@ -247,7 +247,7 @@ func (a *AnthropicAccumulator) FeedEvent(rawEvent []byte) (FeedResult, error) {
 				// truncated/empty view. A conformant stream never does both;
 				// fail closed.
 				if st.startSeeded {
-					return FeedResult{ProtocolViolation: true}, nil
+					return FeedResult{ProtocolViolation: true, violation: violationInterleavedToolUse}, nil
 				}
 				projected := totalAnthropicArgsLen(a.blocks) + len(env.Delta.PartialJSON)
 				if a.maxBufferBytes > 0 && projected > a.maxBufferBytes {

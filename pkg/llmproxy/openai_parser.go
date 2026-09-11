@@ -102,18 +102,34 @@ type FeedResult struct {
 	OverflowBufferBytes bool
 
 	// ProtocolViolation signals the parser detected a structurally unsafe
-	// stream that cannot be gated without risking a bypass. Today the only
-	// trigger is the Anthropic accumulator observing a second tool_use
-	// content block open before the first one closed (audit finding H1):
-	// Anthropic emits content blocks serially, and an interleaved second
-	// tool_use would pass through ungated once the first block's gate cycle
-	// resets the accumulator. The orchestrator MUST emit a synthetic
-	// refusal and stop reading upstream — fail-closed: refuse the ambiguous
-	// stream rather than deliver an ungated tool call. The OpenAI
-	// accumulator never sets this (its tool_calls all close together at
-	// finish_reason, so there is no interleave window).
+	// stream that cannot be gated without risking a bypass. The
+	// orchestrator MUST emit a synthetic refusal and stop reading
+	// upstream — fail-closed: refuse the ambiguous stream rather than
+	// deliver an ungated tool call. See protocolViolationKind for the
+	// specific triggers.
 	ProtocolViolation bool
+
+	// violation names WHICH structural defect set ProtocolViolation, so
+	// the orchestrator renders an accurate refusal instead of one generic
+	// message. Unexported on purpose: the orchestrator lives in this
+	// package, so this carries nothing onto the frozen v1.0 surface.
+	violation protocolViolationKind
 }
+
+// protocolViolationKind enumerates the structural defects that make a
+// stream ungateable. The zero value is the original interleaved-tool_use
+// trigger, so every already-shipped refusal stays byte-identical.
+type protocolViolationKind uint8
+
+const (
+	// violationInterleavedToolUse (audit H1/H2, Anthropic): a second
+	// tool_use content block opened before the first closed, or a block's
+	// start-seeded input conflicts with streamed input_json_deltas.
+	// Anthropic emits content blocks serially; an interleaved second
+	// tool_use would pass through ungated once the first block's gate
+	// cycle resets the accumulator.
+	violationInterleavedToolUse protocolViolationKind = iota
+)
 
 // OpenAIToolCallAccumulator stitches streaming tool_call fragments
 // back into complete ToolCallCheck records and holds the raw SSE

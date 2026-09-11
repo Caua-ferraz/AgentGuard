@@ -504,11 +504,9 @@ func (s *Server) runOpenAIStreamLoop(w http.ResponseWriter, flusher http.Flusher
 				// parser change can never silently drop the signal and leak an
 				// ungated call. Fail closed with a synthetic refusal.
 				metrics.IncLLMProxyProtocolViolation("openai")
-				refusal := s.buildRefusal("openai", Decision{
-					Allow:  false,
-					Reason: "upstream tool_call stream is malformed; refused",
-					Rule:   "deny:llm_api_proxy:tool_use_interleaved",
-				}, &RefusalContext{Provider: "openai", AnthropicToolUseIndex: -1})
+				refusal := s.buildRefusal("openai",
+					protocolViolationDecision("openai", result.violation),
+					&RefusalContext{Provider: "openai", AnthropicToolUseIndex: -1})
 				_, _ = w.Write(refusal)
 				flusher.Flush()
 				return
@@ -618,6 +616,32 @@ func (s *Server) gateAndFlushOpenAI(w http.ResponseWriter, flusher http.Flusher,
 	flusher.Flush()
 	acc.Reset()
 	return true
+}
+
+// protocolViolationDecision renders the fail-closed verdict for a
+// parser-signalled protocol violation. The kind comes from the
+// accumulator so the client-visible Reason and the operator-visible Rule
+// name the actual defect instead of one catch-all message.
+//
+// The zero kind reproduces the pre-existing interleaved-tool_use refusal
+// VERBATIM, per provider, so refusals already shipped under v1.0 stay
+// byte-identical on the wire.
+func protocolViolationDecision(provider string, kind protocolViolationKind) Decision {
+	switch kind {
+	default:
+		if provider == "anthropic" {
+			return Decision{
+				Allow:  false,
+				Reason: "upstream tool_use stream is malformed (interleaved or conflicting tool_use blocks); refused",
+				Rule:   "deny:llm_api_proxy:tool_use_interleaved",
+			}
+		}
+		return Decision{
+			Allow:  false,
+			Reason: "upstream tool_call stream is malformed; refused",
+			Rule:   "deny:llm_api_proxy:tool_use_interleaved",
+		}
+	}
 }
 
 // malformedToolCallDecision is the fail-closed verdict the streaming
@@ -781,11 +805,9 @@ func (s *Server) runAnthropicStreamLoop(w http.ResponseWriter, flusher http.Flus
 				// gate it without risking an ungated call, so we fail closed:
 				// discard the buffered bytes and emit a synthetic refusal.
 				metrics.IncLLMProxyProtocolViolation("anthropic")
-				refusal := s.buildRefusal("anthropic", Decision{
-					Allow:  false,
-					Reason: "upstream tool_use stream is malformed (interleaved or conflicting tool_use blocks); refused",
-					Rule:   "deny:llm_api_proxy:tool_use_interleaved",
-				}, &RefusalContext{Provider: "anthropic", AnthropicToolUseIndex: acc.ActiveToolUseIndex()})
+				refusal := s.buildRefusal("anthropic",
+					protocolViolationDecision("anthropic", result.violation),
+					&RefusalContext{Provider: "anthropic", AnthropicToolUseIndex: acc.ActiveToolUseIndex()})
 				_, _ = w.Write(refusal)
 				flusher.Flush()
 				return
