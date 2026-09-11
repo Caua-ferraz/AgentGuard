@@ -1,13 +1,18 @@
 package llmproxy
 
-// streaming_protocol_test.go pins two v1.0 audit findings in the
-// Anthropic SSE accumulator and the stream loop that drives it. Both share
+// streaming_protocol_test.go pins three v1.0 audit findings in the two
+// SSE accumulators and the stream loops that drive them. All three share
 // one theme: a stream the firewall cannot gate must end in a refusal,
 // never in ungated bytes and never in silence.
 //
 //	B7  Anthropic: an input_json_delta arriving while NO tool_use block
 //	    is open was forwarded verbatim. Those are tool-call argument
 //	    bytes belonging to a call the gate never saw start.
+//	B17 Both: buffered (ungated) events were DROPPED when upstream hit
+//	    EOF, or when `[DONE]` arrived while a cycle was still open. The
+//	    client got an empty response, the gate never ran and nothing was
+//	    audited. Note the fix is NOT to flush them — that would be the
+//	    bypass — but to run the completion path: gate, or refuse.
 //	B21 Anthropic: `{ }` as content_block_start.input was compared with
 //	    bytes.Equal against "{}", so an empty seed carrying insignificant
 //	    whitespace was mistaken for real arguments and the next
@@ -27,12 +32,46 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------
 // event builders. Named with a pv* prefix so they never collide with the
 // fixture helpers other test files define.
 // ---------------------------------------------------------------------
+
+// pvOpenAIToolDelta emits one OpenAI tool_call delta on a given CHOICE
+// index (the axis audit B18 is about) and tool_calls index.
+func pvOpenAIToolDelta(choice, toolIdx int, id, name, args string) string {
+	idPart := ""
+	if id != "" {
+		idPart = fmt.Sprintf(`"id":%q,"type":"function",`, id)
+	}
+	namePart := ""
+	if name != "" {
+		namePart = fmt.Sprintf(`"name":%q,`, name)
+	}
+	return fmt.Sprintf(
+		`data: {"choices":[{"index":%d,"delta":{"tool_calls":[{"index":%d,%s"function":{%s"arguments":%q}}]},"finish_reason":null}]}`+"\n\n",
+		choice, toolIdx, idPart, namePart, args,
+	)
+}
+
+// pvOpenAIFinish emits a finish_reason on a given choice index.
+func pvOpenAIFinish(choice int, reason string) string {
+	return fmt.Sprintf(
+		`data: {"choices":[{"index":%d,"delta":{},"finish_reason":%q}]}`+"\n\n",
+		choice, reason,
+	)
+}
+
+// pvOpenAIContent emits a plain content delta on a given choice index.
+func pvOpenAIContent(choice int, text string) string {
+	return fmt.Sprintf(
+		`data: {"choices":[{"index":%d,"delta":{"content":%q},"finish_reason":null}]}`+"\n\n",
+		choice, text,
+	)
+}
 
 func pvAnthropicToolStart(index int, id, name, input string) string {
 	return "event: content_block_start\n" + fmt.Sprintf(
@@ -367,4 +406,296 @@ func TestB21_WhitespaceSeedStreamGatesEndToEnd(t *testing.T) {
 	if !strings.Contains(got, "toolu_ws") {
 		t.Errorf("ALLOWed tool_use block did not reach the client: %q", got)
 	}
+}
+
+// ---------------------------------------------------------------------
+// B17 — end of stream while a cycle is open
+// ---------------------------------------------------------------------
+
+// TestB17_OpenAI_EOFMidToolCall_GatesInsteadOfDropping drives a stream
+// that ends with NO finish_reason and NO [DONE] — a dropped upstream
+// connection. Pre-fix the loop returned and the buffered events went on
+// the floor: the client got an empty 200, the gate never ran, nothing
+// was audited. The fix runs the completion path, so the call is gated
+// and (on ALLOW) delivered.
+func TestB17_OpenAI_EOFMidToolCall_GatesInsteadOfDropping(t *testing.T) {
+	stream := pvOpenAIToolDelta(0, 0, "call_eof", "bash", `{"cmd":"ls"}`)
+
+	spy := &pvCallSpy{decision: Decision{Allow: true, Rule: "allow:test"}}
+	got := pvRunStream(t, "openai", stream, spy)
+
+	calls := spy.seen()
+	if len(calls) != 1 {
+		t.Fatalf("PolicyCheck ran %d times, want 1 — the cycle was dropped at EOF without gating (B17)", len(calls))
+	}
+	if args := strings.TrimSpace(string(calls[0].RawArguments)); args != `{"cmd":"ls"}` {
+		t.Errorf("gate evaluated %q, want %q", args, `{"cmd":"ls"}`)
+	}
+	if !strings.Contains(got, "call_eof") {
+		t.Errorf("ALLOWed tool_call was not delivered after the EOF close: %q", got)
+	}
+}
+
+// TestB17_OpenAI_EOFMidToolCall_DenyDoesNotLeak is the security half:
+// the EOF closer must route through the gate, so a DENY still refuses.
+// A "flush whatever's buffered" reading of the same finding would have
+// handed these bytes to the client ungated.
+func TestB17_OpenAI_EOFMidToolCall_DenyDoesNotLeak(t *testing.T) {
+	stream := pvOpenAIToolDelta(0, 0, "call_eof_deny", "bash", `{"cmd":"rm -rf /"}`)
+
+	spy := &pvCallSpy{decision: Decision{Allow: false, Reason: "blocked by policy", Rule: "deny:test:rule"}}
+	got := pvRunStream(t, "openai", stream, spy)
+
+	if strings.Contains(got, "call_eof_deny") || strings.Contains(got, "rm -rf /") {
+		t.Fatalf("a DENIED tool_call leaked to the client at EOF (B17 fail-open): %q", got)
+	}
+	if !strings.Contains(got, "deny:test:rule") {
+		t.Errorf("expected the policy refusal to reach the client; got %q", got)
+	}
+	if len(spy.seen()) != 1 {
+		t.Errorf("PolicyCheck ran %d times, want 1", len(spy.seen()))
+	}
+}
+
+// TestB17_OpenAI_EOFTruncatedArgs_FailsClosed covers the routine case: a
+// max_tokens cutoff mid-arguments. The assembled JSON cannot parse, so
+// the cycle lands on the F1 malformed refusal — denied AND audited,
+// rather than dropped in silence.
+func TestB17_OpenAI_EOFTruncatedArgs_FailsClosed(t *testing.T) {
+	stream := pvOpenAIToolDelta(0, 0, "call_trunc", "bash", `{"cmd":"rm -rf `)
+
+	spy := &pvCallSpy{decision: Decision{Allow: true, Rule: "allow:test"}}
+	got := pvRunStream(t, "openai", stream, spy)
+
+	if !strings.Contains(got, "malformed tool call arguments") {
+		t.Errorf("expected the malformed fail-closed refusal; got %q", got)
+	}
+	if strings.Contains(got, "call_trunc") {
+		t.Errorf("truncated tool_call leaked to the client: %q", got)
+	}
+	// The audit path still runs even though the verdict is forced.
+	if len(spy.seen()) != 1 {
+		t.Errorf("PolicyCheck ran %d times, want 1 (the audit trail for the forced deny)", len(spy.seen()))
+	}
+}
+
+// TestB17_OpenAI_DoneWhileActive_ClosesTheCycle covers `[DONE]` arriving
+// while a tool_call is still open. `[DONE]` IS the end of stream, so the
+// cycle closes there rather than waiting for the transport EOF — and it
+// closes through the gate, both directions.
+func TestB17_OpenAI_DoneWhileActive_ClosesTheCycle(t *testing.T) {
+	stream := pvOpenAIToolDelta(0, 0, "call_done", "bash", `{"cmd":"ls"}`) + "data: [DONE]\n\n"
+
+	t.Run("allow-flushes", func(t *testing.T) {
+		spy := &pvCallSpy{decision: Decision{Allow: true, Rule: "allow:test"}}
+		got := pvRunStream(t, "openai", stream, spy)
+		if len(spy.seen()) != 1 {
+			t.Fatalf("PolicyCheck ran %d times, want 1", len(spy.seen()))
+		}
+		if !strings.Contains(got, "call_done") {
+			t.Errorf("ALLOWed tool_call was not delivered: %q", got)
+		}
+		if !strings.Contains(got, "[DONE]") {
+			t.Errorf("terminator missing from the flushed stream: %q", got)
+		}
+	})
+
+	t.Run("deny-does-not-leak", func(t *testing.T) {
+		spy := &pvCallSpy{decision: Decision{Allow: false, Reason: "no", Rule: "deny:test:rule"}}
+		got := pvRunStream(t, "openai", stream, spy)
+		if strings.Contains(got, "call_done") {
+			t.Fatalf("a DENIED tool_call leaked via the [DONE] path: %q", got)
+		}
+		if !strings.Contains(got, "deny:test:rule") {
+			t.Errorf("expected the policy refusal; got %q", got)
+		}
+	})
+}
+
+// TestB17_OpenAI_DoneWithoutEOF_DoesNotWaitForTheConnectionToClose
+// isolates the `[DONE]` closer from the EOF closer. When upstream closes
+// right after `[DONE]` the two are indistinguishable — EOF arrives
+// immediately and finalizes the cycle either way. An upstream that holds
+// the connection open after `[DONE]` (keep-alive behaviour some gateways
+// have) is the case that separates them: without the `[DONE]` close the
+// client waits on a stream that is already over.
+func TestB17_OpenAI_DoneWithoutEOF_DoesNotWaitForTheConnectionToClose(t *testing.T) {
+	released := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		f, _ := w.(http.Flusher)
+		_, _ = io.WriteString(w, pvOpenAIToolDelta(0, 0, "call_keepalive", "bash", `{"cmd":"rm -rf /"}`))
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		if f != nil {
+			f.Flush()
+		}
+		// Hold the connection open. The proxy must NOT need this to end.
+		select {
+		case <-released:
+		case <-r.Context().Done():
+		case <-time.After(15 * time.Second):
+		}
+	}))
+	defer upstream.Close()
+	defer close(released)
+
+	spy := &pvCallSpy{decision: Decision{Allow: false, Reason: "no", Rule: "deny:test:rule"}}
+	base, teardown := newStreamingTestServer(t, upstream, func(s *Server) {
+		s.BuildRefusal = BuildRefusalRich
+		s.PolicyCheck = spy.check
+	})
+	defer teardown()
+
+	type result struct {
+		body string
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		req, _ := http.NewRequest("POST", base+"/v1/chat/completions",
+			strings.NewReader(`{"model":"gpt-4","messages":[],"stream":true}`))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			done <- result{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(resp.Body)
+		done <- result{body: string(raw)}
+	}()
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("request: %v", got.err)
+		}
+		if strings.Contains(got.body, "call_keepalive") || strings.Contains(got.body, "rm -rf /") {
+			t.Fatalf("a DENIED tool_call leaked via the [DONE] path: %q", got.body)
+		}
+		if !strings.Contains(got.body, "deny:test:rule") {
+			t.Errorf("expected the policy refusal; got %q", got.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the client was still waiting 5s after [DONE]: the cycle is not closed until the connection drops (B17)")
+	}
+}
+
+// TestB17_Anthropic_EOFMidToolUse_GatesInsteadOfDropping is the
+// Anthropic sibling: a tool_use block still open when upstream vanishes.
+func TestB17_Anthropic_EOFMidToolUse_GatesInsteadOfDropping(t *testing.T) {
+	stream := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"id":"msg_b17","type":"message"}}` + "\n\n" +
+		pvAnthropicToolStart(0, "toolu_eof", "bash", `{}`) +
+		pvAnthropicInputDelta(0, `{"cmd":"rm -rf /"}`)
+	// No content_block_stop, no message_stop — the connection dies here.
+
+	t.Run("deny-does-not-leak", func(t *testing.T) {
+		spy := &pvCallSpy{decision: Decision{Allow: false, Reason: "no", Rule: "deny:test:rule"}}
+		got := pvRunStream(t, "anthropic", stream, spy)
+		if len(spy.seen()) != 1 {
+			t.Fatalf("PolicyCheck ran %d times, want 1 — the tool_use was dropped at EOF without gating (B17)", len(spy.seen()))
+		}
+		if strings.Contains(got, "rm -rf /") {
+			t.Fatalf("a DENIED tool_use leaked to the client at EOF: %q", got)
+		}
+		if !strings.Contains(got, "deny:test:rule") {
+			t.Errorf("expected the policy refusal; got %q", got)
+		}
+	})
+
+	t.Run("allow-delivers", func(t *testing.T) {
+		spy := &pvCallSpy{decision: Decision{Allow: true, Rule: "allow:test"}}
+		got := pvRunStream(t, "anthropic", stream, spy)
+		if len(spy.seen()) != 1 {
+			t.Fatalf("PolicyCheck ran %d times, want 1", len(spy.seen()))
+		}
+		if !strings.Contains(got, "toolu_eof") {
+			t.Errorf("ALLOWed tool_use was not delivered after the EOF close: %q", got)
+		}
+	})
+}
+
+// TestB17_Anthropic_EOFTruncatedInput_FailsClosed: the arguments were
+// cut mid-JSON, so the EOF close lands on the malformed refusal.
+func TestB17_Anthropic_EOFTruncatedInput_FailsClosed(t *testing.T) {
+	stream := pvAnthropicToolStart(0, "toolu_trunc", "bash", `{}`) +
+		pvAnthropicInputDelta(0, `{"cmd":"rm -rf `)
+
+	spy := &pvCallSpy{decision: Decision{Allow: true, Rule: "allow:test"}}
+	got := pvRunStream(t, "anthropic", stream, spy)
+
+	if !strings.Contains(got, "malformed tool call arguments") {
+		t.Errorf("expected the malformed fail-closed refusal; got %q", got)
+	}
+	if strings.Contains(got, "rm -rf") {
+		t.Errorf("truncated tool input leaked to the client: %q", got)
+	}
+}
+
+// TestB17_CompletionSignalledExactlyOnce guards the latch the two new
+// closers required. A stream that ends properly must gate its call ONCE:
+// if `[DONE]` or EOF could re-close an already-completed cycle, every
+// well-formed tool call would be gated (and audited) twice.
+func TestB17_CompletionSignalledExactlyOnce(t *testing.T) {
+	stream := pvOpenAIToolDelta(0, 0, "call_once", "bash", `{"cmd":"ls"}`) +
+		pvOpenAIFinish(0, "tool_calls") +
+		"data: [DONE]\n\n"
+
+	spy := &pvCallSpy{decision: Decision{Allow: true, Rule: "allow:test"}}
+	got := pvRunStream(t, "openai", stream, spy)
+
+	if n := len(spy.seen()); n != 1 {
+		t.Fatalf("PolicyCheck ran %d times for one tool call, want exactly 1", n)
+	}
+	if !strings.Contains(got, "call_once") || !strings.Contains(got, "[DONE]") {
+		t.Errorf("normal ALLOW stream was altered: %q", got)
+	}
+	if strings.Count(got, "call_once") != 1 {
+		t.Errorf("tool_call delivered %d times, want once: %q", strings.Count(got, "call_once"), got)
+	}
+}
+
+// TestB17_CloseAtEOF_IsInertAfterACleanClose pins the same latch at the
+// parser boundary, where the orchestrator's Reset is not in the picture.
+func TestB17_CloseAtEOF_IsInertAfterACleanClose(t *testing.T) {
+	t.Run("openai", func(t *testing.T) {
+		acc := NewOpenAIToolCallAccumulator(0)
+		if _, err := acc.FeedEvent([]byte(pvOpenAIToolDelta(0, 0, "call_x", "bash", `{}`))); err != nil {
+			t.Fatalf("delta: %v", err)
+		}
+		res, err := acc.FeedEvent([]byte(pvOpenAIFinish(0, "tool_calls")))
+		if err != nil || !res.Completed {
+			t.Fatalf("finish: res=%+v err=%v", res, err)
+		}
+		if res, _ := acc.CloseAtEOF(); res.Completed {
+			t.Errorf("CloseAtEOF re-completed an already-closed cycle: %+v", res)
+		}
+	})
+
+	t.Run("anthropic", func(t *testing.T) {
+		acc := NewAnthropicAccumulator(0)
+		if _, err := acc.FeedEvent([]byte(pvAnthropicToolStart(0, "toolu_x", "bash", `{}`))); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		res, err := acc.FeedEvent([]byte(pvAnthropicStop(0)))
+		if err != nil || !res.Completed {
+			t.Fatalf("stop: res=%+v err=%v", res, err)
+		}
+		if res, _ := acc.CloseAtEOF(); res.Completed {
+			t.Errorf("CloseAtEOF re-completed an already-closed cycle: %+v", res)
+		}
+	})
+
+	t.Run("idle-stream-is-untouched", func(t *testing.T) {
+		// No tool call ever started: EOF must do nothing at all.
+		acc := NewOpenAIToolCallAccumulator(0)
+		if _, err := acc.FeedEvent([]byte(pvOpenAIContent(0, "hi"))); err != nil {
+			t.Fatalf("content: %v", err)
+		}
+		res, err := acc.CloseAtEOF()
+		if err != nil || res.Completed || res.PassThrough || res.Accumulating {
+			t.Errorf("CloseAtEOF on an idle stream = %+v (err=%v), want the zero result", res, err)
+		}
+	})
 }

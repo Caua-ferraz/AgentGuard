@@ -532,11 +532,15 @@ func (s *Server) runOpenAIStreamLoop(w http.ResponseWriter, flusher http.Flusher
 				flusher.Flush()
 
 			case result.Accumulating:
-				// Held in acc.bufferedEvents; do not flush.
+				// Held in acc.bufferedEvents; do not flush. If the
+				// stream ends while they are still held, the EOF branch
+				// below finalizes the cycle — it must never drop them
+				// silently (audit B17).
 			}
 		}
 
 		if isEOF {
+			s.closeOpenAIStreamAtEOF(w, flusher, r, acc)
 			return
 		}
 		if err != nil {
@@ -648,6 +652,53 @@ func protocolViolationDecision(provider string, kind protocolViolationKind) Deci
 			Rule:   "deny:llm_api_proxy:tool_use_interleaved",
 		}
 	}
+}
+
+// closeOpenAIStreamAtEOF finalizes a gating cycle still in flight when
+// upstream hit EOF (audit B17): a dropped connection, or a provider that
+// ended the stream without a terminal finish_reason.
+//
+// Before this existed the loop simply returned, and the buffered
+// events — the ungated tool_call — were dropped on the floor: the client
+// saw an empty response, the gate never ran, and nothing was audited.
+// The firewall went dark exactly where a truncated tool call was in
+// flight.
+//
+// Flushing them instead would be the opposite error and a real bypass,
+// so the cycle goes through the SAME gate-or-refuse path a finish_reason
+// takes: truncated arguments fail to parse and land on the F1
+// malformed refusal (deny + audit), complete arguments are gated
+// normally and only replayed on ALLOW. Nothing reaches the client
+// ungated on any branch.
+//
+// Runs once per stream, at EOF, so it adds nothing to the per-event
+// loop.
+func (s *Server) closeOpenAIStreamAtEOF(w http.ResponseWriter, flusher http.Flusher, r *http.Request, acc *OpenAIToolCallAccumulator) {
+	result, ferr := acc.CloseAtEOF()
+	if !result.Completed {
+		return
+	}
+	if ferr != nil {
+		s.denyMalformedOpenAI(w, flusher, r, acc, result.CompletedToolCalls)
+		return
+	}
+	s.gateAndFlushOpenAI(w, flusher, r, acc, result.CompletedToolCalls)
+}
+
+// closeAnthropicStreamAtEOF mirrors closeOpenAIStreamAtEOF: a tool_use
+// block still open when upstream hit EOF is gated or refused, never
+// dropped and never flushed ungated. See that function for the
+// reasoning.
+func (s *Server) closeAnthropicStreamAtEOF(w http.ResponseWriter, flusher http.Flusher, r *http.Request, acc *AnthropicAccumulator) {
+	result, ferr := acc.CloseAtEOF()
+	if !result.Completed {
+		return
+	}
+	if ferr != nil {
+		s.denyMalformedAnthropic(w, flusher, r, acc, result.CompletedToolCalls)
+		return
+	}
+	s.gateAndFlushAnthropic(w, flusher, r, acc, result.CompletedToolCalls)
 }
 
 // malformedToolCallDecision is the fail-closed verdict the streaming
@@ -841,11 +892,13 @@ func (s *Server) runAnthropicStreamLoop(w http.ResponseWriter, flusher http.Flus
 				flusher.Flush()
 
 			case result.Accumulating:
-				// Held in acc.bufferedEvents.
+				// Held in acc.bufferedEvents. The EOF branch below
+				// finalizes them if the stream ends first (audit B17).
 			}
 		}
 
 		if isEOF {
+			s.closeAnthropicStreamAtEOF(w, flusher, r, acc)
 			return
 		}
 		if err != nil {

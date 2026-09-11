@@ -107,6 +107,13 @@ type AnthropicAccumulator struct {
 	// tool_use we're buffering for, or -1 if none.
 	activeToolUseIndex int
 
+	// completed latches once this cycle has signalled Completed, so the
+	// end-of-stream closer added for audit B17 (CloseAtEOF) cannot
+	// re-signal a cycle content_block_stop already closed. Reset clears
+	// it, so a message carrying several tool_use blocks still completes
+	// once per block.
+	completed bool
+
 	bufferedEvents [][]byte
 	bufferedBytes  int
 }
@@ -142,6 +149,36 @@ func (a *AnthropicAccumulator) Reset() {
 	a.activeToolUseIndex = -1
 	a.bufferedEvents = nil
 	a.bufferedBytes = 0
+	a.completed = false
+}
+
+// complete closes the in-flight gating cycle exactly once: it assembles
+// the active tool_use block and latches `completed` so a later EOF
+// cannot signal the same cycle twice. Every Completed result the
+// accumulator produces goes through here.
+func (a *AnthropicAccumulator) complete() (FeedResult, error) {
+	a.completed = true
+	calls, parseErr := a.assembleCompletedCalls()
+	return FeedResult{
+		Completed:          true,
+		CompletedToolCalls: calls,
+	}, parseErr
+}
+
+// CloseAtEOF finalizes an in-flight gating cycle when the upstream
+// stream ends without the content_block_stop that would normally close
+// it (audit B17). Mirrors the OpenAI sibling: the orchestrator calls it
+// once, at EOF, and MUST route a Completed result through the same
+// gate-or-refuse path a content_block_stop takes. Returns the zero
+// FeedResult when no tool_use is in flight, which is the common case —
+// a stream that closed cleanly has already Reset.
+//
+// Runs once per stream at EOF, never per event.
+func (a *AnthropicAccumulator) CloseAtEOF() (FeedResult, error) {
+	if a.activeToolUseIndex < 0 || a.completed {
+		return FeedResult{}, nil
+	}
+	return a.complete()
 }
 
 // FeedEvent ingests one complete Anthropic SSE event. Returns
@@ -299,11 +336,7 @@ func (a *AnthropicAccumulator) FeedEvent(rawEvent []byte) (FeedResult, error) {
 				if st != nil {
 					st.Closed = true
 				}
-				calls, parseErr := a.assembleCompletedCalls()
-				return FeedResult{
-					Completed:          true,
-					CompletedToolCalls: calls,
-				}, parseErr
+				return a.complete()
 			}
 			return res, nil
 		}

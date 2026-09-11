@@ -163,6 +163,13 @@ type OpenAIToolCallAccumulator struct {
 	// active is true once we've started accumulating a tool_call and
 	// haven't yet flushed/refused.
 	active bool
+
+	// completed latches once this cycle has signalled Completed, so the
+	// two end-of-stream closers added for audit B17 (`[DONE]` and
+	// CloseAtEOF) cannot re-signal a cycle finish_reason already closed.
+	// Reset clears it, so a stream carrying several tool_call cycles
+	// still completes once per cycle.
+	completed bool
 }
 
 // NewOpenAIToolCallAccumulator constructs a fresh accumulator with
@@ -191,6 +198,43 @@ func (a *OpenAIToolCallAccumulator) Reset() {
 	a.bufferedEvents = nil
 	a.bufferedBytes = 0
 	a.active = false
+	a.completed = false
+}
+
+// complete closes the in-flight gating cycle exactly once: it assembles
+// the accumulated tool calls and latches `completed` so a later `[DONE]`
+// or EOF cannot signal the same cycle a second time. Every Completed
+// result the accumulator produces goes through here.
+func (a *OpenAIToolCallAccumulator) complete() (FeedResult, error) {
+	a.completed = true
+	calls, parseErr := a.assembleCompletedCalls()
+	return FeedResult{
+		Completed:          true,
+		CompletedToolCalls: calls,
+	}, parseErr
+}
+
+// CloseAtEOF finalizes an in-flight gating cycle when the upstream
+// stream ends without a terminal finish_reason (audit B17): a dropped
+// connection, a provider that closes after `[DONE]` without one, or a
+// truncated response.
+//
+// The orchestrator MUST call it once at EOF and route a Completed result
+// through the same gate-or-refuse path a finish_reason takes. Flushing
+// the buffered events instead would be a fail-open — those bytes are the
+// ungated tool_call — and dropping them (the pre-fix behaviour) left the
+// client with an empty response and the firewall with no audit trail.
+// Truncated arguments do not parse, so the returned error routes the
+// cycle to the F1 malformed refusal, which denies and audits.
+//
+// Returns the zero FeedResult when nothing is in flight, the common case
+// for a stream that closed cleanly and already Reset. Runs once per
+// stream at EOF, never per event.
+func (a *OpenAIToolCallAccumulator) CloseAtEOF() (FeedResult, error) {
+	if !a.active || a.completed {
+		return FeedResult{}, nil
+	}
+	return a.complete()
 }
 
 // FeedEvent ingests one complete SSE event (raw bytes including the
@@ -218,11 +262,30 @@ func (a *OpenAIToolCallAccumulator) FeedEvent(rawEvent []byte) (FeedResult, erro
 	// via finish_reason: "tool_calls" first), [DONE] forces the
 	// stream to end and we have to surface it.
 	if isDone {
-		// If still active (i.e. tool_calls never finished cleanly)
-		// we treat this as an end-of-stream and let the orchestrator
-		// flush whatever's buffered as-is. This is a degenerate
-		// path — most providers always emit finish_reason first.
+		// `[DONE]` while a tool_call cycle is still open (audit B17):
+		// the upstream ended the stream without a terminal
+		// finish_reason. Degenerate — most providers emit finish_reason
+		// first — but `[DONE]` IS the end of stream, so close the cycle
+		// here rather than wait for the transport EOF.
+		//
+		// The buffered bytes must NOT be flushed "as-is" (what the
+		// comment here used to promise): they are the ungated tool_call,
+		// and flushing them is the bypass. Buffer `[DONE]` itself so it
+		// replays in order on ALLOW, then return Completed so the
+		// orchestrator gates the cycle like any other completion —
+		// truncated arguments fail to parse and route to the F1
+		// fail-closed refusal.
+		if a.active && !a.completed {
+			res, err := a.appendBuffered(rawEvent)
+			if err != nil || res.OverflowBufferBytes {
+				return res, err
+			}
+			return a.complete()
+		}
 		if a.active {
+			// finish_reason already closed this cycle and the
+			// orchestrator has not Reset yet. Keep buffering rather
+			// than signal the same completion twice.
 			return a.appendBuffered(rawEvent)
 		}
 		return FeedResult{PassThrough: true}, nil
@@ -314,12 +377,7 @@ func (a *OpenAIToolCallAccumulator) FeedEvent(rawEvent []byte) (FeedResult, erro
 		// any other terminal reason while we were active), close the
 		// cycle now — the closing arg fragment is already applied above.
 		if finishReasonToolCalls || hasFinishReason(env) {
-			calls, parseErr := a.assembleCompletedCalls()
-			res := FeedResult{
-				Completed:          true,
-				CompletedToolCalls: calls,
-			}
-			return res, parseErr
+			return a.complete()
 		}
 		return appendRes, nil
 	}
@@ -336,16 +394,11 @@ func (a *OpenAIToolCallAccumulator) FeedEvent(rawEvent []byte) (FeedResult, erro
 		}
 
 		if finishReasonToolCalls || hasFinishReason(env) {
-			calls, parseErr := a.assembleCompletedCalls()
-			// parseErr surfaces invalid-JSON-arguments cases to the
-			// caller. The orchestrator still proceeds with gating
-			// using RawArguments — the policy hook decides how to
-			// handle malformed args.
-			res := FeedResult{
-				Completed:          true,
-				CompletedToolCalls: calls,
-			}
-			return res, parseErr
+			// complete()'s error surfaces invalid-JSON-arguments cases
+			// to the caller. The orchestrator still proceeds with
+			// gating using RawArguments — the policy hook decides how
+			// to handle malformed args.
+			return a.complete()
 		}
 
 		return appendRes, nil
