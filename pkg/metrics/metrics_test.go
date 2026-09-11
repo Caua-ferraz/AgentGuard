@@ -329,6 +329,7 @@ func TestRegistry_ResetMatchesFresh(t *testing.T) {
 	r.IncLLMProxyBufferOverflow("openai")
 	r.IncLLMProxyNonStreamingOverflow("anthropic")
 	r.IncLLMProxyProtocolViolation("openai")
+	r.IncLLMProxyUndecodableToolCall("openai")
 	r.SetLLMProxyStreamsActive(3)
 	r.IncLLMProxyStreamsRejected()
 	r.IncAuditCorruptLine()

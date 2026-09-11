@@ -139,6 +139,9 @@ type Registry struct {
 	llmProxyProtocolViolationMu    sync.Mutex
 	llmProxyProtocolViolationCount map[string]uint64
 
+	llmProxyUndecodableToolCallMu    sync.Mutex
+	llmProxyUndecodableToolCallCount map[string]uint64
+
 	migrationStatusMu sync.Mutex
 	migrationStatus   map[migrationStatusKey]int64
 
@@ -163,6 +166,7 @@ func NewRegistry() *Registry {
 		llmProxyBufferOverflowCount:       map[string]uint64{},
 		llmProxyNonStreamingOverflowCount: map[string]uint64{},
 		llmProxyProtocolViolationCount:    map[string]uint64{},
+		llmProxyUndecodableToolCallCount:  map[string]uint64{},
 		migrationStatus:                   map[migrationStatusKey]int64{},
 		notifyDroppedCount:                map[notifyDroppedKey]uint64{},
 		notifyDispatchHist:                map[string]*Histogram{},
@@ -225,6 +229,9 @@ func (r *Registry) Reset() {
 	r.llmProxyProtocolViolationMu.Lock()
 	r.llmProxyProtocolViolationCount = map[string]uint64{}
 	r.llmProxyProtocolViolationMu.Unlock()
+	r.llmProxyUndecodableToolCallMu.Lock()
+	r.llmProxyUndecodableToolCallCount = map[string]uint64{}
+	r.llmProxyUndecodableToolCallMu.Unlock()
 	r.migrationStatusMu.Lock()
 	r.migrationStatus = map[migrationStatusKey]int64{}
 	r.migrationStatusMu.Unlock()
@@ -539,6 +546,39 @@ func (r *Registry) LLMProxyProtocolViolationFor(provider string) uint64 {
 	r.llmProxyProtocolViolationMu.Lock()
 	defer r.llmProxyProtocolViolationMu.Unlock()
 	return r.llmProxyProtocolViolationCount[provider]
+}
+
+// IncLLMProxyUndecodableToolCall increments
+// agentguard_llmproxy_undecodable_tool_call_total{provider=...}. Audit
+// finding B6: a non-streaming upstream body that fails strict decode
+// into the typed response struct was forwarded verbatim and UNGATED,
+// because "AgentGuard cannot decode it" was treated as "the client
+// cannot use it". Go rejects a type-mismatched field a lenient client
+// SDK ignores — including the tool_calls sitting next to it. When such a
+// body is found to carry a tool call after all, the proxy now refuses it
+// fail-closed instead of passing it through.
+//
+// A non-zero rate here means an upstream is emitting responses whose
+// field TYPES do not match the provider schema (a null or an extra field
+// is harmless and decodes normally). The usual cause is an
+// OpenAI-compatible shim (vLLM, Ollama, LiteLLM, a cloud gateway) that
+// stringifies a numeric field — worth fixing at the source, because
+// every one of these is a refused call the operator's agent did not get
+// to make. See pkg/llmproxy/forward.go.
+func (r *Registry) IncLLMProxyUndecodableToolCall(provider string) {
+	if provider == "" {
+		provider = "unknown"
+	}
+	r.llmProxyUndecodableToolCallMu.Lock()
+	r.llmProxyUndecodableToolCallCount[provider]++
+	r.llmProxyUndecodableToolCallMu.Unlock()
+}
+
+// LLMProxyUndecodableToolCallFor returns the current count (for tests).
+func (r *Registry) LLMProxyUndecodableToolCallFor(provider string) uint64 {
+	r.llmProxyUndecodableToolCallMu.Lock()
+	defer r.llmProxyUndecodableToolCallMu.Unlock()
+	return r.llmProxyUndecodableToolCallCount[provider]
 }
 
 // SetLLMProxyStreamsActive updates the active-streams gauge. Called
@@ -968,6 +1008,9 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeLabeledCounter(w, "agentguard_llmproxy_protocol_violation_total",
 		"LLM-proxy streams refused fail-closed because the upstream's content-block ordering was structurally unsafe to gate (e.g. an interleaved second tool_use), by provider.",
 		"provider", snapshotStringMap(&r.llmProxyProtocolViolationMu, r.llmProxyProtocolViolationCount))
+	writeLabeledCounter(w, "agentguard_llmproxy_undecodable_tool_call_total",
+		"LLM-proxy non-streaming responses refused fail-closed because the body failed strict decode yet still carried a tool call, which a lenient client SDK would have executed ungated (audit B6), by provider.",
+		"provider", snapshotStringMap(&r.llmProxyUndecodableToolCallMu, r.llmProxyUndecodableToolCallCount))
 	writeDeprecations(w)
 }
 

@@ -199,10 +199,25 @@ func (s *Server) forwardWithToolCallGating(
 	// never inject our own bytes into an already-corrupt wire. If the
 	// model wasn't going to call a tool the parser still works (empty
 	// tool_calls / tool_use slice).
+	//
+	// One exception, audit B6: a body that fails strict decode but still
+	// carries a tool call is NOT forwarded. Go rejects a type-mismatched
+	// field that a lenient client SDK ignores, so "we can't decode it"
+	// does not imply "the client can't execute it" — that gap let an
+	// ungated tool call reach the agent. hasLenientToolCall answers the
+	// narrower question, and only on this failure branch, so a body that
+	// decodes normally pays nothing for the check.
 	switch provider {
 	case "openai":
 		var parsed ChatCompletionResponse
 		if err := json.Unmarshal(bodyBytes, &parsed); err != nil {
+			if hasLenientToolCall(bodyBytes, "openai") {
+				metrics.IncLLMProxyUndecodableToolCall("openai")
+				s.auditUndecodableToolCall(r, "openai", reqModel)
+				decision := undecodableToolCallDecision("openai")
+				writeNonStreamingRefusal(s, w, resp.Header, "openai", decision, ToolCallCheck{Provider: "openai"}, reqModel)
+				return nil
+			}
 			passThroughResponse(w, resp.Header, resp.StatusCode, bodyBytes)
 			return nil
 		}
@@ -214,6 +229,13 @@ func (s *Server) forwardWithToolCallGating(
 	case "anthropic":
 		var parsed AnthropicMessagesResponse
 		if err := json.Unmarshal(bodyBytes, &parsed); err != nil {
+			if hasLenientToolCall(bodyBytes, "anthropic") {
+				metrics.IncLLMProxyUndecodableToolCall("anthropic")
+				s.auditUndecodableToolCall(r, "anthropic", reqModel)
+				decision := undecodableToolCallDecision("anthropic")
+				writeNonStreamingRefusal(s, w, resp.Header, "anthropic", decision, ToolCallCheck{Provider: "anthropic"}, reqModel)
+				return nil
+			}
 			passThroughResponse(w, resp.Header, resp.StatusCode, bodyBytes)
 			return nil
 		}
