@@ -545,6 +545,47 @@ Worth fixing at the source: each one is a call your agent did not get to
 make. Streaming responses are unaffected — they are gated by the
 accumulator, which has its own fail-closed defences.
 
+#### Ungateable streams fail closed (v1.0)
+
+Some streams are not corrupt so much as **unpartitionable**: the bytes
+arrive, but there is no way to bind them to a tool call the gate can
+evaluate. Gating requires knowing which fragments belong to which call,
+and when one of those relationships is missing the firewall cannot
+honestly say what the client is about to execute. Those streams are
+refused rather than forwarded, each under its own stable rule string:
+
+| Rule | Trigger |
+|---|---|
+| `deny:llm_api_proxy:tool_use_interleaved` | **Anthropic.** A second `tool_use` content block opened before the first closed, or a block's `content_block_start.input` carries real arguments *and* `input_json_delta` fragments stream for the same block. Two argument sources, no way to tell which one the client will use. |
+| `deny:llm_api_proxy:orphaned_tool_input` | **Anthropic.** An `input_json_delta` arrived while no `tool_use` block was open. The fragments belong to a call the firewall never saw start, so no gate cycle can ever evaluate them. |
+| `deny:llm_api_proxy:multi_choice_tool_calls` | **OpenAI.** Tool-call deltas arrived on more than one `choices[].index`. `tool_calls[i].index` is unique only *within* a choice, so two choices' fragments would merge into a single argument string the firewall gates and no client executes. |
+
+All three discard the buffered bytes and stop reading upstream. None is
+subject to `--fail-mode allow`: the guard is healthy, it simply cannot
+see what the client will execute.
+
+`n > 1` with tool calls is the only capability this costs, and it did not
+previously work correctly — the merged arguments were already wrong.
+Every mainstream agent framework sends `n = 1`, which is untouched.
+
+#### A stream that ends mid-tool-call is gated, not dropped
+
+When upstream reaches EOF — or sends `[DONE]` — while a tool call is
+still buffered, the cycle is **completed**, not abandoned:
+
+- Arguments that parse are gated normally and, on ALLOW, replayed
+  byte-identical.
+- Arguments truncated by the cut do not parse, so the cycle lands on
+  `deny:llm_api_proxy:malformed_tool_call` above: denied and audited.
+
+The buffered bytes are never flushed unexamined — that would hand the
+client the ungated call this whole mechanism exists to gate. Before
+v1.0 they were silently discarded instead, which left the client with
+an empty `200`, the gate un-run and no audit entry: the firewall went
+dark exactly where a truncated tool call was in flight. `[DONE]` is
+treated as the end of stream in its own right, so a gateway that holds
+the connection open after it no longer delays the verdict.
+
 ##### Audit fidelity
 
 For a proxy-manufactured refusal (the malformed-completion DENY above),
