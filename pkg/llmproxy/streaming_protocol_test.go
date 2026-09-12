@@ -272,10 +272,13 @@ func TestB7_AnthropicOrphanedToolInput_RefusesEndToEnd(t *testing.T) {
 	if !strings.Contains(got, "sure, running that") {
 		t.Errorf("pre-violation text was dropped; got %q", got)
 	}
-	// Nothing was gateable, so the gate correctly never ran — the
-	// refusal is unconditional, not policy-derived.
-	if n := len(spy.seen()); n != 0 {
-		t.Errorf("PolicyCheck ran %d times for an orphaned delta; want 0 (there is no assembled call to gate)", n)
+	// The refusal is unconditional, not policy-derived — but it is still
+	// AUDITED. With no RecordForcedAudit hook wired, auditStreamRefusal
+	// drives the normal PolicyCheck path purely for its audit side effect,
+	// so the hook fires exactly once and its verdict is ignored (the spy
+	// above returns ALLOW and the stream is refused anyway).
+	if n := len(spy.seen()); n != 1 {
+		t.Errorf("PolicyCheck ran %d times for an orphaned delta; want 1 (the audit fallback), and the refusal must stand regardless of its verdict", n)
 	}
 }
 

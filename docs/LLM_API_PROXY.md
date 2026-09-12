@@ -564,6 +564,17 @@ All three discard the buffered bytes and stop reading upstream. None is
 subject to `--fail-mode allow`: the guard is healthy, it simply cannot
 see what the client will execute.
 
+**All three are recorded in the central audit trail**, as are the two
+buffer-cap refusals (`deny:llm_api_proxy:buffer_overflow`, emitted both
+for one oversized SSE event and for cumulative arguments past
+`--max-buffer-bytes`). Each entry carries the rule, tenant, agent and
+provider, plus whatever tool identity the parser observed before
+refusing — often none, since a stream refused because its bytes cannot
+be bound to a call is by definition one where no call assembled. Before
+v1.0.1 these refusals reached the client and left no trace an operator
+could see: the gate never ran, so nothing was written, and the only
+signal was a process-local counter with no scrape endpoint.
+
 `n > 1` with tool calls is the only capability this costs, and it did not
 previously work correctly — the merged arguments were already wrong.
 Every mainstream agent framework sends `n = 1`, which is untouched.

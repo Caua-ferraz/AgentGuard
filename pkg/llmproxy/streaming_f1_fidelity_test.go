@@ -34,11 +34,16 @@ type forcedAuditSpy struct {
 type forcedAuditCall struct {
 	toolCallID string
 	decision   Decision
+	// call is the whole request as it would reach /v1/audit. The structural
+	// refusals in stream_refusal_audit_test.go assert on its identity fields
+	// (tenant, agent, session, provider), which are what make an entry
+	// actionable for an operator.
+	call ToolCallCheck
 }
 
 func (f *forcedAuditSpy) record(_ context.Context, tc *ToolCallCheck, d Decision) {
 	f.mu.Lock()
-	f.calls = append(f.calls, forcedAuditCall{toolCallID: tc.ToolCallID, decision: d})
+	f.calls = append(f.calls, forcedAuditCall{toolCallID: tc.ToolCallID, decision: d, call: *tc})
 	f.mu.Unlock()
 }
 
