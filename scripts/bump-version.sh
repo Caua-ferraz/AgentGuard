@@ -163,14 +163,16 @@ check_canonical 'plugins/python/pyproject.toml'             "^version\s*=\s*\"$O
 check_canonical 'plugins/python/agentguard/adapters/mcp.py' "^SDK_VERSION\s*=\s*\"$OLD\""
 check_canonical 'plugins/typescript/package.json'           "^\s*\"version\"\s*:\s*\"$OLD\""
 # package-lock.json: only the top-level (line 3) and the root-package entry
-# under packages.""; both follow a `"name": "@agentguard/sdk"` line. Use perl
-# to locate any leftover root-package-version line whose previous line names
-# our package, ignoring transitive-dep version blocks.
+# under packages.""; npm emits "version" on the line IMMEDIATELY after the
+# matching "name", so the guard is armed for exactly one line. It used to
+# stay armed until the next "name" key — but most lockfile entries are keyed
+# by path and carry no "name" at all, so any transitive dependency pinned at
+# $OLD (fs.realpath@1.0.0, wordwrap@1.0.0) tripped it. That made 1.0.0 the
+# first version this check could not be bumped away from.
 if [ -f 'plugins/typescript/package-lock.json' ]; then
   if perl -ne '
     if ($g && /"version"\s*:\s*"'"$OLD"'"/) { print; exit 1; }
-    $g = 1 if /"name"\s*:\s*"\@agentguard\/sdk"/;
-    $g = 0 if !/"name"\s*:\s*"\@agentguard\/sdk"/ && /"name"\s*:/;
+    $g = (/"name"\s*:\s*"\@agentguard\/sdk"/) ? 1 : 0;
   ' 'plugins/typescript/package-lock.json'; then
     :  # no leftovers
   else
