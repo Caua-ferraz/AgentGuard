@@ -4,7 +4,7 @@
 BINARY=agentguard
 MCP_GATEWAY_BINARY=agentguard-mcp-gateway
 LLM_PROXY_BINARY=agentguard-llm-proxy
-VERSION=1.0.1
+VERSION=1.1.0
 COMMIT=$(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)"
 

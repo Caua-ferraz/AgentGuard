@@ -79,7 +79,7 @@ func (c DecisionCounts) Other() uint64 {
 // which case the older size heuristic applies (see ReplayWithCheckpoint).
 //
 // Counts is the cumulative decision tally as of Offset. It is what makes the
-// counters restart-safe. A checkpoint without Counts (written by a pre-1.0.1
+// counters restart-safe. A checkpoint without Counts (written by a pre-1.1.0
 // binary) triggers one full replay so the lifetime totals are re-established
 // before the next checkpoint is written.
 //
@@ -155,7 +155,7 @@ func WriteCheckpoint(auditPath string, cp Checkpoint) error {
 // Missing audit file: returns (0, nil) — a fresh install has nothing to
 // replay, and that is not an error.
 //
-// ReplayFrom is the pre-1.0.1 primitive and is kept unchanged for embedders.
+// ReplayFrom is the pre-1.1.0 primitive and is kept unchanged for embedders.
 // It knows nothing about rotation or persisted counts; the server uses
 // ReplayWithCheckpoint.
 func ReplayFrom(auditPath string, cp *Checkpoint, fn func(Entry)) (int64, error) {

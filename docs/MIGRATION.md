@@ -151,7 +151,7 @@ Same as v0.4.0 → v0.4.1: `agentguard migrate --reset-checkpoint --audit-log <p
 
 2. **Update the framework adapters.** If you wrote v0.5.0 code that worked around the composition-wrapper isinstance issue (e.g., `Tool.from_function(func=lambda x: gt.invoke(x))` for LangChain, or skipped `Agent(tools=[GuardedCrewTool(...)])`), you can now pass the wrappers in directly. The v0.5.1 adapters subclass `langchain_core.tools.BaseTool` and `crewai.tools.BaseTool` natively. See [`ADAPTERS.md`](ADAPTERS.md).
 
-3. **Optionally silence the new update notice.** Every subcommand of the `agentguard` binary (since v1.0.1: every subcommand except `serve`) asynchronously checks the GitHub Releases API at startup and prints a single stderr line if a newer release is published. Set `AGENTGUARD_NO_UPDATE_CHECK=1` in scripted environments where stderr noise is unwanted. See [`CLI.md`](CLI.md#update-notice-on-startup-v051).
+3. **Optionally silence the new update notice.** Every subcommand of the `agentguard` binary (since v1.1.0: every subcommand except `serve`) asynchronously checks the GitHub Releases API at startup and prints a single stderr line if a newer release is published. Set `AGENTGUARD_NO_UPDATE_CHECK=1` in scripted environments where stderr noise is unwanted. See [`CLI.md`](CLI.md#update-notice-on-startup-v051).
 
 ### New surfaces
 

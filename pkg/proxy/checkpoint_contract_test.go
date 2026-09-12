@@ -185,7 +185,7 @@ func TestNewServer_CountersSurviveRestart_AcrossRotation(t *testing.T) {
 }
 
 // The production audit pipeline is a BufferedAsyncLogger over the
-// FileLogger. This is the shape that never checkpointed before 1.0.1.
+// FileLogger. This is the shape that never checkpointed before 1.1.0.
 func TestNewServer_BufferedLoggerCheckpointsAndSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")
@@ -232,7 +232,7 @@ func TestNewServer_BufferedLoggerCheckpointsAndSurvivesRestart(t *testing.T) {
 	}
 }
 
-// A checkpoint written by a pre-1.0.1 binary carries no tally. The first
+// A checkpoint written by a pre-1.1.0 binary carries no tally. The first
 // boot on the new binary must re-establish the lifetime totals rather than
 // resume with zeroed counters.
 func TestNewServer_LegacyCheckpointUpgradesToLifetimeCounts(t *testing.T) {

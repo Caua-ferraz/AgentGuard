@@ -52,7 +52,7 @@ import (
 // Versions injected at link time via -ldflags. Defaults are used
 // for `go run ./cmd/agentguard-llm-proxy` and `go test`.
 var (
-	version = "1.0.1"
+	version = "1.1.0"
 	commit  = "dev"
 )
 

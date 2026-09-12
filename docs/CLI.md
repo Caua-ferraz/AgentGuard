@@ -394,7 +394,7 @@ The `version` string is baked in at build time via `-ldflags "-X main.version=..
 The interactive subcommands (`check`, `validate`, `approve`, `deny`, `status`, `audit`, `migrate`, `tenant`, `version`) kick off an async best-effort check against the GitHub Releases API at startup (800 ms wait budget, 1.5 s HTTP timeout). If a newer release exists, one line lands on stderr before subcommand output; otherwise silent.
 
 ```
-Notice: agentguard v1.0.0 is deprecated, version v1.0.1 available — https://github.com/Caua-ferraz/AgentGuard/releases/latest
+Notice: agentguard v1.0.0 is deprecated, version v1.1.0 available — https://github.com/Caua-ferraz/AgentGuard/releases/latest
 ```
 
 `serve` never performs the check: the enforcement server opens no outbound connection the operator did not configure (see [`THREAT_MODEL.md`](THREAT_MODEL.md#outbound-connections)). The check is also skipped when the binary was built with `commit=dev` or a version string containing `dev` (what a plain `go build` without the Makefile's ldflags produces), when `AGENTGUARD_NO_UPDATE_CHECK` is set to any value other than `0`, or when the HTTP request fails. Never touches stdout, never affects exit codes. Only the `agentguard` binary has the check; the MCP gateway and LLM proxy never had one.

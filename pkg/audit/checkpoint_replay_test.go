@@ -203,7 +203,7 @@ func TestReplayWithCheckpoint_ResumeSeesOnlyNewEntriesAndKeepsLifetimeCounts(t *
 
 // --- upgrade path ----------------------------------------------------------
 
-// A checkpoint written by a pre-1.0.1 binary has an offset but no tally.
+// A checkpoint written by a pre-1.1.0 binary has an offset but no tally.
 // Resuming from it would freeze the counters at "since last boot" forever;
 // the contract is one full replay to establish the lifetime tally.
 func TestReplayWithCheckpoint_LegacyCheckpointWithoutCountsTriggersFullReplay(t *testing.T) {
@@ -479,7 +479,7 @@ func TestReplayWithCheckpoint_MissingFileIsNotAnError(t *testing.T) {
 
 // --- on-disk format --------------------------------------------------------
 
-// The checkpoint gained two additive fields. A pre-1.0.1 checkpoint must
+// The checkpoint gained two additive fields. A pre-1.1.0 checkpoint must
 // still parse, and a checkpoint without the new fields must serialise to
 // the exact bytes the old binary wrote (downgrade safety).
 func TestCheckpoint_JSONIsBackwardAndForwardCompatible(t *testing.T) {

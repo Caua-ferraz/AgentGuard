@@ -48,7 +48,7 @@ Default path: `<audit-log>.replay-checkpoint` — `audit.CheckpointSuffix` appen
 | release | shape |
 |---|---|
 | v0.4.1 – v1.0.0 | `{"offset": <bytes>, "audit_size": <bytes>}` |
-| v1.0.1+ | `{"offset": <bytes>, "audit_size": <bytes>, "file_id": "<live file's _meta.created_at>", "counts": {"total": N, "allow": N, "deny": N, "require_approval": N}}` |
+| v1.1.0+ | `{"offset": <bytes>, "audit_size": <bytes>, "file_id": "<live file's _meta.created_at>", "counts": {"total": N, "allow": N, "deny": N, "require_approval": N}}` |
 
 `file_id` says which live file `offset` refers to (rotation stamps every new live file with a fresh `_meta.created_at`); it is absent for headerless legacy files. `counts` is the lifetime decision tally as of `offset`: the next boot seeds `agentguard_checks_total` and its siblings from it and replays only the entries written afterwards, which is how the counters survive restarts. A v1.0.0 checkpoint (no `counts`) is still accepted and triggers one full replay of the live file to establish the tally. The tally starts at the first boot that wrote a checkpoint; archives that already existed before that boot are not scanned.
 
