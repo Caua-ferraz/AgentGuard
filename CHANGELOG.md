@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased] — targeting 1.0.1
+## [1.0.1] — 2026-09-12
 
 > **A correctness-and-honesty patch, from a review of the packages no prior audit had opened** (`pkg/metrics`, `pkg/depaudit`, `pkg/migrate`, `cmd/agentguard`, and both plugin SDKs). Six findings, all fixed. Two of them are behaviours the docs described that the code never implemented: `agentguard migrate --reset-checkpoint` deleted a file that did not exist and reported success, and the SDKs could not replay an approval at all, so the one-shot / validity / cost-reservation semantics documented for `/v1/check` never applied to SDK callers. A third is a defect invisible from the outside: the default audit pipeline never exposed its file path, so **no production deployment had ever written a replay checkpoint** — every boot re-scanned the entire live audit log, and the decision counters restarted from zero. Landing alongside them are five LLM-proxy gating fixes (B6, B7, B17, B18, B21), each one a stream or response the firewall could not evaluate and forwarded, dropped, or wrongly refused anyway.
 >
