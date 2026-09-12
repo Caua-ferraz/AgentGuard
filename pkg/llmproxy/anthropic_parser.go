@@ -181,6 +181,21 @@ func (a *AnthropicAccumulator) CloseAtEOF() (FeedResult, error) {
 	return a.complete()
 }
 
+// pendingIdentity returns the best-effort identity of the tool_use block in
+// flight. Mirrors the OpenAI sibling: used when a stream is refused for a
+// structural reason, so the audit entry names whatever the parser had managed
+// to see. Returns empty strings when no block is open.
+func (a *AnthropicAccumulator) pendingIdentity() (name, id string) {
+	if a.activeToolUseIndex < 0 {
+		return "", ""
+	}
+	st := a.blocks[a.activeToolUseIndex]
+	if st == nil {
+		return "", ""
+	}
+	return st.Name, st.ID
+}
+
 // FeedEvent ingests one complete Anthropic SSE event. Returns
 // FeedResult per the same contract as OpenAIToolCallAccumulator.
 //

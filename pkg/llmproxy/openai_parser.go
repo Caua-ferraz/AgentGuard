@@ -253,6 +253,30 @@ func (a *OpenAIToolCallAccumulator) CloseAtEOF() (FeedResult, error) {
 	return a.complete()
 }
 
+// pendingIdentity returns the best-effort identity of the call in flight:
+// the lowest-indexed tool_call that has a name, with its id. Used only when a
+// stream is refused for a structural reason, where there is no assembled call
+// to name but an audit entry carrying whatever we DID see beats one carrying
+// nothing.
+//
+// Returns empty strings when nothing identifiable has arrived.
+func (a *OpenAIToolCallAccumulator) pendingIdentity() (name, id string) {
+	best := -1
+	for idx, st := range a.byIndex {
+		if st.Name == "" {
+			continue
+		}
+		if best < 0 || idx < best {
+			best = idx
+		}
+	}
+	if best < 0 {
+		return "", ""
+	}
+	st := a.byIndex[best]
+	return st.Name, st.ID
+}
+
 // FeedEvent ingests one complete SSE event (raw bytes including the
 // final blank-line terminator). Returns a FeedResult describing what
 // the orchestrator should do with the event.

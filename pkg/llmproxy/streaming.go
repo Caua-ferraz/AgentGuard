@@ -465,13 +465,13 @@ func (s *Server) runOpenAIStreamLoop(w http.ResponseWriter, flusher http.Flusher
 			// is pathological; treat it as an upstream protocol error
 			// and emit a minimal refusal.
 			metrics.IncLLMProxyBufferOverflow("openai")
-			refusal := s.buildRefusal("openai", Decision{
-				Allow:  false,
-				Reason: "tool call arguments exceed gating buffer",
-				Rule:   "deny:llm_api_proxy:buffer_overflow",
-			}, &RefusalContext{Provider: "openai", AnthropicToolUseIndex: -1})
+			decision := bufferOverflowDecision()
+			refusal := s.buildRefusal("openai", decision,
+				&RefusalContext{Provider: "openai", AnthropicToolUseIndex: -1})
 			_, _ = w.Write(refusal)
 			flusher.Flush()
+			name, id := acc.pendingIdentity()
+			s.auditStreamRefusal(r, "openai", decision, name, id)
 			return
 		}
 
@@ -503,22 +503,24 @@ func (s *Server) runOpenAIStreamLoop(w http.ResponseWriter, flusher http.Flusher
 				// than one choice. Fail closed with a
 				// synthetic refusal naming the specific defect.
 				metrics.IncLLMProxyProtocolViolation("openai")
-				refusal := s.buildRefusal("openai",
-					protocolViolationDecision("openai", result.violation),
+				decision := protocolViolationDecision("openai", result.violation)
+				refusal := s.buildRefusal("openai", decision,
 					&RefusalContext{Provider: "openai", AnthropicToolUseIndex: -1})
 				_, _ = w.Write(refusal)
 				flusher.Flush()
+				name, id := acc.pendingIdentity()
+				s.auditStreamRefusal(r, "openai", decision, name, id)
 				return
 
 			case result.OverflowBufferBytes:
 				metrics.IncLLMProxyBufferOverflow("openai")
-				refusal := s.buildRefusal("openai", Decision{
-					Allow:  false,
-					Reason: "tool call arguments exceed gating buffer",
-					Rule:   "deny:llm_api_proxy:buffer_overflow",
-				}, &RefusalContext{Provider: "openai", AnthropicToolUseIndex: -1})
+				decision := bufferOverflowDecision()
+				refusal := s.buildRefusal("openai", decision,
+					&RefusalContext{Provider: "openai", AnthropicToolUseIndex: -1})
 				_, _ = w.Write(refusal)
 				flusher.Flush()
+				name, id := acc.pendingIdentity()
+				s.auditStreamRefusal(r, "openai", decision, name, id)
 				return
 
 			case result.Completed:
@@ -621,6 +623,18 @@ func (s *Server) gateAndFlushOpenAI(w http.ResponseWriter, flusher http.Flusher,
 	return true
 }
 
+// bufferOverflowDecision is the fail-closed verdict for a stream whose
+// buffered tool-call bytes exceeded --max-buffer-bytes. The Rule is stable and
+// alertable; the four sites that emit it (per provider: one oversized single
+// event, one cumulative overflow) shared this literal verbatim.
+func bufferOverflowDecision() Decision {
+	return Decision{
+		Allow:  false,
+		Reason: "tool call arguments exceed gating buffer",
+		Rule:   "deny:llm_api_proxy:buffer_overflow",
+	}
+}
+
 // protocolViolationDecision renders the fail-closed verdict for a
 // parser-signalled protocol violation. The kind comes from the
 // accumulator so the client-visible Reason and the operator-visible Rule
@@ -700,6 +714,52 @@ func (s *Server) closeAnthropicStreamAtEOF(w http.ResponseWriter, flusher http.F
 		return
 	}
 	s.gateAndFlushAnthropic(w, flusher, r, acc, result.CompletedToolCalls)
+}
+
+// auditStreamRefusal records a refusal the proxy manufactured for a STRUCTURAL
+// reason — an ungateable stream shape, or a buffer cap — in the central audit
+// trail.
+//
+// These refusals used to leave no trace at all. The gate never ran, so the
+// /v1/check path that normally writes the entry was never taken, and the only
+// signal was a counter in the proxy's process-local registry, which has no
+// scrape endpoint. An operator saw nothing: not the refusal, not the tenant,
+// not which upstream did it.
+//
+// The entry carries whatever identity the accumulator managed to observe.
+// Often that is nothing — a stream refused because its bytes cannot be bound
+// to a call is, by definition, one where no call assembled — and an entry
+// naming the rule, tenant, agent and provider is still the difference between
+// a diagnosable event and silence.
+//
+// Ordering: the client is served FIRST and audited after. The forced-audit
+// POST is a network round trip, and no refusal should wait on it. (The
+// malformed-completion path audits first; it predates this and continues to
+// work, but new refusal paths should not add latency ahead of the client.)
+//
+// Best-effort by design: a failure here must never change what the client
+// already received. Runs once per refused stream, never per event.
+func (s *Server) auditStreamRefusal(r *http.Request, provider string, decision Decision, toolName, toolCallID string) {
+	call := ToolCallCheck{
+		Provider:   provider,
+		ToolName:   toolName,
+		ToolCallID: toolCallID,
+		TenantID:   s.cfg.TenantID,
+		AgentID:    strings.TrimSpace(r.Header.Get("X-Agent-ID")),
+		SessionID:  strings.TrimSpace(r.Header.Get("X-Session-ID")),
+		Stream:     true,
+	}
+	if call.AgentID == "" {
+		call.AgentID = "llm-proxy"
+	}
+	if s.RecordForcedAudit != nil {
+		s.RecordForcedAudit(r.Context(), &call, decision)
+		return
+	}
+	// No forced-audit hook (tests, embedders): drive the normal /v1/check
+	// path purely for its audit side effect. Lower fidelity — it records the
+	// engine verdict rather than the refusal — but it is a trail.
+	_, _ = s.runPolicyCheck(r.Context(), call)
 }
 
 // malformedToolCallDecision is the fail-closed verdict the streaming
@@ -831,13 +891,13 @@ func (s *Server) runAnthropicStreamLoop(w http.ResponseWriter, flusher http.Flus
 
 		if isTooLarge {
 			metrics.IncLLMProxyBufferOverflow("anthropic")
-			refusal := s.buildRefusal("anthropic", Decision{
-				Allow:  false,
-				Reason: "tool call arguments exceed gating buffer",
-				Rule:   "deny:llm_api_proxy:buffer_overflow",
-			}, &RefusalContext{Provider: "anthropic", AnthropicToolUseIndex: acc.ActiveToolUseIndex()})
+			decision := bufferOverflowDecision()
+			refusal := s.buildRefusal("anthropic", decision,
+				&RefusalContext{Provider: "anthropic", AnthropicToolUseIndex: acc.ActiveToolUseIndex()})
 			_, _ = w.Write(refusal)
 			flusher.Flush()
+			name, id := acc.pendingIdentity()
+			s.auditStreamRefusal(r, "anthropic", decision, name, id)
 			return
 		}
 
@@ -865,22 +925,24 @@ func (s *Server) runAnthropicStreamLoop(w http.ResponseWriter, flusher http.Flus
 				// fail closed: discard the buffered bytes and emit a
 				// synthetic refusal naming the specific defect.
 				metrics.IncLLMProxyProtocolViolation("anthropic")
-				refusal := s.buildRefusal("anthropic",
-					protocolViolationDecision("anthropic", result.violation),
+				decision := protocolViolationDecision("anthropic", result.violation)
+				refusal := s.buildRefusal("anthropic", decision,
 					&RefusalContext{Provider: "anthropic", AnthropicToolUseIndex: acc.ActiveToolUseIndex()})
 				_, _ = w.Write(refusal)
 				flusher.Flush()
+				name, id := acc.pendingIdentity()
+				s.auditStreamRefusal(r, "anthropic", decision, name, id)
 				return
 
 			case result.OverflowBufferBytes:
 				metrics.IncLLMProxyBufferOverflow("anthropic")
-				refusal := s.buildRefusal("anthropic", Decision{
-					Allow:  false,
-					Reason: "tool call arguments exceed gating buffer",
-					Rule:   "deny:llm_api_proxy:buffer_overflow",
-				}, &RefusalContext{Provider: "anthropic", AnthropicToolUseIndex: acc.ActiveToolUseIndex()})
+				decision := bufferOverflowDecision()
+				refusal := s.buildRefusal("anthropic", decision,
+					&RefusalContext{Provider: "anthropic", AnthropicToolUseIndex: acc.ActiveToolUseIndex()})
 				_, _ = w.Write(refusal)
 				flusher.Flush()
+				name, id := acc.pendingIdentity()
+				s.auditStreamRefusal(r, "anthropic", decision, name, id)
 				return
 
 			case result.Completed:
