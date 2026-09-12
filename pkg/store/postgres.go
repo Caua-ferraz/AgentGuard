@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib" // pure-Go Postgres driver, registered under the name "pgx"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
@@ -251,6 +253,34 @@ func (s *PostgresStore) Close() error { return s.db.Close() }
 
 // --- approvals ---
 
+// sortBatch orders a batch by its ON CONFLICT key, ascending.
+//
+// Postgres holds a row lock on every upserted row until the transaction
+// commits, so two transactions touching the same rows in different orders
+// deadlock. These batches are built by ranging over Go maps, whose iteration
+// order is randomized per call, so with several nodes flushing the same keys
+// the inversion is close to certain — it accounted for every deadlock seen
+// under multi-node load. Sorting gives all writers one global lock order,
+// which makes the deadlock structurally impossible rather than merely rarer.
+//
+// Only tables whose key is shared between nodes need this. The consumption
+// tables carry node_id in theirs, so each node writes a disjoint row set and
+// has nothing to invert against. SQLiteStore needs none of it: it admits one
+// writer at a time database-wide.
+//
+// The batch is sorted in place. Callers build these slices per flush from a
+// fresh snapshot, so the reordering is not observable.
+func sortBatch[T any](rows []T, key func(T) (string, string)) {
+	sort.Slice(rows, func(i, j int) bool {
+		ai, bi := key(rows[i])
+		aj, bj := key(rows[j])
+		if ai != aj {
+			return ai < aj
+		}
+		return bi < bj
+	})
+}
+
 func (s *PostgresStore) UpsertApprovals(ctx context.Context, recs []ApprovalRecord) error {
 	if len(recs) == 0 {
 		return nil
@@ -260,6 +290,7 @@ func (s *PostgresStore) UpsertApprovals(ctx context.Context, recs []ApprovalReco
 			return ErrTenantRequired
 		}
 	}
+	sortBatch(recs, func(r ApprovalRecord) (string, string) { return r.TenantID, r.ID })
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		stmt, err := tx.PrepareContext(ctx, `
 			INSERT INTO approvals (tenant_id, id, request, result, created_at, resolved, decision, resolved_at, consumed_at, resolved_via, resolved_from)
@@ -352,6 +383,7 @@ func (s *PostgresStore) UpsertBuckets(ctx context.Context, buckets []BucketState
 			return ErrTenantRequired
 		}
 	}
+	sortBatch(buckets, func(b BucketState) (string, string) { return b.TenantID, b.Key })
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		stmt, err := tx.PrepareContext(ctx, `
 			INSERT INTO rate_buckets (tenant_id, key, tokens, max_tokens, window_ns, last_refill)
@@ -419,6 +451,7 @@ func (s *PostgresStore) UpsertCosts(ctx context.Context, costs []CostState) erro
 			return ErrTenantRequired
 		}
 	}
+	sortBatch(costs, func(c CostState) (string, string) { return c.TenantID, c.SessionID })
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		stmt, err := tx.PrepareContext(ctx, `
 			INSERT INTO session_costs (tenant_id, session_id, cost, last_updated)
@@ -669,7 +702,43 @@ func (s *PostgresStore) DeletePolicy(ctx context.Context, tenantID string) (bool
 // inTx runs fn inside a transaction, committing on success and rolling back on
 // error. Mirrors SQLiteStore.inTx: batching the write-behind upserts in one
 // transaction keeps each flush to a single commit.
+// pgDeadlockCode is the SQLSTATE Postgres returns to the transaction it chose
+// to kill to break a deadlock. maxTxRetries bounds how often that transaction
+// is replayed, and txRetryBackoff is the first pause between attempts (doubled
+// each time) so the victim does not immediately re-collide with the winner.
+const (
+	pgDeadlockCode = "40P01"
+	maxTxRetries   = 3
+	txRetryBackoff = 5 * time.Millisecond
+)
+
+// inTx runs fn inside a transaction, replaying it if Postgres aborts it for
+// deadlock.
+//
+// Sorting the batches below removes the inversion between two flushing nodes,
+// which is where every deadlock observed under multi-node load came from. The
+// retry covers the residue: a purge DELETE walking rows in index order can
+// still invert against an upsert touching the same rows, and a deadlock there
+// would otherwise drop a whole tick of writes.
+//
+// Replaying fn is safe because a deadlock abort rolls the transaction back
+// whole. Every closure here is a batch write with no effect outside its own
+// transaction, so a second attempt starts from the state the first one saw.
 func (s *PostgresStore) inTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	for attempt := 0; ; attempt++ {
+		err := s.tryTx(ctx, fn)
+		if !isDeadlock(err) || attempt >= maxTxRetries {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(txRetryBackoff << attempt):
+		}
+	}
+}
+
+func (s *PostgresStore) tryTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store: begin tx: %w", err)
@@ -682,6 +751,14 @@ func (s *PostgresStore) inTx(ctx context.Context, fn func(*sql.Tx) error) error 
 		return fmt.Errorf("store: commit: %w", err)
 	}
 	return nil
+}
+
+// isDeadlock reports whether err is a deadlock abort. Postgres kills one of the
+// two transactions and lets the other through, so the victim's work is undone
+// rather than half-applied, and replaying it is the documented recovery.
+func isDeadlock(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgDeadlockCode
 }
 
 // --- multi-node reconciliation (v1.0) ---
