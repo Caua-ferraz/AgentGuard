@@ -25,10 +25,10 @@ func TestHandleAuditRecord_RecordsForcedDeny(t *testing.T) {
 
 	rec := policy.AuditRecord{
 		Request: policy.ActionRequest{
-			Scope:    "shell",
-			Command:  "bash {\"cmd\":\"ls", // the malformed projection
-			AgentID:  "llm-proxy",
-			Meta:     map[string]string{"transport": "llm_api_proxy", "tool_call_id": "call_bad"},
+			Scope:   "shell",
+			Command: "bash {\"cmd\":\"ls", // the malformed projection
+			AgentID: "llm-proxy",
+			Meta:    map[string]string{"transport": "llm_api_proxy", "tool_call_id": "call_bad"},
 		},
 		Reason: "malformed tool call arguments — refused",
 		Rule:   "deny:llm_api_proxy:malformed_tool_call",
