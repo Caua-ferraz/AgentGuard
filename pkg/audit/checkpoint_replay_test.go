@@ -102,22 +102,9 @@ func countArchives(t *testing.T, dir string) int {
 	return n
 }
 
-// settle waits past the current second before more entries are written.
-//
-// Archive names carry a one-second timestamp (rotation.go
-// ArchiveTimestampFormat), and rotateLocked renames the live file onto that
-// name — so two rotations inside the same second silently overwrite the
-// first archive, breaking the rotated_from chain. That is a property of the
-// rotator, not of the replay; these tests step around it so they exercise
-// the chain walk rather than that collision. (Replay behaviour when a
-// segment really is gone is covered by the pruned-segment test below.)
-func settle() { time.Sleep(1100 * time.Millisecond) }
-
-// rotateOnce writes entries until the logger rotates exactly once, waiting
-// past the previous archive's second first (see settle).
+// rotateOnce writes entries until the logger rotates exactly once.
 func rotateOnce(t *testing.T, l *FileLogger, dir, prefix string, d policy.Decision) []string {
 	t.Helper()
-	settle()
 	before := countArchives(t, dir)
 	var names []string
 	for i := 0; i < 50; i++ {
@@ -281,10 +268,9 @@ func TestReplayWithCheckpoint_FollowsRotationChain(t *testing.T) {
 			for i := 0; i < tc.rotations; i++ {
 				post = append(post, rotateOnce(t, l, dir, fmt.Sprintf("rot%d", i), policy.Deny)...)
 			}
-			// The tail may itself push the live file past MaxSize; settle
-			// first so that rotation cannot land on the previous archive's
-			// name and destroy it.
-			settle()
+			// The tail may itself push the live file past MaxSize. That is
+			// fine: the rotator gives a same-second rotation its own archive
+			// name (see rotation_collision_test.go).
 			post = append(post, logNamed(t, l, "tail", 2, policy.RequireApproval)...)
 			l.Close()
 			if got := countArchives(t, dir); got < tc.rotations {
@@ -338,7 +324,6 @@ func TestReplayWithCheckpoint_PrunedCheckpointSegmentStillCarriesCounts(t *testi
 
 	burst1 := rotateOnce(t, l, dir, "burst1", policy.Deny) // lands in the checkpointed segment
 	burst2 := rotateOnce(t, l, dir, "burst2", policy.Deny) // lands in the middle archive
-	settle()                                               // see settle: keep any tail rotation off burst2's archive name
 	tail := logNamed(t, l, "tail", 2, policy.Allow)        // newest live file
 	l.Close()
 

@@ -76,14 +76,72 @@ func NewFileLoggerWithRotation(path string, cfg RotationConfig) (*FileLogger, er
 //     still a valid audit record.
 //   - Prune failure is logged but not surfaced — too many archives is an
 //     operational concern, not a data-loss one.
+//
+// maxArchiveProbe bounds how far nextFreeArchivePath will advance the
+// timestamp looking for a free name. A minute of headroom covers any
+// realistic burst; past that, failing the rotation is the safe outcome.
+const maxArchiveProbe = 60
+
+// nextFreeArchivePath returns the first archive path for basePath whose name
+// is not already taken, advancing the timestamp one second at a time.
+//
+// ArchiveTimestampFormat has one-second resolution, so a burst that rotates
+// twice inside the same second computes the same archive name twice — and
+// os.Rename replaces the target silently, destroying the first archive and
+// breaking the _meta.rotated_from chain that startup replay walks. Real audit
+// data, gone with no error anywhere.
+//
+// Advancing the timestamp rather than adding a disambiguating suffix is
+// deliberate: pruneArchivesWithAge only recognises a name whose suffix is
+// exactly len(ArchiveTimestampFormat), so a `<ts>-1` archive would be invisible
+// to BOTH count- and age-based pruning and would never be deleted. Keeping the
+// name exactly 16 characters preserves pruning, and lexicographic order stays
+// chronological. The cost is that a name can read up to maxArchiveProbe seconds
+// later than the instant it was rotated; the entries inside carry their own
+// timestamps, so nothing downstream depends on that precision.
+//
+// A name is taken if either the plain or the .gz form exists, because
+// compression writes alongside the rename.
+func nextFreeArchivePath(basePath string, ts time.Time) (string, error) {
+	for i := 0; i < maxArchiveProbe; i++ {
+		candidate := fmt.Sprintf("%s.%s", basePath, ts.Format(ArchiveTimestampFormat))
+		if !archiveNameTaken(candidate) {
+			return candidate, nil
+		}
+		ts = ts.Add(time.Second)
+	}
+	return "", fmt.Errorf("no free archive name for %s within %ds", basePath, maxArchiveProbe)
+}
+
+// archiveNameTaken reports whether an archive already occupies this path in
+// either its plain or compressed form.
+func archiveNameTaken(path string) bool {
+	if _, err := os.Stat(path); err == nil {
+		return true
+	}
+	if _, err := os.Stat(path + ".gz"); err == nil {
+		return true
+	}
+	return false
+}
+
 func (l *FileLogger) rotateLocked() error {
 	path := l.file.Name()
 	if err := l.file.Close(); err != nil {
 		return fmt.Errorf("close pre-rotate: %w", err)
 	}
 
-	ts := time.Now().UTC().Format(ArchiveTimestampFormat)
-	archivePath := fmt.Sprintf("%s.%s", path, ts)
+	archivePath, err := nextFreeArchivePath(path, time.Now().UTC())
+	if err != nil {
+		// No free name. Reopen the live file rather than rename over an
+		// existing archive: an over-large live file is recoverable, a
+		// destroyed archive is not.
+		if f, reopenErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, DefaultFilePermissions); reopenErr == nil {
+			l.file = f
+			l.enc = json.NewEncoder(f)
+		}
+		return err
+	}
 
 	if err := os.Rename(path, archivePath); err != nil {
 		// Rename failed — try to reopen the original so the logger is not

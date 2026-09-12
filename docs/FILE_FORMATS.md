@@ -58,7 +58,7 @@ On boot: a matching `file_id` resumes at `offset`. A different one means the log
 
 #### Rotated file headers
 
-Size-triggered rotation via the logger. Each rotated file carries the same schema-2 header as the live file, with `_meta.rotated_from` set to the path of the file whose tail rolled into it. Compression is applied to rotated files only; the live file stays uncompressed to keep appends cheap. Startup replay walks the chain backwards via `_meta.rotated_from` until it reaches the segment identified by the replay checkpoint's `file_id`.
+Size-triggered rotation via the logger. Archives are named `<audit-log>.<timestamp>` using `20060102T150405Z`, so lexicographic order is chronological and pruning sorts names without parsing them. That format has one-second resolution, so a burst rotating more than once inside a second would compute the same name twice; the rotator advances to the next free second rather than renaming over an existing archive, which means a name can read up to a minute later than the instant it rotated. If no slot is free the rotation fails and the live file keeps growing — recoverable, unlike a destroyed archive. Each rotated file carries the same schema-2 header as the live file, with `_meta.rotated_from` set to the path of the file whose tail rolled into it. Compression is applied to rotated files only; the live file stays uncompressed to keep appends cheap. Startup replay walks the chain backwards via `_meta.rotated_from` until it reaches the segment identified by the replay checkpoint's `file_id`.
 
 ### `.v040-backup` — one-time rollback artifact
 
