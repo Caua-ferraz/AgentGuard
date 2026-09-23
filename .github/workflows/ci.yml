@@ -164,10 +164,12 @@ jobs:
           DEPAUDIT_ONLINE: '1'
         run: go test -run '^TestDependencyAudit_Report$' -count=1 -v ./pkg/depaudit
 
-      # Live npm advisory discovery for the TS SDK (dev-only deps, lockfile
-      # present). Non-blocking: surfaces new advisories to triage into the
-      # registry without gating an unrelated transitive bump. The blocking
-      # teeth are the Go gate above + govulncheck.
+      # Live npm advisory discovery for the TS SDK (dev-only deps). Reads the
+      # committed package-lock.json, so no install step is needed; without a
+      # lockfile `npm audit` fails with ENOLOCK. Non-blocking: surfaces new
+      # advisories to triage into the registry without gating an unrelated
+      # transitive bump. The blocking teeth are the Go gate above +
+      # govulncheck.
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -352,7 +354,9 @@ jobs:
 
       - name: Install TS SDK deps
         working-directory: plugins/typescript
-        run: npm install
+        # npm ci installs exactly the committed lockfile and fails if
+        # package.json and package-lock.json disagree.
+        run: npm ci
 
       - name: Typecheck + build
         working-directory: plugins/typescript

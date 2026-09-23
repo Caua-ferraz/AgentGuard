@@ -53,9 +53,9 @@ __pycache__/
 dist/
 build/
 
-# Node SDK
+# Node SDK (plugins/typescript/package-lock.json is committed: CI installs
+# with `npm ci` and the npm publish builds exactly the tested tree)
 node_modules/
-package-lock.json
 
 # Misc
 CLAUDE.md
