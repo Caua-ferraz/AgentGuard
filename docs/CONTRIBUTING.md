@@ -60,7 +60,7 @@ This updates:
 | `docs/API.md` | `/health` and `/v1/health` response examples |
 | `docs/POLICY_REFERENCE.md` | self-label `as of **vX.Y.Z**` |
 
-Then commit, tag, and push — the PyPI publish workflow triggers when you **publish a GitHub Release** (not on the tag push alone):
+Then commit, tag, and push — the publish workflows trigger when you **publish a GitHub Release** (not on the tag push alone):
 
 ```bash
 git add -p
@@ -69,10 +69,13 @@ git tag v0.5.2
 git push && git push --tags
 
 # Then: GitHub UI → Releases → Draft a new release → Tag: v0.5.2 → Publish
-# That fires .github/workflows/publish-pypi.yml and uploads agentguardproxy==0.5.2.
+# That fires .github/workflows/publish-pypi.yml (uploads agentguardproxy==0.5.2)
+# and .github/workflows/publish-npm.yml (publishes @lictorate/agentguard@0.5.2).
 ```
 
-The publish workflow only triggers on `release: [published]` events or via manual `workflow_dispatch`. Pushing the tag alone does **not** trigger it. (This caught v0.5.1 — the tag was pushed but the release was never drafted, so PyPI stayed on v0.5.0 until the operator pressed Publish.)
+The publish workflows only trigger on `release: [published]` events or via manual `workflow_dispatch`. Pushing the tag alone does **not** trigger them. (This caught v0.5.1 — the tag was pushed but the release was never drafted, so PyPI stayed on v0.5.0 until the operator pressed Publish.)
+
+`publish-npm.yml` needs the repository secret `NPM_TOKEN` (a granular npm access token with publish rights on the `@lictorate` scope). It refuses to publish when the release tag doesn't match `plugins/typescript/package.json`'s version, and publishes with npm provenance.
 
 > **CRLF gotcha on Windows.** `bump-version.sh` uses perl regexes anchored with `$`, which don't match when the file has CRLF line endings (perl's `$` sees `\r` before `\n`). On Windows, several files in this repo end up with CRLF — the Makefile is the typical victim. If the script aborts at the Makefile step, patch that one file by hand and rerun. Fix tracked at the top of `scripts/bump-version.sh`.
 ### How to define your version
