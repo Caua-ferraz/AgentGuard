@@ -11,17 +11,19 @@ TypeScript / JavaScript client for [AgentGuard](https://github.com/Caua-ferraz/A
 ## Install
 
 ```bash
-npm install @agentguard/sdk
+npm install @lictorate/agentguard
 # or
-pnpm add @agentguard/sdk
+pnpm add @lictorate/agentguard
 # or
-yarn add @agentguard/sdk
+yarn add @lictorate/agentguard
 ```
+
+Published to npm from 1.1.1. The `@agentguard/sdk` package on npm is an unrelated project, not this SDK.
 
 ## Quick start
 
 ```ts
-import { AgentGuard } from '@agentguard/sdk';
+import { AgentGuard } from '@lictorate/agentguard';
 
 const guard = new AgentGuard({
   baseUrl: 'http://localhost:8080',   // or set AGENTGUARD_URL
@@ -71,7 +73,7 @@ Any thrown/rejected error from `fetch` (connection refused, DNS failure, TLS han
 ## The `guarded` higher-order function
 
 ```ts
-import { AgentGuard, guarded, AgentGuardDeniedError } from '@agentguard/sdk';
+import { AgentGuard, guarded, AgentGuardDeniedError } from '@lictorate/agentguard';
 
 const guard = new AgentGuard('http://localhost:8080');
 
@@ -214,7 +216,7 @@ The package ships CommonJS (`main: "dist/index.js"`) with types (`types: "dist/i
 
 - Node 18+ (CommonJS or ESM via default-interop).
 - Bundlers (webpack, esbuild, Rollup, Vite) — imports compile cleanly.
-- TypeScript projects (types resolve through `@agentguard/sdk`).
+- TypeScript projects (types resolve through `@lictorate/agentguard`).
 
 Browser / Workers / Deno runtimes: no polyfills needed — the SDK uses only `fetch`, `AbortController`, `setTimeout`. `process.env` reads are guarded.
 

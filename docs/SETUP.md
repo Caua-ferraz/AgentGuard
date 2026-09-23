@@ -181,15 +181,22 @@ rules and per-framework gotchas live in [`ADAPTERS.md`](ADAPTERS.md).
 ### Install
 
 ```bash
+# From npm (published from 1.1.1)
+npm install @lictorate/agentguard
+
+# Or from source: build the package, then install it into your project
 cd plugins/typescript
-npm install
+npm ci
 npm run build
+cd /path/to/your-project && npm install /path/to/AgentGuard/plugins/typescript
 ```
+
+`@agentguard/sdk` on npm is an unrelated project, not this SDK.
 
 ### Usage
 
 ```typescript
-import { AgentGuard } from '@agentguard/sdk';
+import { AgentGuard } from '@lictorate/agentguard';
 
 const guard = new AgentGuard({
   baseUrl: 'http://localhost:8080',

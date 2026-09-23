@@ -5,7 +5,7 @@
  *
  * @example
  * ```ts
- * import { AgentGuard } from '@agentguard/sdk';
+ * import { AgentGuard } from '@lictorate/agentguard';
  *
  * const guard = new AgentGuard('http://localhost:8080');
  * const result = await guard.check('shell', { command: 'rm -rf ./data' });

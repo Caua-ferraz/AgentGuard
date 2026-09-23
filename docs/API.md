@@ -542,7 +542,7 @@ g = Guard("http://localhost:8080", agent_id="my-agent", tenant_id="")  # → /v1
 **TypeScript:**
 
 ```typescript
-import { AgentGuard } from "@agentguard/sdk";
+import { AgentGuard } from "@lictorate/agentguard";
 
 // Default — legacy /v1/... URLs.
 const g = new AgentGuard({ baseUrl: "http://localhost:8080", agentId: "my-agent" });

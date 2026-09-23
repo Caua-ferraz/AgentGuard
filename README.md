@@ -100,10 +100,10 @@ if result.allowed:
     execute(command)
 ```
 
-TypeScript/Node.js:
+TypeScript/Node.js (`npm install @lictorate/agentguard`):
 
 ```typescript
-import { AgentGuard } from '@agentguard/sdk';
+import { AgentGuard } from '@lictorate/agentguard';
 
 const guard = new AgentGuard({ baseUrl: 'http://localhost:8080', agentId: 'my-bot' });
 const result = await guard.check('network', { url: 'https://api.production.internal/deploy' });

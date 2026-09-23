@@ -98,15 +98,15 @@ done
 
 # package-lock.json has many "version" lines (one per transitive dep). Only
 # rewrite occurrences whose previous line is the root package's own
-# `"name": "@agentguard/sdk"` declaration. There are two such occurrences
+# `"name": "@lictorate/agentguard"` declaration. There are two such occurrences
 # (the top-level field and the entry under packages.""). A state variable
-# `$g` is set when the previous line names @agentguard/sdk and consumed by
+# `$g` is set when the previous line names @lictorate/agentguard and consumed by
 # the very next "version" line so transitive-dep versions stay untouched.
 PLOCK='plugins/typescript/package-lock.json'
 if [ -f "$PLOCK" ]; then
   perl -i -pe '
     if ($g) { s/("version"\s*:\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/; $g = 0; }
-    if (/"name"\s*:\s*"\@agentguard\/sdk"/) { $g = 1; }
+    if (/"name"\s*:\s*"\@lictorate\/agentguard"/) { $g = 1; }
   ' "$PLOCK"
   if ! grep -Fq "\"version\": \"$NEW\"" "$PLOCK"; then
     echo "Error: $PLOCK did not pick up $NEW — check the perl block" >&2
@@ -172,7 +172,7 @@ check_canonical 'plugins/typescript/package.json'           "^\s*\"version\"\s*:
 if [ -f 'plugins/typescript/package-lock.json' ]; then
   if perl -ne '
     if ($g && /"version"\s*:\s*"'"$OLD"'"/) { print; exit 1; }
-    $g = (/"name"\s*:\s*"\@agentguard\/sdk"/) ? 1 : 0;
+    $g = (/"name"\s*:\s*"\@lictorate\/agentguard"/) ? 1 : 0;
   ' 'plugins/typescript/package-lock.json'; then
     :  # no leftovers
   else
