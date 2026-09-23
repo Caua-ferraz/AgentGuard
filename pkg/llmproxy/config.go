@@ -84,7 +84,9 @@ const (
 type Config struct {
 	// Listen is the proxy's HTTP bind address. Default DefaultListen
 	// (loopback). Non-loopback is rejected unless --proxy-api-key
-	// is set (mirrors central server's localhost-only fallback).
+	// is set (mirrors central server's localhost-only fallback). An
+	// empty host (":8081") binds every interface, so it counts as
+	// non-loopback.
 	Listen string
 
 	// UpstreamOpenAI is the base URL for OpenAI-shape requests
@@ -277,17 +279,25 @@ func (c *Config) Validate() error {
 	// docs/LLM_API_PROXY.md § 8.1: avoids accidental
 	// internet-exposed proxies.
 	if !isLoopbackHost(host) && c.ProxyAPIKey == "" {
+		if strings.TrimSpace(host) == "" {
+			return fmt.Errorf("--listen %q has no host, so it binds every interface (non-loopback) without --proxy-api-key; refuse to start to avoid exposing an unauthenticated proxy (use 127.0.0.1:%s for loopback only)", c.Listen, port)
+		}
 		return fmt.Errorf("--listen %q binds non-loopback host %q without --proxy-api-key; refuse to start to avoid exposing an unauthenticated proxy", c.Listen, host)
 	}
 
 	return nil
 }
 
-// isLoopbackHost returns true for "", "localhost", "127.x.x.x", "::1",
-// "[::1]". Used by Validate to detect loopback binds.
+// isLoopbackHost returns true for "localhost", "127.x.x.x", "::1" and
+// "[::1]". Used by Validate to detect loopback binds. An empty host is
+// NOT loopback: net/http treats ":8081" as "listen on every interface",
+// the same as "0.0.0.0:8081".
 func isLoopbackHost(host string) bool {
 	host = strings.TrimSpace(host)
-	if host == "" || host == "localhost" {
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
 		return true
 	}
 	// Strip brackets from IPv6 literal (net.SplitHostPort already

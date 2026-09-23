@@ -74,8 +74,9 @@ agentguard-llm-proxy \
 ```
 
 The proxy refuses to bind to non-loopback hosts without
-`--proxy-api-key` set, so the localhost defaults are safe by
-construction.
+`--proxy-api-key` set — that includes an empty host such as `:8081`,
+which listens on every interface — so the localhost defaults are safe
+by construction.
 
 ## 30 seconds — point your code at the proxy
 

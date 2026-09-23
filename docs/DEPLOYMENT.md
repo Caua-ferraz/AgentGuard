@@ -264,7 +264,7 @@ agentguard-mcp-gateway --upstream "fs:npx -y @modelcontextprotocol/server-filesy
 **Production defaults that matter:**
 
 - `--fail-mode=deny` — if the AgentGuard server is unreachable, refuse rather than passthrough.
-- `--listen 127.0.0.1:<port>` — inbound is not authenticated; bind only to trusted-network interfaces.
+- `--listen 127.0.0.1:<port>` — inbound is not authenticated unless you set `--proxy-api-key`. The LLM proxy refuses any non-loopback `--listen` without that key, including `:<port>` with no host (which binds every interface).
 - 30 s graceful-shutdown window (systemd `TimeoutStopSec=30s`, Kubernetes `terminationGracePeriodSeconds: 30`). The LLM proxy buffers tool calls inside streaming responses; a hard kill truncates the client's response.
 - Pin proxy binary and AgentGuard server to the same minor version; wire protocol is stable within `0.x.y`, not across majors.
 

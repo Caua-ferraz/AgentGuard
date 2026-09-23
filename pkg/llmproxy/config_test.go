@@ -99,6 +99,32 @@ func TestConfig_NonLoopbackBindRequiresProxyAuth(t *testing.T) {
 	}
 }
 
+// An empty host (":8081") makes net/http listen on every interface, so it
+// must be treated like 0.0.0.0: refused without --proxy-api-key. It used to
+// pass validation as "loopback" and start an unauthenticated proxy on all
+// interfaces.
+func TestConfig_EmptyHostBindRequiresProxyAuth(t *testing.T) {
+	t.Setenv("AGENTGUARD_API_KEY", "")
+	for _, l := range []string{":8081", "[::]:8081"} {
+		t.Run(l, func(t *testing.T) {
+			_, err := ParseConfigWithOutput([]string{"--listen", l}, &bytes.Buffer{})
+			if err == nil {
+				t.Fatalf("--listen %q without --proxy-api-key: want refusal, got nil", l)
+			}
+			if !strings.Contains(err.Error(), "non-loopback") {
+				t.Errorf("err = %v, want contains non-loopback", err)
+			}
+			if _, err := ParseConfigWithOutput([]string{"--listen", l, "--proxy-api-key", "k"}, &bytes.Buffer{}); err != nil {
+				t.Errorf("--listen %q with --proxy-api-key should succeed; got %v", l, err)
+			}
+		})
+	}
+	if _, err := ParseConfigWithOutput([]string{"--listen", ":8081"}, &bytes.Buffer{}); err == nil ||
+		!strings.Contains(err.Error(), "every interface") {
+		t.Errorf("empty-host refusal should explain it binds every interface; got %v", err)
+	}
+}
+
 func TestConfig_LoopbackVariants(t *testing.T) {
 	t.Setenv("AGENTGUARD_API_KEY", "")
 	loopbacks := []string{"127.0.0.1:8081", "[::1]:8081", "localhost:8081"}

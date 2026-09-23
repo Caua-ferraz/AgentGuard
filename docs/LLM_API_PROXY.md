@@ -78,7 +78,7 @@ agentguard-llm-proxy \
 
 | flag                     | meaning                                                   | default                      |
 |--------------------------|-----------------------------------------------------------|------------------------------|
-| `--listen`               | address to bind (host:port)                               | `127.0.0.1:8081`             |
+| `--listen`               | address to bind (host:port). A non-loopback address — including an empty host such as `:8081`, which binds every interface — requires `--proxy-api-key` (§ 8.1). | `127.0.0.1:8081`             |
 | `--upstream-openai`      | base URL for OpenAI-shape requests                        | `https://api.openai.com`     |
 | `--upstream-anthropic`   | base URL for Anthropic-shape requests                     | `https://api.anthropic.com`  |
 | `--guard-url`            | central server `/v1/check` URL                            | `http://127.0.0.1:8080`      |
@@ -740,8 +740,11 @@ proxy can be an internal trust boundary that re-keys the call to the
 real upstream.
 
 If `--listen` is non-loopback **and** `--proxy-api-key` is unset, the
-proxy refuses to start (logs ERROR and exits 1). Avoids accidental
-internet-exposed proxies.
+proxy refuses to start (it prints the reason to stderr and exits with
+status 2). Non-loopback means `0.0.0.0`, `[::]`, an
+external address, **or an empty host (`:8081`), which binds every
+interface**; only `127.x.x.x`, `[::1]` and `localhost` count as
+loopback. Avoids accidental internet-exposed proxies.
 
 ### 8.2 Outbound to central guard
 
