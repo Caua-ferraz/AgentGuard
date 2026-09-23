@@ -231,8 +231,10 @@ lost, matching v0.5.x's in-memory behaviour.
    go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-mcp-gateway@v0.9.0
    go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@v0.9.0
    pip install --upgrade "agentguardproxy==0.9.0"
-   npm install @agentguard/sdk@0.9.0
+   # TypeScript SDK: not on npm at 0.9.0 — build it from plugins/typescript
    ```
+
+   *(Corrected in v1.1.1: this block previously ended with `npm install @agentguard/sdk@0.9.0`. That npm package is unrelated to AgentGuard; the TypeScript SDK was not published at 0.9.0. It is on npm as `@lictorate/agentguard` from 1.1.1.)*
 
 2. **(Optional) Forward your audit log to WORM storage** if you want tamper-evidence — see the README audit bullet and [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
@@ -291,8 +293,11 @@ Trivial. v0.9.0 introduces no on-disk state, no schema bumps, and no wire-protoc
    go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-mcp-gateway@v1.0.0
    go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@v1.0.0
    pip install --upgrade "agentguardproxy==1.0.0"
-   npm install @agentguard/sdk@1.0.0
+   # TypeScript SDK: not on npm at 1.0.0 — build it from plugins/typescript
    ```
+
+   *(Corrected in v1.1.1: this block previously ended with `npm install @agentguard/sdk@1.0.0`. That npm package is unrelated to AgentGuard; the TypeScript SDK was not published at 1.0.0. It is on npm as `@lictorate/agentguard` from 1.1.1.)*
+
 2. If you run (or plan to run) more than one replica: provision PostgreSQL,
    set `--store-dsn postgres://…` and a distinct `--node-id` per replica,
    and read the bounded-overshoot semantics in
