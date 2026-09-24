@@ -61,6 +61,17 @@ Corrected in place in earlier CHANGELOG entries, release notes and `docs/MIGRATI
 - **`make docker-run` requires `AGENTGUARD_API_KEY`.**
 - Downgrade to 1.1.0 is safe: nothing on disk changed. See `docs/MIGRATION.md`.
 
+### Verification
+
+- **Go** (1.26.7): `go build ./...`, `go vet ./...` and `gofmt -l .` are clean, `golangci-lint run ./...` at CI's version (v2.12.2) reports 0 issues, and `go test -race ./...` passes in all 21 packages.
+- **Python** (3.13, with the `dev`, `langchain`, `crewai` and `mcp` extras that CI's `python-test` job installs): 354 passed, 3 skipped, 35 integration tests deselected. The real-server E2E file ran with 15 passes; CI requires at least 10.
+- **TypeScript:** `npm ci` from the committed lockfile, the `tsc` build, and 95 jest tests pass.
+- **Policies:** `agentguard validate` accepts all three shipped policy files.
+- **LLM proxy bind check, on the built binary:** `--listen :18081`, `[::]:18081` and `0.0.0.0:18081` without `--proxy-api-key` exit with status 2; `127.0.0.1:18081`, and `:18082` with a key, start and answer `/healthz`.
+- **Version bump:** `scripts/bump-version.sh 1.1.1` passed its leftover check, and all three binaries report `1.1.1`.
+- **Docs:** every relative link and anchor in tracked Markdown resolves. A sweep for the stale strings this release removes (`@agentguard/sdk`, the misspelled address, `server-fetch`, `server-github`, `docker pull`, `Go 1.22+`, Node 18, the unpublished plan link) finds only corrections, warnings and historical text.
+- **Not run for this release:** the Docker image build and CI's real-framework `integration-tests` matrix. CI runs both.
+
 ## [1.1.0] — 2026-09-13
 
 > **A correctness-and-honesty release, from a review of the packages no prior audit had opened** (`pkg/metrics`, `pkg/depaudit`, `pkg/migrate`, `cmd/agentguard`, and both plugin SDKs). Six findings, all fixed. Two of them are behaviours the docs described that the code never implemented: `agentguard migrate --reset-checkpoint` deleted a file that did not exist and reported success, and the SDKs could not replay an approval at all, so the one-shot / validity / cost-reservation semantics documented for `/v1/check` never applied to SDK callers. A third is a defect invisible from the outside: the default audit pipeline never exposed its file path, so **no production deployment had ever written a replay checkpoint** — every boot re-scanned the entire live audit log, and the decision counters restarted from zero. Landing alongside them are five LLM-proxy gating fixes (B6, B7, B17, B18, B21), each one a stream or response the firewall could not evaluate and forwarded, dropped, or wrongly refused anyway. Landing alongside *those* are five more that only a running cluster could produce: a migration race that killed replicas at boot, a rotation that destroyed archives, a flush deadlock between nodes, streaming refusals that reached the client but never the audit trail, and a checkpoint path no deployment had ever written to. Eighteen fixes in all.
