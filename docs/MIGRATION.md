@@ -322,4 +322,97 @@ return to single-node SQLite (v0.9 has no Postgres backend).
 
 ---
 
+## v1.1.0 → v1.1.1
+
+Coming from 1.0.x? Read the Compatibility section of
+[`CHANGELOG.md`](../CHANGELOG.md) § 1.1.0 first. This section covers only
+1.1.0 → 1.1.1.
+
+### What happens automatically
+
+- Nothing on disk changes: no store schema, audit format or checkpoint
+  change. `/v1/check`, the audit format (`schema_version: 2`) and the policy
+  schema (`version: "1"`) are unchanged.
+
+### Behavior changes worth knowing about
+
+- **`agentguard-llm-proxy --listen :PORT` refuses to start without
+  `--proxy-api-key`.** A listen address with no host binds every interface,
+  but 1.1.0 treated it as loopback and started with no inbound auth. It now
+  exits with status 2 and says `--listen ":8081" has no host, so it binds
+  every interface …`. Use `127.0.0.1:PORT` for loopback only, or set
+  `--proxy-api-key` if you meant to listen on every interface.
+- **The shipped `configs/default.yaml` changed for the example fetch and
+  GitHub MCP servers.** This only matters if you run that file itself; a
+  copy you made earlier keeps its old rules.
+  - `fetch:*` calls require approval. After approval, the mapped `network`
+    check still applies, so only allow-listed hosts pass. In 1.1.0 the
+    official fetch server's `fetch:fetch` tool matched no rule and was
+    denied by default.
+  - `github:*` is no longer in `tool_scope_map`. GitHub calls still require
+    approval, and an approved call now runs. In 1.1.0 the mapped `network`
+    check found no domain in GitHub's arguments and denied every call,
+    approved or not.
+- **`go install` builds show the update notice.** The interactive
+  subcommands of a binary installed with `go install …@vX.Y.Z` or `@latest`
+  now check the GitHub Releases API at startup, as
+  [`CLI.md`](CLI.md#update-notice-on-startup-v051) describes; in 1.1.0 those
+  builds reported `commit=dev` and skipped the check. `serve` still never
+  checks. Set `AGENTGUARD_NO_UPDATE_CHECK=1` to opt out.
+- **`agentguard version` identifies more builds.** A `go install` build
+  prints `agentguard 1.1.1 (module v1.1.1)` instead of `(dev)`, and a
+  `go build` in a git checkout prints the short revision. A script that
+  matched the literal `(dev)` needs updating.
+- **`make docker-run` requires `AGENTGUARD_API_KEY`.** It passes the key
+  into the container and stops before building the image when the variable
+  is unset. Without a key the server binds the container's own loopback, so
+  the published port never answered.
+
+### What you should do
+
+1. **Swap the binaries and the Python SDK to 1.1.1.**
+
+   ```bash
+   go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@v1.1.1
+   go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-mcp-gateway@v1.1.1
+   go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@v1.1.1
+   pip install --upgrade "agentguardproxy==1.1.1"
+   ```
+
+2. **TypeScript SDK: install it from npm and update your imports.** The SDK
+   is on npm as `@lictorate/agentguard` from 1.1.1. Before that it could
+   only be built from `plugins/typescript`, where its package name was
+   `@agentguard/sdk`, so the import path changes:
+
+   ```bash
+   npm uninstall @agentguard/sdk   # your local build, or the unrelated npm package of that name
+   npm install @lictorate/agentguard@1.1.1
+   ```
+
+   ```ts
+   // before
+   import { AgentGuard } from '@agentguard/sdk';
+   // after
+   import { AgentGuard } from '@lictorate/agentguard';
+   ```
+
+3. If you start the LLM proxy with `--listen :PORT`, change it to
+   `127.0.0.1:PORT` or add `--proxy-api-key`.
+4. If your MCP client config still launches
+   `npx -y @modelcontextprotocol/server-fetch` (a package that never existed
+   on npm, so that namespace was always empty) or the deprecated
+   `@modelcontextprotocol/server-github`, switch to the launchers in
+   [`examples/`](../examples/): `uvx mcp-server-fetch` and GitHub's
+   `ghcr.io/github/github-mcp-server` image.
+
+### Rollback to v1.1.0
+
+Supported: nothing on disk changed. Rolling back brings back the
+`--listen :PORT` hole, where the proxy starts on every interface with no
+inbound auth, so use `127.0.0.1:PORT` or set `--proxy-api-key` before you
+roll back. `@lictorate/agentguard` has no 1.1.0 release on npm; to roll the
+TypeScript SDK back, build `plugins/typescript` at the `v1.1.0` tag.
+
+---
+
 _Migration guides for prior releases live in the git history of this file._

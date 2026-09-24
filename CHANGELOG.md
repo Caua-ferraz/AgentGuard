@@ -2,6 +2,65 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.1] — 2026-09-23
+
+> **A patch release from an audit of names, ownership and docs against the code.** It checked every install command, contact address, example config and documented behaviour against what exists. The worst findings weren't in the code. The docs told TypeScript users to install `@agentguard/sdk`, an npm package owned by an unrelated project. The security contact address didn't exist, so vulnerability reports sent to it were never received. Three release notes told Docker users to pull an image that was never published. And the example MCP configs launched a fetch server package that has never existed. One finding was in the code: `agentguard-llm-proxy --listen :PORT` started on every interface with no inbound auth.
+>
+> **No public API change.** No exported identifier in `pkg/` was added, removed or changed. The one new Go package, `cmd/internal/buildinfo`, is internal to the module. Config keys, routes, wire fields, the audit format (`schema_version: 2`) and the policy schema (`version: "1"`) are unchanged. See *Compatibility* for the behaviour changes, one of which is a deliberate fail-closed correction.
+
+### Fixed
+
+- **`agentguard-llm-proxy --listen :PORT` no longer starts unauthenticated on every interface.** A listen address with no host binds all interfaces, but `isLoopbackHost("")` returned true, so the proxy skipped the rule that non-loopback binds require `--proxy-api-key`. An empty host is now non-loopback, like `0.0.0.0`. The refusal says the address binds every interface and suggests `127.0.0.1:PORT`.
+- **The update notice and `agentguard version` now recognise `go install` release builds.** Binaries built without the Makefile's `-ldflags` keep `commit=dev`, and the update check skipped every such build, so `go install …@latest` (the install path the README documents) never showed the notice, and `version` printed `(dev)`. The new `cmd/internal/buildinfo` reads Go build info: a tagged module version (`vX.Y.Z`) counts as a release build, and `version` in all three binaries prints the best identifier available (the ldflags commit, else the VCS revision with `-dirty`, else `module vX.Y.Z`). `serve` still never checks. The Dockerfile takes a `COMMIT` build arg, which `make docker` sets to the git short hash.
+- **`make docker-run` and the documented `docker run` commands pass `AGENTGUARD_API_KEY`.** Without a key the server binds `127.0.0.1`, which in a container is the container's own loopback, so the published port never answered. `make docker-run` now fails with an explanation before building when the variable is unset, and mounts the audit volume.
+- **`agentguard status` explains a server without `--dashboard`.** It printed `Error decoding pending list: json: cannot unmarshal number …`; it now prints `Pending approvals: unavailable (the server was started without --dashboard)` and reports other non-200 statuses plainly. The exit code is unchanged.
+- **CLI help text.** `status` no longer claims to show connected agents, and `--watch` says it logs each policy reload (the server always hot-reloads its policy).
+- **`scripts/bump-version.sh` checks for leftover versions on macOS.** The final check used `grep -P`, which BSD grep lacks, and read the error as "no leftover". It now uses perl, and treats a perl error as a failure. The script also keeps the `docs/DEPLOYMENT.md` image tags and the `docs/CLI.md` version example current.
+
+### Added
+
+- **npm publishing for the TypeScript SDK.** `.github/workflows/publish-npm.yml` runs when a GitHub release is published (or by manual dispatch), checks that the release tag matches `package.json`'s version, runs `npm ci`, build and test, and publishes with `npm publish --provenance --access public`. It needs the `NPM_TOKEN` repository secret.
+
+### Changed
+
+- **The TypeScript SDK is published to npm as `@lictorate/agentguard`, starting with 1.1.1.** It was never on npm before, and its `package.json` name, `@agentguard/sdk`, belongs to an unrelated npm project. Install and import examples use the new name, and warn that `@agentguard/sdk` is unrelated.
+- **`plugins/typescript/package-lock.json` is committed, and CI installs with `npm ci`.** The lockfile was gitignored, so the `dep-audit` job's `npm audit` failed on every run (hidden by `continue-on-error`) and each build resolved a fresh dependency tree.
+- **The example MCP configs launch the official fetch and GitHub servers.** They started `npx -y @modelcontextprotocol/server-fetch`, which has never existed on npm (the gateway ran with an empty `fetch` namespace), and the deprecated `@modelcontextprotocol/server-github`. They now use `uvx mcp-server-fetch` and `docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server`. Each client guide lists the launcher (npx, uvx or docker) each upstream needs.
+- **`configs/default.yaml` sends calls to those servers to approval.** The official fetch server's only tool, `fetch:fetch`, matched no `mcp_tool` rule and was denied by default; it now requires approval, and the mapped `network` check still limits approved fetches to allow-listed hosts. `github:*` already required approval, but `tool_scope_map` mapped it to `network`, and GitHub's tools carry owner and repo rather than a URL, so every call was denied even after approval. That mapping is removed.
+
+### Documentation
+
+- **New:** a `docs/MIGRATION.md` section for 1.1.0 → 1.1.1; a "Latency budget" section in `docs/CONTRIBUTING.md` (the hot-path rules CI enforces, previously cited from an unpublished file); and a `POST /v1/audit` section in `docs/API.md` (the DENY-only audit-ingest endpoint added in 1.0.0).
+- **Quickstarts:** the MCP quickstart asked Claude to write a file, which the default policy denies through the gateway; it now shows a read being allowed and a write being denied. The LLM proxy quickstart shows the shell command the dashboard records, not the tool name.
+- **MCP Gateway:** the reference command includes the `--policy` flag that the default strict mode requires. The docs no longer claim a built-in tool-to-scope table or a `mapped_scope` field in the gateway; neither exists. The documented spawn-failure log line matches what the gateway logs.
+- **LLM API Proxy:** the inbound auth header is `X-AgentGuard-Proxy-Auth`, not `Authorization`; the proxy serves only `/healthz` (no `/metrics` or `/health`); the non-loopback refusal is keyed on `--proxy-api-key`; hop-by-hop headers are dropped.
+- **Deployment:** the Compose example builds the image and the Kubernetes example points at your own registry, because AgentGuard publishes no image. The Kubernetes `args` gain `--policy`, without which the pod failed to start. Stale source line numbers are replaced with function names.
+- **API reference:** `/api/stream` sends only `check` and `resolved` events (also corrected in `OBSERVABILITY.md` and `DASHBOARD.md`); `/v1/check`, `/auth/login` and `/auth/logout` status codes and examples match the server.
+- **SDK references:** both SDKs raise `AgentGuardAuthError` on a 401/403 approval poll; pending approvals survive a server restart; tenant routing (`tenant_id` / `tenantId`, `AGENTGUARD_TENANT_ID`), `approval_id` and every fail-mode trigger are documented; the Python docs warn that the unrelated `agentguard-sdk` package installs the same `agentguard` import name.
+- **Floors and support:** example docs state Go 1.25+ (not 1.22+) and the TypeScript SDK states Node 20+ (not 18+). `SECURITY.md` supports the latest minor line (1.1.x), not 0.5.x.
+- **CLI reference:** `AGENTGUARD_API_KEY` is read by `serve` too; exit code 2 means invalid flags; `--watch` logs reloads rather than enabling them; `status` needs a server started with `--dashboard`; the `version` output is documented for each build type.
+- **Also corrected:** `docs/ADAPTERS.md` (compatibility matrix through 1.1.x, the `mcp` 1.x/2.x status, which CI legs block), the "real upstream" test description in `docs/MCP_GATEWAY.md`, the example configs' single-tenant guidance, and `docs/CONTRIBUTING.md` (the full list of files the version bump touches, the release checklist, the project structure).
+
+### Errata
+
+Corrected in place in earlier CHANGELOG entries, release notes and `docs/MIGRATION.md`; each correction carries a *(Corrected in v1.1.1: …)* note.
+
+- **The security, conduct and support contact address was misspelled** as `cauaferraz@gmail.com` in `SECURITY.md` and seven other files. That address doesn't exist, so anything sent to it was never received. The correct address is **`cauaferrazp@gmail.com`**. If you reported something to the old address, please resend it.
+- **The TypeScript SDK was not on npm** at 0.5.2, 0.9.0 or 1.0.0. Those release notes, the 0.9.0 and 1.0.0 CHANGELOG entries and `MIGRATION.md` said it was published as `@agentguard/sdk`, and some gave `npm install @agentguard/sdk@X` commands. That package is unrelated to AgentGuard.
+- **No Docker image has ever been published.** The 0.5.2, 0.9.0 and 1.0.0 release notes said to `docker pull` one; they now say to build from the repository's `Dockerfile`.
+- **v0.7.0 and v0.4.1 were never published.** `MIGRATION.md` gave v0.7.0 as the upgrade target and the rollback point; it now names installable versions (upgrade to v0.9.0, roll back to v0.5.2).
+- **Links to `docs/v1.0-multinode-PLAN.md`**, which was never committed, in the 1.0.0 CHANGELOG entry and release notes now point to `COMPATIBILITY.md` and `OPERATIONS.md`.
+
+### Compatibility
+
+- **One fail-closed correction.** `agentguard-llm-proxy --listen :PORT` without `--proxy-api-key` now exits with status 2 instead of starting. Use `127.0.0.1:PORT`, or set `--proxy-api-key`.
+- **The shipped default policy changed** for the `fetch` and `github` MCP namespaces (see *Changed*). A policy file you copied earlier is unaffected.
+- **`go install` builds now make the startup update check** from interactive subcommands, as documented; `serve` never does. Set `AGENTGUARD_NO_UPDATE_CHECK=1` to opt out.
+- **`agentguard version`'s parenthesised build identifier** is `module vX.Y.Z` or a VCS revision where it used to be `dev`.
+- **TypeScript import path:** code that imported a local build as `@agentguard/sdk` imports `@lictorate/agentguard`. The exports are unchanged.
+- **`make docker-run` requires `AGENTGUARD_API_KEY`.**
+- Downgrade to 1.1.0 is safe: nothing on disk changed. See `docs/MIGRATION.md`.
+
 ## [1.1.0] — 2026-09-13
 
 > **A correctness-and-honesty release, from a review of the packages no prior audit had opened** (`pkg/metrics`, `pkg/depaudit`, `pkg/migrate`, `cmd/agentguard`, and both plugin SDKs). Six findings, all fixed. Two of them are behaviours the docs described that the code never implemented: `agentguard migrate --reset-checkpoint` deleted a file that did not exist and reported success, and the SDKs could not replay an approval at all, so the one-shot / validity / cost-reservation semantics documented for `/v1/check` never applied to SDK callers. A third is a defect invisible from the outside: the default audit pipeline never exposed its file path, so **no production deployment had ever written a replay checkpoint** — every boot re-scanned the entire live audit log, and the decision counters restarted from zero. Landing alongside them are five LLM-proxy gating fixes (B6, B7, B17, B18, B21), each one a stream or response the firewall could not evaluate and forwarded, dropped, or wrongly refused anyway. Landing alongside *those* are five more that only a running cluster could produce: a migration race that killed replicas at boot, a rotation that destroyed archives, a flush deadlock between nodes, streaming refusals that reached the client but never the audit trail, and a checkpoint path no deployment had ever written to. Eighteen fixes in all.

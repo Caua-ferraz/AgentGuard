@@ -1,6 +1,6 @@
 {
   "name": "@lictorate/agentguard",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "TypeScript SDK for AgentGuard — the firewall for AI agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
