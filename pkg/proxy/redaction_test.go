@@ -147,3 +147,28 @@ func TestAuditQuery_OrderParam(t *testing.T) {
 		t.Errorf("order=newest: %d, want 400", code)
 	}
 }
+
+func TestNewServer_BindAddress(t *testing.T) {
+	cases := []struct {
+		key, bind, want string
+	}{
+		{"k", "", ":9123"},
+		{"", "", "127.0.0.1:9123"},
+		{"k", "127.0.0.1", "127.0.0.1:9123"},
+		{"k", "::1", "[::1]:9123"},
+		{"k", "0.0.0.0", "0.0.0.0:9123"},
+		{"", "localhost", "localhost:9123"},
+		{"", "0.0.0.0", "127.0.0.1:9123"}, // no key: never a non-loopback bind
+	}
+	for _, c := range cases {
+		srv := newTestServer(t, func(cfg *Config) { cfg.Port = 9123; cfg.APIKey = c.key; cfg.BindHost = c.bind })
+		if srv.http.Addr != c.want {
+			t.Errorf("key=%q bind=%q: Addr = %q, want %q", c.key, c.bind, srv.http.Addr, c.want)
+		}
+	}
+	for host, want := range map[string]bool{"localhost": true, "127.0.0.1": true, "127.5.5.5": true, "::1": true, "[::1]": true, "": false, "0.0.0.0": false, "::": false, "10.0.0.1": false, "example.com": false} {
+		if got := IsLoopbackHost(host); got != want {
+			t.Errorf("IsLoopbackHost(%q) = %v, want %v", host, got, want)
+		}
+	}
+}

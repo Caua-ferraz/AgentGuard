@@ -35,7 +35,9 @@ AgentGuard changes how it binds based on whether `--api-key` is set:
 | **unset** | `127.0.0.1:<port>` **only** | Processes on the same host (all gated endpoints become open) |
 | **set** | `0.0.0.0:<port>` (all interfaces) | Anything with the Bearer token (or a valid session cookie) |
 
-Source: the bind-address logic in `proxy.NewServer` (`pkg/proxy/server.go`).
+**(v1.2)** `--bind <host>` overrides the address: with `--api-key` set, AgentGuard listens on exactly `<host>:<port>`. Without a key only loopback hosts (`127.0.0.1`, `::1`, `localhost`) are accepted; a non-loopback `--bind` without `--api-key` exits 2 at startup rather than exposing the open gated endpoints.
+
+Source: the bind-address logic in `proxy.NewServer` (`pkg/proxy/server.go`) and `validateBind` (`cmd/agentguard/main.go`).
 
 **Symptom if you forget:** agents running on a different host get `connection refused` or `connect: timed out`. The server log shows:
 
@@ -120,6 +122,13 @@ server {
         proxy_read_timeout 90s;
     }
 }
+```
+
+With nginx on the same host, start AgentGuard with `--bind 127.0.0.1` **(v1.2)** as well as `--api-key`, so the plaintext port is reachable only through nginx and not from the network:
+
+```bash
+agentguard serve --api-key "$AGENTGUARD_API_KEY" --bind 127.0.0.1 --tls-terminated-upstream \
+  --base-url https://guard.example.com ...
 ```
 
 ### 2d. Docker Compose reference

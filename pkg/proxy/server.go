@@ -67,7 +67,12 @@ var ErrApprovalQueueFull = errors.New("approval queue full: no resolved entries 
 
 // Config holds the server configuration.
 type Config struct {
-	Port             int
+	Port int
+	// BindHost is the host or IP to listen on (v1.2, `serve --bind`). Empty
+	// keeps the historical default: every interface when APIKey is set,
+	// 127.0.0.1 otherwise. A non-loopback BindHost without an APIKey falls
+	// back to 127.0.0.1 (the CLI refuses that combination before it gets here).
+	BindHost         string
 	Engine           *policy.Engine
 	Logger           audit.Logger
 	DashboardEnabled bool
@@ -495,11 +500,18 @@ func NewServer(cfg Config) *Server {
 	}
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
-	if cfg.APIKey == "" {
+	switch {
+	case cfg.BindHost != "" && (cfg.APIKey != "" || IsLoopbackHost(cfg.BindHost)):
+		addr = net.JoinHostPort(cfg.BindHost, strconv.Itoa(cfg.Port))
+	case cfg.APIKey == "":
 		// Without an API key, bind to localhost only to prevent network-adjacent
 		// attackers from approving/denying actions.
 		addr = fmt.Sprintf("127.0.0.1:%d", cfg.Port)
-		log.Printf("INFO: binding to %s (localhost only) — set --api-key to listen on all interfaces", addr)
+		if cfg.BindHost != "" {
+			log.Printf("WARNING: --bind %q is not loopback and no API key is set; binding to %s instead", cfg.BindHost, addr)
+		} else {
+			log.Printf("INFO: binding to %s (localhost only) — set --api-key to listen on all interfaces", addr)
+		}
 	}
 
 	s.http = &http.Server{
@@ -2583,4 +2595,17 @@ func seedDecisionCounters(c audit.DecisionCounts) {
 	metrics.AddDecision(string(policy.Deny), c.Deny)
 	metrics.AddDecision(string(policy.RequireApproval), c.RequireApproval)
 	metrics.AddDecision("", c.Other())
+}
+
+// IsLoopbackHost reports whether host names the local machine only:
+// "localhost" or a loopback IP (127.0.0.0/8, ::1), with or without IPv6
+// brackets. An empty host means every interface and is not loopback.
+func IsLoopbackHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "localhost" {
+		return true
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

@@ -45,6 +45,7 @@ func main() {
 	serveCmd := flag.NewFlagSet("serve", flag.ExitOnError)
 	policyFile := serveCmd.String("policy", "configs/default.yaml", "Path to policy file")
 	port := serveCmd.Int("port", 8080, "Port to listen on")
+	bindHost := serveCmd.String("bind", "", "Host or IP to listen on. Empty: every interface when --api-key is set, 127.0.0.1 otherwise. A non-loopback --bind requires --api-key.")
 	dashboard := serveCmd.Bool("dashboard", false, "Enable web dashboard")
 	watch := serveCmd.Bool("watch", false, "Log each policy hot-reload (reloading itself is always on)")
 	auditPath := serveCmd.String("audit-log", "audit.jsonl", "Path to audit log file")
@@ -277,7 +278,7 @@ Flags:
 			NodeID:              *nodeID,
 			ReconcileInterval:   *reconcileInterval,
 			TenantPolicyRefresh: *tenantPolicyRefresh,
-		}, *notifySpool, *auditRedact)
+		}, *notifySpool, *auditRedact, *bindHost)
 		// Applied here, not inside runServe: os.Exit skips defers, and every
 		// teardown in runServe has already run by the time it returns.
 		if serveCode != 0 {
@@ -487,7 +488,11 @@ func openStore(cfg persistOpts) (persistentStore, string, error) {
 // 1 when the listener failed. The caller applies it with os.Exit AFTER this
 // function returns, so every deferred teardown here (persist flush, audit
 // drain, store close) has already run — os.Exit skips defers.
-func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, approvalValidity time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts, persistCfg persistOpts, notifySpoolPath string, auditRedact bool) int {
+func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, approvalValidity time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts, persistCfg persistOpts, notifySpoolPath string, auditRedact bool, bindHost string) int {
+	if err := validateBind(bindHost, apiKey); err != nil {
+		log.Printf("ERROR: %v", err)
+		return 2
+	}
 	if baseURL == "" {
 		baseURL = fmt.Sprintf("http://localhost:%d", port)
 	}
@@ -688,6 +693,7 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		Notifier:                 notifier,
 		Redactor:                 redactor,
 		APIKey:                   apiKey,
+		BindHost:                 bindHost,
 		BaseURL:                  baseURL,
 		AllowedOrigin:            allowedOrigin,
 		Version:                  version,
@@ -1290,4 +1296,13 @@ Subcommands:
 
 Run 'agentguard tenant <subcommand> -h' for details on each subcommand.
 `)
+}
+
+// validateBind refuses a non-loopback --bind without an API key: without a
+// key the approve/deny endpoints are open, which is only safe on loopback.
+func validateBind(bindHost, apiKey string) error {
+	if bindHost == "" || apiKey != "" || proxy.IsLoopbackHost(bindHost) {
+		return nil
+	}
+	return fmt.Errorf("--bind %q is not a loopback address; refusing to listen without --api-key (set --api-key, or use --bind 127.0.0.1)", bindHost)
 }

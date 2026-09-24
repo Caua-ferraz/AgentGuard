@@ -37,6 +37,7 @@ Start the AgentGuard server. This is the only subcommand that runs a long-lived 
 |---|---|---|
 | `--policy <path>` | `configs/default.yaml` | Path to policy YAML. Rejected at startup if missing or invalid. |
 | `--port <int>` | `8080` | TCP port. See bind behavior below. |
+| `--bind <host>` | *(empty)* | **(v1.2)** Host or IP to listen on, e.g. `127.0.0.1` behind a same-host reverse proxy. Empty keeps the default bind behavior below. A non-loopback `--bind` without `--api-key` is refused at startup (exit 2). |
 | `--dashboard` | off | Serve `/dashboard` HTML + `/api/stream` SSE. Required for human approval UI. |
 | `--watch` | off | Log policy hot-reload activity. Hot-reload itself is always on (fsnotify events, with a 2 s mtime poll as fallback); no restart needed after policy edits. |
 | `--audit-log <path>` | `audit.jsonl` | Append-only JSON Lines file. Mode `0600`. Rotation is on by default; configurable via `--audit-max-size-mb`, `--audit-max-backups`, `--audit-max-age-days`, `--audit-compress`. Operators following older guidance should NOT also configure logrotate against `audit.jsonl` — the dual-rotator chain corrupts the rotation index. See [`OPERATIONS.md`](OPERATIONS.md#audit-log-rotation). |
@@ -69,7 +70,8 @@ Start the AgentGuard server. This is the only subcommand that runs a long-lived 
 ### Bind behavior
 
 - `--api-key` **set**: binds on `0.0.0.0:<port>` (all interfaces).
-- `--api-key` **unset**: binds on `127.0.0.1:<port>` only. A WARNING is logged at startup. Remote agents cannot connect. This is the #1 source of "connection refused" for new users.
+- `--api-key` **unset**: binds on `127.0.0.1:<port>` only. An INFO line is logged at startup. Remote agents cannot connect. This is the #1 source of "connection refused" for new users.
+- `--bind <host>` **(v1.2)**: binds on `<host>:<port>` instead. With `--api-key` any address is accepted; without one only a loopback address (`127.0.0.1`, `::1`, `localhost`) is, and anything else exits 2 before listening. Use `--bind 127.0.0.1` with `--api-key` when a reverse proxy on the same host is the only client.
 
 ### Persistence & multi-tenancy (v0.6)
 
