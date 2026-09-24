@@ -124,10 +124,15 @@ server {
 
 ### 2d. Docker Compose reference
 
+AgentGuard does not publish a prebuilt image, so Compose builds it from the
+repository's `Dockerfile` (save this file at the repo root, or point
+`build:` at your checkout).
+
 ```yaml
 services:
   agentguard:
-    image: agentguard:latest
+    build: .                      # the repo's Dockerfile
+    image: agentguard:1.1.0       # tag for the locally built image
     restart: unless-stopped
     command: >
       serve
@@ -176,9 +181,12 @@ spec:
     spec:
       containers:
         - name: agentguard
-          image: agentguard:0.5.1
-          args:
+          # No prebuilt image is published: build the Dockerfile and push it
+          # to a registry your cluster can pull from.
+          image: registry.example.com/agentguard:1.1.0
+          args:                   # replaces the image's CMD, so --policy must be repeated
             - serve
+            - --policy=/etc/agentguard/default.yaml
             - --api-key=$(AGENTGUARD_API_KEY)
             - --base-url=https://guard.example.com
             - --tls-terminated-upstream

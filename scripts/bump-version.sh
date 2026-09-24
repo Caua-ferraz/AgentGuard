@@ -22,15 +22,17 @@
 #   docs/MCP_GATEWAY.md                        — "version": "X.Y.Z" (MCP serverInfo example)
 #   docs/PROXY_ARCHITECTURE.md                 — "version": "X.Y.Z" (/health response example)
 #   docs/POLICY_REFERENCE.md                   — self-label "as of **vX.Y.Z**"
+#   docs/DEPLOYMENT.md                         — Compose/Kubernetes example image tags
 #
 # Portability: uses perl -i -pe for in-place edit. perl is present on macOS
 # (BSD) and Linux out of the box, unlike -i with no suffix (GNU sed only).
 
 set -eo pipefail
 
-# grep -P refuses to run in multibyte non-UTF-8 locales (Git Bash on Windows
-# defaults to one), and check_canonical would read that error as "no leftover"
-# — a silent false-OK on the final verification. Pin a locale grep -P accepts.
+# Pin a UTF-8 locale so perl reads these files (which contain non-ASCII
+# characters) the same way on every platform. check_canonical uses perl, not
+# `grep -P`: BSD grep on macOS has no -P, and the old check read that error
+# as "no leftover" — a silent false-OK on the final verification.
 export LC_ALL=C.UTF-8
 
 if [ $# -ne 1 ]; then
@@ -78,6 +80,7 @@ REPLACEMENTS=(
   'docs/MCP_GATEWAY.md|s/("version":\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
   'docs/PROXY_ARCHITECTURE.md|s/("version":\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
   'docs/POLICY_REFERENCE.md|s/(format as of \*\*v)[0-9]+\.[0-9]+\.[0-9]+(\*\*)/${1}'"$NEW"'${2}/'
+  'docs/DEPLOYMENT.md|s/(image: (?:registry\.example\.com\/)?agentguard:)[0-9]+\.[0-9]+\.[0-9]+/${1}'"$NEW"'/'
 )
 
 for entry in "${REPLACEMENTS[@]}"; do
@@ -139,6 +142,7 @@ TRACKED=(
   docs/MCP_GATEWAY.md
   docs/PROXY_ARCHITECTURE.md
   docs/POLICY_REFERENCE.md
+  docs/DEPLOYMENT.md
 )
 grep -Hn "$OLD" "${TRACKED[@]}" 2>/dev/null || echo "  (none)"
 
@@ -151,10 +155,16 @@ LEFTOVER=0
 check_canonical() {
   local file="$1"
   local pattern="$2"
-  if [ -f "$file" ] && grep -Pq "$pattern" "$file"; then
-    echo "  FAIL: $file still has canonical declaration matching $pattern" >&2
-    LEFTOVER=1
-  fi
+  [ -f "$file" ] || return 0
+  # perl exits 0 on a match, 1 on no match; anything else (a bad regex, an
+  # unreadable file) is an error and must not pass as "no leftover".
+  local rc=0
+  PAT="$pattern" perl -ne 'BEGIN { $p = $ENV{PAT} } if (/$p/) { $hit = 1; last } END { $? ||= ($hit ? 0 : 1) }' "$file" || rc=$?
+  case "$rc" in
+    0) echo "  FAIL: $file still has canonical declaration matching $pattern" >&2; LEFTOVER=1 ;;
+    1) ;;
+    *) echo "  FAIL: could not check $file (perl exited $rc)" >&2; LEFTOVER=1 ;;
+  esac
 }
 check_canonical 'cmd/agentguard/main.go'                    "^\s*version\s*=\s*\"$OLD\""
 check_canonical 'cmd/agentguard-mcp-gateway/main.go'        "^\s*version\s*=\s*\"$OLD\""
@@ -186,6 +196,7 @@ check_canonical 'docs/API.md'                               "\"version\":\s*\"$O
 check_canonical 'docs/MCP_GATEWAY.md'                       "\"version\":\s*\"$OLD\""
 check_canonical 'docs/PROXY_ARCHITECTURE.md'                "\"version\":\s*\"$OLD\""
 check_canonical 'docs/POLICY_REFERENCE.md'                  "format as of \*\*v$OLD\*\*"
+check_canonical 'docs/DEPLOYMENT.md'                        "image: (registry\.example\.com/)?agentguard:$OLD"
 
 if [ "$LEFTOVER" -ne 0 ]; then
   echo "Error: at least one canonical declaration still references $OLD — fix the script" >&2
