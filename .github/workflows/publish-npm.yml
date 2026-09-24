@@ -1,18 +1,25 @@
 name: Publish TypeScript SDK to npm
 
-# Publishes plugins/typescript as @lictorate/agentguard when a GitHub release
-# is published — the same trigger as publish-pypi.yml.
+# Stages plugins/typescript as @lictorate/agentguard when a GitHub release is
+# published — the same trigger as publish-pypi.yml. The version is not public
+# until a maintainer approves it with 2FA: on npmjs.com, the package page's
+# "Staged Packages" tab → Approve (or `npm stage approve <stage-id>`). npm
+# scans a staged package for malware before it can be approved.
 #
 # Authenticates with npm trusted publishing (GitHub OIDC), so no npm token
 # is stored in this repository. On npmjs.com, @lictorate/agentguard's trusted
 # publisher must name the repository Caua-ferraz/AgentGuard and the workflow
 # file publish-npm.yml; renaming this file stops publishing until the setting
-# is updated. `id-token: write` lets the job request the OIDC token, and npm
-# attaches provenance automatically. Trusted publishing needs npm >= 11.5.1.
+# is updated. The publisher is stage-only: it may run `npm stage publish` but
+# not `npm publish`, so a workflow run can never make a version public on its
+# own. `id-token: write` lets the job request the OIDC token; --provenance
+# links the version to this workflow run. Staged publishing needs
+# npm >= 11.15.0.
 #
 # npm only accepts a trusted publisher for a package that already exists, so
 # the first version (1.1.1) was published by hand. A version that's already
-# on npm is skipped, so publishing that release here is a no-op.
+# on npm is skipped. A version that's already staged can't be staged again,
+# so re-running before approval fails; approve or reject the staged one.
 on:
   release:
     types: [published]
@@ -60,14 +67,15 @@ jobs:
       - name: Test
         run: npm test
 
-      - name: Update npm (trusted publishing needs >= 11.5.1)
-        run: npm install -g npm@^11.5.1
+      - name: Update npm (staged publishing needs >= 11.15.0)
+        run: npm install -g npm@^11.15.0
 
-      - name: Publish
+      - name: Stage for approval
         run: |
           spec="$(node -p "const p = require('./package.json'); p.name + '@' + p.version")"
           if npm view "${spec}" version >/dev/null 2>&1; then
-            echo "${spec} is already on npm; nothing to publish."
+            echo "${spec} is already on npm; nothing to stage."
             exit 0
           fi
-          npm publish --access public
+          npm stage publish . --access public --provenance
+          echo "::notice::${spec} is staged. Approve it with 2FA in the Staged Packages tab on npmjs.com to make it public."
