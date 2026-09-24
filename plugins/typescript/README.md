@@ -55,6 +55,7 @@ if (result.allowed) {
 |---|---|---|
 | `AGENTGUARD_URL` | `http://localhost:8080` | `baseUrl` fallback (explicit options override). |
 | `AGENTGUARD_API_KEY` | *(empty)* | `apiKey` fallback. Sent as `Authorization: Bearer <key>` on `/v1/approve`, `/v1/deny`, and every poll of `/v1/status` inside `waitForApproval`. |
+| `AGENTGUARD_TENANT_ID` | *(empty)* | `tenantId` fallback (an explicit `tenantId`, even `''`, wins). A value other than `local` routes calls to `/v1/t/<tenant>/…`. |
 
 `process.env` reads are guarded — the SDK works in browser / Workers / Deno runtimes that do not expose `process`.
 
@@ -68,7 +69,7 @@ const guard = new AgentGuard('http://localhost:8080');
 const guard = new AgentGuard({ baseUrl: '…', failMode: 'allow' });
 ```
 
-Any thrown/rejected error from `fetch` (connection refused, DNS failure, TLS handshake, body-read failure, `AbortController` timeout) collapses into the fail-mode response. This matches the Python SDK's semantics.
+Any thrown/rejected error from `fetch` (connection refused, DNS failure, TLS handshake, body-read failure, `AbortController` timeout) collapses into the fail-mode response, and so does a response that isn't a valid decision: a non-2xx status, a `Content-Type` other than `application/json`, a body that isn't JSON, or one without `decision`. This matches the Python SDK's semantics.
 
 ## The `guarded` higher-order function
 
@@ -110,7 +111,7 @@ const reviewed = guarded(guard, 'cost', makeExpensiveCall, {
 
 ## Error classes
 
-All thrown by `guarded` on deny/approval. Every class extends the built-in `Error`, so plain `catch (e)` handlers still work.
+`guarded` throws the first three on deny/approval; `AgentGuardAuthError` comes from `waitForApproval` (and so also from `guarded` with `waitForApproval: true`). Every class extends the built-in `Error`, so plain `catch (e)` handlers still work.
 
 | Class | Thrown when | Extra fields |
 |---|---|---|
@@ -118,6 +119,7 @@ All thrown by `guarded` on deny/approval. Every class extends the built-in `Erro
 | `AgentGuardDeniedError` | decision was DENY (or REQUIRE_APPROVAL resolved to DENY) | `.result` |
 | `AgentGuardApprovalRequiredError` | REQUIRE_APPROVAL, not waiting | `.approvalId`, `.approvalUrl` |
 | `AgentGuardApprovalTimeoutError` | `waitForApproval` deadline elapsed | `.approvalId` |
+| `AgentGuardAuthError` | a `waitForApproval` status poll got `401`/`403` (API key missing or wrong) | `.status` |
 
 ```ts
 try {
@@ -147,6 +149,7 @@ new AgentGuard({
   apiKey?: string,    // default: process.env.AGENTGUARD_API_KEY ?? ''
   timeout?: number,   // ms, default 5000
   failMode?: 'deny' | 'allow',  // default 'deny'
+  tenantId?: string,  // default: process.env.AGENTGUARD_TENANT_ID ?? ''; not 'local' → /v1/t/<tenant>/…
 });
 ```
 
@@ -226,10 +229,10 @@ Both SDKs talk to the same `/v1/check` endpoint and share identical behavior on 
 
 | Concern | Python | TypeScript |
 |---|---|---|
-| Env fallback | `AGENTGUARD_URL`, `AGENTGUARD_API_KEY` | same |
+| Env fallback | `AGENTGUARD_URL`, `AGENTGUARD_API_KEY`, `AGENTGUARD_TENANT_ID` | same |
 | Fail mode | `fail_mode="deny"` (default) / `"allow"` | `failMode: 'deny'` (default) / `'allow'` |
 | Approval wait | `wait_for_approval(timeout=300, poll_interval=2)` | `waitForApproval(timeoutMs=300_000, pollIntervalMs=2_000)` |
-| Exceptions | `AgentGuardDenied`, `AgentGuardApprovalRequired`, `AgentGuardApprovalTimeout` (all `PermissionError`) | `AgentGuardDeniedError`, `AgentGuardApprovalRequiredError`, `AgentGuardApprovalTimeoutError` (all `Error`) |
+| Exceptions | `AgentGuardDenied`, `AgentGuardApprovalRequired`, `AgentGuardApprovalTimeout`, `AgentGuardAuthError` (all `PermissionError`) | `AgentGuardDeniedError`, `AgentGuardApprovalRequiredError`, `AgentGuardApprovalTimeoutError`, `AgentGuardAuthError` (all `Error`) |
 | Decorator / HOF | `@guarded(scope, guard, wait_for_approval=…)` | `guarded(guard, scope, fn, { waitForApproval: … })` |
 
 ## Related docs
