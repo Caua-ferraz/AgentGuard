@@ -2,7 +2,7 @@
 
 Companion to the short [`plugins/python/README.md`](../plugins/python/README.md). This page covers the details you need when things go sideways: fail modes, timeouts, exception semantics, adapter internals, and testing patterns.
 
-Package on PyPI: `agentguardproxy`. Import name: `agentguard`.
+Package on PyPI: `agentguardproxy`. Import name: `agentguard`. `agentguard-sdk` on PyPI is an unrelated project that also installs an `agentguard` module — don't install both in the same environment.
 
 Source: `plugins/python/agentguard/core.py` (Guard client, exceptions, constants), `plugins/python/agentguard/decorators.py` (`@guarded`), and `plugins/python/agentguard/adapters/*.py` (framework integrations). The package `__init__.py` re-exports the public surface — always import from the package root.
 

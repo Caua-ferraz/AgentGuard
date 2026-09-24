@@ -20,6 +20,8 @@ pip install agentguardproxy[browser-use]
 pip install agentguardproxy[all]
 ```
 
+The package is `agentguardproxy`; the import name is `agentguard`. `agentguard-sdk` on PyPI is an unrelated project that also installs an `agentguard` module — don't install both in the same environment.
+
 ## Quick start
 
 ```python
