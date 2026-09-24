@@ -27,9 +27,9 @@ mcpServers:
       - "--upstream"
       - "fs:npx -y @modelcontextprotocol/server-filesystem /tmp"
       - "--upstream"
-      - "fetch:npx -y @modelcontextprotocol/server-fetch"
+      - "fetch:uvx mcp-server-fetch"
       - "--upstream"
-      - "github:npx -y @modelcontextprotocol/server-github"
+      - "github:docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server"
       - "--guard-url"
       - "http://127.0.0.1:8080"
       - "--policy"
@@ -77,6 +77,24 @@ Continue (agent mode) ──stdio──► agentguard-mcp-gateway ──► fs /
 ```
 
 ## Setup
+
+The example config starts three downstream MCP servers, each with its own
+launcher:
+
+| Upstream | Launcher | Install |
+|---|---|---|
+| `fs` — filesystem server | `npx` | [Node.js](https://nodejs.org/) 20+ |
+| `fetch` — fetch server | `uvx` | [uv](https://docs.astral.sh/uv/getting-started/installation/) |
+| `github` — [GitHub's MCP server](https://github.com/github/github-mcp-server) | `docker` | [Docker](https://docs.docker.com/get-started/get-docker/) |
+
+Install the launchers for the upstreams you keep and delete the
+`--upstream` entries you don't need. A missing launcher disables only
+that namespace: the gateway logs
+`info mcpgw: startup: upstream "fetch" failed to spawn: …` and serves the
+others. The GitHub server reads `GITHUB_PERSONAL_ACCESS_TOKEN` from the
+config's `env` block; the gateway passes its environment to every
+upstream, and `docker run -e GITHUB_PERSONAL_ACCESS_TOKEN` forwards it
+into the container.
 
 1. **Install binaries** (Go 1.22+):
 

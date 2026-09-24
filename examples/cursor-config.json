@@ -7,8 +7,8 @@
       "command": "agentguard-mcp-gateway",
       "args": [
         "--upstream", "fs:npx -y @modelcontextprotocol/server-filesystem ${workspaceFolder}",
-        "--upstream", "fetch:npx -y @modelcontextprotocol/server-fetch",
-        "--upstream", "github:npx -y @modelcontextprotocol/server-github",
+        "--upstream", "fetch:uvx mcp-server-fetch",
+        "--upstream", "github:docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server",
         "--guard-url", "http://127.0.0.1:8080",
         "--policy", "${workspaceFolder}/.agentguard/policy.yaml",
         "--tenant-id", "local",

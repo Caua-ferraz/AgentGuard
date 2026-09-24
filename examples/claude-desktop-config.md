@@ -23,9 +23,9 @@ opens it in your default editor.
 ## What this config does
 
 ```
-Claude Desktop ──stdio──► agentguard-mcp-gateway ──stdio──► server-filesystem
-                                  │                       ──stdio──► server-fetch
-                                  │                       ──stdio──► server-github
+Claude Desktop ──stdio──► agentguard-mcp-gateway ──stdio──► server-filesystem (npx)
+                                  │                       ──stdio──► mcp-server-fetch (uvx)
+                                  │                       ──stdio──► github-mcp-server (docker)
                                   │
                                   └─HTTP──► http://127.0.0.1:8080/v1/check
                                             (the central AgentGuard server,
@@ -35,10 +35,28 @@ Claude Desktop ──stdio──► agentguard-mcp-gateway ──stdio──► 
 ```
 
 The gateway namespaces tools per upstream — Claude sees `fs:read_text_file`,
-`fetch:fetch`, `github:create_issue`, etc. The same names appear in the
+`fetch:fetch`, `github:list_issues`, etc. The same names appear in the
 audit log so every decision is unambiguous.
 
 ## Setup (5 steps)
+
+The example config starts three downstream MCP servers, each with its own
+launcher:
+
+| Upstream | Launcher | Install |
+|---|---|---|
+| `fs` — filesystem server | `npx` | [Node.js](https://nodejs.org/) 20+ |
+| `fetch` — fetch server | `uvx` | [uv](https://docs.astral.sh/uv/getting-started/installation/) |
+| `github` — [GitHub's MCP server](https://github.com/github/github-mcp-server) | `docker` | [Docker](https://docs.docker.com/get-started/get-docker/) |
+
+Install the launchers for the upstreams you keep and delete the
+`--upstream` entries you don't need. A missing launcher disables only
+that namespace: the gateway logs
+`info mcpgw: startup: upstream "fetch" failed to spawn: …` and serves the
+others. The GitHub server reads `GITHUB_PERSONAL_ACCESS_TOKEN` from the
+config's `env` block; the gateway passes its environment to every
+upstream, and `docker run -e GITHUB_PERSONAL_ACCESS_TOKEN` forwards it
+into the container.
 
 1. **Install the binaries** (Go 1.22+):
 
@@ -132,5 +150,5 @@ denies (or is blanket-allowed, depending on your `--fail-mode`).
 ## Trimming the example
 
 The bundled config wires `fs`, `fetch`, and `github` upstreams. Remove any
-you don't need (each upstream costs an `npx` subprocess on startup) and
+you don't need (each one is a subprocess the gateway starts with it) and
 add others from <https://github.com/modelcontextprotocol/servers>.

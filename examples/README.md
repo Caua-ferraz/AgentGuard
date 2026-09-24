@@ -27,6 +27,11 @@ Each `<client>-config.json` has a sibling `<client>-config.md` with the
 authoritative file path, OS-specific gotchas, the source-doc URL +
 verification date, and concrete verification steps.
 
+The configs start three downstream servers with different launchers: the
+filesystem server with `npx` (Node.js), the fetch server with `uvx` (uv),
+and GitHub's MCP server with `docker`. Each guide's **Setup** section
+lists what to install; drop the upstreams you don't need.
+
 ## LLM API Proxy
 
 The proxy binary is `agentguard-llm-proxy` (Go 1.22+,

@@ -68,7 +68,7 @@ the docs default to the Go binary.
 ```
 agentguard-mcp-gateway \
   --upstream "fs:npx -y @modelcontextprotocol/server-filesystem /tmp" \
-  --upstream "github:npx -y @modelcontextprotocol/server-github" \
+  --upstream "github:docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server" \
   --upstream "everything:npx -y @modelcontextprotocol/server-everything" \
   --guard-url http://127.0.0.1:8080 \
   --api-key $AGENTGUARD_API_KEY \
@@ -809,12 +809,15 @@ call against the central server, which hot-reloads via `--watch`. But
 adding a *new upstream* (a new `--upstream` flag) does require a
 gateway restart, which means restarting the MCP client.
 
-**Missing `npx`.** All bundled examples use `npx -y …` for upstreams.
-If `npx` isn't on PATH inside the MCP client's environment (a
-notoriously common Windows issue), the upstream subprocess fails to
-launch and the gateway logs a degraded-upstream WARN to stderr — visible
-in Claude Desktop's `mcp.log` and equivalents. Install Node 18+ and
-verify `npx --version` before debugging deeper.
+**Missing launcher (`npx`, `uvx`, `docker`).** The bundled examples start
+the filesystem server with `npx`, the fetch server with `uvx`, and
+GitHub's MCP server with `docker`. If a launcher isn't on `PATH` inside
+the MCP client's environment (a notoriously common Windows issue for
+`npx`), that upstream fails to spawn and the gateway logs
+`info mcpgw: startup: upstream "<ns>" failed to spawn: …` to stderr —
+visible in Claude Desktop's `mcp.log` and equivalents — while the other
+upstreams keep working. Check the launcher on its own (`npx --version`,
+`uvx --version`, `docker version`) before debugging deeper.
 
 **Cookie-based auth on macOS.** AgentGuard's session cookies depend on
 the connection's TLS state. When the central server runs on plain HTTP

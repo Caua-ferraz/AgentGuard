@@ -229,7 +229,7 @@ docker run -d -p 8080:8080 \
 
 ### MCP client shows zero tools after pointing at `agentguard-mcp-gateway`
 
-The gateway started but no `--upstream` is wired, or the upstream subprocess crashed at boot. Run the gateway in the foreground and watch for `WARN mcpgw upstream <name> spawn failed: ...`. Verify the upstream command runs standalone. Details: [`MCP_GATEWAY.md`](MCP_GATEWAY.md).
+The gateway started but no `--upstream` is wired, or the upstream subprocess crashed at boot. Run the gateway in the foreground and watch for `info mcpgw: startup: upstream "<name>" failed to spawn: …` (a missing launcher such as `npx`, `uvx` or `docker` shows up here). Verify the upstream command runs standalone. Details: [`MCP_GATEWAY.md`](MCP_GATEWAY.md).
 
 ### LLM API Proxy: SDK hangs / `unexpected end of stream`
 
