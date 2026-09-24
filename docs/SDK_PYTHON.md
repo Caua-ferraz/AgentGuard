@@ -162,7 +162,7 @@ CheckResult(decision="ALLOW", reason="AgentGuard unreachable (allow): <original 
 | `wait_for_approval(timeout=300)` | 300s | Wall-clock deadline for the whole poll loop. |
 | `wait_for_approval(poll_interval=2)` | 2s | Sleep between polls. |
 
-`wait_for_approval` quietly swallows individual poll failures (`URLError`, other `OSError`s, and a body that is not JSON) and keeps retrying until the deadline — the assumption is that the server is momentarily unreachable but will come back within the approval window. A final deadline miss returns `CheckResult(decision="DENY", reason="Approval timed out")`, which the `@guarded(wait_for_approval=True)` wrapper surfaces as `AgentGuardApprovalTimeout`.
+`wait_for_approval` quietly swallows individual poll failures (`URLError`, HTTP errors other than `401`/`403`, other `OSError`s, and a body that is not JSON) and keeps retrying until the deadline — the assumption is that the server is momentarily unreachable but will come back within the approval window. A final deadline miss returns `CheckResult(decision="DENY", reason="Approval timed out")`, which the `@guarded(wait_for_approval=True)` wrapper surfaces as `AgentGuardApprovalTimeout`.
 
 **Pick `timeout` higher than your human-SLA.** If approvers need 15 minutes on average, `timeout=300` will fire false negatives.
 
@@ -180,7 +180,7 @@ guard.wait_for_approval("ap_1a2b3c…",
                         poll_interval=2)  # CheckResult
 ```
 
-All three send `Authorization: Bearer <api_key>` when `api_key` is set. If the server was started without `--api-key`, the key is ignored. If the server **was** started with `--api-key` and you do not set one on the SDK side, you will get `401` on approve/deny and `wait_for_approval` will loop until the deadline.
+All three send `Authorization: Bearer <api_key>` when `api_key` is set. If the server was started without `--api-key`, the key is ignored. If the server **was** started with `--api-key` and you do not set one on the SDK side, the server answers `401`: `approve`/`deny` return `False`, and `wait_for_approval` raises `AgentGuardAuthError` (with `.status`) on the first `401`/`403` instead of polling until the deadline.
 
 `approve`/`deny` treat any `URLError` as failure and return `False`. They do **not** distinguish network error from 4xx. If you need that distinction, call the HTTP API directly.
 

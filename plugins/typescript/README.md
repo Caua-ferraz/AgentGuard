@@ -186,7 +186,7 @@ Returns `Promise<boolean>` — `true` iff the server responded 2xx. Swallows net
 waitForApproval(id: string, timeoutMs = 300_000, pollIntervalMs = 2_000): Promise<CheckResult>
 ```
 
-Polls `GET /v1/status/{id}` with the Bearer token attached. Poll-level errors are swallowed and retried until the deadline. On deadline elapse returns `{ decision: 'DENY', reason: 'Approval timed out' }`.
+Polls `GET /v1/status/{id}` with the Bearer token attached. A `401`/`403` throws `AgentGuardAuthError` (with `.status`) immediately — the API key is wrong or missing, so waiting can't help. Other poll-level errors (network failures, other non-2xx responses, a per-poll timeout, a body that isn't JSON) are retried until the deadline. On deadline elapse returns `{ decision: 'DENY', reason: 'Approval timed out' }`.
 
 **Tune `timeoutMs` to the human SLA.** If approvers routinely take 5 minutes, `300_000` (5 min) will fire false negatives.
 
