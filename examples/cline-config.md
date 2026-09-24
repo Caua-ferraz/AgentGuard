@@ -113,8 +113,10 @@ Open the Cline chat in VS Code and ask:
 - "Read `/tmp/test.txt`" — Cline calls `fs:read_text_file` through the
   gateway, AgentGuard's default policy ALLOWs it, dashboard shows the
   event.
-- "List recent issues from `<your repo>`" — gateway routes via `github:`,
-  AgentGuard either ALLOWs or surfaces an approval depending on policy.
+- "List recent issues from `<your repo>`" — gateway routes via `github:`;
+  the default policy requires approval for every `github:*` call, so the
+  tool returns an approval request and the dashboard lists it (see the
+  [approval flow](../docs/MCP_GATEWAY.md#6-approval-flow)).
 - "Read `/etc/passwd`" — DENY, dashboard shows the deny event.
 
 ## API key handling

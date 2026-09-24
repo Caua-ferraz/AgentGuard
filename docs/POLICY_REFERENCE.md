@@ -308,7 +308,7 @@ tool_scope_map:
     scope: filesystem
   - pattern: "fs:*"
     scope: filesystem
-  - pattern: "github:*"
+  - pattern: "fetch:*"
     scope: network
   - pattern: "*:execute_*"
     scope: shell
@@ -336,6 +336,8 @@ When the dual-check fires, the gateway projects the tool-call arguments into the
 | `data` | `Command` ← first non-empty of `value`/`content`/`text`/`data`. `Action` ← `"form_input"`. `URL`/`Domain` projected as for network. |
 
 Rules in the mapped scope (`filesystem`, `network`, etc.) match on these fields exactly as they would for an SDK or proxy request — there is no MCP-specific matching path.
+
+**Map a tool only if its arguments carry what the mapped scope checks.** A tool mapped to `network` with no `url`/`domain`/`host`/`hostname` argument projects an empty `Domain`, so domain allow rules such as `api.github.com` never match and every call falls through to default deny. GitHub's MCP server is the common case (its tools take `owner`/`repo`), which is why `configs/default.yaml` leaves `github:*` unmapped and gates it with an `mcp_tool` `require_approval` rule instead.
 
 ### Why the list form, not an inline map
 

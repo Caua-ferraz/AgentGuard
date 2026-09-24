@@ -86,7 +86,7 @@ agentguard-mcp-gateway \
 | `--fail-mode`       | no         | `deny` / `allow` / `fail-closed-with-audit`. Default `deny`. `fail-closed-with-audit` denies with the distinct Rule `deny:gateway:fail_closed_audit` **and** records the denial in the local `--fail-audit-log` file. See [`PROXY_ARCHITECTURE.md`](./PROXY_ARCHITECTURE.md) § 6.1. |
 | `--fail-audit-log`  | no         | local JSONL fallback audit file for `fail-closed-with-audit` denials. Default `agentguard-fail-audit.jsonl`; empty disables. |
 | `--policy`          | no         | Path to AgentGuard policy YAML. **Required** when `--policy-mode strict` (the default). Used to resolve `tool_scope_map` overrides for the dual-check (`mcp_tool` + mapped scope). |
-| `--policy-mode`     | no         | `strict` (default) or `fast`. `strict` requires `--policy` and fails closed if the file is missing/invalid; `fast` skips loading and uses only the gateway's built-in default mapping. |
+| `--policy-mode`     | no         | `strict` (default) or `fast`. `strict` requires `--policy` and fails closed if the file is missing/invalid; `fast` runs only the `mcp_tool` check and never consults `tool_scope_map` (`--policy` is optional). |
 | `--log-level`       | no         | stderr verbosity. Default `info`.               |
 | `--upstream-timeout`| no         | per-frame upstream-response timeout. Default `30s`. |
 | `--reconnect-cap`   | no         | upper bound on reconnect backoff. Default `60s`. |
@@ -312,37 +312,18 @@ agentguard-mcp-gateway --policy-mode strict   # dual-check (default)
 agentguard-mcp-gateway --policy-mode fast     # single-check (mcp_tool only)
 ```
 
-`fast` mode dispatches one check with `scope: "mcp_tool"` and stamps
-the inferred mapped scope as `meta["mapped_scope"]` — operators who
-want filesystem semantics in `fast` mode have to write `mcp_tool` rules
-that key on `meta.mapped_scope`. Most won't; that's why `strict` is the
+`fast` mode dispatches one check with `scope: "mcp_tool"` and never
+consults `tool_scope_map`, so only `mcp_tool` rules apply — filesystem,
+network and shell rules never see the call. That's why `strict` is the
 default.
 
 #### 4.4.4 Tool-scope mapping table
 
-Two layers — built-in defaults + policy-YAML override.
+The mapping comes only from the policy's `tool_scope_map` — the gateway
+has **no built-in table**. A tool that matches no entry is checked under
+`mcp_tool` alone (see below).
 
-Built-in (compiled into the gateway):
-
-```go
-var defaultToolScopeMap = []toolScopePattern{
-    // pattern        scope        path-arg         url-arg      action-from-name
-    {"*:read_*",      "filesystem", "path,file_path", "",          "read"},
-    {"*:write_*",     "filesystem", "path,file_path", "",          "write"},
-    {"*:edit_*",      "filesystem", "path,file_path", "",          "write"},
-    {"*:delete_*",    "filesystem", "path,file_path", "",          "delete"},
-    {"*:list_*",      "filesystem", "path,file_path", "",          "read"},
-    {"*:fetch_*",     "network",    "",               "url",       ""},
-    {"*:get_*",       "network",    "",               "url",       ""},
-    {"*:post_*",      "network",    "",               "url",       ""},
-    {"*:browse_*",    "browser",    "",               "url",       ""},
-    {"*:execute_*",   "shell",      "",               "",          ""},
-    {"*:run_*",       "shell",      "",               "",          ""},
-    {"*:exec_*",      "shell",      "",               "",          ""},
-}
-```
-
-Policy-YAML override — `tool_scope_map` is a **top-level list** (same level as `rules:`; see [`POLICY_REFERENCE.md`](POLICY_REFERENCE.md#tool_scope_map) for why it's a list, not a map):
+`tool_scope_map` is a **top-level list** (same level as `rules:`; see [`POLICY_REFERENCE.md`](POLICY_REFERENCE.md#tool_scope_map) for why it's a list, not a map):
 
 ```yaml
 tool_scope_map:
@@ -350,15 +331,13 @@ tool_scope_map:
     scope: filesystem
   - pattern: "fs:write_file"
     scope: filesystem
-  - pattern: "github:*"
+  - pattern: "fetch:*"        # the fetch tool's `url` arg gives the network check a domain
     scope: network
   - pattern: "*:execute_*"
     scope: shell
 ```
 
-Merge semantics: policy entries are evaluated **before** built-ins.
-First match wins. Operators can shadow a built-in by pinning a more
-specific pattern earlier.
+First match wins, in list order — put more specific patterns first.
 
 A tool that matches **no** mapping is checked only under `mcp_tool` —
 operators who want default-deny on unknown tools write:
@@ -412,7 +391,7 @@ tool_scope_map:
     scope: filesystem
   - pattern: "fs:write_file"
     scope: filesystem
-  - pattern: "github:*"
+  - pattern: "fetch:*"        # the fetch tool's `url` arg gives the network check a domain
     scope: network
 ```
 

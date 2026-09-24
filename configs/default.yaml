@@ -174,6 +174,10 @@ rules:
     require_approval:
       # Network-touching tools should ask before acting.
       - pattern: "github:*"
+      # The official fetch server (uvx mcp-server-fetch) exposes a single
+      # tool named `fetch` — i.e. `fetch:fetch`, which `*:fetch_*` below
+      # does not match.
+      - pattern: "fetch:*"
       - pattern: "*:fetch_*"
       - pattern: "*:http_*"
     allow:
@@ -206,7 +210,7 @@ rules:
 # Two namespaces are addressed by this single section:
 #
 #   1. MCP Gateway tool names are namespaced as `<server>:<tool>`
-#      (e.g. `fs:read_file`, `github:create_issue`).
+#      (e.g. `fs:read_text_file`, `github:list_issues`).
 #   2. LLM API Proxy tool names are bare (e.g. `bash`, `read_file`,
 #      `web_search`). The LLM proxy ships with a default map for
 #      common tool names baked into the binary
@@ -228,14 +232,16 @@ tool_scope_map:
   # Filesystem server (npx @modelcontextprotocol/server-filesystem).
   - pattern: "fs:*"
     scope: filesystem
-  # Fetch server (npx @modelcontextprotocol/server-fetch) — every
-  # tool is a network egress.
+  # Fetch server (uvx mcp-server-fetch) — its `fetch` tool is a network
+  # egress; the mapped network check takes the host from the tool's
+  # `url` argument, so only allow-listed domains pass after approval.
   - pattern: "fetch:*"
     scope: network
-  # GitHub server (npx @modelcontextprotocol/server-github) — every
-  # tool ultimately hits api.github.com.
-  - pattern: "github:*"
-    scope: network
+  # GitHub's MCP server (docker … ghcr.io/github/github-mcp-server) is
+  # deliberately NOT mapped. Its tools take owner/repo arguments, not a
+  # URL, so a mapped `network` check would see an empty domain and deny
+  # every call. The mcp_tool rule `require_approval: "github:*"` above is
+  # the gate: an approved GitHub call runs.
   # Cross-namespace catch-alls (more specific patterns above win).
   - pattern: "*:execute_*"
     scope: shell

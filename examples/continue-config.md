@@ -126,8 +126,10 @@ into the container.
 In Continue's agent-mode chat:
 
 - "Read `/tmp/notes.txt`" → ALLOW (default policy), dashboard shows event.
-- "Fetch `https://example.com`" → ALLOW or REQUIRE_APPROVAL depending on
-  the `network` rules in your policy.
+- "Fetch `https://example.com`" → REQUIRE_APPROVAL under the default
+  policy (`fetch:*`). Even after approval it is denied, because
+  `example.com` isn't on the default `network` allow-list — add it under
+  `scope: network` to let it through (see the [approval flow](../docs/MCP_GATEWAY.md#6-approval-flow)).
 - "Read `/etc/passwd`" → DENY, dashboard shows event.
 
 ## API key handling

@@ -119,8 +119,12 @@ In a Claude Desktop chat:
   `/tmp`, the call succeeds, and the dashboard shows an `ALLOW` event.
 - "Read `/etc/passwd`" → policy denies, Claude reports the tool returned an
   error, the dashboard shows a `DENY` event.
-- "Fetch `https://api.openai.com/v1/models`" → if you've enabled the
-  `fetch` upstream and a `network` rule, the gateway gates it.
+- "Fetch `https://api.github.com/zen`" → the default policy requires
+  approval for `fetch:*`: the tool returns an approval request (ID + URL)
+  and the dashboard lists it as pending. The call runs only when the
+  client retries with that approval ID (see the [approval flow](../docs/MCP_GATEWAY.md#6-approval-flow)),
+  and only for hosts on the policy's `network` allow-list —
+  `api.github.com` is; most others are denied even after approval.
 
 If actions appear in Claude but never show on the dashboard, see the
 **Common gotchas** section in [`docs/MCP_GATEWAY.md`](../docs/MCP_GATEWAY.md#11-client-integration).
