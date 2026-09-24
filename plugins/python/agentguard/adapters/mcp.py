@@ -45,10 +45,10 @@ SDK_VERSION = "1.1.1"
 
 # Secret patterns mirrored from pkg/notify/notify.go's DefaultRedactor. The
 # MCP adapter forwards handler exception text back to the client as a
-# content block; raw exception strings can carry bearer tokens, AWS keys,
-# or credentials embedded in KEY=value form. Keeping this list in sync with
-# the Go-side redactor means MCP egress matches webhook/Slack egress
-# hygiene. A fresh `list()` so external callers who mutate it don't
+# content block; raw exception strings can carry bearer tokens, API keys,
+# JWTs, private keys or credentials embedded in KEY=value form. Keeping
+# this list in sync with the Go-side redactor means MCP egress matches
+# webhook/Slack egress hygiene. A fresh `list()` so external callers who mutate it don't
 # accidentally blank out redaction for the whole process.
 _REDACT_PATTERNS = [
     re.compile(r"(?i)bearer\s+[A-Za-z0-9_\-\.]+"),
@@ -56,6 +56,15 @@ _REDACT_PATTERNS = [
     re.compile(r"ghp_[A-Za-z0-9]{36,}"),
     re.compile(r"xox[baprs]-[A-Za-z0-9\-]+"),
     re.compile(r"(?i)(secret|token|password|api[_\-]?key)\s*=\s*\S+"),
+    # Added in v1.2.0 with the Go side (see tests/test_redactor_property.py,
+    # which checks the two lists are identical).
+    re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}"),
+    re.compile(r"AIza[0-9A-Za-z_\-]{35}"),
+    re.compile(r"\bgh[ousr]_[A-Za-z0-9]{36,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{22,}"),
+    re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"),
+    re.compile(r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(-----END [A-Z ]*PRIVATE KEY-----|$)"),
+    re.compile(r"""(?i)\b(x-api-key|api-key|authorization)\s*:\s*(?:(?:basic|bearer|token|digest)\s+)?[^\s"']+"""),
 ]
 
 

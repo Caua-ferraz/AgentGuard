@@ -283,7 +283,7 @@ If the wrapped handler raises, the adapter returns:
 Error (<ExceptionType>): <redacted message>
 ```
 
-The redaction regex list mirrors `pkg/notify/notify.go`'s `DefaultRedactor` — Bearer tokens, AWS `AKIA...`, GitHub `ghp_...`, Slack tokens (`xox[baprs]-...`), and `key=value` for `secret/token/password/api_key`. The raw, unredacted exception is written to stderr for operator visibility; only the redacted form crosses the JSON-RPC boundary back to the MCP client.
+The redaction regex list is `pkg/notify/notify.go`'s `DefaultRedactor`, pattern for pattern (a test checks they're identical) — Bearer tokens, AWS `AKIA...`, Slack tokens (`xox[baprs]-...`), `key=value` for `secret/token/password/api_key`, and from 1.2.0 `sk-...` LLM keys, Google `AIza...` keys, GitHub `gh[pousr]_...` and `github_pat_...` tokens, JWTs, PEM private keys and `Authorization` / `x-api-key` header values. The raw, unredacted exception is written to stderr for operator visibility; only the redacted form crosses the JSON-RPC boundary back to the MCP client.
 
 This matters because the MCP client is arbitrary (Claude Desktop, Cursor, a script). A naive `str(e)` leak of a bearer token would cross a trust boundary.
 
