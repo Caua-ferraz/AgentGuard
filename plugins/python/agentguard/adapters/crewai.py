@@ -85,6 +85,26 @@ _CREWAI_BASETOOL: Optional[type] = None
 _GUARDED_CLASS: Optional[type] = None
 
 
+
+def _accepted_kwargs(cls: Any, kwargs: dict) -> dict:
+    """Keep only the keyword arguments ``cls.__init__`` accepts.
+
+    CrewStructuredTool's constructor changed across CrewAI releases: 1.x is a
+    pydantic model that takes any field as a keyword, while 0.19x names its
+    parameters explicitly and has no ``cache_function``. Passing an unknown
+    keyword raises TypeError, which broke every gated tool on older CrewAI
+    (the version pip picks for ``agentguardproxy[all]``).
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(cls.__init__).parameters
+    except (TypeError, ValueError):
+        return kwargs
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return kwargs
+    return {k: v for k, v in kwargs.items() if k in params}
+
 def _is_valid_args_schema(value: Any) -> bool:
     """Return True if ``value`` is a pydantic BaseModel subclass or a
     JSON-schema-shaped dict. Filters MagicMock and other unusable types
@@ -98,6 +118,32 @@ def _is_valid_args_schema(value: Any) -> bool:
         return False
 
 
+# CrewAI releases before 1.0 dispatch an agent's tool calls through a path
+# this adapter does not wrap: a crew kickoff on crewai 0.193 ran the tool
+# without a single /v1/check call. Refuse them rather than hand back tools
+# that look gated but aren't.
+_MIN_CREWAI = (1, 0)
+
+
+def _require_supported_crewai() -> None:
+    try:
+        from importlib.metadata import version
+
+        found = version("crewai")
+    except Exception:
+        return  # not installed: the import below raises the install hint
+    parts = []
+    for piece in found.split(".")[:2]:
+        digits = "".join(ch for ch in piece if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    if tuple(parts) < _MIN_CREWAI:
+        raise ImportError(
+            f"agentguard CrewAI adapter requires crewai>=1.0 (found {found}). "
+            "Older CrewAI runs agent tool calls outside the adapter's gate. "
+            "Upgrade with `pip install -U 'crewai>=1.0,<2.0'`."
+        )
+
+
 def _resolve_crewai_basetool() -> type:
     """Return ``crewai.tools.BaseTool`` or raise a clear ImportError.
 
@@ -106,6 +152,7 @@ def _resolve_crewai_basetool() -> type:
     global _CREWAI_BASETOOL
     if _CREWAI_BASETOOL is not None:
         return _CREWAI_BASETOOL
+    _require_supported_crewai()
     last_err: Optional[Exception] = None
     for module_name, attr in (
         ("crewai.tools", "BaseTool"),
@@ -478,16 +525,17 @@ def _build_guarded_class() -> type:
             from crewai.tools.structured_tool import CrewStructuredTool  # type: ignore
 
             self._set_args_schema()
-            structured_tool = CrewStructuredTool(
-                name=self.name,
-                description=self.description,
-                args_schema=self.args_schema,
-                func=self._run,  # gated
-                result_as_answer=self.result_as_answer,
-                max_usage_count=self.max_usage_count,
-                current_usage_count=self.current_usage_count,
-                cache_function=self.cache_function,
-            )
+            kwargs = {
+                "name": self.name,
+                "description": self.description,
+                "args_schema": self.args_schema,
+                "func": self._run,  # gated
+                "result_as_answer": getattr(self, "result_as_answer", False),
+                "max_usage_count": getattr(self, "max_usage_count", None),
+                "current_usage_count": getattr(self, "current_usage_count", 0),
+                "cache_function": getattr(self, "cache_function", None),
+            }
+            structured_tool = CrewStructuredTool(**_accepted_kwargs(CrewStructuredTool, kwargs))
             structured_tool._original_tool = self
             return structured_tool
 

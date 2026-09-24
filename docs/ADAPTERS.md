@@ -19,19 +19,22 @@ The version pins live in [`plugins/python/pyproject.toml`](../plugins/python/pyp
 
 | AgentGuard | LangChain | CrewAI | browser-use | MCP |
 |---|---|---|---|---|
+| 1.2.x | `langchain >=0.3,<2.0`, `langchain-core >=0.3,<2.0` | `crewai >=1.0,<2.0` | `browser-use >=0.4,<1.0`, `playwright >=1.40` | `mcp >=0.9,<3.0` |
 | 0.5.x – 1.1.x | `langchain >=0.3,<2.0`, `langchain-core >=0.3,<2.0` | `crewai >=0.80,<2.0` | `browser-use >=0.4,<1.0`, `playwright >=1.40` | `mcp >=0.9,<2.0` |
 | 0.4.x | `>=0.1` (no upper bound — silent rot) | `>=0.1` | `>=0.1` (`goto` only) | wire protocol `2024-11-05` |
 
-The 0.5 floors cover the API surface AgentGuard's adapters were built and hardened against (LangChain 0.3+'s split `langchain-core` package, CrewAI 0.80+'s Runnable BaseTool, browser-use 0.4+'s stable Page surface). Each ceiling sits at the next upstream major, so a new major can't install until it has been verified. As of 2026-09-23, the newest LangChain (1.x), CrewAI (1.x), and browser-use (0.x) releases are inside their pins. MCP's newest release is 2.x, which is outside the pin, so `pip install agentguardproxy[mcp]` resolves to the newest 1.x release.
+The floors cover the API surface AgentGuard's adapters were built and hardened against (LangChain 0.3+'s split `langchain-core` package, CrewAI 1.0+ — see below — and browser-use 0.4+'s stable Page surface). Each ceiling sits at the next upstream major, so a new major can't install until it has been verified. As of 2026-09-24, the newest LangChain (1.x), CrewAI (1.x), browser-use (0.x) and MCP (2.x) releases are inside their pins.
+
+**`pip install agentguardproxy[all]`** resolves, as of 2026-09-24, to crewai 1.15, browser-use 0.11, langchain 1.4, mcp 1.28 and pydantic 2.12, and `pip check` is clean. The newest browser-use (0.13) pins `mcp==2.1.1` and `pydantic>=2.13`, which conflict with crewai 1.x, so pip picks an older browser-use; every adapter suite passes on that set.
 
 ### Pinning rationale
 
 The 0.5 line introduces upper bounds because the prior `>=0.1` floor allowed silent rot when frameworks renamed methods or added new bypass paths. Specifically:
 
 - **LangChain** moved from a single `langchain` package on 0.1 to a split `langchain-core` (Runnable protocol) + `langchain` (agents / chains) on 0.3. LangChain has since reached 1.x, which the `<2.0` ceiling already admits and CI installs today; 2.0 gets re-verified before the ceiling moves.
-- **CrewAI** moved its `BaseTool` to inherit from `langchain_core.runnables.Runnable` around 0.80, exposing the modern `invoke` / `ainvoke` / `stream` / `batch` surface. Pre-0.80 tools have a different bypass surface. The adapter was hardened against 0.80+; CrewAI has since reached 1.x, which the `<2.0` ceiling admits and CI installs today.
+- **CrewAI** moved its `BaseTool` to inherit from `langchain_core.runnables.Runnable` around 0.80, exposing the modern `invoke` / `ainvoke` / `stream` / `batch` surface. The floor is **1.0** since v1.2.0: on 0.19x a crew kickoff dispatched agent tool calls through a path the adapter does not wrap (the tool ran with no `/v1/check` call), so the adapter now refuses CrewAI below 1.0 with an `ImportError` instead of returning tools that look gated but aren't. (Before 1.2.0 the floor was 0.80, and `[all]` could resolve to crewai 0.193, where wrapping a tool failed with a `cache_function` TypeError.)
 - **browser-use** 0.4 is the first release where the `Browser` / `Page` API stabilised enough that we could write a strict allowlist against it. Earlier versions reshape the page proxy across minor releases.
-- **MCP** Python SDK (`mcp` on PyPI) is on 1.x, which the adapter is tested against. 2.x is out on PyPI but not verified yet, so the `<2.0` ceiling keeps pip on 1.x. The ceiling widens once the adapter passes against 2.x.
+- **MCP** Python SDK (`mcp` on PyPI): the ceiling is `<3.0` since v1.2.0, after the adapter's suite and the gateway end-to-end suite passed on mcp 2.2.0 (and 2.1.1). 1.x stays supported.
 
 ### Bumping the upper bound
 
