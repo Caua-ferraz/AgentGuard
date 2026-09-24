@@ -15,7 +15,7 @@ The MCP Gateway and the LLM API Proxy are the **hero** integration paths — the
 
 ## Compatibility Matrix
 
-The version pins live in [`plugins/python/pyproject.toml`](../plugins/python/pyproject.toml) under `[project.optional-dependencies]`. The CI `integration-tests` job runs the LangChain, CrewAI, and browser-use adapters against the real upstream package (the newest release inside each pin) on every push and PR, and on a weekly cron (Monday 06:00 UTC), so a breaking upstream release surfaces before a customer hits it. The MCP adapter has no leg in that job: its tests run in the blocking `python-test` job, which installs the real `mcp` package (again the newest release inside the pin).
+The version pins live in [`plugins/python/pyproject.toml`](../plugins/python/pyproject.toml) under `[project.optional-dependencies]`. The CI `integration-tests` job runs each adapter against the real upstream package (the newest release inside each pin) on every push and PR, and on a weekly cron (Monday 06:00 UTC), so a breaking upstream release surfaces before a customer hits it. Each leg runs the framework's `test_real_*` suite and its `test_at_*` suite (a real agent loop end to end); the langchain leg also drives the real `agentguard-llm-proxy` binary (`test_at_llm_proxy_e2e.py`), and the `mcp` leg drives the Python MCP gateway adapter against a real stdio MCP server. The advisory `python-extras-all` job installs `.[all,dev]` into a fresh environment, runs `pip check`, and runs the whole Python suite, so an extras set that stops resolving — or resolves to an unsupported framework version — shows up.
 
 | AgentGuard | LangChain | CrewAI | browser-use | MCP |
 |---|---|---|---|---|
@@ -46,7 +46,7 @@ The 0.5 line introduces upper bounds because the prior `>=0.1` floor allowed sil
 
 ### Which integration-tests legs block CI
 
-Since v1.0.0, the LangChain and CrewAI legs are required: a red leg fails CI. The browser-use leg is advisory (`continue-on-error`) for two reasons. Its `playwright install` step downloads about 200 MB of Chromium from a CDN and is the known flake. And like every leg, it tests against live upstream releases, so a red browser-use leg usually means upstream drift, not an AgentGuard regression. A red advisory leg still shows in the run, and the weekly cron run surfaces upstream breakage even when no PR is open. (Before v1.0.0 the whole job was non-blocking.)
+Since v1.0.0, the LangChain and CrewAI legs are required: a red leg fails CI (and, since v1.2.0, the MCP leg). The browser-use leg is advisory (`continue-on-error`) for two reasons. Its `playwright install` step downloads about 200 MB of Chromium from a CDN and is the known flake. And like every leg, it tests against live upstream releases, so a red browser-use leg usually means upstream drift, not an AgentGuard regression. A red advisory leg still shows in the run, and the weekly cron run surfaces upstream breakage even when no PR is open. (Before v1.0.0 the whole job was non-blocking.)
 
 Authors of adapter changes are still expected to drive the integration job to green locally before merging: from `plugins/python`, run `pytest -v -m integration tests/integration/test_real_<framework>.py` (the same invocation CI uses).
 

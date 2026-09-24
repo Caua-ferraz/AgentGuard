@@ -282,7 +282,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        framework: [langchain, crewai, browser-use]
+        framework: [langchain, crewai, browser-use, mcp]
         include:
           - framework: langchain
             allow_failure: false
@@ -290,6 +290,10 @@ jobs:
             allow_failure: false
           - framework: browser-use
             allow_failure: true
+          # The Python MCP gateway adapter against a real stdio MCP server
+          # (tests/integration/_mcp_stub_server.py).
+          - framework: mcp
+            allow_failure: false
     steps:
       - uses: actions/checkout@v4
 
@@ -298,8 +302,11 @@ jobs:
         with:
           go-version: '1.26.7'
 
-      - name: Build agentguard binary
-        run: go build -o agentguard ./cmd/agentguard
+      - name: Build agentguard binaries
+        run: |
+          go build -o agentguard ./cmd/agentguard
+          # test_at_llm_proxy_e2e.py (langchain leg) drives the real proxy.
+          go build -o agentguard-llm-proxy ./cmd/agentguard-llm-proxy
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -329,12 +336,63 @@ jobs:
           # back to AGENTGUARD_URL. Pin it so a leaked env var from the
           # runner image doesn't smuggle in a real proxy.
           AGENTGUARD_URL: http://127.0.0.1:0
+          AGENTGUARD_LLM_PROXY_BIN: ${{ github.workspace }}/agentguard-llm-proxy
         run: |
-          # Each framework's integration file is run in isolation — this
+          # Each framework's integration files run in isolation — this
           # makes the matrix output cleaner and surfaces a per-framework
-          # break without burying it under the others' output.
-          fname=test_real_${{ matrix.framework == 'browser-use' && 'browseruse' || matrix.framework }}.py
-          pytest -v -m integration "tests/integration/${fname}"
+          # break without burying it under the others' output. The test_at_*
+          # files drive a real agent loop (or the real proxy) end to end.
+          d=tests/integration
+          case "${{ matrix.framework }}" in
+            langchain)   files="$d/test_real_langchain.py $d/test_at_real_langchain.py $d/test_at_llm_proxy_e2e.py" ;;
+            crewai)      files="$d/test_real_crewai.py $d/test_at_real_crewai.py" ;;
+            browser-use) files="$d/test_real_browseruse.py $d/test_at_real_browseruse.py" ;;
+            mcp)         files="$d/test_at_mcp_gateway.py" ;;
+          esac
+          pytest -v -rs -m integration $files
+
+  # Fresh install of every extra at once. Catches an extras set that no
+  # longer resolves, resolves to a framework version the adapters don't
+  # support, or breaks an adapter — 1.1.1's [all] picked crewai 0.193, whose
+  # tool dispatch bypassed the CrewAI adapter. Advisory: an upstream release
+  # can break the resolution at any time, and the weekly cron surfaces it.
+  python-extras-all:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.7'
+
+      - name: Build agentguard binaries
+        run: |
+          go build -o agentguard ./cmd/agentguard
+          go build -o agentguard-llm-proxy ./cmd/agentguard-llm-proxy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install every extra into a fresh environment
+        working-directory: plugins/python
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[all,dev]"
+          pip check
+          pip list | grep -i -E '^(crewai|browser-use|langchain|langchain-core|mcp|pydantic) '
+
+      - name: Install Playwright Chromium
+        working-directory: plugins/python
+        run: python -m playwright install --with-deps chromium
+
+      - name: Unit and integration suites
+        working-directory: plugins/python
+        env:
+          AGENTGUARD_URL: http://127.0.0.1:0
+          AGENTGUARD_LLM_PROXY_BIN: ${{ github.workspace }}/agentguard-llm-proxy
+        run: pytest -q -rs -p no:cacheprovider tests
 
   typescript-build:
     runs-on: ubuntu-latest
