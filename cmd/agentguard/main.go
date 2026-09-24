@@ -788,10 +788,13 @@ func startPprofServer(opts pprofOpts) *http.Server {
 }
 
 func runValidate(policyFile string) {
-	pol, err := policy.LoadFromFile(policyFile)
+	pol, warnings, err := policy.LoadFromFileWithWarnings(policyFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "INVALID: %v\n", err)
 		os.Exit(1)
+	}
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "WARN: %s\n", w)
 	}
 	fmt.Printf("VALID: %s — %d rules across %d scopes\n", pol.Name, pol.RuleCount(), pol.ScopeCount())
 }

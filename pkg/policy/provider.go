@@ -7,8 +7,6 @@ import (
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
-
-	"gopkg.in/yaml.v3"
 )
 
 // safeCallback invokes cb(pol) with a deferred recover. A panic inside a
@@ -77,46 +75,14 @@ type PolicyProvider interface {
 // providers can reuse it (FilePolicyProvider for raw-bytes Validate; the
 // MultiTenantProvider for loading per-tenant policies from a store).
 func parsePolicyBytes(data []byte) (*Policy, error) {
-	var pol Policy
-	if err := yaml.Unmarshal(data, &pol); err != nil {
-		return nil, fmt.Errorf("parsing policy YAML: %w", err)
-	}
-	if pol.Version == "" {
-		return nil, fmt.Errorf("policy missing required 'version' field")
-	}
-	if pol.Name == "" {
-		return nil, fmt.Errorf("policy missing required 'name' field")
-	}
-	if err := validateFilesystemPaths(&pol); err != nil {
+	pol, warnings, err := parsePolicyBytesWithWarnings(data)
+	if err != nil {
 		return nil, err
 	}
-	if err := validateRedactionPatterns(&pol); err != nil {
-		return nil, err
-	}
-	if err := validateToolScopeMap(&pol); err != nil {
-		return nil, err
-	}
-	if err := validateTunables(&pol); err != nil {
-		return nil, err
-	}
-	if err := validateRuleDurationsAndCounts(&pol); err != nil {
-		return nil, err
-	}
-	if err := errorTimeWindowOnlyConditions(&pol); err != nil {
-		return nil, err
-	}
-
-	// Fold rule domains to lower case once (case-insensitive domain matching;
-	// see normalizeRuleDomains). Mirrors LoadFromFile so every YAML->Policy
-	// path — file load, multi-tenant store load, and Validate — is consistent.
-	normalizeRuleDomains(&pol)
-
-	// Non-fatal lint: warn on path patterns whose '*' recurses across '/'.
-	for _, w := range lintPathPatterns(&pol) {
+	for _, w := range warnings {
 		log.Print(w)
 	}
-
-	return &pol, nil
+	return pol, nil
 }
 
 // validatePolicyBytes validates raw policy YAML without retaining the parsed

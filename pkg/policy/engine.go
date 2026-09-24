@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -12,8 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // Decision represents the outcome of a policy check.
@@ -232,67 +229,14 @@ type NotifyTarget struct {
 // function. Validation errors include the YAML path so operators can find
 // the failing field without grepping.
 func LoadFromFile(path string) (*Policy, error) {
-	data, err := os.ReadFile(path)
+	pol, warnings, err := LoadFromFileWithWarnings(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading policy file: %w", err)
-	}
-
-	var pol Policy
-	if err := yaml.Unmarshal(data, &pol); err != nil {
-		return nil, fmt.Errorf("parsing policy YAML: %w", err)
-	}
-
-	if pol.Version == "" {
-		return nil, fmt.Errorf("policy missing required 'version' field")
-	}
-	if pol.Name == "" {
-		return nil, fmt.Errorf("policy missing required 'name' field")
-	}
-
-	if err := validateFilesystemPaths(&pol); err != nil {
 		return nil, err
 	}
-	if err := validateRedactionPatterns(&pol); err != nil {
-		return nil, err
-	}
-	if err := validateToolScopeMap(&pol); err != nil {
-		return nil, err
-	}
-
-	// Validate proxy and notification tunables: parse durations, bound-check
-	// integers. Fail at load so an operator who types "1hr" instead of "1h"
-	// finds out before a session tries to expire.
-	if err := validateTunables(&pol); err != nil {
-		return nil, err
-	}
-
-	// Validate every rule-level rate_limit and condition.time_window
-	// duration at load time. Lazy parsing on the request path silently
-	// fell through on bad input, so a typo like `window: "1minute"`
-	// produced a no-op rule. window=0 (panic in the limiter) is also
-	// rejected here.
-	if err := validateRuleDurationsAndCounts(&pol); err != nil {
-		return nil, err
-	}
-
-	// Reject conditions with time_window but no require_prior. Such a
-	// condition is inert at runtime; we hard-fail at load so a footgun
-	// in production cannot hide behind a one-line typo.
-	if err := errorTimeWindowOnlyConditions(&pol); err != nil {
-		return nil, err
-	}
-
-	// Fold rule domains to lower case once, so case-insensitive domain
-	// matching (normalizeRequest lower-cases the request side per Check)
-	// works without a rule-side allocation on the hot path.
-	normalizeRuleDomains(&pol)
-
-	// Non-fatal lint: warn on path patterns whose '*' recurses across '/'.
-	for _, w := range lintPathPatterns(&pol) {
+	for _, w := range warnings {
 		log.Print(w)
 	}
-
-	return &pol, nil
+	return pol, nil
 }
 
 // normalizeRuleDomains lower-cases every rule.Domain in the policy exactly

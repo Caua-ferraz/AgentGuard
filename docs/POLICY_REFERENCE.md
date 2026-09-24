@@ -61,7 +61,7 @@ rules:
 
 | Scope | Dedicated handling | Typical fields on each rule |
 |---|---|---|
-| `shell` | none | `pattern`, optional `conditions` |
+| `shell` | a command with shell syntax is checked one command at a time — see [compound shell commands](#compound-shell-commands) | `pattern`, optional `conditions` |
 | `filesystem` | `..` path-traversal guard at load + at request time | `action`, `paths` |
 | `network` | none | `domain` or `pattern` |
 | `browser` | none | `domain` |
@@ -69,6 +69,8 @@ rules:
 | `data` | none (generic) | `pattern`, `action` (`form_input`), `domain` — see [data scope](#data-scope) |
 | `mcp_tool` | none (generic) | `pattern` matched against `<namespace>:<tool>` — see [mcp_tool scope](#mcp_tool-scope) |
 | *any other string* | none | generic; `pattern`/`action`/`domain` all still work |
+
+**One rule set per scope.** If a scope appears in more than one block of `rules:` (or of one agent's `override:`), the blocks are merged at load, in file order: their `deny`, `require_approval` and `allow` rules are combined, so deny → require_approval → allow precedence holds across them. `agentguard validate` prints a `WARN` line for each merge. A `rate_limit` or `limits` set in more than one of the merged blocks must be identical, or the policy is rejected. Before v1.2.0 the first block that decided won, and a `deny` in a later block for the same scope never applied.
 
 ### Scope field reference
 
@@ -657,18 +659,18 @@ before v1.0 a mixed-case request could slip past a lowercase deny rule.
 
 ## Load-time validation
 
-`LoadFromFile` (in `pkg/policy/engine.go:174`) enforces:
+Every policy load — the `--policy` file, a hot reload, a tenant policy from the store, `agentguard validate` — goes through `parsePolicyBytesWithWarnings` (`pkg/policy/policy_load.go`), which enforces:
 
 - `version` present, non-empty.
 - `name` present, non-empty.
 - `filesystem` rule `paths` do not contain `..` after normalization.
 - Every `notifications.redaction.extra_patterns` entry compiles as a Go regexp.
 - `conditions.time_window` without `require_prior` is rejected as a hard load error (since v0.5.0).
+- Blocks for the same scope are merged; a `rate_limit` or `limits` that differs between them is a load error (since v1.2.0).
 
-One **non-fatal warning** (v1.0): a rule path pattern that contains `/` but no
-`**` (e.g. `/workspace/*`) is logged at load, because its single `*` crosses
-`/` and matches recursively (`/workspace/a/b/secret.env`) — usually broader
-than intended. The policy still loads; switch to `**` (segment-aware) if you
-meant one level. See [Single-star `*` crosses `/`](#single-star--crosses-).
+**Non-fatal warnings** are logged at load and printed by `agentguard validate` (to stderr, prefixed `WARN:`); the policy still loads:
+
+- (v1.2.0) a scope that appears in more than one block — the blocks were merged (see [Rule sets and scopes](#rule-sets-and-scopes));
+- (v1.0) a rule path pattern that contains `/` but no `**` (e.g. `/workspace/*`) — its single `*` crosses `/` and matches recursively (`/workspace/a/b/secret.env`), usually broader than intended. Switch to `**` (segment-aware) if you meant one level. See [Single-star `*` crosses `/`](#single-star--crosses-).
 
 There is **no** schema validation beyond the above — typos in field names are silently ignored by the YAML decoder. Always run `agentguard validate --policy <file>` after edits; wire it into CI against every policy file you ship.
