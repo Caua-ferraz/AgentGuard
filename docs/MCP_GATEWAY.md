@@ -225,7 +225,7 @@ and concatenating the arrays.
     "tools": [
       { "name": "fs:read_file",     "description": "...", "inputSchema": {...} },
       { "name": "fs:write_file",    "description": "...", "inputSchema": {...} },
-      { "name": "github:create_issue", "description": "...", "inputSchema": {...} }
+      { "name": "github:list_issues", "description": "...", "inputSchema": {...} }
     ]
   }
 }
@@ -733,7 +733,7 @@ Copy [`examples/claude-desktop-config.json`](../examples/claude-desktop-config.j
 the table above.
 
 The gateway namespaces tools per upstream (`fs:read_text_file`,
-`github:create_issue`, …), so policies written against namespaced names
+`github:list_issues`, …), so policies written against namespaced names
 work without changes. Strict policy mode (the default) requires
 `--policy <path>` because the gateway resolves the
 `tool_scope_map` locally to drive the dual-check (mcp_tool + mapped
