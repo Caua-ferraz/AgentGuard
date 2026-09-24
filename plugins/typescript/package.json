@@ -43,8 +43,8 @@
     "access": "public"
   },
   "devDependencies": {
-    "typescript": "^6.0.0",
-    "@types/node": "^22.0.0",
+    "typescript": "^7.0.2",
+    "@types/node": "^26.6.2",
     "jest": "^30.0.0",
     "ts-jest": "^29.4.0",
     "@types/jest": "^30.0.0"
