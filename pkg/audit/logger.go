@@ -150,6 +150,13 @@ type FileLogger struct {
 	file   *os.File
 	enc    *json.Encoder
 	rotCfg RotationConfig
+
+	// Replay checkpoint maintenance, on once EnableCheckpoints is called:
+	// the lifetime decision tally of everything written and the live file's
+	// identity (its _meta.created_at).
+	cpEnabled bool
+	cpCounts  DecisionCounts
+	cpFileID  string
 }
 
 // NewFileLogger creates a new file-based audit logger.
@@ -215,6 +222,9 @@ func (l *FileLogger) Log(entry Entry) error {
 
 	if err := l.enc.Encode(entry); err != nil {
 		return err
+	}
+	if l.cpEnabled {
+		l.cpCounts.add(entry.Result.Decision)
 	}
 
 	if l.rotCfg.MaxSize > 0 {
@@ -361,6 +371,9 @@ func matchesFilter(entry Entry, filter QueryFilter) bool {
 func (l *FileLogger) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.cpEnabled {
+		l.writeCheckpointLocked()
+	}
 	return l.file.Close()
 }
 

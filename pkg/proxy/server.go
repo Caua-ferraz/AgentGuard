@@ -379,10 +379,18 @@ func NewServer(cfg Config) *Server {
 		}
 		if err != nil {
 			log.Printf("WARN: audit replay failed (%v); counters may be under-seeded", err)
-		} else if next.Offset > 0 {
-			// Best-effort: a failed checkpoint write just means the next
-			// boot re-scans. No need to surface the error at startup.
-			_ = audit.WriteCheckpoint(path, next)
+		} else {
+			if next.Offset > 0 {
+				// Best-effort: a failed checkpoint write just means the next
+				// boot re-scans. No need to surface the error at startup.
+				_ = audit.WriteCheckpoint(path, next)
+			}
+			// From here on the file logger keeps the checkpoint current itself
+			// (on every rotation and on Close), so rotation pruning can't
+			// strand it.
+			if c, ok := cfg.Logger.(audit.Checkpointer); ok && next.Counts != nil {
+				c.EnableCheckpoints(*next.Counts, next.Offset)
+			}
 		}
 	} else if existing, err := cfg.Logger.Query(audit.QueryFilter{}); err == nil {
 		for _, e := range existing {
