@@ -19,7 +19,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- **npm publishing for the TypeScript SDK.** `.github/workflows/publish-npm.yml` runs when a GitHub release is published (or by manual dispatch), checks that the release tag matches `package.json`'s version, runs `npm ci`, build and test, and publishes with `npm publish --provenance --access public`. It needs the `NPM_TOKEN` repository secret.
+- **npm publishing for the TypeScript SDK.** `.github/workflows/publish-npm.yml` runs when a GitHub release is published (or by manual dispatch), checks that the release tag matches `package.json`'s version, runs `npm ci`, build and test, and publishes. It authenticates with npm trusted publishing (GitHub OIDC), so no npm token is stored in the repository, and npm attaches provenance to each version it publishes. A version that's already on npm is skipped. npm accepts a trusted publisher only for a package that already exists, so 1.1.1, the first version, was published by hand and has no provenance.
 
 ### Changed
 

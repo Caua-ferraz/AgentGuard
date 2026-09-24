@@ -95,7 +95,7 @@ git push && git push --tags
 
 The publish workflows only trigger on `release: [published]` events or via manual `workflow_dispatch`. Pushing the tag alone does **not** trigger them. (This caught v0.5.1 — the tag was pushed but the release was never drafted, so PyPI stayed on v0.5.0 until the operator pressed Publish.)
 
-`publish-npm.yml` needs the repository secret `NPM_TOKEN` (a granular npm access token with publish rights on the `@lictorate` scope). It refuses to publish when the release tag doesn't match `plugins/typescript/package.json`'s version, and publishes with npm provenance.
+`publish-npm.yml` uses npm trusted publishing, so there's no npm token to store or rotate. On npmjs.com, `@lictorate/agentguard`'s trusted publisher names the repository `Caua-ferraz/AgentGuard` and the workflow file `publish-npm.yml`. If you rename the workflow file, update that setting too, or publishing fails. The workflow refuses to publish when the release tag doesn't match `plugins/typescript/package.json`'s version, and skips a version that's already on npm. npm attaches provenance to each version it publishes.
 
 ### How to define your version
 

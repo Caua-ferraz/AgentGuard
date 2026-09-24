@@ -3,9 +3,16 @@ name: Publish TypeScript SDK to npm
 # Publishes plugins/typescript as @lictorate/agentguard when a GitHub release
 # is published — the same trigger as publish-pypi.yml.
 #
-# Requires the repository secret NPM_TOKEN: a granular npm access token with
-# publish rights on the @lictorate scope. `--provenance` links the published
-# version to this workflow run, which needs `id-token: write`.
+# Authenticates with npm trusted publishing (GitHub OIDC), so no npm token
+# is stored in this repository. On npmjs.com, @lictorate/agentguard's trusted
+# publisher must name the repository Caua-ferraz/AgentGuard and the workflow
+# file publish-npm.yml; renaming this file stops publishing until the setting
+# is updated. `id-token: write` lets the job request the OIDC token, and npm
+# attaches provenance automatically. Trusted publishing needs npm >= 11.5.1.
+#
+# npm only accepts a trusted publisher for a package that already exists, so
+# the first version (1.1.1) was published by hand. A version that's already
+# on npm is skipped, so publishing that release here is a no-op.
 on:
   release:
     types: [published]
@@ -53,7 +60,14 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Update npm (trusted publishing needs >= 11.5.1)
+        run: npm install -g npm@^11.5.1
+
       - name: Publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --provenance --access public
+        run: |
+          spec="$(node -p "const p = require('./package.json'); p.name + '@' + p.version")"
+          if npm view "${spec}" version >/dev/null 2>&1; then
+            echo "${spec} is already on npm; nothing to publish."
+            exit 0
+          fi
+          npm publish --access public
