@@ -11,7 +11,7 @@ dashboard you can approve / deny from.
 
 - **Claude Desktop** installed: <https://claude.ai/download>
 - **Go 1.25+** (for `go install`): <https://go.dev/dl/>
-- **`npx`** (Node.js 18+): <https://nodejs.org/> — used to launch the
+- **`npx`** (Node.js 20+, a current LTS): <https://nodejs.org/> — used to launch the
   upstream MCP servers
 
 This walkthrough uses Claude Desktop. The same pattern works for Cursor,

@@ -6,7 +6,7 @@ TypeScript / JavaScript client for [AgentGuard](https://github.com/Caua-ferraz/A
 - **Fail-closed by default.** If the proxy is unreachable, `check()` resolves to `DENY`. Opt in to `failMode: 'allow'` if your threat model requires it.
 - **Types included.** Ships `.d.ts` alongside CommonJS `dist/`.
 
-> **Runtime requirement:** Node.js **18+** (for native `fetch`), or any browser / Deno / Bun / Workers runtime that provides `fetch` and `AbortController` globally. Node 16 and earlier will need a `fetch` polyfill such as `undici`.
+> **Runtime requirement:** Node.js **20+** (the `engines` field in `package.json`; CI tests 20, 22 and 24), or any browser / Deno / Bun / Workers runtime that provides `fetch` and `AbortController` globally.
 
 ## Install
 
@@ -214,7 +214,7 @@ The getter convenience properties are computed from `decision`.
 
 The package ships CommonJS (`main: "dist/index.js"`) with types (`types: "dist/index.d.ts"`). It works out of the box in:
 
-- Node 18+ (CommonJS or ESM via default-interop).
+- Node 20+ (CommonJS or ESM via default-interop).
 - Bundlers (webpack, esbuild, Rollup, Vite) — imports compile cleanly.
 - TypeScript projects (types resolve through `@lictorate/agentguard`).
 
