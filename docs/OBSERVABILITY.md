@@ -226,10 +226,10 @@ data: {"type":"check","timestamp":"…","request":{…},"result":{…}}\n\n
 
 | Type | Emitted when |
 |---|---|
-| `check` | `/v1/check` handled any decision. |
-| `approval_required` | A `REQUIRE_APPROVAL` decision was stored in the queue. |
-| `denied` | A `DENY` decision was returned (also fires `check`). |
-| `resolved` | `/v1/approve/{id}` or `/v1/deny/{id}` resolved a pending entry. |
+| `check` | Every response from `/v1/check` (any decision, including rate-limit denies) and every `POST /v1/audit` record. `REQUIRE_APPROVAL` and `DENY` decisions arrive as `check` events — read `result.decision`. |
+| `resolved` | The first `approve` / `deny` of a pending approval. `result.decision` is `ALLOW` or `DENY`, `result.reason` is `manually allow` / `manually deny`. Repeating the same resolution does not send it again. |
+
+Events are unnamed SSE messages (no `event:` field), so an `EventSource` receives them through `onmessage`. Each carries `transport` (`sdk`, `mcp_gateway`, `llm_api_proxy`) and, for tenants other than `local`, `tenant`, alongside `request` and `result`. `approval_required` and `denied` are **notifier** event types (webhook / Slack / console), not stream events — see [`APPROVAL_WORKFLOW.md`](APPROVAL_WORKFLOW.md#2-notification-fan-out).
 
 Slow consumers drop events; see `agentguard_sse_events_dropped_total{reason="slow_consumer"}`.
 
