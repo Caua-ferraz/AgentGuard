@@ -45,6 +45,8 @@ from agentguard import (
 )
 ```
 
+**(v1.2)** `agentguard.__version__` is the SDK's version string, e.g. `"1.2.0"` — the same as the `agentguardproxy` release it ships in.
+
 The core SDK has **no runtime dependencies** — it uses only the standard library (`urllib`, `json`, `dataclasses`, `functools`, `time`). Adapters pull in their respective frameworks through PyPI extras.
 
 ---

@@ -23,6 +23,10 @@ constants live in :mod:`agentguard.core`; the ``@guarded`` decorator in
 import from the package root.
 """
 
+# The SDK's release version; scripts/bump-version.sh keeps it in step with
+# pyproject.toml.
+__version__ = "1.1.1"
+
 # Back-compat module aliases. The pre-split __init__ imported these
 # stdlib modules directly, which made e.g. ``agentguard.request`` and
 # ``agentguard.time`` valid mock.patch targets ("agentguard.request.
@@ -66,8 +70,10 @@ from agentguard.core import (
 )
 from agentguard.decorators import guarded
 
+
 # Public API surface. Everything else is internal.
 __all__ = [
+    "__version__",
     "Guard",
     "CheckResult",
     "guarded",

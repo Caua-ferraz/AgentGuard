@@ -63,6 +63,7 @@ This updates:
 | `cmd/agentguard-mcp-gateway/main.go` | `version = "..."` (v0.5+) |
 | `cmd/agentguard-llm-proxy/main.go` | `version = "..."` (v0.5+) |
 | `plugins/python/pyproject.toml` | `version = "..."` under `[project]` |
+| `plugins/python/agentguard/__init__.py` | `__version__ = "..."` |
 | `plugins/python/agentguard/adapters/mcp.py` | `SDK_VERSION = "..."` |
 | `plugins/typescript/package.json` | `"version": "..."` |
 | `plugins/typescript/package-lock.json` | top-level + root-package `"version"` (committed; CI installs with `npm ci`) |
