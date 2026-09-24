@@ -1234,7 +1234,10 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 
 	// Normalize request inputs (Unicode, URL-encoding, null bytes) before
 	// matching. Callers should ideally do this at the proxy boundary, but we
-	// do it here as a belt-and-suspenders defense.
+	// do it here as a belt-and-suspenders defense. The raw command is kept
+	// for the shell tokenizer: normalization strips line breaks, and a line
+	// break separates two commands.
+	rawCommand := req.Command
 	req = normalizeRequest(req)
 
 	// Cost-scoped requests that may write to sessionCosts need the write lock
@@ -1267,6 +1270,43 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 
 	rules := resolveRules(pol, req.AgentID)
 
+	// A shell command with any shell syntax (operators, quotes, substitutions,
+	// redirections, line breaks) is evaluated one simple command at a time;
+	// see shell_segments.go. The tokenizer reads the raw command because
+	// normalizeRequest strips line breaks, which separate commands.
+	if req.Scope == "shell" && isCompoundShell(rawCommand) {
+		return e.checkCompoundShell(rules, req, rawCommand, tenantID)
+	}
+
+	if res, ok := e.evalScope(rules, req, tenantID, ruleKindsAll); ok {
+		return res
+	}
+	return defaultDenyResult()
+}
+
+// ruleKinds selects which rule lists evalScope consults.
+type ruleKinds uint8
+
+const (
+	ruleKindDeny ruleKinds = 1 << iota
+	ruleKindApproval
+	ruleKindAllow
+
+	ruleKindsAll = ruleKindDeny | ruleKindApproval | ruleKindAllow
+)
+
+func defaultDenyResult() CheckResult {
+	return CheckResult{
+		Decision: Deny,
+		Reason:   "No matching allow rule (default deny)",
+	}
+}
+
+// evalScope evaluates req against every rule set of req.Scope, in order:
+// deny, then require_approval, then allow within each set. It returns
+// ok=false when nothing matched (the caller applies default deny). The caller
+// holds e.mu.
+func (e *Engine) evalScope(rules []RuleSet, req ActionRequest, tenantID string, kinds ruleKinds) (CheckResult, bool) {
 	for _, rs := range rules {
 		if rs.Scope != req.Scope {
 			continue
@@ -1274,7 +1314,7 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 
 		// Cost scope: evaluate limits instead of pattern rules
 		if rs.Scope == "cost" && rs.Limits != nil {
-			return e.checkCost(rs, req, tenantID)
+			return e.checkCost(rs, req, tenantID), true
 		}
 
 		// Data scope: gates form inputs, browser data exfiltration, and
@@ -1296,53 +1336,200 @@ func (e *Engine) Check(req ActionRequest, tenantID string) CheckResult {
 					Decision: Deny,
 					Reason:   fmt.Sprintf("path traversal detected: %s", req.Path),
 					Rule:     "deny:filesystem:path_traversal",
-				}
+				}, true
 			}
 		}
 
 		// 1. Check deny rules first
-		for _, rule := range rs.Deny {
-			if matchRule(rule, req) && e.matchConditions(rule, req, tenantID) {
-				msg := rule.Message
-				if msg == "" {
-					msg = fmt.Sprintf("Action denied by %s deny rule", rs.Scope)
-				}
-				return CheckResult{
-					Decision: Deny,
-					Reason:   msg,
-					Rule:     formatRule("deny", rs.Scope, rule),
+		if kinds&ruleKindDeny != 0 {
+			for _, rule := range rs.Deny {
+				if matchRule(rule, req) && e.matchConditions(rule, req, tenantID) {
+					msg := rule.Message
+					if msg == "" {
+						msg = fmt.Sprintf("Action denied by %s deny rule", rs.Scope)
+					}
+					return CheckResult{
+						Decision: Deny,
+						Reason:   msg,
+						Rule:     formatRule("deny", rs.Scope, rule),
+					}, true
 				}
 			}
 		}
 
 		// 2. Check require_approval rules
-		for _, rule := range rs.RequireApproval {
-			if matchRule(rule, req) && e.matchConditions(rule, req, tenantID) {
-				return CheckResult{
-					Decision: RequireApproval,
-					Reason:   fmt.Sprintf("Matches approval rule in %s scope", rs.Scope),
-					Rule:     formatRule("require_approval", rs.Scope, rule),
+		if kinds&ruleKindApproval != 0 {
+			for _, rule := range rs.RequireApproval {
+				if matchRule(rule, req) && e.matchConditions(rule, req, tenantID) {
+					return CheckResult{
+						Decision: RequireApproval,
+						Reason:   fmt.Sprintf("Matches approval rule in %s scope", rs.Scope),
+						Rule:     formatRule("require_approval", rs.Scope, rule),
+					}, true
 				}
 			}
 		}
 
 		// 3. Check allow rules
-		for _, rule := range rs.Allow {
-			if matchRule(rule, req) && e.matchConditions(rule, req, tenantID) {
-				return CheckResult{
-					Decision: Allow,
-					Reason:   fmt.Sprintf("Allowed by %s rule", rs.Scope),
-					Rule:     formatRule("allow", rs.Scope, rule),
+		if kinds&ruleKindAllow != 0 {
+			for _, rule := range rs.Allow {
+				if matchRule(rule, req) && e.matchConditions(rule, req, tenantID) {
+					return CheckResult{
+						Decision: Allow,
+						Reason:   fmt.Sprintf("Allowed by %s rule", rs.Scope),
+						Rule:     formatRule("allow", rs.Scope, rule),
+					}, true
 				}
 			}
 		}
 	}
+	return CheckResult{}, false
+}
 
-	// Default deny
-	return CheckResult{
-		Decision: Deny,
-		Reason:   "No matching allow rule (default deny)",
+// checkCompoundShell evaluates a shell command that contains shell syntax.
+//
+//  1. Whole-string deny and require_approval rules run first, so patterns
+//     written for a full command line (`:(){ :|:& };:`, `curl * | bash`)
+//     keep working.
+//  2. The raw command is split into simple commands (segments) and file
+//     redirections. A command the tokenizer can't split safely is denied.
+//  3. An allow rule whose own pattern contains shell syntax matches when it
+//     has the same number of segments and each segment matches its glob, so
+//     `allow: "ls * | grep *"` still allows `ls /tmp | grep x` but not
+//     `ls /tmp | grep x; rm -rf /`.
+//  4. Otherwise every segment is evaluated on its own (deny, approval,
+//     allow, default deny).
+//  5. Every redirection target is checked as a filesystem write (or read,
+//     for `<`) against the policy's filesystem rules.
+//
+// The most severe verdict wins: DENY over REQUIRE_APPROVAL over ALLOW.
+func (e *Engine) checkCompoundShell(rules []RuleSet, req ActionRequest, rawCommand, tenantID string) CheckResult {
+	if res, ok := e.evalScope(rules, req, tenantID, ruleKindDeny|ruleKindApproval); ok {
+		return res
 	}
+	parsed, err := parseShell(rawCommand)
+	if err != nil {
+		return CheckResult{
+			Decision: Deny,
+			Reason:   "Shell command could not be split into simple commands safely (heredoc, unbalanced quotes or parentheses, arithmetic expansion, or nesting too deep)",
+			Rule:     "deny:shell:unparseable_command",
+		}
+	}
+	if len(parsed.Segments) == 0 {
+		return defaultDenyResult()
+	}
+	parts := len(parsed.Segments) + len(parsed.Redirects)
+
+	var verdict CheckResult
+	if res, ok := e.matchCompoundAllow(rules, req, parsed.Segments, tenantID); ok {
+		verdict = res
+	} else {
+		for i, seg := range parsed.Segments {
+			sub := req
+			sub.Command = stripControl(seg)
+			res, ok := e.evalScope(rules, sub, tenantID, ruleKindsAll)
+			if !ok {
+				res = defaultDenyResult()
+			}
+			if parts > 1 && res.Decision != Allow {
+				res.Reason = fmt.Sprintf("%s (command %d of %d: %q)", res.Reason, i+1, len(parsed.Segments), sub.Command)
+			}
+			if res.Decision == Deny {
+				return res
+			}
+			if i == 0 || moreSevere(res.Decision, verdict.Decision) {
+				verdict = res
+			}
+		}
+	}
+
+	for _, r := range parsed.Redirects {
+		fsReq := ActionRequest{
+			SchemaVersion: req.SchemaVersion,
+			Scope:         "filesystem",
+			Action:        "write",
+			Path:          normalizePath(r.Target),
+			AgentID:       req.AgentID,
+			SessionID:     req.SessionID,
+			Meta:          req.Meta,
+		}
+		if !r.Write {
+			fsReq.Action = "read"
+		}
+		res, ok := e.evalScope(rules, fsReq, tenantID, ruleKindsAll)
+		if !ok {
+			res = defaultDenyResult()
+		}
+		if res.Decision != Allow {
+			res.Reason = fmt.Sprintf("%s (redirection %s %q)", res.Reason, fsReq.Action, r.Target)
+		}
+		if res.Decision == Deny {
+			return res
+		}
+		if moreSevere(res.Decision, verdict.Decision) {
+			verdict = res
+		}
+	}
+
+	if verdict.Decision == Allow && parts > 1 {
+		verdict.Reason = fmt.Sprintf("Allowed by shell rules (%s, %s)", plural(len(parsed.Segments), "command"), plural(len(parsed.Redirects), "redirection"))
+	}
+	return verdict
+}
+
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// matchCompoundAllow looks for an allow rule whose pattern itself contains
+// shell syntax and matches the command segment by segment.
+func (e *Engine) matchCompoundAllow(rules []RuleSet, req ActionRequest, segments []string, tenantID string) (CheckResult, bool) {
+	for _, rs := range rules {
+		if rs.Scope != req.Scope {
+			continue
+		}
+		for _, rule := range rs.Allow {
+			if rule.Pattern == "" || !isCompoundShell(rule.Pattern) {
+				continue
+			}
+			pat, err := parseShell(rule.Pattern)
+			if err != nil || len(pat.Segments) != len(segments) {
+				continue
+			}
+			matched := true
+			for i := range segments {
+				if !globMatch(pat.Segments[i], stripControl(segments[i])) {
+					matched = false
+					break
+				}
+			}
+			if matched && e.matchConditions(rule, req, tenantID) {
+				return CheckResult{
+					Decision: Allow,
+					Reason:   fmt.Sprintf("Allowed by %s rule", rs.Scope),
+					Rule:     formatRule("allow", rs.Scope, rule),
+				}, true
+			}
+		}
+	}
+	return CheckResult{}, false
+}
+
+// moreSevere reports whether a outranks b (DENY > REQUIRE_APPROVAL > ALLOW).
+func moreSevere(a, b Decision) bool {
+	rank := func(d Decision) int {
+		switch d {
+		case Deny:
+			return 2
+		case RequireApproval:
+			return 1
+		}
+		return 0
+	}
+	return rank(a) > rank(b)
 }
 
 // RateLimitConfig returns the rate limit config for a given scope under a

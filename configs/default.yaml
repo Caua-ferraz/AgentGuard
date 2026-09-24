@@ -52,10 +52,21 @@ rules:
   # what you want for shell. The anchored match covers the whole command,
   # so `rm -rf *` matches `rm -rf /home/user` but not `sudo rm -rf /`.
   # Order matters: deny is checked before require_approval before allow.
+  #
+  # A command with shell syntax (`;`, `&&`, `|`, `$( )`, backticks, quotes,
+  # redirections, line breaks) is checked one command at a time, and its
+  # redirection targets against the filesystem rules above: `ls *` allows
+  # `ls /tmp | grep x` but `ls /tmp; rm -rf /` still needs approval. See
+  # docs/POLICY_REFERENCE.md § Compound shell commands.
   - scope: shell
     require_approval:
       - pattern: "sudo *"
       - pattern: "rm -rf *"
+      # `find *` below is allowed; these arguments make find delete files or
+      # run other programs.
+      - pattern: "find * -exec*"
+      - pattern: "find * -ok*"
+      - pattern: "find * -delete*"
       - pattern: "curl * | bash"
       - pattern: "wget * | sh"
       - pattern: "chmod 777 *"

