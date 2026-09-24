@@ -141,7 +141,7 @@ repository's `Dockerfile` (save this file at the repo root, or point
 services:
   agentguard:
     build: .                      # the repo's Dockerfile
-    image: agentguard:1.1.1       # tag for the locally built image
+    image: agentguard:1.2.0       # tag for the locally built image
     restart: unless-stopped
     command: >
       serve
@@ -192,7 +192,7 @@ spec:
         - name: agentguard
           # No prebuilt image is published: build the Dockerfile and push it
           # to a registry your cluster can pull from.
-          image: registry.example.com/agentguard:1.1.1
+          image: registry.example.com/agentguard:1.2.0
           args:                   # replaces the image's CMD, so --policy must be repeated
             - serve
             - --policy=/etc/agentguard/default.yaml

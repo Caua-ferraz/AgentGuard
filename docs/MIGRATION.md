@@ -415,4 +415,180 @@ TypeScript SDK back, build `plugins/typescript` at the `v1.1.0` tag.
 
 ---
 
+## v1.1.x → v1.2.0
+
+This section covers 1.1.0 and 1.1.1 → 1.2.0. Coming from 1.0.x? Read
+[§ v1.1.0 → v1.1.1](#v110--v111) and the Compatibility section of
+[`CHANGELOG.md`](../CHANGELOG.md) § 1.1.0 first.
+
+1.2.0 fixes one high-severity policy bypass and nine medium-severity
+findings from a full local test of 1.1.1. Several of the fixes change what a policy you already have decides,
+so read *Behavior changes* before you upgrade.
+
+### What happens automatically
+
+- No on-disk format changes. The store schema, the audit format
+  (`schema_version: 2`), the replay checkpoint and the policy schema
+  (`version: "1"`) are unchanged, and 1.2.0 reads everything 1.1.x wrote.
+- New audit entries are written with secrets masked (see below). Entries
+  already on disk are not rewritten.
+- The file audit logger rewrites the replay checkpoint after every rotation
+  and on shutdown, not only at startup.
+
+### Behavior changes worth knowing about
+
+**Policy evaluation**
+
+- **Compound shell commands are checked one command at a time.** In 1.1.x a
+  shell rule's glob matched the whole command line, and one `*` matched every
+  operator in it, so `allow: "ls *"` also allowed `ls /tmp; rm -rf /`. A
+  shell command that contains shell syntax (`;`, `&&`, `||`, `|`, `&`, a line
+  break, `$( )`, backticks, `<( )`, a subshell, a redirection) is now split
+  into the simple commands a shell would run:
+  - Whole-command `deny` and `require_approval` rules run first, as before.
+  - Then each command is checked on its own (deny, then approval, then
+    allow, then default deny), and the most severe verdict wins.
+  - Each redirection target is checked as a `filesystem` write (`>`, `>>`) or
+    read (`<`). `/dev/null` and descriptor duplications such as `2>&1` are
+    ignored.
+  - An allow pattern that contains shell syntax itself, such as
+    `cat * | head *`, matches command by command.
+  - A command the splitter can't handle safely (a heredoc, `$(( ))`,
+    unbalanced quotes, nesting deeper than 8 levels) is denied with
+    `deny:shell:unparseable_command`.
+
+  A command with no shell syntax is matched exactly as before. With the
+  shipped `configs/default.yaml`:
+
+  | Command | 1.1.x | 1.2.0 |
+  |---|---|---|
+  | `ls /tmp; rm -rf /` | ALLOW | REQUIRE_APPROVAL (`rm -rf *`) |
+  | `ls /tmp && sudo rm -rf /` | ALLOW | REQUIRE_APPROVAL (`sudo *`) |
+  | `echo x > /etc/passwd` | ALLOW | DENY (`deny:filesystem:write`) |
+  | `cat README.md \| head -5` | ALLOW | DENY: no rule allows `head -5` |
+  | `git status && git diff` | ALLOW | ALLOW |
+
+  The fourth row is the one most likely to affect a working setup: **a
+  pipeline or chain is allowed only when every command in it is.** Add allow
+  rules for the commands your agents chain, or an allow pattern with the
+  operator in it. Details:
+  [`POLICY_REFERENCE.md`](POLICY_REFERENCE.md#compound-shell-commands).
+- **Rule blocks that share a scope are merged.** 1.1.x stopped at the first
+  block for a scope that decided, so a second block for the same scope was
+  ignored whenever the first matched: `allow: "*"` followed by a separate
+  `deny: "rm *"` block allowed `rm -rf /`. Blocks with the same scope (in
+  `rules:`, or in one agent's `override:`) are now merged at load, and each
+  merge logs a warning. **If two merged blocks set different `rate_limit`s,
+  or different cost `limits`, the policy no longer loads**, since keeping
+  either would silently drop the other. This is the one way a policy that
+  loaded on 1.1.x fails to load on 1.2.0: `serve` exits at startup, and a hot
+  reload keeps the previous policy and logs `Policy reload failed`.
+- **`network` and `browser` checks that carry only a `url` are matched
+  against the URL's host.** `POLICY_REFERENCE.md` always said they were, but
+  1.1.x read only `domain`, so every such check was denied by default, even
+  for an allow-listed host. Checks that 1.1.x denied can now be allowed. An
+  explicit `domain` still wins, and the host is taken the way an HTTP client
+  would: `https://api.github.com@evil.com/` is checked as `evil.com`.
+- **Scope names one or two edits from a built-in scope warn at load**
+  (`scope "shel" is not a built-in scope — did you mean "shell"?`). The
+  policy still loads; custom scopes still work.
+
+**Audit trail**
+
+- **Secrets are masked by default.** In 1.1.x only notifications were
+  redacted; keys, tokens and passwords in an agent's command were stored
+  verbatim in the audit log and shown by `GET /v1/audit`, the SSE stream,
+  the dashboard and `/api/pending`. `serve --audit-redact` (on by default)
+  now masks them there too, using the notification patterns (extended in
+  1.2.0 with `sk-…` keys, Google `AIza…` keys, GitHub token types, JWTs, PEM
+  private keys and `Authorization` / `x-api-key` header values) plus the
+  policy's `notifications.redaction.extra_patterns`. A broad extra pattern
+  therefore now also masks audit content. The masking runs in the audit
+  workers, not on the `/v1/check` request path. `--audit-redact=false`
+  restores verbatim content and logs a startup warning. See
+  [`OPERATIONS.md`](OPERATIONS.md#audit-redaction).
+- **`agentguard audit` shows the newest entries first.** In 1.1.x
+  `--limit 20` returned the 20 oldest matches. `--order asc` restores the old
+  order. `GET /v1/audit` still defaults to oldest first; pass `order=desc`
+  for newest first. The dashboard's history now loads the newest 200
+  entries.
+
+**Shipped `configs/default.yaml`** (a copy you made earlier keeps its old
+rules)
+
+- `find … -exec`, `-ok` and `-delete` require approval.
+- The filesystem MCP server's `edit_file`, `move_file` and
+  `create_directory` tools are denied like `write_file`. In 1.1.x they
+  matched the `fs:*` allow.
+
+**Python SDK**
+
+- **The CrewAI adapter requires CrewAI 1.0 or newer** and raises
+  `ImportError` on older versions. On CrewAI 0.19x, a crew ran agent tool
+  calls through a path the adapter doesn't wrap, so tools that looked gated
+  weren't. The `crewai` extra is now `crewai>=1.0,<2.0`, which also fixes
+  `pip install agentguardproxy[all]` resolving CrewAI 0.193.
+- The `mcp` extra allows MCP 2.x (`mcp>=0.9,<3.0`).
+
+### New surfaces
+
+- `serve --bind <host>`: listen on one address. Without `--api-key`, only a
+  loopback address is accepted; anything else exits with status 2.
+- `serve --audit-redact`, `validate --strict` (exit 1 when the policy loads
+  with warnings), `audit --order asc|desc`, and `agentguard --version`.
+- `GET /v1/audit?order=asc|desc` (and the tenant mirror). Any other value
+  returns 400.
+- Python: `agentguard.__version__`.
+- Go packages, all additive: `policy.LoadFromFileWithWarnings`;
+  `proxy.IsLoopbackHost` and `proxy.Config.Redactor` / `BindHost`;
+  `audit.WithTransform`, `audit.EntryTransform`, `audit.Checkpointer`,
+  `(*audit.FileLogger).EnableCheckpoints`, `audit.QueryFilter.Desc` and
+  `audit.BufferedAsyncOpts.Transform`; `(*notify.Redactor).RedactRequest` and
+  `RedactString`.
+
+### What you should do
+
+1. **Validate your policy with the 1.2.0 binary** before you swap the server:
+
+   ```bash
+   agentguard validate --strict --policy /etc/agentguard/policy.yaml
+   ```
+
+   An error means two blocks for one scope set different rate or cost
+   limits; keep one. A `WARN` about merged blocks tells you which rules now
+   apply together; one about a scope name is probably a typo.
+2. **Replay your recent shell ALLOWs through 1.2.0** to see which chained
+   commands it would stop. `audit.jsonl` is your 1.1.x server's audit log:
+
+   ```bash
+   jq -c 'select(.request.scope == "shell" and .result.decision == "ALLOW") | .request' audit.jsonl \
+     | agentguard check --policy /etc/agentguard/policy.yaml --batch \
+     | grep -v '^ALLOW'
+   ```
+
+   Add allow rules for the commands you want to keep allowing.
+3. **Swap the binaries and the SDKs.**
+
+   ```bash
+   go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@v1.2.0
+   go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-mcp-gateway@v1.2.0
+   go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@v1.2.0
+   pip install --upgrade "agentguardproxy==1.2.0"
+   npm install @lictorate/agentguard@1.2.0
+   ```
+
+4. If you use the CrewAI adapter on CrewAI 0.x, upgrade CrewAI to 1.x.
+5. If a script parses `agentguard audit` output in order, or depends on
+   secrets appearing in the audit trail, pass `--order asc` or
+   `--audit-redact=false`.
+
+### Rollback to v1.1.x
+
+Supported: nothing on disk changed format, and 1.1.x reads the checkpoint
+1.2.0 writes. Rolling back brings back the compound-shell and
+duplicate-block bypasses, and new audit entries are stored unredacted again.
+Entries 1.2.0 wrote stay masked.
+
+---
+
 _Migration guides for prior releases live in the git history of this file._

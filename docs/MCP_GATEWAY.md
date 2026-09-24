@@ -157,7 +157,7 @@ Sequence:
      "id": 1,
      "result": {
        "protocolVersion": "2025-11-25",
-       "serverInfo": { "name": "agentguard-mcp-gateway", "version": "1.1.1" },
+       "serverInfo": { "name": "agentguard-mcp-gateway", "version": "1.2.0" },
        "capabilities": {
          "tools": { "listChanged": true }
        }

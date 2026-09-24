@@ -25,7 +25,7 @@ import from the package root.
 
 # The SDK's release version; scripts/bump-version.sh keeps it in step with
 # pyproject.toml.
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 
 # Back-compat module aliases. The pre-split __init__ imported these
 # stdlib modules directly, which made e.g. ``agentguard.request`` and
