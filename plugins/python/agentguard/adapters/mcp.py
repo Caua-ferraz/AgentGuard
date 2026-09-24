@@ -91,7 +91,7 @@ def _infer_check_params_for(tool: "ToolDefinition", arguments: dict) -> dict:
     Builds on the shared :func:`extract_check_params` and adds the
     MCP-specific parts: secret redaction on commands, a synthesised
     command for shell-scope tools without an explicit one, and a bare
-    ``domain`` argument passthrough.
+    ``domain`` argument passthrough when there is no ``url`` argument.
     """
     params: Dict[str, Any] = extract_check_params(arguments, tool.name)
 
@@ -102,7 +102,11 @@ def _infer_check_params_for(tool: "ToolDefinition", arguments: dict) -> dict:
     elif tool.scope == "shell":
         params["command"] = _redact(f"{tool.name} {json.dumps(arguments)}")
 
-    if "domain" in arguments:
+    # A bare domain argument counts only without a url argument: the model
+    # writes the arguments, so it could otherwise pair an allow-listed domain
+    # with a URL on another host. With a url, the domain is the URL's host
+    # (absent when the URL has none, which the server denies).
+    if "domain" in arguments and "url" not in arguments:
         params["domain"] = arguments["domain"]
 
     return params
