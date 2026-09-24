@@ -15,23 +15,23 @@ The MCP Gateway and the LLM API Proxy are the **hero** integration paths — the
 
 ## Compatibility Matrix
 
-The version pins live in [`plugins/python/pyproject.toml`](../plugins/python/pyproject.toml) under `[project.optional-dependencies]`. The CI `integration-tests` job runs every adapter against the pinned major on every PR and on a weekly cron (Monday 06:00 UTC) so a breaking upstream release surfaces before a customer hits it.
+The version pins live in [`plugins/python/pyproject.toml`](../plugins/python/pyproject.toml) under `[project.optional-dependencies]`. The CI `integration-tests` job runs the LangChain, CrewAI, and browser-use adapters against the real upstream package (the newest release inside each pin) on every push and PR, and on a weekly cron (Monday 06:00 UTC), so a breaking upstream release surfaces before a customer hits it. The MCP adapter has no leg in that job: its tests run in the blocking `python-test` job, which installs the real `mcp` package (again the newest release inside the pin).
 
 | AgentGuard | LangChain | CrewAI | browser-use | MCP |
 |---|---|---|---|---|
-| 0.5.x – 0.9.x | `langchain >=0.3,<2.0`, `langchain-core >=0.3,<2.0` | `crewai >=0.80,<2.0` | `browser-use >=0.4,<1.0`, `playwright >=1.40` | `mcp >=0.9,<2.0` |
+| 0.5.x – 1.1.x | `langchain >=0.3,<2.0`, `langchain-core >=0.3,<2.0` | `crewai >=0.80,<2.0` | `browser-use >=0.4,<1.0`, `playwright >=1.40` | `mcp >=0.9,<2.0` |
 | 0.4.x | `>=0.1` (no upper bound — silent rot) | `>=0.1` | `>=0.1` (`goto` only) | wire protocol `2024-11-05` |
 
-The 0.5 floors cover the API surface AgentGuard's adapters were built and hardened against (LangChain 0.3+'s split `langchain-core` package, CrewAI 0.80+'s Runnable BaseTool, browser-use 0.4+'s stable Page surface). The ceilings cover the latest upstream majors verified against the integration suite.
+The 0.5 floors cover the API surface AgentGuard's adapters were built and hardened against (LangChain 0.3+'s split `langchain-core` package, CrewAI 0.80+'s Runnable BaseTool, browser-use 0.4+'s stable Page surface). Each ceiling sits at the next upstream major, so a new major can't install until it has been verified. As of 2026-09-23, the newest LangChain (1.x), CrewAI (1.x), and browser-use (0.x) releases are inside their pins. MCP's newest release is 2.x, which is outside the pin, so `pip install agentguardproxy[mcp]` resolves to the newest 1.x release.
 
 ### Pinning rationale
 
 The 0.5 line introduces upper bounds because the prior `>=0.1` floor allowed silent rot when frameworks renamed methods or added new bypass paths. Specifically:
 
-- **LangChain** moved from a single `langchain` package on 0.1 to a split `langchain-core` (Runnable protocol) + `langchain` (agents / chains) on 0.3. The 0.4 line will introduce its own breaking changes; we re-verify before bumping.
-- **CrewAI** moved its `BaseTool` to inherit from `langchain_core.runnables.Runnable` around 0.80, exposing the modern `invoke` / `ainvoke` / `stream` / `batch` surface. Pre-0.80 tools have a different bypass surface; the v0.5 adapter is built and tested against 0.80–0.89.
+- **LangChain** moved from a single `langchain` package on 0.1 to a split `langchain-core` (Runnable protocol) + `langchain` (agents / chains) on 0.3. LangChain has since reached 1.x, which the `<2.0` ceiling already admits and CI installs today; 2.0 gets re-verified before the ceiling moves.
+- **CrewAI** moved its `BaseTool` to inherit from `langchain_core.runnables.Runnable` around 0.80, exposing the modern `invoke` / `ainvoke` / `stream` / `batch` surface. Pre-0.80 tools have a different bypass surface. The adapter was hardened against 0.80+; CrewAI has since reached 1.x, which the `<2.0` ceiling admits and CI installs today.
 - **browser-use** 0.4 is the first release where the `Browser` / `Page` API stabilised enough that we could write a strict allowlist against it. Earlier versions reshape the page proxy across minor releases.
-- **MCP** Python SDK (`mcp` on PyPI) has not yet hit 1.0; the upper bound at `<2.0` covers the entire 0.x line. Once 1.0 ships and we re-verify, this widens.
+- **MCP** Python SDK (`mcp` on PyPI) is on 1.x, which the adapter is tested against. 2.x is out on PyPI but not verified yet, so the `<2.0` ceiling keeps pip on 1.x. The ceiling widens once the adapter passes against 2.x.
 
 ### Bumping the upper bound
 
@@ -41,9 +41,9 @@ The 0.5 line introduces upper bounds because the prior `>=0.1` floor allowed sil
 4. Update this table.
 5. Check the framework's changelog for new method names — if the framework added a method that side-steps our gate (`Runnable.with_listeners` did this in `langchain-core` 0.3.x), extend the adapter's gated set BEFORE bumping the pin.
 
-### Why the integration-tests CI job is non-blocking on PRs
+### Which integration-tests legs block CI
 
-The job runs against the real upstream framework. A transient PyPI / CDN failure during `pip install` or `playwright install` should not block a PR that didn't change any adapter code. The weekly cron run still surfaces those failures asynchronously; the job will be promoted to required once stability data accumulates.
+Since v1.0.0, the LangChain and CrewAI legs are required: a red leg fails CI. The browser-use leg is advisory (`continue-on-error`) for two reasons. Its `playwright install` step downloads about 200 MB of Chromium from a CDN and is the known flake. And like every leg, it tests against live upstream releases, so a red browser-use leg usually means upstream drift, not an AgentGuard regression. A red advisory leg still shows in the run, and the weekly cron run surfaces upstream breakage even when no PR is open. (Before v1.0.0 the whole job was non-blocking.)
 
 Authors of adapter changes are still expected to drive the integration job to green locally before merging: from `plugins/python`, run `pytest -v -m integration tests/integration/test_real_<framework>.py` (the same invocation CI uses).
 

@@ -14,7 +14,7 @@ license = "Apache-2.0"
 # after upstream EOL (October 2025) — the `mcp` PyPI extra requires >=3.10
 # anyway, so keeping 3.9 in the trove invited a broken
 # `pip install agentguardproxy[mcp]` resolution. The CI matrix exercises
-# 3.10, 3.11, 3.12 on every push.
+# 3.10, 3.11, 3.12, 3.13 on every push.
 requires-python = ">=3.10"
 authors = [
     { name = "Cauã Ferraz", email = "cauaferrazp@gmail.com" },

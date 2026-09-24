@@ -664,13 +664,14 @@ way out. That is deferred — see `Bridge.handleNotification`.
 | Approval round-trip      | _meta prefix variants, expired id (404), unresolved id (still pending)      |
 | Cancellation             | cancel propagates to upstream and the policy check goroutine                |
 | Stdout serialisation     | concurrent upstream responses don't interleave bytes                        |
-| Real upstream            | spawn `npx -y @modelcontextprotocol/server-everything`, drive a full session|
+| Real upstream            | spawn the stub MCP server subprocess via the real `StdioUpstream`, drive a full session|
 
-The "real upstream" test is the equivalent of the Python integration
-suite — it lives in a separate `integration-tests` CI job that runs
-against the real upstream framework (non-blocking on PRs to avoid
-upstream-flake failures; promoted to required once stability data
-accumulates).
+The "real upstream" tests (`pkg/mcpgw/at_real_protocol_test.go`) run
+`Bridge` plus the real `StdioUpstream` against a stub MCP server
+subprocess built from `pkg/mcpgw/testdata/stub_server`, instead of
+`npx -y @modelcontextprotocol/server-everything`, so they need no
+network and give deterministic replies. They run in the blocking Go
+`test` job with the rest of `go test ./...`, and skip under `-short`.
 
 ---
 
