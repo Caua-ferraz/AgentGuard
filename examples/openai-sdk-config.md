@@ -98,11 +98,12 @@ exists.
   dashboard logs an `ALLOW` event with `transport=llm_api_proxy` and
   the bash tool name. Your script prints the tool-call deltas the
   model emitted.
-- **DENY:** modify the prompt in the script to ask the model to
-  `rm -rf /etc`. The default policy includes a `deny` rule for
-  `rm -rf *`; the proxy rewrites the stream as an assistant text
-  refusal (`[AgentGuard] Tool call denied: ...`). The dashboard logs
-  a `DENY` event.
+- **DENY:** modify the prompt in the script to ask the model to run
+  `dd if=/dev/zero of=/dev/sda`. The default policy denies it
+  (`deny:shell:dd if=/dev/*`); the proxy rewrites the stream as an
+  assistant text refusal starting with `AgentGuard denied this action.`,
+  followed by the reason and rule. The dashboard logs a `DENY` event.
+  (`rm -rf …` goes to approval under the default policy, not deny.)
 - **REQUIRE_APPROVAL:** ask for `sudo apt update` (the default policy
   routes `sudo *` to `require_approval`). Your script receives a
   synthetic assistant text including the approval ID and approval URL.

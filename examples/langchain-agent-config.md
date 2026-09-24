@@ -100,36 +100,43 @@ have an entry for that name — it's not one of the bundled built-ins
 dispatch the call as `scope: unmapped`, which the engine treats as
 default-deny unless an explicit `unmapped` rule exists.
 
-The recommended fix: add an operator entry to your policy YAML so
-your tool name maps to the right scope.
+The fix: map the tool to a scope in your policy, and allow it there.
 
 ```yaml
-# In configs/default.yaml or your custom policy
+# In your policy file (configs/default.yaml or your own)
 tool_scope_map:
-  list_tmp_files: shell
-  my_db_query:    network
-  read_secret:    data
+  - pattern: "list_tmp_files"
+    scope: shell
+
+rules:
+  - scope: shell
+    allow:
+      - pattern: "list_tmp_files"
 ```
 
-After editing, the proxy hot-reloads via `--watch`. See
+`tool_scope_map` is a list of `pattern` / `scope` entries. For a tool mapped to `shell`, the proxy checks the tool's `command` argument; `list_tmp_files` takes no arguments, so the check runs with the tool name as the command — that's why the `allow` rule names it. In `configs/default.yaml`, add the mapping at the top of the existing `tool_scope_map:` list and the `pattern:` line to the existing `shell` block's `allow:` list, rather than a second `shell` block (a second block is merged into the first, and `agentguard validate` warns about it).
+
+The proxy reloads its policy file on its own when you save it; so does `agentguard serve`. See
 [`docs/POLICY_REFERENCE.md` § "LLM API Proxy tool scope mapping"](../docs/POLICY_REFERENCE.md)
 for the full schema.
 
 ## Verification
 
-With `tool_scope_map.list_tmp_files: shell` in place:
+With the mapping and the allow rule above in place:
 
-- **ALLOW:** the agent calls `list_tmp_files()`. Scope `shell`
-  evaluates the rule chain and ALLOWs — the script's `tool_calls`
-  branch runs, the local Python function executes, and the result
-  prints. Dashboard logs `ALLOW` with `transport=llm_api_proxy`.
-- **DENY:** add `deny: [{pattern: "list_tmp_files*"}]` under
-  `scope: shell`. Re-run — the proxy rewrites the response as an
-  assistant text refusal; `response.tool_calls` is empty and
-  `response.content` carries `[AgentGuard] Tool call denied: ...`.
-- **REQUIRE_APPROVAL:** swap `deny` for `require_approval`. The
-  refusal text contains the approval ID and approval URL; click
-  approve on the dashboard.
+- **ALLOW:** the agent calls `list_tmp_files()`; the audit records
+  scope `shell`, command `list_tmp_files`, rule
+  `allow:shell:list_tmp_files`. The script's `tool_calls` branch runs,
+  the local Python function executes, and the result prints. The
+  dashboard logs `ALLOW` with `transport=llm_api_proxy`.
+- **DENY:** add `- pattern: "list_tmp_files"` to the `shell` block's
+  `deny:` list. Re-run — the proxy rewrites the response as assistant
+  text: `response.tool_calls` is empty and `response.content` starts
+  with `AgentGuard denied this action.`, followed by the reason and
+  rule.
+- **REQUIRE_APPROVAL:** put the same pattern under `require_approval:`
+  instead. The refusal text contains the approval ID; approve it on
+  the dashboard and re-run.
 
 Without any `tool_scope_map` entry, the proxy reports
 `scope: unmapped` and the engine's fall-through default-deny applies —

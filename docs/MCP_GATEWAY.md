@@ -786,7 +786,8 @@ The recommended pattern is:
 
 **Stale tool list after policy edit.** Adding or removing tools from a
 policy does not require a gateway restart — the gateway re-checks every
-call against the central server, which hot-reloads via `--watch`. But
+call against the central server, which reloads its policy file on its own
+(`--watch` only logs each reload). But
 adding a *new upstream* (a new `--upstream` flag) does require a
 gateway restart, which means restarting the MCP client.
 
