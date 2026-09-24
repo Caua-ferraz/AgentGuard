@@ -91,12 +91,15 @@ git push && git push --tags
 
 # Then: GitHub UI → Releases → Draft a new release → Tag: v1.2.0 → Publish
 # That fires .github/workflows/publish-pypi.yml (uploads agentguardproxy==1.2.0)
-# and .github/workflows/publish-npm.yml (publishes @lictorate/agentguard@1.2.0).
+# and .github/workflows/publish-npm.yml (stages @lictorate/agentguard@1.2.0;
+# approve it on npmjs.com to make it public, see below).
 ```
 
 The publish workflows only trigger on `release: [published]` events or via manual `workflow_dispatch`. Pushing the tag alone does **not** trigger them. (This caught v0.5.1 — the tag was pushed but the release was never drafted, so PyPI stayed on v0.5.0 until the operator pressed Publish.)
 
-`publish-npm.yml` uses npm trusted publishing, so there's no npm token to store or rotate. On npmjs.com, `@lictorate/agentguard`'s trusted publisher names the repository `Caua-ferraz/AgentGuard` and the workflow file `publish-npm.yml`. If you rename the workflow file, update that setting too, or publishing fails. The workflow refuses to publish when the release tag doesn't match `plugins/typescript/package.json`'s version, and skips a version that's already on npm. npm attaches provenance to each version it publishes.
+`publish-npm.yml` uses npm trusted publishing, so there's no npm token to store or rotate. On npmjs.com, `@lictorate/agentguard`'s trusted publisher names the repository `Caua-ferraz/AgentGuard` and the workflow file `publish-npm.yml`. If you rename the workflow file, update that setting too, or publishing fails. The workflow refuses to publish when the release tag doesn't match `plugins/typescript/package.json`'s version, and skips a version that's already on npm. Each version carries provenance that links it to the workflow run.
+
+**The npm release needs a maintainer's approval.** The trusted publisher is stage-only, so the workflow runs `npm stage publish`: the version waits in npm's staging area, npm scans it for malware, and it becomes installable only after a maintainer approves it with 2FA — on npmjs.com, the package page's **Staged Packages** tab → **Approve**, or `npm stage approve <stage-id>`. A compromised workflow run can stage a version but never make one public. A version that's already staged can't be staged again, so approve or reject it rather than re-running the workflow.
 
 ### How to define your version
 
