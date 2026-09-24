@@ -157,7 +157,7 @@ Sequence:
      "id": 1,
      "result": {
        "protocolVersion": "2025-11-25",
-       "serverInfo": { "name": "agentguard-mcp-gateway", "version": "1.1.1" },
+       "serverInfo": { "name": "agentguard-mcp-gateway", "version": "1.2.0" },
        "capabilities": {
          "tools": { "listChanged": true }
        }
@@ -435,8 +435,9 @@ result if either denies, otherwise the more specific scope's result).
 
 `Meta["arguments_json"]` is **redacted** through
 `pkg/notify.DefaultRedactor` before being written. Bearer tokens, AWS
-keys, GitHub PATs, Slack tokens, and `key=value` secret patterns are
-scrubbed.
+keys, GitHub tokens, Slack tokens, `key=value` secret patterns and, from
+v1.2.0, `sk-…` and Google API keys, JWTs, PEM private keys and
+`Authorization` / `x-api-key` header values are scrubbed.
 
 The dashboard renders the `transport: "mcp_gateway"` chip in the audit
 feed (blue), distinct from `sdk` (green) and `llm_api_proxy` (purple).
@@ -786,7 +787,8 @@ The recommended pattern is:
 
 **Stale tool list after policy edit.** Adding or removing tools from a
 policy does not require a gateway restart — the gateway re-checks every
-call against the central server, which hot-reloads via `--watch`. But
+call against the central server, which reloads its policy file on its own
+(`--watch` only logs each reload). But
 adding a *new upstream* (a new `--upstream` flag) does require a
 gateway restart, which means restarting the MCP client.
 

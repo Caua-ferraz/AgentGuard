@@ -63,6 +63,7 @@ This updates:
 | `cmd/agentguard-mcp-gateway/main.go` | `version = "..."` (v0.5+) |
 | `cmd/agentguard-llm-proxy/main.go` | `version = "..."` (v0.5+) |
 | `plugins/python/pyproject.toml` | `version = "..."` under `[project]` |
+| `plugins/python/agentguard/__init__.py` | `__version__ = "..."` |
 | `plugins/python/agentguard/adapters/mcp.py` | `SDK_VERSION = "..."` |
 | `plugins/typescript/package.json` | `"version": "..."` |
 | `plugins/typescript/package-lock.json` | top-level + root-package `"version"` (committed; CI installs with `npm ci`) |
@@ -124,7 +125,7 @@ This runs, in order:
 | Suite | What it does |
 |-------|--------------|
 | `go` | `go test -race -coverprofile=coverage.out ./...` |
-| `policy` | builds the binary, runs `agentguard validate` on every YAML in `configs/` and `configs/examples/` |
+| `policy` | builds the binary, runs `agentguard validate --strict` on every YAML in `configs/` and `configs/examples/` |
 | `python` | `pip install -e ".[dev]"` + `pytest -v --cov=agentguard` in `plugins/python` |
 | `ts` | `npm install` + `npm run build` + `npm test` in `plugins/typescript` |
 

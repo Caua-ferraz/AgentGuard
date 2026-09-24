@@ -30,7 +30,7 @@ import (
 )
 
 var (
-	version = "1.1.1"
+	version = "1.2.0"
 	commit  = "dev"
 )
 
@@ -45,6 +45,7 @@ func main() {
 	serveCmd := flag.NewFlagSet("serve", flag.ExitOnError)
 	policyFile := serveCmd.String("policy", "configs/default.yaml", "Path to policy file")
 	port := serveCmd.Int("port", 8080, "Port to listen on")
+	bindHost := serveCmd.String("bind", "", "Host or IP to listen on. Empty: every interface when --api-key is set, 127.0.0.1 otherwise. A non-loopback --bind requires --api-key.")
 	dashboard := serveCmd.Bool("dashboard", false, "Enable web dashboard")
 	watch := serveCmd.Bool("watch", false, "Log each policy hot-reload (reloading itself is always on)")
 	auditPath := serveCmd.String("audit-log", "audit.jsonl", "Path to audit log file")
@@ -70,6 +71,7 @@ func main() {
 	auditBuffered := serveCmd.Bool("audit-buffered", true, "Wrap the audit logger in a bounded async queue with disk-overflow durability. Disable to write straight to FileLogger.")
 	auditQueueSize := serveCmd.Int("audit-queue-size", 1024, "Bounded queue size for the buffered async logger. Ignored unless --audit-buffered is set.")
 	auditWorkers := serveCmd.Int("audit-workers", 4, "Worker goroutines draining the buffered audit queue. Ignored unless --audit-buffered is set.")
+	auditRedact := serveCmd.Bool("audit-redact", true, "Mask secrets (API keys, tokens, passwords, private keys) in commands, paths, URLs and meta before they reach the audit log, GET /v1/audit, the SSE stream and the pending-approvals list. The policy's notifications.redaction.extra_patterns apply too. Set false to store requests verbatim.")
 	auditOverflowPath := serveCmd.String("audit-overflow-path", "", "Path to the disk-overflow spill file used when the buffered queue saturates. Defaults to <audit-log>.overflow.jsonl. Ignored unless --audit-buffered is set.")
 	// Debug pprof. Off by default; when on, the runtime profiler endpoints
 	// register under http.DefaultServeMux via the blank import above and we
@@ -124,6 +126,7 @@ Environment:
 
 	validateCmd := flag.NewFlagSet("validate", flag.ExitOnError)
 	validateFile := validateCmd.String("policy", "configs/default.yaml", "Policy file to validate")
+	validateStrict := validateCmd.Bool("strict", false, "Exit with status 1 if the policy loads with warnings (merged scope blocks, likely-misspelled scope names, recursive path globs)")
 	validateCmd.Usage = func() {
 		fmt.Fprintf(os.Stderr, `Usage: agentguard validate [flags]
 
@@ -202,6 +205,7 @@ Environment:
 	auditScope := auditCmd.String("scope", "", "Filter by scope")
 	auditTransport := auditCmd.String("transport", "", "Filter by integration path (sdk|mcp_gateway|llm_api_proxy)")
 	auditLimit := auditCmd.Int("limit", 50, "Max entries to return")
+	auditOrder := auditCmd.String("order", "desc", "Entry order: desc (newest first) or asc (oldest first)")
 	auditKey := auditCmd.String("api-key", "", "Bearer token (overrides AGENTGUARD_API_KEY)")
 	auditCmd.Usage = func() {
 		fmt.Fprintf(os.Stderr, `Usage: agentguard audit [flags]
@@ -274,7 +278,7 @@ Flags:
 			NodeID:              *nodeID,
 			ReconcileInterval:   *reconcileInterval,
 			TenantPolicyRefresh: *tenantPolicyRefresh,
-		}, *notifySpool)
+		}, *notifySpool, *auditRedact, *bindHost)
 		// Applied here, not inside runServe: os.Exit skips defers, and every
 		// teardown in runServe has already run by the time it returns.
 		if serveCode != 0 {
@@ -283,7 +287,7 @@ Flags:
 
 	case "validate":
 		_ = validateCmd.Parse(os.Args[2:])
-		runValidate(*validateFile)
+		runValidate(*validateFile, *validateStrict)
 
 	case "approve":
 		_ = approveCmd.Parse(os.Args[2:])
@@ -309,7 +313,7 @@ Flags:
 
 	case "audit":
 		_ = auditCmd.Parse(os.Args[2:])
-		runAuditQuery(*auditQueryURL, *auditAgent, *auditDecision, *auditScope, *auditTransport, *auditLimit, resolveAPIKey(*auditKey))
+		runAuditQuery(*auditQueryURL, *auditAgent, *auditDecision, *auditScope, *auditTransport, *auditOrder, *auditLimit, resolveAPIKey(*auditKey))
 
 	case "migrate":
 		_ = migrateCmd.Parse(os.Args[2:])
@@ -325,7 +329,7 @@ Flags:
 	case "tenant":
 		runTenant(os.Args[2:])
 
-	case "version":
+	case "version", "--version", "-version":
 		fmt.Printf("agentguard %s (%s)\n", version, buildinfo.Describe(commit))
 
 	default:
@@ -350,7 +354,7 @@ Commands:
   audit       Query the audit log
   tenant      Manage per-tenant policies in the store (put|list|rm)
   migrate     Run on-disk schema migrations (see docs/FILE_FORMATS.md)
-  version     Print version information
+  version     Print version information (also: --version)
 
 Environment:
   AGENTGUARD_API_KEY          Bearer token fallback for every command that
@@ -484,7 +488,11 @@ func openStore(cfg persistOpts) (persistentStore, string, error) {
 // 1 when the listener failed. The caller applies it with os.Exit AFTER this
 // function returns, so every deferred teardown here (persist flush, audit
 // drain, store close) has already run — os.Exit skips defers.
-func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, approvalValidity time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts, persistCfg persistOpts, notifySpoolPath string) int {
+func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, approvalValidity time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts, persistCfg persistOpts, notifySpoolPath string, auditRedact bool, bindHost string) int {
+	if err := validateBind(bindHost, apiKey); err != nil {
+		log.Printf("ERROR: %v", err)
+		return 2
+	}
 	if baseURL == "" {
 		baseURL = fmt.Sprintf("http://localhost:%d", port)
 	}
@@ -549,6 +557,29 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 	}
 	log.Printf("Loaded policy: %s (%d rules across %d scopes)", pol.Name, pol.RuleCount(), pol.ScopeCount())
 
+	// Audit redaction (v1.2): mask secrets in requests before they reach the
+	// audit trail, the SSE stream and the pending-approvals list. It runs in
+	// the audit workers and the SSE writers, not on the /v1/check goroutine
+	// (except with --audit-buffered=false, where the write itself is
+	// synchronous). The approval store keeps the original request: replay
+	// matching compares it field by field.
+	var redactor *notify.Redactor
+	var auditTransform audit.EntryTransform
+	if auditRedact {
+		r, rerr := notify.DefaultRedactor().WithExtraPatterns(pol.Notifications.Redaction.ExtraPatterns)
+		if rerr != nil {
+			log.Printf("WARNING: audit redaction: ignoring notifications.redaction.extra_patterns (%v); built-in patterns only", rerr)
+		}
+		redactor = r
+		auditTransform = func(e audit.Entry) audit.Entry {
+			e.Request = redactor.RedactRequest(e.Request)
+			e.Result.Reason = redactor.RedactString(e.Result.Reason)
+			return e
+		}
+	} else {
+		log.Printf("WARNING: --audit-redact=false: the audit trail, SSE stream and pending list show requests verbatim, including any secrets they contain.")
+	}
+
 	// Open the durable store. Zero-config by default: a SQLite database
 	// at <data-dir>/agentguard.db. Deferred Close is registered HERE (early) so
 	// — via Go's LIFO defer order — the store is the LAST thing torn down, after
@@ -574,7 +605,7 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 	// /v1/check hot path off the audit write — it only enqueues. See
 	// buildAuditPipeline (audit_setup.go) for the construction + forced-
 	// buffering rules.
-	pipeline, err := buildAuditPipeline(auditPath, storeAudit, st, rotOpts, bufOpts)
+	pipeline, err := buildAuditPipeline(auditPath, storeAudit, st, rotOpts, bufOpts, auditTransform)
 	if err != nil {
 		log.Fatalf("Failed to initialize audit pipeline: %v", err)
 	}
@@ -660,7 +691,9 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		Logger:                   auditLogger,
 		DashboardEnabled:         dashboardEnabled,
 		Notifier:                 notifier,
+		Redactor:                 redactor,
 		APIKey:                   apiKey,
+		BindHost:                 bindHost,
 		BaseURL:                  baseURL,
 		AllowedOrigin:            allowedOrigin,
 		Version:                  version,
@@ -787,10 +820,17 @@ func startPprofServer(opts pprofOpts) *http.Server {
 	return srv
 }
 
-func runValidate(policyFile string) {
-	pol, err := policy.LoadFromFile(policyFile)
+func runValidate(policyFile string, strict bool) {
+	pol, warnings, err := policy.LoadFromFileWithWarnings(policyFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "INVALID: %v\n", err)
+		os.Exit(1)
+	}
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "WARN: %s\n", w)
+	}
+	if strict && len(warnings) > 0 {
+		fmt.Fprintf(os.Stderr, "INVALID (--strict): %s loads, but with %d warning(s)\n", pol.Name, len(warnings))
 		os.Exit(1)
 	}
 	fmt.Printf("VALID: %s — %d rules across %d scopes\n", pol.Name, pol.RuleCount(), pol.ScopeCount())
@@ -922,9 +962,12 @@ func statusReport(stdout, stderr io.Writer, baseURL, apiKey string) int {
 	return 0
 }
 
-func runAuditQuery(baseURL, agent, decision, scope, transport string, limit int, apiKey string) {
+func runAuditQuery(baseURL, agent, decision, scope, transport, order string, limit int, apiKey string) {
 	params := url.Values{}
 	params.Set("limit", fmt.Sprintf("%d", limit))
+	if order != "" {
+		params.Set("order", order)
+	}
 	if agent != "" {
 		params.Set("agent_id", agent)
 	}
@@ -1253,4 +1296,13 @@ Subcommands:
 
 Run 'agentguard tenant <subcommand> -h' for details on each subcommand.
 `)
+}
+
+// validateBind refuses a non-loopback --bind without an API key: without a
+// key the approve/deny endpoints are open, which is only safe on loopback.
+func validateBind(bindHost, apiKey string) error {
+	if bindHost == "" || apiKey != "" || proxy.IsLoopbackHost(bindHost) {
+		return nil
+	}
+	return fmt.Errorf("--bind %q is not a loopback address; refusing to listen without --api-key (set --api-key, or use --bind 127.0.0.1)", bindHost)
 }

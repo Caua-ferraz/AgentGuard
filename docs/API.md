@@ -246,7 +246,8 @@ Query the audit log.
 | `decision` | string | — | `ALLOW`, `DENY`, `REQUIRE_APPROVAL`. |
 | `scope` | string | — | Exact match on `request.scope`. |
 | `limit` | int | `auditDefaultLimit` (default 100) | Silently clamped at `auditMaxLimit` (default 1000). `<1` or non-integer → `400`. |
-| `offset` | int | `0` | Skip N matching entries. Must be ≥ 0. |
+| `offset` | int | `0` | Skip N matching entries. Must be ≥ 0. With `order=desc` it counts from the newest entry. |
+| `order` | string | `asc` | **(v1.2)** `asc` returns the oldest matches first (the original behaviour); `desc` returns the newest first. Anything else → `400`. |
 | `transport` | string | — | Filter on the `Entry.Transport` audit field. Recognised values: `sdk`, `mcp_gateway`, `llm_api_proxy`. Pre-v0.5 entries have no transport tag and are excluded when this filter is set. |
 
 ### Response
@@ -266,14 +267,17 @@ Array of entries (JSON Lines rows as JSON objects):
 
 ### Pagination
 
-Use `limit` + `offset` for stable pagination:
+Use `limit` + `offset` for pagination. The default order is oldest first; add `order=desc` for the most recent entries:
 
 ```bash
-curl -s -H "Authorization: Bearer $K" \
-  "http://localhost:8080/v1/audit?limit=100&offset=200"
+# the 100 most recent decisions
+curl -s -H "Authorization: Bearer $K" "http://localhost:8080/v1/audit?order=desc&limit=100"
+
+# stable export pages, oldest first
+curl -s -H "Authorization: Bearer $K" "http://localhost:8080/v1/audit?limit=100&offset=200"
 ```
 
-For large exports, prefer `curl` over the CLI subcommand — the CLI doesn't expose `offset`.
+For large exports, prefer `curl` over the CLI subcommand — the CLI doesn't expose `offset`. With `order=desc`, pages shift as new entries arrive; use the default order for exports.
 
 ---
 
@@ -381,7 +385,7 @@ Returns `204 No Content`. Safe to call with no session (no-op).
 ## `GET /health`
 
 ```json
-{ "status": "ok", "version": "1.1.1" }
+{ "status": "ok", "version": "1.2.0" }
 ```
 
 Always `200` once the HTTP server is accepting connections. Use for liveness probes (see [`DEPLOYMENT.md`](DEPLOYMENT.md)). The legacy `/health` body shape is unchanged in v0.5 — for the richer operator probe see `/v1/health` below.
@@ -397,7 +401,7 @@ Operator-grade health endpoint introduced in v0.5. Richer than `/health`: includ
 ```json
 {
   "status": "ok",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "tenant": "local",
   "last_request_at": "2026-05-05T19:04:54.646Z",
   "last_policy_load_at": "2026-05-05T19:04:53.549Z",
@@ -523,7 +527,7 @@ Referrer-Policy: no-referrer
 Cache-Control: no-store
 ```
 
-The dashboard JS loads `/api/stats`, `/api/pending`, `/v1/audit?limit=200`, and subscribes to `/api/stream`. CSRF token is read from `document.cookie['ag_csrf']` and echoed as `X-CSRF-Token` on approve/deny.
+The dashboard JS loads `/api/stats`, `/api/pending`, `/v1/audit?order=desc&limit=200` (the newest 200 entries; before v1.2 it loaded `?limit=200`, the oldest), and subscribes to `/api/stream`. CSRF token is read from `document.cookie['ag_csrf']` and echoed as `X-CSRF-Token` on approve/deny.
 
 ---
 

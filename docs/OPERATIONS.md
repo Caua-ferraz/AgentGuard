@@ -22,7 +22,7 @@ Rotated files carry a `_meta.rotated_from` chain pointing to the previous segmen
 Two follow-on consequences regardless of who rotates:
 
 1. **Disk usage** grows proportional to request volume × retention. A busy deployment can produce hundreds of MB per day; the defaults bound this to ~500 MiB across 5 backups.
-2. **Startup replay** seeds the decision counters from the replay checkpoint (`<audit-log>.replay-checkpoint`, which carries the lifetime tally) and re-reads only the entries written since it was last written — following the `_meta.rotated_from` chain through any archives rotated in between — so `/metrics` and `/api/stats` survive restarts with the totals a never-restarted process would show. The first boot after upgrading from v1.0.0, or after `agentguard migrate --reset-checkpoint`, replays the whole live file once; a multi-GB live file delays counter accuracy until that scan completes. The `--audit-backend=store` logger has no checkpoint and re-queries the store on every boot.
+2. **Startup replay** seeds the decision counters from the replay checkpoint (`<audit-log>.replay-checkpoint`, which carries the lifetime tally) and re-reads only the entries written since it was last written — following the `_meta.rotated_from` chain through any archives rotated in between — so `/metrics` and `/api/stats` survive restarts with the totals a never-restarted process would show. Since v1.2.0 the file audit logger also rewrites the checkpoint after every rotation (before `--audit-max-backups` prunes old archives) and on shutdown; before that, a server that rotated more than `--audit-max-backups` times between restarts lost the counts of the pruned files. The first boot after upgrading from v1.0.0, or after `agentguard migrate --reset-checkpoint`, replays the whole live file once; a multi-GB live file delays counter accuracy until that scan completes. The `--audit-backend=store` logger has no checkpoint and re-queries the store on every boot.
 
 ### External shipping (compatible with default rotation)
 
@@ -58,6 +58,20 @@ If restart latency bothers you more than disk usage, archive aggressively:
 Historical audit queries then become a two-tier lookup: recent entries from the local file, older entries from the external store. `/v1/audit`'s `?offset=` + `?limit=` support pagination within the local file; cross-tier paging is your responsibility.
 
 ---
+
+## Audit redaction
+
+Since v1.2.0, `agentguard serve` masks secrets in every request before it is stored or shown (`--audit-redact`, default `true`). Matches are replaced with `[REDACTED]` in the command, path, domain, action, URL, reason and every `meta` value.
+
+**What is masked:** bearer tokens, `Authorization:` / `x-api-key:` / `api-key:` header values, AWS access keys (`AKIA…`), GitHub tokens (`ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`, `github_pat_`), Slack tokens (`xox?-`), LLM provider keys (`sk-…`), Google API keys (`AIza…`), JWTs, PEM private keys, and `secret=` / `token=` / `password=` / `api_key=` pairs — plus the policy's `notifications.redaction.extra_patterns`. It is pattern-based and best effort: a secret in a shape none of these match is stored as sent.
+
+**Where:** the audit file or store, the overflow spill file, `GET /v1/audit`, the SSE stream (so the dashboard feed), and `/api/pending`. The MCP gateway and LLM proxy mask their `--fail-audit-log` entries with the built-in patterns. Redaction runs in the audit worker goroutines and the SSE writers, not on the `/v1/check` request goroutine — except with `--audit-buffered=false`, where the audit write itself is synchronous.
+
+**What still holds the original request:**
+- The approval store (the `approvals` table in SQLite or Postgres): replaying an `approval_id` compares the retry to the original request field by field. Protect `agentguard.db` / the database credentials accordingly.
+- The in-memory `require_prior` index, until the next restart; after a restart it is rebuilt from the redacted audit trail, so a `require_prior` condition that names a secret-bearing command may stop matching.
+
+**Also note:** only the `--policy` file's `extra_patterns` are used (not tenant policies'); audit files written before 1.2.0 are not rewritten; notifications were already redacted and still are. `--audit-redact=false` restores verbatim audit content and logs `WARNING: --audit-redact=false: …` at startup.
 
 ## Multi-instance deployments
 

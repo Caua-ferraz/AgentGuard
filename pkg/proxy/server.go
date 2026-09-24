@@ -67,11 +67,20 @@ var ErrApprovalQueueFull = errors.New("approval queue full: no resolved entries 
 
 // Config holds the server configuration.
 type Config struct {
-	Port             int
+	Port int
+	// BindHost is the host or IP to listen on (v1.2, `serve --bind`). Empty
+	// keeps the historical default: every interface when APIKey is set,
+	// 127.0.0.1 otherwise. A non-loopback BindHost without an APIKey falls
+	// back to 127.0.0.1 (the CLI refuses that combination before it gets here).
+	BindHost         string
 	Engine           *policy.Engine
 	Logger           audit.Logger
 	DashboardEnabled bool
 	Notifier         *notify.Dispatcher
+	// Redactor, when set, masks secrets in requests on the SSE stream and the
+	// pending-approvals list (v1.2, `serve --audit-redact`). The audit trail
+	// itself is redacted by the audit pipeline.
+	Redactor *notify.Redactor
 	// APIKey protects the approve/deny endpoints. If empty, a warning is
 	// logged and the endpoints are open (suitable for localhost-only deployments).
 	APIKey string
@@ -375,10 +384,18 @@ func NewServer(cfg Config) *Server {
 		}
 		if err != nil {
 			log.Printf("WARN: audit replay failed (%v); counters may be under-seeded", err)
-		} else if next.Offset > 0 {
-			// Best-effort: a failed checkpoint write just means the next
-			// boot re-scans. No need to surface the error at startup.
-			_ = audit.WriteCheckpoint(path, next)
+		} else {
+			if next.Offset > 0 {
+				// Best-effort: a failed checkpoint write just means the next
+				// boot re-scans. No need to surface the error at startup.
+				_ = audit.WriteCheckpoint(path, next)
+			}
+			// From here on the file logger keeps the checkpoint current itself
+			// (on every rotation and on Close), so rotation pruning can't
+			// strand it.
+			if c, ok := cfg.Logger.(audit.Checkpointer); ok && next.Counts != nil {
+				c.EnableCheckpoints(*next.Counts, next.Offset)
+			}
 		}
 	} else if existing, err := cfg.Logger.Query(audit.QueryFilter{}); err == nil {
 		for _, e := range existing {
@@ -483,11 +500,18 @@ func NewServer(cfg Config) *Server {
 	}
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
-	if cfg.APIKey == "" {
+	switch {
+	case cfg.BindHost != "" && (cfg.APIKey != "" || IsLoopbackHost(cfg.BindHost)):
+		addr = net.JoinHostPort(cfg.BindHost, strconv.Itoa(cfg.Port))
+	case cfg.APIKey == "":
 		// Without an API key, bind to localhost only to prevent network-adjacent
 		// attackers from approving/denying actions.
 		addr = fmt.Sprintf("127.0.0.1:%d", cfg.Port)
-		log.Printf("INFO: binding to %s (localhost only) — set --api-key to listen on all interfaces", addr)
+		if cfg.BindHost != "" {
+			log.Printf("WARNING: --bind %q is not loopback and no API key is set; binding to %s instead", cfg.BindHost, addr)
+		} else {
+			log.Printf("INFO: binding to %s (localhost only) — set --api-key to listen on all interfaces", addr)
+		}
 	}
 
 	s.http = &http.Server{
@@ -1165,6 +1189,15 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid offset: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	var desc bool
+	switch r.URL.Query().Get("order") {
+	case "", "asc":
+	case "desc":
+		desc = true
+	default:
+		http.Error(w, `invalid order: want "asc" or "desc"`, http.StatusBadRequest)
+		return
+	}
 
 	// Scope the query to the request's tenant. Legacy /v1/audit has no tenant
 	// in the path → TenantIDFromContext returns LocalTenantID, so it returns
@@ -1179,6 +1212,7 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 		Decision:  r.URL.Query().Get("decision"),
 		Scope:     r.URL.Query().Get("scope"),
 		Transport: r.URL.Query().Get("transport"),
+		Desc:      desc,
 		Limit:     limit,
 		Offset:    offset,
 	}
@@ -1497,7 +1531,21 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 // handlePendingList returns pending approval actions.
 func (s *Server) handlePendingList(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(s.approval.List(TenantIDFromContext(r.Context())))
+	list := s.approval.List(TenantIDFromContext(r.Context()))
+	if s.cfg.Redactor == nil {
+		_ = json.NewEncoder(w).Encode(list)
+		return
+	}
+	// List returns the queue's own entries; redact copies so the stored
+	// request, which replay matching compares, stays intact.
+	var out []PendingAction
+	for _, pa := range list {
+		cp := *pa
+		cp.Request = s.cfg.Redactor.RedactRequest(cp.Request)
+		cp.Result.Reason = s.cfg.Redactor.RedactString(cp.Result.Reason)
+		out = append(out, cp)
+	}
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 // handleEventStream is a Server-Sent Events endpoint for live updates.
@@ -1527,6 +1575,10 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case event := <-ch:
+			if s.cfg.Redactor != nil {
+				event.Request = s.cfg.Redactor.RedactRequest(event.Request)
+				event.Result.Reason = s.cfg.Redactor.RedactString(event.Result.Reason)
+			}
 			data, _ := json.Marshal(event)
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
@@ -2425,15 +2477,15 @@ var dashboardHTML = `<!DOCTYPE html>
     }
 
     // Load historical entries on page open so the feed isn't blank.
-    // Fetches the last MAX_FEED_ENTRIES audit entries (newest-first after reversing).
+    // Fetches the newest MAX_FEED_ENTRIES audit entries.
     function loadHistory() {
-      agFetch('/v1/audit?limit=' + MAX_FEED_ENTRIES)
+      agFetch('/v1/audit?order=desc&limit=' + MAX_FEED_ENTRIES)
         .then(r => r.json())
         .then(entries => {
           if (!entries || entries.length === 0) return;
           feed.querySelector('.empty')?.remove();
-          // Audit entries come oldest-first; reverse so newest is at the top.
-          entries.slice().reverse().forEach(entry => {
+          // order=desc: newest first, which is the feed's top-to-bottom order.
+          entries.forEach(entry => {
             feed.appendChild(renderEntry(entry));
           });
         })
@@ -2543,4 +2595,17 @@ func seedDecisionCounters(c audit.DecisionCounts) {
 	metrics.AddDecision(string(policy.Deny), c.Deny)
 	metrics.AddDecision(string(policy.RequireApproval), c.RequireApproval)
 	metrics.AddDecision("", c.Other())
+}
+
+// IsLoopbackHost reports whether host names the local machine only:
+// "localhost" or a loopback IP (127.0.0.0/8, ::1), with or without IPv6
+// brackets. An empty host means every interface and is not loopback.
+func IsLoopbackHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "localhost" {
+		return true
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

@@ -37,6 +37,7 @@ Start the AgentGuard server. This is the only subcommand that runs a long-lived 
 |---|---|---|
 | `--policy <path>` | `configs/default.yaml` | Path to policy YAML. Rejected at startup if missing or invalid. |
 | `--port <int>` | `8080` | TCP port. See bind behavior below. |
+| `--bind <host>` | *(empty)* | **(v1.2)** Host or IP to listen on, e.g. `127.0.0.1` behind a same-host reverse proxy. Empty keeps the default bind behavior below. A non-loopback `--bind` without `--api-key` is refused at startup (exit 2). |
 | `--dashboard` | off | Serve `/dashboard` HTML + `/api/stream` SSE. Required for human approval UI. |
 | `--watch` | off | Log policy hot-reload activity. Hot-reload itself is always on (fsnotify events, with a 2 s mtime poll as fallback); no restart needed after policy edits. |
 | `--audit-log <path>` | `audit.jsonl` | Append-only JSON Lines file. Mode `0600`. Rotation is on by default; configurable via `--audit-max-size-mb`, `--audit-max-backups`, `--audit-max-age-days`, `--audit-compress`. Operators following older guidance should NOT also configure logrotate against `audit.jsonl` — the dual-rotator chain corrupts the rotation index. See [`OPERATIONS.md`](OPERATIONS.md#audit-log-rotation). |
@@ -51,6 +52,7 @@ Start the AgentGuard server. This is the only subcommand that runs a long-lived 
 | `--audit-max-backups <int>` | `5` | Maximum number of rotated archives to retain. `0` keeps all archives indefinitely. |
 | `--audit-max-age-days <int>` | `30` | Maximum age (days) of archived audit files. Older archives pruned at rotation time. `0` disables age-based pruning. |
 | `--audit-compress` | `true` | gzip-compress rotated archives. Disable for plain JSONL siblings. |
+| `--audit-redact` | `true` | **(v1.2)** Mask secrets (API keys, tokens, passwords, private keys, credential headers — see [OPERATIONS § Audit redaction](OPERATIONS.md#audit-redaction)) in requests before they reach the audit log, `GET /v1/audit`, the SSE stream, the dashboard and the pending-approvals list. The policy's `notifications.redaction.extra_patterns` apply too. `false` stores requests verbatim and logs a startup warning. |
 | `--audit-buffered` | `true` | Wrap the audit logger in a bounded async queue with disk-overflow durability so `/v1/check` no longer waits on the audit mutex. Disable to write straight to FileLogger (v0.4.x behavior). |
 | `--audit-queue-size <int>` | `1024` | Bounded queue size for the buffered async logger. Ignored unless `--audit-buffered`. |
 | `--audit-workers <int>` | `4` | Worker goroutines draining the buffered audit queue. Ignored unless `--audit-buffered`. |
@@ -68,7 +70,8 @@ Start the AgentGuard server. This is the only subcommand that runs a long-lived 
 ### Bind behavior
 
 - `--api-key` **set**: binds on `0.0.0.0:<port>` (all interfaces).
-- `--api-key` **unset**: binds on `127.0.0.1:<port>` only. A WARNING is logged at startup. Remote agents cannot connect. This is the #1 source of "connection refused" for new users.
+- `--api-key` **unset**: binds on `127.0.0.1:<port>` only. An INFO line is logged at startup. Remote agents cannot connect. This is the #1 source of "connection refused" for new users.
+- `--bind <host>` **(v1.2)**: binds on `<host>:<port>` instead. With `--api-key` any address is accepted; without one only a loopback address (`127.0.0.1`, `::1`, `localhost`) is, and anything else exits 2 before listening. Use `--bind 127.0.0.1` with `--api-key` when a reverse proxy on the same host is the only client.
 
 ### Persistence & multi-tenancy (v0.6)
 
@@ -120,9 +123,12 @@ agentguard serve \
 
 Load a policy file and report rule count / scope count. Exits `1` on parse error, load-time validation failure (e.g., `..` in a filesystem path), or missing required fields (`version`, `name`).
 
+Non-fatal warnings go to stderr as `WARN: …` lines and don't change the exit code unless you pass `--strict`: a scope that appears in more than one block (the blocks are merged), a scope name one or two edits away from a built-in one (`shel` → "did you mean `shell`?"), and a path pattern whose single `*` crosses `/`. See [POLICY_REFERENCE § Load-time validation](POLICY_REFERENCE.md#load-time-validation).
+
 | Flag | Default | Description |
 |---|---|---|
 | `--policy <path>` | `configs/default.yaml` | Policy file to validate. |
+| `--strict` | `false` | **(v1.2)** Exit `1` if the policy loads with any warning. |
 
 ```bash
 agentguard validate --policy configs/examples/trading-bot.yaml
@@ -130,13 +136,17 @@ agentguard validate --policy configs/examples/trading-bot.yaml
 
 agentguard validate --policy /tmp/broken.yaml
 # INVALID: yaml: unmarshal errors: line 4: cannot unmarshal !!int into string
+
+agentguard validate --strict --policy /tmp/typo.yaml
+# WARN: policy: rules[1] scope "shel" is not a built-in scope — did you mean "shell"? …
+# INVALID (--strict): my-policy loads, but with 1 warning(s)
 ```
 
 Use in CI:
 
 ```bash
 for f in configs/*.yaml configs/examples/*.yaml; do
-  agentguard validate --policy "$f" || exit 1
+  agentguard validate --strict --policy "$f" || exit 1
 done
 ```
 
@@ -307,6 +317,7 @@ Query `/v1/audit` for recent decisions. All filters are optional and AND-combine
 | `--scope <name>` | *(none)* | `shell`, `filesystem`, `network`, `browser`, `cost`, `data`, `mcp_tool`. |
 | `--transport <name>` | *(none)* | Filter by audit `transport` tag. One of `sdk`, `mcp_gateway`, `llm_api_proxy`. Pre-v0.5 entries are excluded when set. |
 | `--limit <int>` | `50` | Max entries. Server clamps silently above configured ceiling (default 1000). |
+| `--order <desc\|asc>` | `desc` | **(v1.2)** `desc` shows the newest entries first; `asc`, the oldest (the order before v1.2, when `--limit` returned the first entries in the log rather than the latest). |
 | `--api-key <key>` | `$AGENTGUARD_API_KEY` | Bearer token. |
 
 ```bash
@@ -382,9 +393,11 @@ Startup migrations run automatically inside `agentguard serve` before the audit 
 
 ## `agentguard version`
 
+`agentguard --version` (or `-version`) is the same command since v1.2, matching the MCP gateway and LLM proxy flags.
+
 ```bash
 agentguard version
-# agentguard 1.1.1 (abc1234)
+# agentguard 1.2.0 (abc1234)
 ```
 
 The version comes from the source; the part in parentheses identifies the build:

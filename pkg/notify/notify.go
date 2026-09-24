@@ -689,8 +689,10 @@ type Redactor struct {
 }
 
 // DefaultRedactor returns a Redactor pre-loaded with common secret patterns:
-// bearer tokens, AWS-style access keys, GitHub/Slack tokens, and generic
-// KEY=value pairs where the key name contains "secret"/"token"/"password".
+// bearer tokens, AWS-style access keys, GitHub/Slack tokens, LLM provider
+// keys (sk-…), Google API keys, JWTs, PEM private keys, credential headers,
+// and generic KEY=value pairs where the key name contains
+// "secret"/"token"/"password"/"api_key".
 func DefaultRedactor() *Redactor {
 	return &Redactor{
 		patterns: []*regexp.Regexp{
@@ -699,6 +701,14 @@ func DefaultRedactor() *Redactor {
 			regexp.MustCompile(`ghp_[A-Za-z0-9]{36,}`),
 			regexp.MustCompile(`xox[baprs]-[A-Za-z0-9\-]+`),
 			regexp.MustCompile(`(?i)(secret|token|password|api[_\-]?key)\s*=\s*\S+`),
+			// Added in v1.2.0, when redaction was extended to the audit trail.
+			regexp.MustCompile(`\bsk-[A-Za-z0-9_\-]{20,}`),                                        // OpenAI / Anthropic style keys
+			regexp.MustCompile(`AIza[0-9A-Za-z_\-]{35}`),                                          // Google API keys
+			regexp.MustCompile(`\bgh[ousr]_[A-Za-z0-9]{36,}`),                                     // other GitHub token types
+			regexp.MustCompile(`github_pat_[A-Za-z0-9_]{22,}`),                                    // GitHub fine-grained PATs
+			regexp.MustCompile(`\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}`), // JWTs
+			regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(-----END [A-Z ]*PRIVATE KEY-----|$)`),
+			regexp.MustCompile(`(?i)\b(x-api-key|api-key|authorization)\s*:\s*(?:(?:basic|bearer|token|digest)\s+)?[^\s"']+`),
 		},
 	}
 }
@@ -726,22 +736,36 @@ func (r *Redactor) WithExtraPatterns(extras []string) (*Redactor, error) {
 }
 
 // Redact returns a copy of the event with sensitive substrings replaced by
-// "[REDACTED]" in the command, path, domain, action, URL, and reason fields.
+// "[REDACTED]" in the command, path, domain, action, URL, meta values and
+// reason.
 func (r *Redactor) Redact(e Event) Event {
-	e.Request.Command = r.redactString(e.Request.Command)
-	e.Request.Path = r.redactString(e.Request.Path)
-	e.Request.Domain = r.redactString(e.Request.Domain)
-	e.Request.Action = r.redactString(e.Request.Action)
-	e.Request.URL = r.redactString(e.Request.URL)
+	e.Request = r.RedactRequest(e.Request)
 	e.Result.Reason = r.redactString(e.Result.Reason)
-	if e.Request.Meta != nil {
-		meta := make(map[string]string, len(e.Request.Meta))
-		for k, v := range e.Request.Meta {
+	return e
+}
+
+// RedactRequest returns a copy of req with sensitive substrings replaced by
+// "[REDACTED]" in the command, path, domain, action, URL and meta values.
+// The meta map is copied, never modified in place.
+func (r *Redactor) RedactRequest(req policy.ActionRequest) policy.ActionRequest {
+	req.Command = r.redactString(req.Command)
+	req.Path = r.redactString(req.Path)
+	req.Domain = r.redactString(req.Domain)
+	req.Action = r.redactString(req.Action)
+	req.URL = r.redactString(req.URL)
+	if req.Meta != nil {
+		meta := make(map[string]string, len(req.Meta))
+		for k, v := range req.Meta {
 			meta[k] = r.redactString(v)
 		}
-		e.Request.Meta = meta
+		req.Meta = meta
 	}
-	return e
+	return req
+}
+
+// RedactString replaces sensitive substrings in s with "[REDACTED]".
+func (r *Redactor) RedactString(s string) string {
+	return r.redactString(s)
 }
 
 func (r *Redactor) redactString(s string) string {
@@ -749,7 +773,10 @@ func (r *Redactor) redactString(s string) string {
 		return s
 	}
 	for _, p := range r.patterns {
-		s = p.ReplaceAllString(s, "[REDACTED]")
+		// MatchString doesn't allocate; ReplaceAllString always copies.
+		if p.MatchString(s) {
+			s = p.ReplaceAllString(s, "[REDACTED]")
+		}
 	}
 	return s
 }

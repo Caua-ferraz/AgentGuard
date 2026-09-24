@@ -264,22 +264,12 @@ func buildMappedActionRequest(req *ToolsCallRequest, mappedScope string) policy.
 
 	case "network":
 		ar.URL = gateclient.FirstStringArg(req.Arguments, "url")
-		ar.Domain = gateclient.FirstStringArg(req.Arguments, "domain", "host", "hostname")
-		if ar.Domain == "" && ar.URL != "" {
-			if u, err := url.Parse(ar.URL); err == nil {
-				ar.Domain = u.Hostname()
-			}
-		}
+		ar.Domain = mappedDomain(req.Arguments, ar.URL)
 		ar.Command = req.FullName
 
 	case "browser":
 		ar.URL = gateclient.FirstStringArg(req.Arguments, "url")
-		ar.Domain = gateclient.FirstStringArg(req.Arguments, "domain", "host", "hostname")
-		if ar.Domain == "" && ar.URL != "" {
-			if u, err := url.Parse(ar.URL); err == nil {
-				ar.Domain = u.Hostname()
-			}
-		}
+		ar.Domain = mappedDomain(req.Arguments, ar.URL)
 		ar.Action = req.ToolName
 		ar.Command = req.FullName
 
@@ -321,6 +311,23 @@ func buildMappedActionRequest(req *ToolsCallRequest, mappedScope string) policy.
 	}
 
 	return ar
+}
+
+// mappedDomain is the host a network or browser tool call will contact. With
+// a url argument it is the URL's host, and "" when the URL has none (a
+// relative or malformed URL), which the engine denies. A domain, host or
+// hostname argument counts only when there is no url argument: the model
+// writes the arguments, so it could otherwise pair an allow-listed domain
+// with a URL on another host. This matches the LLM API Proxy's projectDomain.
+func mappedDomain(args map[string]interface{}, rawURL string) string {
+	if rawURL == "" {
+		return gateclient.FirstStringArg(args, "domain", "host", "hostname")
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 // callV1Check delegates to the shared gate client with the gateway's

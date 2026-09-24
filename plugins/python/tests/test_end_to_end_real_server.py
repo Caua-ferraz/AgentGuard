@@ -167,6 +167,10 @@ def agentguard_server(tmp_path):
             "--port", str(port),
             "--api-key", api_key,
             "--audit-log", str(audit_file),
+            # Keep the durable store in the test's temp dir: the default is
+            # the working directory, where session costs and approvals would
+            # leak into the next run.
+            "--data-dir", str(tmp_path),
             "--dashboard",
         ],
         stdout=subprocess.PIPE,

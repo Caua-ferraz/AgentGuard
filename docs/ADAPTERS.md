@@ -15,23 +15,26 @@ The MCP Gateway and the LLM API Proxy are the **hero** integration paths — the
 
 ## Compatibility Matrix
 
-The version pins live in [`plugins/python/pyproject.toml`](../plugins/python/pyproject.toml) under `[project.optional-dependencies]`. The CI `integration-tests` job runs the LangChain, CrewAI, and browser-use adapters against the real upstream package (the newest release inside each pin) on every push and PR, and on a weekly cron (Monday 06:00 UTC), so a breaking upstream release surfaces before a customer hits it. The MCP adapter has no leg in that job: its tests run in the blocking `python-test` job, which installs the real `mcp` package (again the newest release inside the pin).
+The version pins live in [`plugins/python/pyproject.toml`](../plugins/python/pyproject.toml) under `[project.optional-dependencies]`. The CI `integration-tests` job runs each adapter against the real upstream package (the newest release inside each pin) on every push and PR, and on a weekly cron (Monday 06:00 UTC), so a breaking upstream release surfaces before a customer hits it. Each leg runs the framework's `test_real_*` suite and its `test_at_*` suite (a real agent loop end to end); the langchain leg also drives the real `agentguard-llm-proxy` binary (`test_at_llm_proxy_e2e.py`), and the `mcp` leg drives the Python MCP gateway adapter against a real stdio MCP server. The advisory `python-extras-all` job installs `.[all,dev]` into a fresh environment, runs `pip check`, and runs the whole Python suite, so an extras set that stops resolving — or resolves to an unsupported framework version — shows up.
 
 | AgentGuard | LangChain | CrewAI | browser-use | MCP |
 |---|---|---|---|---|
+| 1.2.x | `langchain >=0.3,<2.0`, `langchain-core >=0.3,<2.0` | `crewai >=1.0,<2.0` | `browser-use >=0.4,<1.0`, `playwright >=1.40` | `mcp >=0.9,<3.0` |
 | 0.5.x – 1.1.x | `langchain >=0.3,<2.0`, `langchain-core >=0.3,<2.0` | `crewai >=0.80,<2.0` | `browser-use >=0.4,<1.0`, `playwright >=1.40` | `mcp >=0.9,<2.0` |
 | 0.4.x | `>=0.1` (no upper bound — silent rot) | `>=0.1` | `>=0.1` (`goto` only) | wire protocol `2024-11-05` |
 
-The 0.5 floors cover the API surface AgentGuard's adapters were built and hardened against (LangChain 0.3+'s split `langchain-core` package, CrewAI 0.80+'s Runnable BaseTool, browser-use 0.4+'s stable Page surface). Each ceiling sits at the next upstream major, so a new major can't install until it has been verified. As of 2026-09-23, the newest LangChain (1.x), CrewAI (1.x), and browser-use (0.x) releases are inside their pins. MCP's newest release is 2.x, which is outside the pin, so `pip install agentguardproxy[mcp]` resolves to the newest 1.x release.
+The floors cover the API surface AgentGuard's adapters were built and hardened against (LangChain 0.3+'s split `langchain-core` package, CrewAI 1.0+ — see below — and browser-use 0.4+'s stable Page surface). Each ceiling sits at the next upstream major, so a new major can't install until it has been verified. As of 2026-09-24, the newest LangChain (1.x), CrewAI (1.x), browser-use (0.x) and MCP (2.x) releases are inside their pins.
+
+**`pip install agentguardproxy[all]`** resolves, as of 2026-09-24, to crewai 1.15, browser-use 0.11, langchain 1.4, mcp 1.28 and pydantic 2.12, and `pip check` is clean. The newest browser-use (0.13) pins `mcp==2.1.1` and `pydantic>=2.13`, which conflict with crewai 1.x, so pip picks an older browser-use; every adapter suite passes on that set.
 
 ### Pinning rationale
 
 The 0.5 line introduces upper bounds because the prior `>=0.1` floor allowed silent rot when frameworks renamed methods or added new bypass paths. Specifically:
 
 - **LangChain** moved from a single `langchain` package on 0.1 to a split `langchain-core` (Runnable protocol) + `langchain` (agents / chains) on 0.3. LangChain has since reached 1.x, which the `<2.0` ceiling already admits and CI installs today; 2.0 gets re-verified before the ceiling moves.
-- **CrewAI** moved its `BaseTool` to inherit from `langchain_core.runnables.Runnable` around 0.80, exposing the modern `invoke` / `ainvoke` / `stream` / `batch` surface. Pre-0.80 tools have a different bypass surface. The adapter was hardened against 0.80+; CrewAI has since reached 1.x, which the `<2.0` ceiling admits and CI installs today.
+- **CrewAI** moved its `BaseTool` to inherit from `langchain_core.runnables.Runnable` around 0.80, exposing the modern `invoke` / `ainvoke` / `stream` / `batch` surface. The floor is **1.0** since v1.2.0: on 0.19x a crew kickoff dispatched agent tool calls through a path the adapter does not wrap (the tool ran with no `/v1/check` call), so the adapter now refuses CrewAI below 1.0 with an `ImportError` instead of returning tools that look gated but aren't. (Before 1.2.0 the floor was 0.80, and `[all]` could resolve to crewai 0.193, where wrapping a tool failed with a `cache_function` TypeError.)
 - **browser-use** 0.4 is the first release where the `Browser` / `Page` API stabilised enough that we could write a strict allowlist against it. Earlier versions reshape the page proxy across minor releases.
-- **MCP** Python SDK (`mcp` on PyPI) is on 1.x, which the adapter is tested against. 2.x is out on PyPI but not verified yet, so the `<2.0` ceiling keeps pip on 1.x. The ceiling widens once the adapter passes against 2.x.
+- **MCP** Python SDK (`mcp` on PyPI): the ceiling is `<3.0` since v1.2.0, after the adapter's suite and the gateway end-to-end suite passed on mcp 2.2.0 (and 2.1.1). 1.x stays supported.
 
 ### Bumping the upper bound
 
@@ -43,7 +46,7 @@ The 0.5 line introduces upper bounds because the prior `>=0.1` floor allowed sil
 
 ### Which integration-tests legs block CI
 
-Since v1.0.0, the LangChain and CrewAI legs are required: a red leg fails CI. The browser-use leg is advisory (`continue-on-error`) for two reasons. Its `playwright install` step downloads about 200 MB of Chromium from a CDN and is the known flake. And like every leg, it tests against live upstream releases, so a red browser-use leg usually means upstream drift, not an AgentGuard regression. A red advisory leg still shows in the run, and the weekly cron run surfaces upstream breakage even when no PR is open. (Before v1.0.0 the whole job was non-blocking.)
+Since v1.0.0, the LangChain and CrewAI legs are required: a red leg fails CI (and, since v1.2.0, the MCP leg). The browser-use leg is advisory (`continue-on-error`) for two reasons. Its `playwright install` step downloads about 200 MB of Chromium from a CDN and is the known flake. And like every leg, it tests against live upstream releases, so a red browser-use leg usually means upstream drift, not an AgentGuard regression. A red advisory leg still shows in the run, and the weekly cron run surfaces upstream breakage even when no PR is open. (Before v1.0.0 the whole job was non-blocking.)
 
 Authors of adapter changes are still expected to drive the integration job to green locally before merging: from `plugins/python`, run `pytest -v -m integration tests/integration/test_real_<framework>.py` (the same invocation CI uses).
 
@@ -280,7 +283,7 @@ If the wrapped handler raises, the adapter returns:
 Error (<ExceptionType>): <redacted message>
 ```
 
-The redaction regex list mirrors `pkg/notify/notify.go`'s `DefaultRedactor` — Bearer tokens, AWS `AKIA...`, GitHub `ghp_...`, Slack tokens (`xox[baprs]-...`), and `key=value` for `secret/token/password/api_key`. The raw, unredacted exception is written to stderr for operator visibility; only the redacted form crosses the JSON-RPC boundary back to the MCP client.
+The redaction regex list is `pkg/notify/notify.go`'s `DefaultRedactor`, pattern for pattern (a test checks they're identical) — Bearer tokens, AWS `AKIA...`, Slack tokens (`xox[baprs]-...`), `key=value` for `secret/token/password/api_key`, and from 1.2.0 `sk-...` LLM keys, Google `AIza...` keys, GitHub `gh[pousr]_...` and `github_pat_...` tokens, JWTs, PEM private keys and `Authorization` / `x-api-key` header values. The raw, unredacted exception is written to stderr for operator visibility; only the redacted form crosses the JSON-RPC boundary back to the MCP client.
 
 This matters because the MCP client is arbitrary (Claude Desktop, Cursor, a script). A naive `str(e)` leak of a bearer token would cross a trust boundary.
 

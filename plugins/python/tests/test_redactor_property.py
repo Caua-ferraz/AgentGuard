@@ -47,7 +47,8 @@ def _random_safe_text(length: int) -> str:
     """A plaintext string guaranteed not to look like any redactor pattern.
 
     We deliberately avoid:
-      - the substrings 'bearer', 'AKIA', 'ghp_', 'xox' (case-insensitive)
+      - the prefixes the patterns anchor on ('bearer', 'AKIA', 'ghp_', 'xox',
+        'sk-', 'AIza', 'eyJ', 'authorization', ...; case-insensitive)
       - the literal '=' character (kills the secret/token/password kv rule)
     so any positive match in tests must come from a planted secret, not
     from accidental collision with the random text.
@@ -55,7 +56,8 @@ def _random_safe_text(length: int) -> str:
     out_chars = _RNG.choices(_SAFE_ALPHABET.replace("=", ""), k=length)
     text = "".join(out_chars)
     # Final scrub of accidentally generated case-insensitive substrings.
-    forbidden = ("bearer", "akia", "ghp_", "xox")
+    forbidden = ("bearer", "akia", "ghp_", "xox", "sk-", "aiza", "gho_", "ghu_",
+                 "ghs_", "ghr_", "github_pat_", "eyj", "authorization", "api-key")
     lowered = text.lower()
     for f in forbidden:
         if f in lowered:
@@ -83,6 +85,15 @@ SECRET_PATTERNS = [
     ("kv_token", lambda: f"token={_rand_token(12)}", "token="),
     ("kv_api_key", lambda: f"api_key={_rand_token(12)}", "api_key="),
     ("kv_api_dash_key", lambda: f"api-key={_rand_token(12)}", "api-key="),
+    # v1.2.0 additions, mirrored from pkg/notify/notify.go.
+    ("llm_sk", lambda: f"sk-{_rand_token(40)}", "sk-"),
+    ("google_aiza", lambda: f"AIza{_rand_token(35)}", "AIza"),
+    ("github_gho", lambda: f"gho_{_rand_token(36)}", "gho_"),
+    ("github_pat", lambda: f"github_pat_{_rand_token(30)}", "github_pat_"),
+    ("jwt", lambda: f"eyJ{_rand_token(12)}.{_rand_token(20)}.{_rand_token(20)}", "eyJ"),
+    ("pem", lambda: f"-----BEGIN RSA PRIVATE KEY-----\n{_rand_token(40)}\n-----END RSA PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----\n"),
+    ("header_authorization", lambda: f"Authorization: Basic {_rand_token(24)}", "Authorization: Basic "),
+    ("header_x_api_key", lambda: f"x-api-key: {_rand_token(24)}", "x-api-key: "),
 ]
 
 
@@ -230,3 +241,27 @@ def test_redactor_is_idempotent(label, gen, _planted_prefix):
         assert twice == once, (
             f"{label}: not idempotent (once={once!r}, twice={twice!r})"
         )
+
+
+# ---------------------------------------------------------------------------
+# The pattern list is the Go DefaultRedactor's, pattern for pattern
+# ---------------------------------------------------------------------------
+
+
+def test_patterns_match_go_default_redactor():
+    """``_REDACT_PATTERNS`` must stay identical to ``DefaultRedactor`` in
+    pkg/notify/notify.go, so MCP egress is redacted like the audit trail
+    and notifications. Skipped outside a repository checkout."""
+    import pathlib
+
+    from agentguard.adapters.mcp import _REDACT_PATTERNS
+
+    go_file = pathlib.Path(__file__).resolve().parents[3] / "pkg" / "notify" / "notify.go"
+    if not go_file.exists():
+        pytest.skip("pkg/notify/notify.go not available (not a repository checkout)")
+    src = go_file.read_text()
+    body = src[src.index("func DefaultRedactor()"):]
+    body = body[: body.index("\n}\n")]
+    go_patterns = re.findall(r"regexp\.MustCompile\(`([^`]*)`\)", body)
+    assert go_patterns, "no patterns found in DefaultRedactor"
+    assert [p.pattern for p in _REDACT_PATTERNS] == go_patterns

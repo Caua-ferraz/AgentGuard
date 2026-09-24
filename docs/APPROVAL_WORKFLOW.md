@@ -91,6 +91,9 @@ Redactor (in `pkg/notify/notify.go` — `DefaultRedactor`) scrubs:
 - `ghp_[A-Za-z0-9]{36,}` (GitHub PAT)
 - `xox[baprs]-…` (Slack)
 - `(secret|token|password|api_key)=<value>`
+- **(v1.2)** `sk-…` API keys, Google `AIza…` keys, GitHub `gho_` / `ghu_` / `ghs_` / `ghr_` / `github_pat_` tokens, JWTs, PEM private keys, and `Authorization:` / `x-api-key:` / `api-key:` header values
+
+Since v1.2.0 the same redactor also masks the audit trail, `GET /v1/audit`, the SSE stream and `/api/pending` (`serve --audit-redact`) — see [OPERATIONS § Audit redaction](OPERATIONS.md#audit-redaction).
 
 Redaction runs on `Command`, `Path`, `Domain`, `Action`, `URL`, `Reason`, and every `Meta` value.
 

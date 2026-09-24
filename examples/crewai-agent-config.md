@@ -15,7 +15,7 @@ client.
 ## Prerequisites
 
 - Python 3.10+
-- `pip install "crewai>=0.80,<2.0"` (matches the pin in
+- `pip install "crewai>=1.0,<2.0"` (matches the pin in
   [`plugins/python/pyproject.toml`](../plugins/python/pyproject.toml))
 - A valid `OPENAI_API_KEY` (forwarded to OpenAI by LiteLLM via the
   proxy)
@@ -54,7 +54,7 @@ response back to CrewAI.
 1. **Install CrewAI:**
 
    ```bash
-   pip install "crewai>=0.80,<2.0"
+   pip install "crewai>=1.0,<2.0"
    ```
 
 2. **Generate AgentGuard's API key:**
@@ -99,32 +99,39 @@ response back to CrewAI.
 
 The script defines a CrewAI tool called `list_tmp_files`. As with the
 LangChain example, this is not in AgentGuard's bundled tool-scope map,
-so add an operator entry to your policy:
+so map it to a scope in your policy and allow it there:
 
 ```yaml
-# In configs/default.yaml or your custom policy
+# In your policy file (configs/default.yaml or your own)
 tool_scope_map:
-  list_tmp_files: shell
+  - pattern: "list_tmp_files"
+    scope: shell
+
+rules:
+  - scope: shell
+    allow:
+      - pattern: "list_tmp_files"
 ```
 
-The proxy hot-reloads via `--watch` so a YAML edit takes effect
-without restarting either binary.
+`tool_scope_map` is a list of `pattern` / `scope` entries. For a tool mapped to `shell`, the proxy checks the tool's `command` argument; `list_tmp_files` takes no arguments, so the check runs with the tool name as the command — that's why the `allow` rule names it. In `configs/default.yaml`, add the mapping at the top of the existing `tool_scope_map:` list and the `pattern:` line to the existing `shell` block's `allow:` list, rather than a second `shell` block (a second block is merged into the first, and `agentguard validate` warns about it).
+
+The proxy reloads its policy file on its own when you save it; so does `agentguard serve`.
 
 ## Verification
 
-- **ALLOW:** with the `tool_scope_map` entry above plus the default
-  policy's `shell` rules, the agent's `list_tmp_files` call is ALLOWed
-  and the local `_run` executes. CrewAI's verbose logging shows the
+- **ALLOW:** with the mapping and the allow rule above, the agent's
+  `list_tmp_files` call is ALLOWed (`allow:shell:list_tmp_files`) and
+  the local `_run` executes. CrewAI's verbose logging shows the
   tool result; the dashboard logs `ALLOW` with
   `transport=llm_api_proxy`.
-- **DENY:** add a `deny` rule under `scope: shell` matching
-  `list_tmp_files*`. Re-run — the proxy rewrites the LLM's response
+- **DENY:** add `- pattern: "list_tmp_files"` to the `shell` block's
+  `deny:` list. Re-run — the proxy rewrites the LLM's response
   as a synthetic refusal text. CrewAI's agent loop reads the
   assistant text and adapts its plan; the final crew result is the
   refusal text propagated through the agent's reasoning.
-- **REQUIRE_APPROVAL:** swap `deny` for `require_approval`. The
-  refusal text includes the approval ID and URL; approve on the
-  dashboard, then re-run.
+- **REQUIRE_APPROVAL:** put the same pattern under `require_approval:`
+  instead. The refusal text includes the approval ID; approve it on
+  the dashboard, then re-run.
 
 ## Inspecting the audit log
 

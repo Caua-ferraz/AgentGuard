@@ -29,6 +29,17 @@ line will not break you. (One correction made during that window, per the
 reserved right: approval resolutions became write-once/one-shot — see
 [`MIGRATION.md`](MIGRATION.md#v090--v100).)
 
+**Security fixes in 1.2.0.** Four fixes change how a policy you already
+have behaves, each because the old behaviour let through actions the
+policy's own rules deny or send to approval, or exposed secrets:
+compound shell commands are checked one command at a time; several rule
+blocks for one scope are merged; the MCP gateway checks the host of a
+tool's `url` argument rather than a `domain` argument next to it; and
+secrets in requests are masked before they reach the audit trail
+(`serve --audit-redact=false` turns that off).
+No field, route, flag or schema version changed. Details:
+[`MIGRATION.md`](MIGRATION.md#v11x--v120).
+
 ---
 
 ## Frozen surface 1 — Policy YAML schema (`version: "1"`)
@@ -39,7 +50,9 @@ The policy file format is frozen at schema **`version: "1"`**.
   `notifications`, …), the rule-precedence contract
   (`deny → require_approval → allow → default deny`), and the matching
   semantics (string-glob, `filepath.Clean` path normalization) do not change
-  across the stabilized line.
+  across the stabilized line. (1.2.0 applies the same globs to each command
+  of a compound shell command — see
+  [`POLICY_REFERENCE.md`](POLICY_REFERENCE.md#compound-shell-commands).)
 - The built-in scopes are frozen: `shell`, `filesystem`, `network`, `browser`,
   `cost`, `data`, `mcp_tool`, plus the `unmapped` sentinel emitted by the LLM
   API Proxy. New scopes may be **added**; none of these is removed or
@@ -156,4 +169,5 @@ the surfaces above.
 
 Out of scope and deliberately not on the stabilization: in-process
 cryptographic audit sealing (hash-chaining / Merkle checkpoints — use external
-WORM instead), RBAC / multi-key auth, and audit secret-redaction.
+WORM instead) and RBAC / multi-key auth. (Audit secret-redaction, once on this
+list, shipped in 1.2.0.)

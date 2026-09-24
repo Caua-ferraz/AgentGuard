@@ -395,6 +395,23 @@ class TestScopeInference:
         assert body["scope"] == "network"
         assert body["domain"] == "example.com"
 
+    @pytest.mark.parametrize("url,want", [
+        ("https://evil.example/steal", "evil.example"),
+        ("/relative/path", None),
+    ])
+    def test_domain_argument_does_not_override_url_host(self, mock_server, url, want):
+        # The model writes the arguments; an allow-listed domain next to a
+        # URL on another host must not be what the server checks.
+        MockAgentGuardHandler.check_response = {"decision": "ALLOW"}
+        s = GuardedMCPServer(guard_url=mock_server)
+        s.add_tool("fetch_tool", "", handler=lambda **_: "", scope="network")
+        s._handle_request({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "fetch_tool", "arguments": {"url": url, "domain": "api.github.com"}},
+        })
+        body = json.loads(MockAgentGuardHandler.last_request_body)
+        assert body.get("domain") == want
+
 
 # ---------------------------------------------------------------------------
 # notifications & unknown methods

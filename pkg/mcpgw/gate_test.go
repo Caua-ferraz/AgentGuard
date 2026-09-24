@@ -520,6 +520,32 @@ func TestBuildMappedActionRequest_NetworkArgs(t *testing.T) {
 	}
 }
 
+// The model writes the tool arguments, so a domain/host argument must not
+// stand in for the host of the URL the tool will actually fetch.
+func TestBuildMappedActionRequest_URLHostBeatsDomainArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		args map[string]interface{}
+		want string
+	}{
+		{"url with smuggled domain", map[string]interface{}{"url": "https://evil.example/x", "domain": "api.github.com"}, "evil.example"},
+		{"url with smuggled host", map[string]interface{}{"url": "https://evil.example/x", "host": "api.github.com"}, "evil.example"},
+		{"url with smuggled hostname", map[string]interface{}{"url": "https://evil.example/x", "hostname": "api.github.com"}, "evil.example"},
+		{"relative url with domain", map[string]interface{}{"url": "/x", "domain": "api.github.com"}, ""},
+		{"unparseable url with domain", map[string]interface{}{"url": "https://evil.example/%zz", "domain": "api.github.com"}, ""},
+		{"domain only", map[string]interface{}{"domain": "api.github.com"}, "api.github.com"},
+		{"host only", map[string]interface{}{"host": "api.github.com"}, "api.github.com"},
+	}
+	for _, scope := range []string{"network", "browser"} {
+		for _, c := range cases {
+			ar := buildMappedActionRequest(toolsCallReq("web:get", c.args), scope)
+			if ar.Domain != c.want {
+				t.Errorf("%s/%s: Domain = %q, want %q", scope, c.name, ar.Domain, c.want)
+			}
+		}
+	}
+}
+
 func TestBuildMappedActionRequest_ShellArgs(t *testing.T) {
 	ar := buildMappedActionRequest(toolsCallReq("runner:execute", map[string]interface{}{
 		"command": "rm -rf /",

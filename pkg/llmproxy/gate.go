@@ -338,8 +338,8 @@ func projectURL(scope string, args map[string]interface{}) string {
 }
 
 // projectDomain extracts a domain from a URL-like arg, or returns the
-// bare domain/host arg if no URL is present. Mirrors mcpgw's
-// buildMappedActionRequest behaviour for network/browser scopes.
+// bare domain/host arg if no URL is present. Mirrors mcpgw's mappedDomain
+// (a model-written domain arg never overrides the URL's host).
 func projectDomain(scope string, args map[string]interface{}) string {
 	if scope != "network" && scope != "browser" {
 		return ""

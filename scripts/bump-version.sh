@@ -13,6 +13,7 @@
 #   cmd/agentguard-mcp-gateway/main.go         — var version = "X.Y.Z"
 #   cmd/agentguard-llm-proxy/main.go           — var version = "X.Y.Z"
 #   plugins/python/pyproject.toml              — version = "X.Y.Z" under [project]
+#   plugins/python/agentguard/__init__.py      — __version__ = "X.Y.Z"
 #   plugins/python/agentguard/adapters/mcp.py  — SDK_VERSION = "X.Y.Z"
 #   plugins/typescript/package.json            — "version": "X.Y.Z"
 #   plugins/typescript/package-lock.json       — top-level + root-package "version" (rewritten by npm install too)
@@ -72,6 +73,7 @@ REPLACEMENTS=(
   'cmd/agentguard-mcp-gateway/main.go|s/(^\s*version\s*=\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
   'cmd/agentguard-llm-proxy/main.go|s/(^\s*version\s*=\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
   'plugins/python/pyproject.toml|s/(^version\s*=\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
+  'plugins/python/agentguard/__init__.py|s/(^__version__\s*=\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
   'plugins/python/agentguard/adapters/mcp.py|s/(^SDK_VERSION\s*=\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
   'plugins/typescript/package.json|s/(^\s*"version"\s*:\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
   # \r? keeps the anchor working on CRLF working trees (Windows core.autocrlf).
@@ -135,6 +137,7 @@ TRACKED=(
   cmd/agentguard-mcp-gateway/main.go
   cmd/agentguard-llm-proxy/main.go
   plugins/python/pyproject.toml
+  plugins/python/agentguard/__init__.py
   plugins/python/agentguard/adapters/mcp.py
   plugins/typescript/package.json
   plugins/typescript/package-lock.json
@@ -173,6 +176,7 @@ check_canonical 'cmd/agentguard/main.go'                    "^\s*version\s*=\s*\
 check_canonical 'cmd/agentguard-mcp-gateway/main.go'        "^\s*version\s*=\s*\"$OLD\""
 check_canonical 'cmd/agentguard-llm-proxy/main.go'          "^\s*version\s*=\s*\"$OLD\""
 check_canonical 'plugins/python/pyproject.toml'             "^version\s*=\s*\"$OLD\""
+check_canonical 'plugins/python/agentguard/__init__.py'     "^__version__\s*=\s*\"$OLD\""
 check_canonical 'plugins/python/agentguard/adapters/mcp.py' "^SDK_VERSION\s*=\s*\"$OLD\""
 check_canonical 'plugins/typescript/package.json'           "^\s*\"version\"\s*:\s*\"$OLD\""
 # package-lock.json: only the top-level (line 3) and the root-package entry

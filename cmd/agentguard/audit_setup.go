@@ -50,7 +50,7 @@ func (p *auditPipeline) Close() {
 // path — so the store backend forces async buffering even if the
 // operator passed --audit-buffered=false (fine for the cheap file
 // append; a DB write per request would blow the <3ms budget).
-func buildAuditPipeline(auditPath string, storeAudit bool, st store.Store, rotOpts auditRotationOpts, bufOpts auditBufferedOpts) (*auditPipeline, error) {
+func buildAuditPipeline(auditPath string, storeAudit bool, st store.Store, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, transform audit.EntryTransform) (*auditPipeline, error) {
 	if storeAudit && !bufOpts.Enabled {
 		log.Printf("WARNING: --audit-backend=store requires async buffering to keep DB writes off the /v1/check hot path; forcing --audit-buffered=true.")
 		bufOpts.Enabled = true
@@ -102,6 +102,10 @@ func buildAuditPipeline(auditPath string, storeAudit bool, st store.Store, rotOp
 		p.cleanups = append(p.cleanups, fileLogger.Close)
 	}
 
+	// Redaction (or any transform) wraps the base logger, so with buffering it
+	// runs in the worker goroutines; the overflow spill applies it too.
+	p.Logger = audit.WithTransform(p.Logger, transform)
+
 	if bufOpts.Enabled {
 		overflowPath := bufOpts.OverflowPath
 		if overflowPath == "" {
@@ -111,6 +115,7 @@ func buildAuditPipeline(auditPath string, storeAudit bool, st store.Store, rotOp
 			QueueSize:    bufOpts.QueueSize,
 			Workers:      bufOpts.Workers,
 			OverflowPath: overflowPath,
+			Transform:    transform,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("buffered audit logger: %w", err)

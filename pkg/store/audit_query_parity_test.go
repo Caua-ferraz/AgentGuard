@@ -92,6 +92,11 @@ func TestAuditQuery_FileAndStoreBackendsAgree(t *testing.T) {
 		"offset only":         {Offset: 1},
 		"tenant+decision":     {TenantID: "acme", Decision: "DENY"},
 		"agent+scope+session": {AgentID: "agent-a", Scope: "shell", SessionID: "s1"},
+		"desc":                {Desc: true},
+		"desc+limit":          {Desc: true, Limit: 2},
+		"desc+limit+offset":   {Desc: true, Limit: 2, Offset: 1},
+		"desc offset only":    {Desc: true, Offset: 1},
+		"desc+decision+limit": {Desc: true, Decision: "DENY", Limit: 1},
 	}
 
 	for name, f := range filters {

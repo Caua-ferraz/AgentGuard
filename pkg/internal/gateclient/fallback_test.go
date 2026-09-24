@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
@@ -70,5 +71,19 @@ func TestFallbackAuditWriter_RecordsCanonicalEntries(t *testing.T) {
 	}
 	if entries[1].Result.Decision != policy.Allow {
 		t.Errorf("fail-open record should carry ALLOW, got %v", entries[1].Result.Decision)
+	}
+}
+
+func TestFallbackAuditWriter_RedactsSecrets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fallback.jsonl")
+	w := NewFallbackAuditWriter(path)
+	w.Record(policy.ActionRequest{Scope: "shell", Command: "curl -H 'Authorization: Bearer abc.def.ghi' https://x"},
+		Decision{Allow: false, Reason: "central server unreachable", Rule: "deny:fail_mode:unreachable"}, "mcp_gateway", "local")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "abc.def.ghi") || !strings.Contains(string(data), "[REDACTED]") {
+		t.Errorf("fallback entry not redacted: %s", data)
 	}
 }

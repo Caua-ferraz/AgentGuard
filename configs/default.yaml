@@ -52,10 +52,21 @@ rules:
   # what you want for shell. The anchored match covers the whole command,
   # so `rm -rf *` matches `rm -rf /home/user` but not `sudo rm -rf /`.
   # Order matters: deny is checked before require_approval before allow.
+  #
+  # A command with shell syntax (`;`, `&&`, `|`, `$( )`, backticks, quotes,
+  # redirections, line breaks) is checked one command at a time, and its
+  # redirection targets against the filesystem rules above: `ls *` allows
+  # `ls /tmp | grep x` but `ls /tmp; rm -rf /` still needs approval. See
+  # docs/POLICY_REFERENCE.md § Compound shell commands.
   - scope: shell
     require_approval:
       - pattern: "sudo *"
       - pattern: "rm -rf *"
+      # `find *` below is allowed; these arguments make find delete files or
+      # run other programs.
+      - pattern: "find * -exec*"
+      - pattern: "find * -ok*"
+      - pattern: "find * -delete*"
       - pattern: "curl * | bash"
       - pattern: "wget * | sh"
       - pattern: "chmod 777 *"
@@ -159,9 +170,18 @@ rules:
   # set used by the MCP quickstart; tune for your deployment.
   - scope: mcp_tool
     deny:
-      # Block any namespace's destructive write/delete tools by name.
-      # Operators who need writes should add a narrower allow above.
+      # Block any namespace's write/delete tools by name. The four write
+      # names are the official filesystem server's (write_file, edit_file,
+      # move_file, create_directory). Deny is checked before allow, so an
+      # allow rule can't re-open these: to permit writes, remove or narrow
+      # the matching deny line (e.g. "fs:edit_file" only for one server).
       - pattern: "*:write_file"
+        message: "Writes via MCP are blocked by default policy"
+      - pattern: "*:edit_file"
+        message: "Writes via MCP are blocked by default policy"
+      - pattern: "*:move_file"
+        message: "Writes via MCP are blocked by default policy"
+      - pattern: "*:create_directory"
         message: "Writes via MCP are blocked by default policy"
       - pattern: "*:delete_*"
         message: "Deletes via MCP are blocked by default policy"

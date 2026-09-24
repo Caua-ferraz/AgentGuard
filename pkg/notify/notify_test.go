@@ -1147,3 +1147,43 @@ func TestDispatcher_SpoolCleanScanStillRemovesFile(t *testing.T) {
 		}
 	}
 }
+
+// TestRedactor_V120Patterns covers the patterns added when redaction was
+// extended to the audit trail.
+func TestRedactor_V120Patterns(t *testing.T) {
+	r := DefaultRedactor()
+	// The fake credentials are built from pieces so secret scanners don't
+	// flag the fixtures; each still has the full shape its pattern matches.
+	for _, c := range []struct{ in, mustHide string }{
+		{"export OPENAI_API_KEY; curl -d key=" + "sk-" + "proj-ABCDEF0123456789abcdef0123456789", "proj-ABCDEF0123456789"},
+		{"claude --key " + "sk-" + "ant-api03-AbCdEfGhIjKlMnOpQrStUvWx", "ant-api03-AbCdEf"},
+		{"gcloud --key " + "AI" + "za" + "SyA1234567890abcdefghijklmnopqrstuv", "SyA1234567890"},
+		{"git clone https://" + "gho" + "_abcdefghijklmnopqrstuvwxyz0123456789AB@github.com/a/b", "_abcdefghij"},
+		{"gh auth login --with-token " + "github" + "_pat_11ABCDEFG0123456789_abcdefghijkl", "_pat_11ABCDEFG"},
+		{"curl -H token:" + "eyJ" + "hbGciOiJIUzI1NiJ9" + "." + "eyJ" + "zdWIiOiIxMjM0In0" + "." + "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U", "zdWIiOiIxMjM0In0"},
+		{"printf '-----BEGIN RSA " + "PRIVATE KEY-----\nMIIEow\n-----END RSA " + "PRIVATE KEY-----' > k", "MIIEow"},
+		{`curl -H "x-api-` + `key: abc123def456" https://api`, "abc123def456"},
+		{`curl -H "Authorization: Basic ` + `dXNlcjpwYXNz" https://api`, "dXNlcjpwYXNz"},
+	} {
+		out := r.RedactString(c.in)
+		if strings.Contains(out, c.mustHide) || !strings.Contains(out, "[REDACTED]") {
+			t.Errorf("RedactString(%q) = %q, still contains %q", c.in, out, c.mustHide)
+		}
+	}
+	if got := r.RedactString("ls -la /tmp && git status"); got != "ls -la /tmp && git status" {
+		t.Errorf("benign command changed: %q", got)
+	}
+}
+
+func TestRedactRequest_CopiesMeta(t *testing.T) {
+	r := DefaultRedactor()
+	meta := map[string]string{"header": "Bearer abc.def"}
+	req := policy.ActionRequest{Scope: "shell", Command: "echo password=hunter2", Meta: meta}
+	out := r.RedactRequest(req)
+	if strings.Contains(out.Command, "hunter2") || strings.Contains(out.Meta["header"], "abc.def") {
+		t.Errorf("not redacted: %+v", out)
+	}
+	if meta["header"] != "Bearer abc.def" || req.Command != "echo password=hunter2" {
+		t.Error("RedactRequest modified its input")
+	}
+}

@@ -114,9 +114,11 @@ routing that traffic around AgentGuard: that bypasses enforcement entirely.
 - **ALLOW (default policy):** the model calls `bash` with
   `command: "ls /tmp"` — the proxy gates it as `scope: shell`,
   ALLOWs, and your script prints the tool-input deltas as they arrive.
-- **DENY:** modify the prompt to ask for `rm -rf /etc`. The proxy
+- **DENY:** modify the prompt to ask for `dd if=/dev/zero of=/dev/sda`
+  (the default policy's `deny:shell:dd if=/dev/*` rule). The proxy
   emits a synthetic `text` block at the same `content_block` index
-  starting with `[AgentGuard] Tool call denied:`. The
+  starting with `AgentGuard denied this action.`, followed by the
+  reason and rule. The
   `message_delta`'s `stop_reason` is rewritten to `end_turn` so the
   SDK terminates the iteration cleanly.
 - **REQUIRE_APPROVAL:** prompt for `sudo *` — the synthetic text

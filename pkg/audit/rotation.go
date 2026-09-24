@@ -183,6 +183,14 @@ func (l *FileLogger) rotateLocked() error {
 		return fmt.Errorf("write post-rotate header: %w", err)
 	}
 
+	// Point the checkpoint at the new live file BEFORE pruning: a checkpoint
+	// that still named a file prune is about to delete would make the next
+	// startup lose the counts of every pruned file.
+	if l.cpEnabled {
+		l.cpFileID = fileIDOf(&env.Meta)
+		l.writeCheckpointLocked()
+	}
+
 	if l.rotCfg.MaxFiles > 0 || l.rotCfg.MaxAge > 0 {
 		if err := pruneArchivesWithAge(path, l.rotCfg.MaxFiles, l.rotCfg.MaxAge); err != nil {
 			log.Printf("WARN: audit archive prune failed: %v", err)

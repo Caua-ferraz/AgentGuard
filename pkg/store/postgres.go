@@ -585,7 +585,11 @@ func (s *PostgresStore) QueryAudit(ctx context.Context, tenantID string, filter 
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
 	}
-	q += " ORDER BY id ASC"
+	if filter.Desc {
+		q += " ORDER BY id DESC"
+	} else {
+		q += " ORDER BY id ASC"
+	}
 	// LIMIT/OFFSET: mirror SQLiteStore's semantics. SQLite spells "offset with no
 	// limit" as "LIMIT -1 OFFSET n"; Postgres expresses the same as a bare
 	// "OFFSET n".
