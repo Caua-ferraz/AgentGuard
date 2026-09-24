@@ -40,7 +40,7 @@ run: build
 validate: build
 	@for f in configs/*.yaml configs/examples/*.yaml; do \
 		echo "Validating $$f..."; \
-		./$(BINARY) validate --policy $$f || exit 1; \
+		./$(BINARY) validate --strict --policy $$f || exit 1; \
 	done
 	@echo "All policies valid."
 
@@ -51,7 +51,7 @@ validate-examples: build
 	@set -e; \
 	for f in configs/*.yaml configs/examples/*.yaml; do \
 		echo "Validating $$f"; \
-		./$(BINARY) validate --policy $$f; \
+		./$(BINARY) validate --strict --policy $$f; \
 	done
 	@echo "All example policies valid."
 

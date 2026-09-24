@@ -68,14 +68,14 @@ jobs:
 
       - name: Validate default policy
         shell: bash
-        run: go run ./cmd/agentguard validate --policy configs/default.yaml
+        run: go run ./cmd/agentguard validate --strict --policy configs/default.yaml
 
       - name: Validate example policies
         shell: bash
         run: |
           for f in configs/examples/*.yaml; do
             echo "Validating $f..."
-            go run ./cmd/agentguard validate --policy "$f"
+            go run ./cmd/agentguard validate --strict --policy "$f"
           done
 
   lint:

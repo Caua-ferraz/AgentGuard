@@ -4,14 +4,15 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 // LoadFromFileWithWarnings loads and validates a policy file like
 // LoadFromFile, and also returns the non-fatal warnings it found (merged
-// duplicate scope blocks, recursive path globs) instead of only logging
-// them. `agentguard validate` prints them, and `--strict` fails on them.
+// duplicate scope blocks, likely-misspelled scope names, recursive path
+// globs) instead of only logging them. `agentguard validate` prints them, and `--strict` fails on them.
 func LoadFromFileWithWarnings(path string) (*Policy, []string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -94,6 +95,9 @@ func parsePolicyBytesWithWarnings(data []byte) (*Policy, []string, error) {
 
 	// Non-fatal lint: path patterns whose '*' recurses across '/'.
 	warnings = append(warnings, lintPathPatterns(&pol)...)
+	// Non-fatal lint: scope names one or two edits away from a built-in
+	// scope are probably typos (`shel`), whose rules would never apply.
+	warnings = append(warnings, lintScopeNames(&pol)...)
 
 	return &pol, warnings, nil
 }
@@ -139,4 +143,64 @@ func mergeDuplicateScopes(sets []RuleSet, loc string) ([]RuleSet, []string, erro
 		}
 	}
 	return out, warnings, nil
+}
+
+// lintScopeNames warns about rule-set scopes that aren't built-in but are
+// within two edits of one. Custom scopes are allowed (a request's scope just
+// has to match), so an unknown name alone is not an error; a near miss of a
+// built-in name usually is a typo that silently disables its rules.
+func lintScopeNames(pol *Policy) []string {
+	var warnings []string
+	check := func(loc string, sets []RuleSet) {
+		for i, rs := range sets {
+			if _, ok := knownPolicyScopes[rs.Scope]; ok || rs.Scope == "" {
+				continue
+			}
+			if near := nearestKnownScope(rs.Scope); near != "" {
+				warnings = append(warnings, fmt.Sprintf(
+					"policy: %s[%d] scope %q is not a built-in scope — did you mean %q? "+
+						"Custom scopes are allowed, but its rules only apply to requests whose scope is exactly %q.",
+					loc, i, rs.Scope, near, rs.Scope))
+			}
+		}
+	}
+	check("rules", pol.Rules)
+	for agentID, cfg := range pol.Agents {
+		check(fmt.Sprintf("agents.%s.override", agentID), cfg.Override)
+	}
+	return warnings
+}
+
+// nearestKnownScope returns the built-in scope within two edits of name
+// (case-insensitive), or "" if there is none.
+func nearestKnownScope(name string) string {
+	lower := strings.ToLower(name)
+	best, bestDist := "", 3
+	for known := range knownPolicyScopes {
+		if d := editDistance(lower, known); d < bestDist || (d == bestDist && known < best) {
+			best, bestDist = known, d
+		}
+	}
+	return best
+}
+
+// editDistance is the Levenshtein distance between two short ASCII strings.
+func editDistance(a, b string) int {
+	prev := make([]int, len(b)+1)
+	cur := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		cur[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(b)]
 }

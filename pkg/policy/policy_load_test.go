@@ -116,3 +116,46 @@ agents:
 		t.Errorf("bot rm -rf / = %s, want DENY", got.Decision)
 	}
 }
+
+func TestLintScopeNames(t *testing.T) {
+	yml := `
+version: "1"
+name: t
+rules:
+  - scope: shel
+    deny: [{pattern: "rm *"}]
+  - scope: filesytem
+    allow: [{action: read, paths: ["/tmp/**"]}]
+  - scope: Shell
+    allow: [{pattern: "ls *"}]
+  - scope: deploy
+    allow: [{pattern: "staging *"}]
+  - scope: browser_rl
+    allow: [{domain: "*"}]
+agents:
+  bot:
+    override:
+      - scope: netwrok
+        allow: [{domain: "a.com"}]
+`
+	_, warnings, err := parsePolicyBytesWithWarnings([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(warnings, "\n")
+	for _, want := range []string{
+		`rules[0] scope "shel" is not a built-in scope — did you mean "shell"?`,
+		`rules[1] scope "filesytem" is not a built-in scope — did you mean "filesystem"?`,
+		`rules[2] scope "Shell" is not a built-in scope — did you mean "shell"?`,
+		`agents.bot.override[0] scope "netwrok" is not a built-in scope — did you mean "network"?`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing warning %q in:\n%s", want, joined)
+		}
+	}
+	for _, custom := range []string{`"deploy"`, `"browser_rl"`} {
+		if strings.Contains(joined, custom) {
+			t.Errorf("custom scope %s should not warn:\n%s", custom, joined)
+		}
+	}
+}

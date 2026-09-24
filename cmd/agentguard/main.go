@@ -124,6 +124,7 @@ Environment:
 
 	validateCmd := flag.NewFlagSet("validate", flag.ExitOnError)
 	validateFile := validateCmd.String("policy", "configs/default.yaml", "Policy file to validate")
+	validateStrict := validateCmd.Bool("strict", false, "Exit with status 1 if the policy loads with warnings (merged scope blocks, likely-misspelled scope names, recursive path globs)")
 	validateCmd.Usage = func() {
 		fmt.Fprintf(os.Stderr, `Usage: agentguard validate [flags]
 
@@ -283,7 +284,7 @@ Flags:
 
 	case "validate":
 		_ = validateCmd.Parse(os.Args[2:])
-		runValidate(*validateFile)
+		runValidate(*validateFile, *validateStrict)
 
 	case "approve":
 		_ = approveCmd.Parse(os.Args[2:])
@@ -787,7 +788,7 @@ func startPprofServer(opts pprofOpts) *http.Server {
 	return srv
 }
 
-func runValidate(policyFile string) {
+func runValidate(policyFile string, strict bool) {
 	pol, warnings, err := policy.LoadFromFileWithWarnings(policyFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "INVALID: %v\n", err)
@@ -795,6 +796,10 @@ func runValidate(policyFile string) {
 	}
 	for _, w := range warnings {
 		fmt.Fprintf(os.Stderr, "WARN: %s\n", w)
+	}
+	if strict && len(warnings) > 0 {
+		fmt.Fprintf(os.Stderr, "INVALID (--strict): %s loads, but with %d warning(s)\n", pol.Name, len(warnings))
+		os.Exit(1)
 	}
 	fmt.Printf("VALID: %s — %d rules across %d scopes\n", pol.Name, pol.RuleCount(), pol.ScopeCount())
 }

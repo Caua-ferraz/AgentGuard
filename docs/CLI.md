@@ -120,9 +120,12 @@ agentguard serve \
 
 Load a policy file and report rule count / scope count. Exits `1` on parse error, load-time validation failure (e.g., `..` in a filesystem path), or missing required fields (`version`, `name`).
 
+Non-fatal warnings go to stderr as `WARN: …` lines and don't change the exit code unless you pass `--strict`: a scope that appears in more than one block (the blocks are merged), a scope name one or two edits away from a built-in one (`shel` → "did you mean `shell`?"), and a path pattern whose single `*` crosses `/`. See [POLICY_REFERENCE § Load-time validation](POLICY_REFERENCE.md#load-time-validation).
+
 | Flag | Default | Description |
 |---|---|---|
 | `--policy <path>` | `configs/default.yaml` | Policy file to validate. |
+| `--strict` | `false` | **(v1.2)** Exit `1` if the policy loads with any warning. |
 
 ```bash
 agentguard validate --policy configs/examples/trading-bot.yaml
@@ -130,13 +133,17 @@ agentguard validate --policy configs/examples/trading-bot.yaml
 
 agentguard validate --policy /tmp/broken.yaml
 # INVALID: yaml: unmarshal errors: line 4: cannot unmarshal !!int into string
+
+agentguard validate --strict --policy /tmp/typo.yaml
+# WARN: policy: rules[1] scope "shel" is not a built-in scope — did you mean "shell"? …
+# INVALID (--strict): my-policy loads, but with 1 warning(s)
 ```
 
 Use in CI:
 
 ```bash
 for f in configs/*.yaml configs/examples/*.yaml; do
-  agentguard validate --policy "$f" || exit 1
+  agentguard validate --strict --policy "$f" || exit 1
 done
 ```
 

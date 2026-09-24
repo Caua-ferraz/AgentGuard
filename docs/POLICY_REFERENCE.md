@@ -68,7 +68,7 @@ rules:
 | `cost` | dedicated `checkCost` evaluator; `limits` block | no rule fields — driven entirely by `limits` and `est_cost` on the request |
 | `data` | none (generic) | `pattern`, `action` (`form_input`), `domain` — see [data scope](#data-scope) |
 | `mcp_tool` | none (generic) | `pattern` matched against `<namespace>:<tool>` — see [mcp_tool scope](#mcp_tool-scope) |
-| *any other string* | none | generic; `pattern`/`action`/`domain` all still work |
+| *any other string* | none | generic; `pattern`/`action`/`domain` all still work — a custom scope applies to requests that send exactly that scope string. A name one or two edits from a built-in one is flagged at load as a likely typo |
 
 **One rule set per scope.** If a scope appears in more than one block of `rules:` (or of one agent's `override:`), the blocks are merged at load, in file order: their `deny`, `require_approval` and `allow` rules are combined, so deny → require_approval → allow precedence holds across them. `agentguard validate` prints a `WARN` line for each merge. A `rate_limit` or `limits` set in more than one of the merged blocks must be identical, or the policy is rejected. Before v1.2.0 the first block that decided won, and a `deny` in a later block for the same scope never applied.
 
@@ -671,6 +671,7 @@ Every policy load — the `--policy` file, a hot reload, a tenant policy from th
 **Non-fatal warnings** are logged at load and printed by `agentguard validate` (to stderr, prefixed `WARN:`); the policy still loads:
 
 - (v1.2.0) a scope that appears in more than one block — the blocks were merged (see [Rule sets and scopes](#rule-sets-and-scopes));
+- (v1.2.0) a scope name that isn't built-in but is one or two edits away from one (`shel`, `filesytem`, `Shell`): its rules only apply to requests whose scope is spelled exactly that way, so it is almost always a typo;
 - (v1.0) a rule path pattern that contains `/` but no `**` (e.g. `/workspace/*`) — its single `*` crosses `/` and matches recursively (`/workspace/a/b/secret.env`), usually broader than intended. Switch to `**` (segment-aware) if you meant one level. See [Single-star `*` crosses `/`](#single-star--crosses-).
 
-There is **no** schema validation beyond the above — typos in field names are silently ignored by the YAML decoder. Always run `agentguard validate --policy <file>` after edits; wire it into CI against every policy file you ship.
+There is **no** schema validation beyond the above — typos in field names are silently ignored by the YAML decoder. Always run `agentguard validate --policy <file>` after edits; wire `agentguard validate --strict` into CI against every policy file you ship, so warnings fail the build.

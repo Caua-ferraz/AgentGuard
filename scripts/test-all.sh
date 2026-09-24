@@ -10,7 +10,7 @@
 #
 # Suites:
 #   go       — go test -race -coverprofile=coverage.out ./...
-#   policy   — agentguard validate on every YAML in configs/ and configs/examples/
+#   policy   — agentguard validate --strict on every YAML in configs/ and configs/examples/
 #   python   — pip install -e ".[dev]" + pytest -v --cov=agentguard in plugins/python
 #   ts       — npm install + npm run build + npm test in plugins/typescript
 #
@@ -147,7 +147,7 @@ policy_suite() {
     [ -f "$f" ] || continue
     any=1
     echo "  validate $f"
-    "$AGENTGUARD_BIN" validate --policy "$f"
+    "$AGENTGUARD_BIN" validate --strict --policy "$f"
   done
   if [ "$any" -eq 0 ]; then
     echo "  no policy files found under configs/ — nothing to validate" >&2

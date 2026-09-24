@@ -124,7 +124,7 @@ This runs, in order:
 | Suite | What it does |
 |-------|--------------|
 | `go` | `go test -race -coverprofile=coverage.out ./...` |
-| `policy` | builds the binary, runs `agentguard validate` on every YAML in `configs/` and `configs/examples/` |
+| `policy` | builds the binary, runs `agentguard validate --strict` on every YAML in `configs/` and `configs/examples/` |
 | `python` | `pip install -e ".[dev]"` + `pytest -v --cov=agentguard` in `plugins/python` |
 | `ts` | `npm install` + `npm run build` + `npm test` in `plugins/typescript` |
 
