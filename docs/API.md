@@ -51,6 +51,7 @@ Auth posture is **identical** across both URL families — the middleware is URL
 | `POST /v1/deny/{id}` | `POST /v1/t/{tenant}/deny/{id}` | Bearer or session | yes |
 | `GET  /v1/status/{id}` | `GET  /v1/t/{tenant}/status/{id}` | Bearer or session | no |
 | `GET  /v1/audit` | `GET  /v1/t/{tenant}/audit` | Bearer or session | no |
+| `POST /v1/audit` | `POST /v1/t/{tenant}/audit` | Bearer or session | yes |
 | `GET  /api/pending` | `GET  /v1/t/{tenant}/api/pending` | Bearer or session | no |
 | `GET  /api/stream` | `GET  /v1/t/{tenant}/api/stream` | Bearer or session | no |
 | `GET  /api/stats` | `GET  /v1/t/{tenant}/api/stats` | Bearer or session | no |
@@ -271,6 +272,55 @@ curl -s -H "Authorization: Bearer $K" \
 ```
 
 For large exports, prefer `curl` over the CLI subcommand — the CLI doesn't expose `offset`.
+
+---
+
+## `POST /v1/audit` · `POST /v1/t/{tenant}/audit`
+
+Records a DENY that was decided **outside** the policy engine, without running the engine. `agentguard-llm-proxy` uses it when it refuses a tool call on its own — for example `deny:llm_api_proxy:malformed_tool_call` — so the central audit log records the verdict the client actually received.
+
+### Request
+
+```http
+POST /v1/audit HTTP/1.1
+Authorization: Bearer $KEY
+Content-Type: application/json
+
+{
+  "schema_version": "v1",
+  "rule": "deny:llm_api_proxy:malformed_tool_call",
+  "reason": "malformed tool call arguments — refused",
+  "request": {"scope": "shell", "command": "bash", "agent_id": "llm-proxy", "meta": {"transport": "llm_api_proxy"}}
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `rule` | string | yes | Recorded as `matched_rule`. Empty or blank → `400 rule is required`. |
+| `reason` | string | no | Recorded as `reason`. |
+| `request` | object | no | The action the refusal was for, in the `/v1/check` request shape. `meta.transport` sets the entry's `transport` tag (default `sdk`). |
+| `schema_version` | string | no | Defaults to `"v1"`; any other value → `400`. |
+
+The decision is always **DENY**: the endpoint never takes a decision from the caller (a `"decision"` field in the body is ignored), so it cannot write an ALLOW into the trail.
+
+### Response
+
+Same shape as `/v1/check`. The entry goes through the same audit-write path, so it also appears on `/api/stream` as a `check` event and counts toward the decision metrics.
+
+```json
+{"schema_version":"v1","decision":"DENY","reason":"malformed tool call arguments — refused","matched_rule":"deny:llm_api_proxy:malformed_tool_call"}
+```
+
+### Status codes
+
+| Code | Meaning |
+|---|---|
+| `200` | Recorded. |
+| `400` | Malformed JSON, unsupported `schema_version` (JSON error body), or missing `rule`. |
+| `401` | Missing/invalid Bearer token or session. |
+| `403` | Session valid but `X-CSRF-Token` missing or mismatched. |
+| `404` | Tenant-aware route with an unregistered tenant: `{"error":"tenant not found"}`. |
+| `413` | Body exceeds `MaxRequestBodyBytes`. |
 
 ---
 
@@ -495,7 +545,7 @@ Most error responses are `text/plain` from `http.Error` (e.g. `"Method not allow
 - Tenant-routing 500 (provider infrastructure failure): `{"error":"policy provider error"}`
 - Health 404 (`/v1/t/<unknown>/health`): `{"error":"tenant not found"}`
 - Recovered panic 500: `{"error":"internal server error"}`
-- `/v1/check` schema mismatch 400: `{"error":"unsupported schema_version; expected v1","received":"v2"}`
+- `/v1/check` and `POST /v1/audit` schema mismatch 400: `{"error":"unsupported schema_version; expected v1","received":"v2"}`
 
 Other error responses (auth 401/403, `/v1/check` 400 for bad JSON, audit 400 for bad `?limit`) are plain-text and may differ between releases — programmatic clients should rely on the HTTP status code rather than message-text matching.
 
