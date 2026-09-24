@@ -157,6 +157,27 @@ Key metrics to watch when contributing:
 
 Histogram buckets go from 0.25 ms to 1000 ms. A healthy server at low load should show p99 `request_duration_ms` below 5 ms.
 
+## Latency budget
+
+AgentGuard sits in front of every tool call, so the enforcement hot path has a hard budget: **p99 < 3 ms** for a `/v1/check` decision. The hot path is:
+
+- `pkg/proxy` — `handleCheck`
+- `pkg/policy` — `Engine.Check` and the rule matchers
+- `pkg/ratelimit` — `Allow`
+- `pkg/llmproxy` — the streaming, forwarding and parser code on the read-a-byte / forward path
+- `pkg/internal/gateclient` — the `/v1/check` client both proxies use
+
+On that path, don't add a synchronous database call, blocking I/O, or new per-request allocations. That's why persistence, multi-node reconciliation and (by default) audit writes run in the background.
+
+CI enforces the budget in the `latency-gate` job, which runs without `-race` because the race detector distorts timing. Run the same gates locally before sending a hot-path change:
+
+```bash
+go test ./pkg/policy/ -run TestEngineCheck_P99LatencyGate -v -count=1
+go test ./pkg/persist/ -run TestIntegration_HotPathLatencyWithPersistence -v -count=1
+AGENTGUARD_SOAK_P99_GATE=1 go test ./pkg/persist/ -run TestIntegration_ConcurrentHotPathLatencyWithPersistence -v -count=1
+make bench   # compare allocations per op before and after your change
+```
+
 ## Pull Request Process
 
 - Fork the repo, create a feature branch
