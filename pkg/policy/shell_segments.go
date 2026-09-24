@@ -27,9 +27,24 @@ import (
 // whole-string matching (the hot path).
 const shellSyntaxChars = ";&|<>()$`'\"\\\n\r"
 
+// shellSyntaxByte marks the bytes of shellSyntaxChars. A table lookup per
+// byte is about twice as fast as strings.ContainsAny, which rebuilds its
+// character set on every call, and isCompoundShell runs on every shell check.
+var shellSyntaxByte = func() (t [256]bool) {
+	for i := 0; i < len(shellSyntaxChars); i++ {
+		t[shellSyntaxChars[i]] = true
+	}
+	return t
+}()
+
 // isCompoundShell reports whether cmd needs the segment-by-segment path.
 func isCompoundShell(cmd string) bool {
-	return strings.ContainsAny(cmd, shellSyntaxChars)
+	for i := 0; i < len(cmd); i++ {
+		if shellSyntaxByte[cmd[i]] {
+			return true
+		}
+	}
+	return false
 }
 
 // errShellUnparseable means the tokenizer could not split the command with

@@ -60,6 +60,15 @@ func TestParseShell(t *testing.T) {
 	}
 }
 
+func TestIsCompoundShell_EveryByte(t *testing.T) {
+	for b := 0; b < 256; b++ {
+		s := "ls " + string([]byte{byte(b)}) + " x"
+		if got, want := isCompoundShell(s), strings.ContainsAny(s, shellSyntaxChars); got != want {
+			t.Errorf("isCompoundShell(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
 func TestParseShell_Unparseable(t *testing.T) {
 	for _, in := range []string{
 		`ls "unterminated`,
