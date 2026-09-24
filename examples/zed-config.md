@@ -128,17 +128,20 @@ absent.
 
 ## Tenant ID
 
-v0.5 is single-tenant. Use `--tenant-id local` (the only value the
-central server recognizes). Multi-tenant routing lands in v0.6 — until
-then, `--tenant-id <anything-other-than-local>` returns 404 from
-`/v1/check`, the gateway hits its `--fail-mode` path, and every action
-denies (or is blanket-allowed, depending on your `--fail-mode`).
+`--tenant-id` picks the tenant whose policy evaluates the gateway's
+calls (they go to `/v1/t/<tenant>/check`). Keep `local` — the policy
+the server loads with `--policy` — unless you've registered another
+tenant on the central server with
+`agentguard tenant put <id> --policy <file.yaml>`. A tenant the server
+doesn't know answers `404`, which the gateway
+treats like an unreachable server: `--fail-mode` decides, so with `deny`
+every call is refused.
 
 ## Notes
 
 - Zed also supports remote / HTTP context servers via a `url`+`headers`
-  shape. The AgentGuard gateway is stdio-only in v0.5; remote transport
-  is `TODO(v0.6, #mcp-streamable-http)`.
+  shape. The AgentGuard gateway is stdio-only; Streamable HTTP isn't
+  implemented (see [`MCP_GATEWAY.md` § 10](../docs/MCP_GATEWAY.md#10-currently-out-of-scope)).
 - Zed does not support an `${env:VAR}` interpolation syntax (unlike
   Cursor); the `env` block on a context-server entry is the only way to
   feed secrets to the subprocess. Don't paste raw keys — wire them in

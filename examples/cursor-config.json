@@ -1,5 +1,5 @@
 {
-  "_comment": "AgentGuard MCP Gateway config for Cursor. See cursor-config.md for the file path (global vs project) and verification steps. Source: https://cursor.com/docs/context/mcp (verified 2026-05-05). Cursor's ${env:VAR} interpolation is unreliable across versions — prefer the env block, which the gateway reads via AGENTGUARD_API_KEY when the --api-key flag is absent. v0.5 is single-tenant: --tenant-id must be 'local'; multi-tenant routing arrives in v0.6.",
+  "_comment": "AgentGuard MCP Gateway config for Cursor. See cursor-config.md for the file path (global vs project) and verification steps. Source: https://cursor.com/docs/context/mcp (verified 2026-05-05). Cursor's ${env:VAR} interpolation is unreliable across versions — prefer the env block, which the gateway reads via AGENTGUARD_API_KEY when the --api-key flag is absent. --tenant-id selects the tenant whose policy applies; keep 'local' unless you registered another tenant on the server with `agentguard tenant put`.",
 
   "mcpServers": {
     "agentguard": {
