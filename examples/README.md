@@ -7,7 +7,7 @@ date.
 
 ## MCP Gateway
 
-The gateway binary is `agentguard-mcp-gateway` (Go 1.22+,
+The gateway binary is `agentguard-mcp-gateway` (Go 1.25+,
 `go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-mcp-gateway@latest`).
 It sits between an MCP client and one or more downstream MCP servers,
 gating every `tools/call` against the central AgentGuard server's
@@ -34,7 +34,7 @@ lists what to install; drop the upstreams you don't need.
 
 ## LLM API Proxy
 
-The proxy binary is `agentguard-llm-proxy` (Go 1.22+,
+The proxy binary is `agentguard-llm-proxy` (Go 1.25+,
 `go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@latest`).
 It speaks the OpenAI Chat Completions and Anthropic Messages wire
 formats, forwards traffic to the real upstream, and gates tool calls

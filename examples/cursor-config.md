@@ -63,7 +63,7 @@ config's `env` block; the gateway passes its environment to every
 upstream, and `docker run -e GITHUB_PERSONAL_ACCESS_TOKEN` forwards it
 into the container.
 
-1. **Install binaries** (Go 1.22+):
+1. **Install binaries** (Go 1.25+):
 
    ```bash
    go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@latest
