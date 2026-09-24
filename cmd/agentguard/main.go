@@ -328,7 +328,7 @@ Flags:
 	case "tenant":
 		runTenant(os.Args[2:])
 
-	case "version":
+	case "version", "--version", "-version":
 		fmt.Printf("agentguard %s (%s)\n", version, buildinfo.Describe(commit))
 
 	default:
@@ -353,7 +353,7 @@ Commands:
   audit       Query the audit log
   tenant      Manage per-tenant policies in the store (put|list|rm)
   migrate     Run on-disk schema migrations (see docs/FILE_FORMATS.md)
-  version     Print version information
+  version     Print version information (also: --version)
 
 Environment:
   AGENTGUARD_API_KEY          Bearer token fallback for every command that

@@ -391,6 +391,8 @@ Startup migrations run automatically inside `agentguard serve` before the audit 
 
 ## `agentguard version`
 
+`agentguard --version` (or `-version`) is the same command since v1.2, matching the MCP gateway and LLM proxy flags.
+
 ```bash
 agentguard version
 # agentguard 1.1.1 (abc1234)
