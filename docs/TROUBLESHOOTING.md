@@ -143,6 +143,26 @@ curl -s http://127.0.0.1:8080/metrics | grep notify_events_dropped_total
 
 ---
 
+## A chained or piped shell command is denied after upgrading to 1.2
+
+**Symptom:** a command that 1.1.x allowed, such as `cat README.md | head -5` or `ls | grep foo`, is now `DENY` or `REQUIRE_APPROVAL`, and the reason names one part of it: `No matching allow rule (default deny) (command 2 of 2: "head -5")`.
+
+**Cause:** since v1.2.0, a shell command with shell syntax (`;`, `&&`, `||`, `|`, `&`, a line break, `$( )`, backticks, a redirection) is split into the commands a shell would run, and every one of them must be allowed. In 1.1.x the whole line matched the first command's rule, which is how `allow: "ls *"` also allowed `ls /tmp; rm -rf /`. A bare command is its own segment, and `ls *` needs something after `ls`, so the `ls` in `ls | grep foo` is not allowed by `ls *`.
+
+**Fix:** add allow rules for the commands your agents chain (`head *`, `grep *`, or `ls` on its own), or write an allow pattern that contains the operator, which matches command by command:
+
+```yaml
+- scope: shell
+  allow:
+    - pattern: "head *"
+    - pattern: "ls"
+    - pattern: "cat * | head *"
+```
+
+A `deny:shell:unparseable_command` verdict means the command used syntax AgentGuard doesn't split (a heredoc, `$(( ))`, unbalanced quotes, or nesting deeper than 8 levels); rewrite the command without it. To see what 1.2.0 would decide for commands your agents already ran, replay them with `agentguard check --batch` — see [`MIGRATION.md`](MIGRATION.md#v11x--v120).
+
+---
+
 ## `*.foo.com` does not match `foo.com`
 
 **Not a bug.** AgentGuard uses standard glob semantics: `*.foo.com` requires at least one character before the dot. Similarly, `*` does not cross `/` boundaries unless you use `**`.

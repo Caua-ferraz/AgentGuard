@@ -241,7 +241,7 @@ The Python SDK applies a redactor (mirrored from `pkg/notify.DefaultRedactor`) t
 
 - Empty / whitespace values pass through unchanged.
 - Values longer than **256 chars** are replaced with `<redacted; len=N>` so audit logs never carry paste-buffer-sized PII.
-- Shorter values run through the regex redactor (Bearer tokens, AWS `AKIA…`, `ghp_…`, `xox?-…`, `secret=…`).
+- Shorter values run through the regex redactor, which has the same patterns as the server's (Bearer tokens, AWS `AKIA…`, GitHub and Slack tokens, `secret=…`, and from v1.2.0 `sk-…` and Google keys, JWTs, PEM keys and credential headers).
 
 Since v1.2.0 the server also masks secrets in every request before it reaches the audit trail (`serve --audit-redact`, on by default — see [OPERATIONS § Audit redaction](OPERATIONS.md#audit-redaction)), so a value that reaches the server unredacted is masked there too.
 

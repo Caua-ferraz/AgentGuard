@@ -15,7 +15,7 @@ client.
 ## Prerequisites
 
 - Python 3.10+
-- `pip install "crewai>=0.80,<2.0"` (matches the pin in
+- `pip install "crewai>=1.0,<2.0"` (matches the pin in
   [`plugins/python/pyproject.toml`](../plugins/python/pyproject.toml))
 - A valid `OPENAI_API_KEY` (forwarded to OpenAI by LiteLLM via the
   proxy)
@@ -54,7 +54,7 @@ response back to CrewAI.
 1. **Install CrewAI:**
 
    ```bash
-   pip install "crewai>=0.80,<2.0"
+   pip install "crewai>=1.0,<2.0"
    ```
 
 2. **Generate AgentGuard's API key:**

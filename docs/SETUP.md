@@ -54,7 +54,7 @@ go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@latest
 
 ```bash
 ./agentguard validate --policy configs/default.yaml
-# Output: VALID: default-sandbox — 54 rules across 5 scopes  (numbers vary as the default ships more rules)
+# Output: VALID: default-sandbox — 61 rules across 5 scopes  (numbers vary as the default ships more rules)
 ```
 
 ### 3. Start the Server

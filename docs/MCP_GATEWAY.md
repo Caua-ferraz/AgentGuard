@@ -435,8 +435,9 @@ result if either denies, otherwise the more specific scope's result).
 
 `Meta["arguments_json"]` is **redacted** through
 `pkg/notify.DefaultRedactor` before being written. Bearer tokens, AWS
-keys, GitHub PATs, Slack tokens, and `key=value` secret patterns are
-scrubbed.
+keys, GitHub tokens, Slack tokens, `key=value` secret patterns and, from
+v1.2.0, `sk-…` and Google API keys, JWTs, PEM private keys and
+`Authorization` / `x-api-key` header values are scrubbed.
 
 The dashboard renders the `transport: "mcp_gateway"` chip in the audit
 feed (blue), distinct from `sdk` (green) and `llm_api_proxy` (purple).

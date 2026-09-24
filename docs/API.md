@@ -527,7 +527,7 @@ Referrer-Policy: no-referrer
 Cache-Control: no-store
 ```
 
-The dashboard JS loads `/api/stats`, `/api/pending`, `/v1/audit?limit=200`, and subscribes to `/api/stream`. CSRF token is read from `document.cookie['ag_csrf']` and echoed as `X-CSRF-Token` on approve/deny.
+The dashboard JS loads `/api/stats`, `/api/pending`, `/v1/audit?order=desc&limit=200` (the newest 200 entries; before v1.2 it loaded `?limit=200`, the oldest), and subscribes to `/api/stream`. CSRF token is read from `document.cookie['ag_csrf']` and echoed as `X-CSRF-Token` on approve/deny.
 
 ---
 
