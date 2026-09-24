@@ -16,16 +16,28 @@ For the full local setup guide, see [SETUP.md](SETUP.md).
 ## Project Structure
 
 ```
-cmd/agentguard/     CLI entry point
-pkg/policy/         Policy engine (YAML parsing, rule evaluation, per-agent overrides)
-pkg/proxy/          HTTP proxy server + embedded dashboard
-pkg/audit/          Audit logging (JSON lines)
-pkg/notify/         Webhook/Slack/console notifications
-pkg/ratelimit/      Token-bucket rate limiter
-plugins/python/     Python SDK + framework adapters (LangChain, CrewAI, browser-use, MCP)
-plugins/typescript/ TypeScript SDK
-configs/            Policy files and examples
-docs/               Documentation
+cmd/agentguard/              CLI and policy server (serve, check, validate, status, ...)
+cmd/agentguard-mcp-gateway/  MCP Gateway binary
+cmd/agentguard-llm-proxy/    LLM API Proxy binary
+cmd/internal/buildinfo/      Version and commit reporting shared by the three binaries
+pkg/policy/                  Policy engine (YAML parsing, rule evaluation, per-agent overrides)
+pkg/proxy/                   HTTP policy server + embedded dashboard
+pkg/mcpgw/                   MCP Gateway (stdio bridge, upstream processes, dual-check)
+pkg/llmproxy/                LLM API Proxy (OpenAI / Anthropic parsers, streaming rewrite)
+pkg/internal/gateclient/     Shared /v1/check client used by both proxies
+pkg/audit/                   Audit logging (JSON lines, rotation, async buffering)
+pkg/store/                   Durable store (SQLite, PostgreSQL)
+pkg/persist/                 Write-behind sync between in-memory state and the store
+pkg/migrate/                 On-disk schema migrations
+pkg/notify/                  Webhook/Slack/console notifications
+pkg/ratelimit/               Token-bucket rate limiter
+pkg/metrics/                 In-process metrics with Prometheus text output
+pkg/depaudit/                Dependency safety auditor
+pkg/deprecation/             Warnings for features scheduled for removal
+plugins/python/              Python SDK + framework adapters (LangChain, CrewAI, browser-use, MCP)
+plugins/typescript/          TypeScript SDK
+configs/                     Policy files and examples
+docs/                        Documentation
 ```
 
 ## Priority Areas
@@ -33,15 +45,14 @@ docs/               Documentation
 1. **Adapters** — Adding support for more agent frameworks (AutoGPT, OpenAI Agents SDK, etc.)
 2. **Policy rules** — New scope types, matching strategies, and contextual conditions
 3. **Dashboard** — Session replay, policy editor, richer analytics
-4. **Audit backends** — SQLite/PostgreSQL storage for audit logs
-5. **Documentation** — Tutorials, integration guides, example policies
+4. **Documentation** — Tutorials, integration guides, example policies
 
 ## Releasing a New Version
 
-All version strings are kept in sync across ~11 files. Use the bump script before tagging — never edit them by hand.
+The version string appears in 15 files. Use the bump script before tagging — never edit them by hand.
 
 ```bash
-./scripts/bump-version.sh 0.5.2     # whatever the new version is
+./scripts/bump-version.sh 1.2.0     # whatever the new version is
 ```
 
 This updates:
@@ -58,26 +69,34 @@ This updates:
 | `Makefile` | `VERSION=...` |
 | `docs/SETUP.md` | `/health` curl example |
 | `docs/API.md` | `/health` and `/v1/health` response examples |
+| `docs/MCP_GATEWAY.md` | `serverInfo` version in the `initialize` example |
+| `docs/PROXY_ARCHITECTURE.md` | `/health` response example |
 | `docs/POLICY_REFERENCE.md` | self-label `as of **vX.Y.Z**` |
+| `docs/DEPLOYMENT.md` | Compose and Kubernetes example image tags |
+| `docs/CLI.md` | `agentguard version` example output |
+
+The script then checks that no file still carries the old version in its canonical spot, and exits non-zero if one does. It doesn't touch `CHANGELOG.md`, `docs/releases/`, or `SECURITY.md`, so before you commit the bump, also:
+
+- Add the release's section to `CHANGELOG.md` and write `docs/releases/vX.Y.Z.md`.
+- On a **minor or major** bump, update the Supported Versions table and the "currently X.Y.x" line in `SECURITY.md`, which support only the latest minor line.
 
 Then commit, tag, and push — the publish workflows trigger when you **publish a GitHub Release** (not on the tag push alone):
 
 ```bash
 git add -p
-git commit -m "release: v0.5.2"
-git tag v0.5.2
+git commit -m "release: v1.2.0"
+git tag v1.2.0
 git push && git push --tags
 
-# Then: GitHub UI → Releases → Draft a new release → Tag: v0.5.2 → Publish
-# That fires .github/workflows/publish-pypi.yml (uploads agentguardproxy==0.5.2)
-# and .github/workflows/publish-npm.yml (publishes @lictorate/agentguard@0.5.2).
+# Then: GitHub UI → Releases → Draft a new release → Tag: v1.2.0 → Publish
+# That fires .github/workflows/publish-pypi.yml (uploads agentguardproxy==1.2.0)
+# and .github/workflows/publish-npm.yml (publishes @lictorate/agentguard@1.2.0).
 ```
 
 The publish workflows only trigger on `release: [published]` events or via manual `workflow_dispatch`. Pushing the tag alone does **not** trigger them. (This caught v0.5.1 — the tag was pushed but the release was never drafted, so PyPI stayed on v0.5.0 until the operator pressed Publish.)
 
 `publish-npm.yml` needs the repository secret `NPM_TOKEN` (a granular npm access token with publish rights on the `@lictorate` scope). It refuses to publish when the release tag doesn't match `plugins/typescript/package.json`'s version, and publishes with npm provenance.
 
-> **CRLF gotcha on Windows.** `bump-version.sh` uses perl regexes anchored with `$`, which don't match when the file has CRLF line endings (perl's `$` sees `\r` before `\n`). On Windows, several files in this repo end up with CRLF — the Makefile is the typical victim. If the script aborts at the Makefile step, patch that one file by hand and rerun. Fix tracked at the top of `scripts/bump-version.sh`.
 ### How to define your version
 
 Version format: `MAJOR.MINOR.PATCH` → `0.0.0`
@@ -155,7 +174,7 @@ Key metrics to watch when contributing:
 | `agentguard_denied_total` | Cumulative deny count (sanity check for policy tests) |
 | `agentguard_pending_approvals` | Current approval queue depth |
 
-Histogram buckets go from 0.25 ms to 1000 ms. A healthy server at low load should show p99 `request_duration_ms` below 5 ms.
+Histogram buckets go from 0.25 ms to 10,000 ms, plus `+Inf`. A healthy server at low load should show p99 `request_duration_ms` below 5 ms.
 
 ## Latency budget
 
