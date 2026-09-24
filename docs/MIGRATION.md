@@ -98,7 +98,7 @@ This deletes `<path>.replay-checkpoint` â€” the file `agentguard serve` reads â€
    - `go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-mcp-gateway@v0.5.0`
    - `go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@v0.5.0`
 
-   Both share the central server's policy file (mount the same `policy.yaml` into all three processes; `--watch` on the central server still hot-reloads).
+   Both share the central server's policy file (mount the same `policy.yaml` into all three processes; each one hot-reloads it when it changes).
 
 5. **Update Python SDK installs** to Python 3.9+. v0.5 drops 3.8 (upstream EOL October 2024). The `pyproject.toml` floor is now `requires-python = ">=3.9"`.
 

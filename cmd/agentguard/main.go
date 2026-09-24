@@ -46,7 +46,7 @@ func main() {
 	policyFile := serveCmd.String("policy", "configs/default.yaml", "Path to policy file")
 	port := serveCmd.Int("port", 8080, "Port to listen on")
 	dashboard := serveCmd.Bool("dashboard", false, "Enable web dashboard")
-	watch := serveCmd.Bool("watch", false, "Watch policy file for changes")
+	watch := serveCmd.Bool("watch", false, "Log each policy hot-reload (reloading itself is always on)")
 	auditPath := serveCmd.String("audit-log", "audit.jsonl", "Path to audit log file")
 	apiKey := serveCmd.String("api-key", "", "Bearer token for approve/deny endpoints")
 	baseURL := serveCmd.String("base-url", "", "External base URL for approval links (default: http://localhost:<port>)")

@@ -295,10 +295,14 @@ Policies are YAML files in `configs/`. See the included examples:
 
 ### Policy Hot-Reload
 
-Start with `--watch` to reload policies on file change without restarting:
+Policy edits take effect without a restart: the server always watches the
+`--policy` file (fsnotify, falling back to a 2 s modification-time poll
+where fsnotify isn't available). `--watch` only adds a log line for each
+reload:
 
 ```bash
 agentguard serve --policy configs/default.yaml --watch
+# 2026/09/23 21:59:11 Policy reloaded: default-sandbox (56 rules)
 ```
 
 ### Everything else in the policy file
