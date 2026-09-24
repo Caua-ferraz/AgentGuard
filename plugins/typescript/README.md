@@ -190,7 +190,7 @@ Polls `GET /v1/status/{id}` with the Bearer token attached. Poll-level errors ar
 
 **Tune `timeoutMs` to the human SLA.** If approvers routinely take 5 minutes, `300_000` (5 min) will fire false negatives.
 
-**Restart kills in-flight approvals.** The approval queue is in-memory on the server — a proxy restart loses every pending ID. Handle the timeout by re-issuing `check()` (which yields a new approval ID).
+**Restarts pause approvals; they don't kill them.** Since v0.6 the server persists the approval queue by default (`--persist`), so pending IDs survive a restart and `waitForApproval` picks up where it left off. The exceptions: a server started with `--persist=false` loses every pending ID on restart, and an approval created in the last ≥1 s store-sync window before a hard crash may be gone. In both cases the status endpoint answers `404` for that ID, `waitForApproval` keeps polling until `timeoutMs`, and you get `{ decision: 'DENY', reason: 'Approval timed out' }` — re-issue `check()` to get a new approval ID.
 
 ### `CheckResult`
 
