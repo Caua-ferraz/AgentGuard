@@ -489,6 +489,13 @@ so read *Behavior changes* before you upgrade.
   for an allow-listed host. Checks that 1.1.x denied can now be allowed. An
   explicit `domain` still wins, and the host is taken the way an HTTP client
   would: `https://api.github.com@evil.com/` is checked as `evil.com`.
+- **The MCP gateway checks the URL's host, not a `domain` argument next to
+  it.** For a tool mapped to `network` or `browser`, 1.1.x took the domain
+  from a `domain`, `host` or `hostname` argument before the URL, so a model
+  could pair an allow-listed domain with a URL on another host. With a `url`
+  argument, the gateway (and the Python MCP adapter) now checks the URL's
+  host; a relative or malformed URL gives no domain and is denied. A tool
+  that takes a `domain` or `host` argument and no `url` is checked as before.
 - **Scope names one or two edits from a built-in scope warn at load**
   (`scope "shel" is not a built-in scope — did you mean "shell"?`). The
   policy still loads; custom scopes still work.

@@ -29,12 +29,14 @@ line will not break you. (One correction made during that window, per the
 reserved right: approval resolutions became write-once/one-shot — see
 [`MIGRATION.md`](MIGRATION.md#v090--v100).)
 
-**Security fixes in 1.2.0.** Three fixes change how a policy you already
+**Security fixes in 1.2.0.** Four fixes change how a policy you already
 have behaves, each because the old behaviour let through actions the
 policy's own rules deny or send to approval, or exposed secrets:
 compound shell commands are checked one command at a time; several rule
-blocks for one scope are merged; and secrets in requests are masked before
-they reach the audit trail (`serve --audit-redact=false` turns that off).
+blocks for one scope are merged; the MCP gateway checks the host of a
+tool's `url` argument rather than a `domain` argument next to it; and
+secrets in requests are masked before they reach the audit trail
+(`serve --audit-redact=false` turns that off).
 No field, route, flag or schema version changed. Details:
 [`MIGRATION.md`](MIGRATION.md#v11x--v120).
 
