@@ -170,9 +170,18 @@ rules:
   # set used by the MCP quickstart; tune for your deployment.
   - scope: mcp_tool
     deny:
-      # Block any namespace's destructive write/delete tools by name.
-      # Operators who need writes should add a narrower allow above.
+      # Block any namespace's write/delete tools by name. The four write
+      # names are the official filesystem server's (write_file, edit_file,
+      # move_file, create_directory). Deny is checked before allow, so an
+      # allow rule can't re-open these: to permit writes, remove or narrow
+      # the matching deny line (e.g. "fs:edit_file" only for one server).
       - pattern: "*:write_file"
+        message: "Writes via MCP are blocked by default policy"
+      - pattern: "*:edit_file"
+        message: "Writes via MCP are blocked by default policy"
+      - pattern: "*:move_file"
+        message: "Writes via MCP are blocked by default policy"
+      - pattern: "*:create_directory"
         message: "Writes via MCP are blocked by default policy"
       - pattern: "*:delete_*"
         message: "Deletes via MCP are blocked by default policy"

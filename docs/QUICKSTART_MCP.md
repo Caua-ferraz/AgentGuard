@@ -117,7 +117,9 @@ Now ask Claude to write a file:
 
 The dashboard logs a `DENY` from the rule `deny:mcp_tool:*:write_file`
 ("Writes via MCP are blocked by default policy"). Claude reports that the
-tool returned an error with that reason embedded.
+tool returned an error with that reason embedded. The filesystem server's
+other write tools — `edit_file`, `move_file`, `create_directory` — are
+denied the same way.
 
 Finally:
 
