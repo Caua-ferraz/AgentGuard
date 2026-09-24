@@ -27,7 +27,7 @@ func TestBuildAuditPipeline_FileUnbuffered(t *testing.T) {
 	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
 
 	p, err := buildAuditPipeline(auditPath, false, nil,
-		auditRotationOpts{}, auditBufferedOpts{Enabled: false})
+		auditRotationOpts{}, auditBufferedOpts{Enabled: false}, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestBuildAuditPipeline_FileBuffered_DrainsOnClose(t *testing.T) {
 	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
 
 	p, err := buildAuditPipeline(auditPath, false, nil,
-		auditRotationOpts{}, auditBufferedOpts{Enabled: true, QueueSize: 64, Workers: 1})
+		auditRotationOpts{}, auditBufferedOpts{Enabled: true, QueueSize: 64, Workers: 1}, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestBuildAuditPipeline_StoreForcesBuffering(t *testing.T) {
 	// Operator passed --audit-buffered=false; the store backend must
 	// force it back on (DB writes never run on the /v1/check path).
 	p, err := buildAuditPipeline(filepath.Join(dir, "audit.jsonl"), true, st,
-		auditRotationOpts{}, auditBufferedOpts{Enabled: false, QueueSize: 64, Workers: 1})
+		auditRotationOpts{}, auditBufferedOpts{Enabled: false, QueueSize: 64, Workers: 1}, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -104,5 +104,32 @@ func TestBuildAuditPipeline_StoreForcesBuffering(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Fatalf("store entries = %d, want 1", len(got))
+	}
+}
+
+func TestBuildAuditPipeline_RedactsFileContents(t *testing.T) {
+	transform := func(e audit.Entry) audit.Entry {
+		e.Request.Command = "[REDACTED]"
+		return e
+	}
+	for _, buffered := range []bool{false, true} {
+		dir := t.TempDir()
+		auditPath := filepath.Join(dir, "audit.jsonl")
+		p, err := buildAuditPipeline(auditPath, false, nil,
+			auditRotationOpts{}, auditBufferedOpts{Enabled: buffered, QueueSize: 64, Workers: 1}, transform)
+		if err != nil {
+			t.Fatalf("buffered=%v build: %v", buffered, err)
+		}
+		if pr, ok := p.Logger.(interface{ Path() string }); !ok || pr.Path() != auditPath {
+			t.Errorf("buffered=%v: Path not reachable through the pipeline (replay checkpoint needs it)", buffered)
+		}
+		if err := p.Logger.Log(audit.Entry{Request: policy.ActionRequest{Scope: "shell", Command: "echo token=s3cret"}}); err != nil {
+			t.Fatal(err)
+		}
+		p.Close()
+		data, _ := os.ReadFile(auditPath)
+		if bytes.Contains(data, []byte("s3cret")) || !bytes.Contains(data, []byte("[REDACTED]")) {
+			t.Errorf("buffered=%v: audit file = %s", buffered, data)
+		}
 	}
 }

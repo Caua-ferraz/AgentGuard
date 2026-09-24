@@ -41,6 +41,8 @@ Default path: `audit.jsonl` (CLI `--audit-log`). JSON-Lines, one record per line
 
 The field is purely additive: schema_version remains `2`. Pre-v0.5 readers ignore unknown top-level keys without error. v0.5+ writers MUST set `Transport` on every new entry; the central server's `/v1/check` handler stamps it from `meta["transport"]` on the inbound request, defaulting to `"sdk"` when the field is absent. External audit consumers implementing against this format MUST tolerate the field's absence on legacy data and SHOULD preserve it round-trip when re-serialising entries.
 
+**Redacted values (v1.2+).** With `serve --audit-redact` (the default), secret-shaped substrings in request fields and the reason are replaced with `[REDACTED]` before an entry is written — see [OPERATIONS § Audit redaction](OPERATIONS.md#audit-redaction). The entry shape and `schema_version` don't change; files written before 1.2.0 are not rewritten.
+
 ### `<audit-log>.replay-checkpoint` — audit replay checkpoint
 
 Default path: `<audit-log>.replay-checkpoint` — `audit.CheckpointSuffix` appended to the audit log path, e.g. `audit.jsonl.replay-checkpoint`. Single JSON record, written atomically (temp file + rename) by the server **once per boot**, after the startup replay finishes. `agentguard migrate --reset-checkpoint` and the v0.4.0 → v0.4.1 migration delete this exact file; there is no schema-version envelope.

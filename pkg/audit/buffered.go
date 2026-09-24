@@ -69,6 +69,11 @@ type BufferedAsyncOpts struct {
 	Workers          int           // default 4   if 0
 	OverflowPath     string        // required (caller derives, e.g. "<auditPath>.overflow.jsonl")
 	RecoveryInterval time.Duration // default 5s if 0; mainly exposed for tests
+	// Transform, when set, is applied to an entry before it is appended to
+	// the overflow file, so the spill file holds the same (e.g. redacted)
+	// content as the underlying log. Wrap the underlying logger with
+	// WithTransform for the normal worker path.
+	Transform EntryTransform
 }
 
 // BufferedAsyncLogger wraps an underlying Logger with a bounded queue,
@@ -80,6 +85,7 @@ type BufferedAsyncLogger struct {
 	queue            chan Entry
 	workers          int
 	overflowPath     string
+	transform        EntryTransform
 	recoveryInterval time.Duration
 
 	// overflowMu serializes appends to the overflow file. JSON encoding is
@@ -132,6 +138,7 @@ func NewBufferedAsyncLogger(underlying Logger, opts BufferedAsyncOpts) (*Buffere
 		queue:            make(chan Entry, opts.QueueSize),
 		workers:          opts.Workers,
 		overflowPath:     opts.OverflowPath,
+		transform:        opts.Transform,
 		recoveryInterval: opts.RecoveryInterval,
 		closed:           make(chan struct{}),
 	}
@@ -335,6 +342,9 @@ func (b *BufferedAsyncLogger) safeUnderlyingLog(entry Entry) (err error) {
 // overflowMu so workers and the saturation path do not produce interleaved
 // bytes.
 func (b *BufferedAsyncLogger) appendOverflow(e Entry) error {
+	if b.transform != nil {
+		e = b.transform(e)
+	}
 	b.overflowMu.Lock()
 	defer b.overflowMu.Unlock()
 

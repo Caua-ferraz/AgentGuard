@@ -70,6 +70,7 @@ func main() {
 	auditBuffered := serveCmd.Bool("audit-buffered", true, "Wrap the audit logger in a bounded async queue with disk-overflow durability. Disable to write straight to FileLogger.")
 	auditQueueSize := serveCmd.Int("audit-queue-size", 1024, "Bounded queue size for the buffered async logger. Ignored unless --audit-buffered is set.")
 	auditWorkers := serveCmd.Int("audit-workers", 4, "Worker goroutines draining the buffered audit queue. Ignored unless --audit-buffered is set.")
+	auditRedact := serveCmd.Bool("audit-redact", true, "Mask secrets (API keys, tokens, passwords, private keys) in commands, paths, URLs and meta before they reach the audit log, GET /v1/audit, the SSE stream and the pending-approvals list. The policy's notifications.redaction.extra_patterns apply too. Set false to store requests verbatim.")
 	auditOverflowPath := serveCmd.String("audit-overflow-path", "", "Path to the disk-overflow spill file used when the buffered queue saturates. Defaults to <audit-log>.overflow.jsonl. Ignored unless --audit-buffered is set.")
 	// Debug pprof. Off by default; when on, the runtime profiler endpoints
 	// register under http.DefaultServeMux via the blank import above and we
@@ -275,7 +276,7 @@ Flags:
 			NodeID:              *nodeID,
 			ReconcileInterval:   *reconcileInterval,
 			TenantPolicyRefresh: *tenantPolicyRefresh,
-		}, *notifySpool)
+		}, *notifySpool, *auditRedact)
 		// Applied here, not inside runServe: os.Exit skips defers, and every
 		// teardown in runServe has already run by the time it returns.
 		if serveCode != 0 {
@@ -485,7 +486,7 @@ func openStore(cfg persistOpts) (persistentStore, string, error) {
 // 1 when the listener failed. The caller applies it with os.Exit AFTER this
 // function returns, so every deferred teardown here (persist flush, audit
 // drain, store close) has already run — os.Exit skips defers.
-func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, approvalValidity time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts, persistCfg persistOpts, notifySpoolPath string) int {
+func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, approvalValidity time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts, persistCfg persistOpts, notifySpoolPath string, auditRedact bool) int {
 	if baseURL == "" {
 		baseURL = fmt.Sprintf("http://localhost:%d", port)
 	}
@@ -550,6 +551,29 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 	}
 	log.Printf("Loaded policy: %s (%d rules across %d scopes)", pol.Name, pol.RuleCount(), pol.ScopeCount())
 
+	// Audit redaction (v1.2): mask secrets in requests before they reach the
+	// audit trail, the SSE stream and the pending-approvals list. It runs in
+	// the audit workers and the SSE writers, not on the /v1/check goroutine
+	// (except with --audit-buffered=false, where the write itself is
+	// synchronous). The approval store keeps the original request: replay
+	// matching compares it field by field.
+	var redactor *notify.Redactor
+	var auditTransform audit.EntryTransform
+	if auditRedact {
+		r, rerr := notify.DefaultRedactor().WithExtraPatterns(pol.Notifications.Redaction.ExtraPatterns)
+		if rerr != nil {
+			log.Printf("WARNING: audit redaction: ignoring notifications.redaction.extra_patterns (%v); built-in patterns only", rerr)
+		}
+		redactor = r
+		auditTransform = func(e audit.Entry) audit.Entry {
+			e.Request = redactor.RedactRequest(e.Request)
+			e.Result.Reason = redactor.RedactString(e.Result.Reason)
+			return e
+		}
+	} else {
+		log.Printf("WARNING: --audit-redact=false: the audit trail, SSE stream and pending list show requests verbatim, including any secrets they contain.")
+	}
+
 	// Open the durable store. Zero-config by default: a SQLite database
 	// at <data-dir>/agentguard.db. Deferred Close is registered HERE (early) so
 	// — via Go's LIFO defer order — the store is the LAST thing torn down, after
@@ -575,7 +599,7 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 	// /v1/check hot path off the audit write — it only enqueues. See
 	// buildAuditPipeline (audit_setup.go) for the construction + forced-
 	// buffering rules.
-	pipeline, err := buildAuditPipeline(auditPath, storeAudit, st, rotOpts, bufOpts)
+	pipeline, err := buildAuditPipeline(auditPath, storeAudit, st, rotOpts, bufOpts, auditTransform)
 	if err != nil {
 		log.Fatalf("Failed to initialize audit pipeline: %v", err)
 	}
@@ -661,6 +685,7 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 		Logger:                   auditLogger,
 		DashboardEnabled:         dashboardEnabled,
 		Notifier:                 notifier,
+		Redactor:                 redactor,
 		APIKey:                   apiKey,
 		BaseURL:                  baseURL,
 		AllowedOrigin:            allowedOrigin,

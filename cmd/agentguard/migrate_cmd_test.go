@@ -287,7 +287,7 @@ func TestBuildAuditPipeline_MigratesLegacyFileAndInvalidatesCheckpoint(t *testin
 		t.Fatal(err)
 	}
 
-	p, err := buildAuditPipeline(logPath, false, nil, auditRotationOpts{}, auditBufferedOpts{Enabled: false})
+	p, err := buildAuditPipeline(logPath, false, nil, auditRotationOpts{}, auditBufferedOpts{Enabled: false}, nil)
 	if err != nil {
 		t.Fatalf("buildAuditPipeline: %v", err)
 	}

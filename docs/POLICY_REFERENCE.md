@@ -243,6 +243,8 @@ The Python SDK applies a redactor (mirrored from `pkg/notify.DefaultRedactor`) t
 - Values longer than **256 chars** are replaced with `<redacted; len=N>` so audit logs never carry paste-buffer-sized PII.
 - Shorter values run through the regex redactor (Bearer tokens, AWS `AKIA…`, `ghp_…`, `xox?-…`, `secret=…`).
 
+Since v1.2.0 the server also masks secrets in every request before it reaches the audit trail (`serve --audit-redact`, on by default — see [OPERATIONS § Audit redaction](OPERATIONS.md#audit-redaction)), so a value that reaches the server unredacted is masked there too.
+
 The field NAME (in `meta.field`) is NOT redacted — operators need it stable for rule authoring. Raw values do not land in the audit log unless they survive the redactor cleanly. Future deferred work (`v0.6, #data-pii`): regex / classifier-based PII detection baked into a built-in rule library so operators don't have to spell out SSN/CC formats themselves.
 
 ### Default-deny still applies
@@ -495,7 +497,7 @@ notifications:
 
 - `approval_required` → fired when a rule matches `REQUIRE_APPROVAL`.
 - `on_deny` → fired when a rule matches `DENY`.
-- `redaction.extra_patterns` → Go `regexp` (RE2) patterns appended to the built-in redactor list (Bearer tokens, `AKIA…`, `ghp_…`, `xox?-…`, `secret=…`). Applied to `Command`, `Path`, `Domain`, `URL`, `Action`, `Reason`, and every `Meta` value before dispatch. Invalid regex → policy load fails.
+- `redaction.extra_patterns` → Go `regexp` (RE2) patterns appended to the built-in redactor list (bearer tokens and credential headers, `AKIA…`, GitHub `gh?_…`/`github_pat_…`, `xox?-…`, `sk-…`, `AIza…`, JWTs, PEM private keys, `secret=`/`token=`/`password=`/`api_key=`). Applied to `Command`, `Path`, `Domain`, `URL`, `Action`, `Reason`, and every `Meta` value before dispatch — and, since v1.2.0, before the request reaches the audit trail, SSE stream and pending list (`serve --audit-redact`; the `--policy` file's patterns only). Invalid regex → policy load fails.
 - `dispatch_timeout` — Go duration; default `10s`. Per-target `timeout` overrides it.
 
 | `type` | Purpose | Honors `timeout` |

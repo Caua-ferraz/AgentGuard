@@ -51,6 +51,7 @@ Start the AgentGuard server. This is the only subcommand that runs a long-lived 
 | `--audit-max-backups <int>` | `5` | Maximum number of rotated archives to retain. `0` keeps all archives indefinitely. |
 | `--audit-max-age-days <int>` | `30` | Maximum age (days) of archived audit files. Older archives pruned at rotation time. `0` disables age-based pruning. |
 | `--audit-compress` | `true` | gzip-compress rotated archives. Disable for plain JSONL siblings. |
+| `--audit-redact` | `true` | **(v1.2)** Mask secrets (API keys, tokens, passwords, private keys, credential headers — see [OPERATIONS § Audit redaction](OPERATIONS.md#audit-redaction)) in requests before they reach the audit log, `GET /v1/audit`, the SSE stream, the dashboard and the pending-approvals list. The policy's `notifications.redaction.extra_patterns` apply too. `false` stores requests verbatim and logs a startup warning. |
 | `--audit-buffered` | `true` | Wrap the audit logger in a bounded async queue with disk-overflow durability so `/v1/check` no longer waits on the audit mutex. Disable to write straight to FileLogger (v0.4.x behavior). |
 | `--audit-queue-size <int>` | `1024` | Bounded queue size for the buffered async logger. Ignored unless `--audit-buffered`. |
 | `--audit-workers <int>` | `4` | Worker goroutines draining the buffered audit queue. Ignored unless `--audit-buffered`. |

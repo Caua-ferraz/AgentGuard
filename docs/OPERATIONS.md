@@ -59,6 +59,20 @@ Historical audit queries then become a two-tier lookup: recent entries from the 
 
 ---
 
+## Audit redaction
+
+Since v1.2.0, `agentguard serve` masks secrets in every request before it is stored or shown (`--audit-redact`, default `true`). Matches are replaced with `[REDACTED]` in the command, path, domain, action, URL, reason and every `meta` value.
+
+**What is masked:** bearer tokens, `Authorization:` / `x-api-key:` / `api-key:` header values, AWS access keys (`AKIA…`), GitHub tokens (`ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`, `github_pat_`), Slack tokens (`xox?-`), LLM provider keys (`sk-…`), Google API keys (`AIza…`), JWTs, PEM private keys, and `secret=` / `token=` / `password=` / `api_key=` pairs — plus the policy's `notifications.redaction.extra_patterns`. It is pattern-based and best effort: a secret in a shape none of these match is stored as sent.
+
+**Where:** the audit file or store, the overflow spill file, `GET /v1/audit`, the SSE stream (so the dashboard feed), and `/api/pending`. The MCP gateway and LLM proxy mask their `--fail-audit-log` entries with the built-in patterns. Redaction runs in the audit worker goroutines and the SSE writers, not on the `/v1/check` request goroutine — except with `--audit-buffered=false`, where the audit write itself is synchronous.
+
+**What still holds the original request:**
+- The approval store (the `approvals` table in SQLite or Postgres): replaying an `approval_id` compares the retry to the original request field by field. Protect `agentguard.db` / the database credentials accordingly.
+- The in-memory `require_prior` index, until the next restart; after a restart it is rebuilt from the redacted audit trail, so a `require_prior` condition that names a secret-bearing command may stop matching.
+
+**Also note:** only the `--policy` file's `extra_patterns` are used (not tenant policies'); audit files written before 1.2.0 are not rewritten; notifications were already redacted and still are. `--audit-redact=false` restores verbatim audit content and logs `WARNING: --audit-redact=false: …` at startup.
+
 ## Multi-instance deployments
 
 Since v1.0, replicas can share state through PostgreSQL. Which mode you are in

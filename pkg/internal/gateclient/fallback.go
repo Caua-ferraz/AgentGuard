@@ -15,11 +15,16 @@ import (
 	"time"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
+	"github.com/Caua-ferraz/AgentGuard/pkg/notify"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
 // FallbackFileMode matches the audit overflow file's permissions.
 const FallbackFileMode = 0o600
+
+// fallbackRedactor masks secrets (keys, tokens, passwords) in the request
+// before it is written, like the central server's audit redaction.
+var fallbackRedactor = notify.DefaultRedactor()
 
 // FallbackAuditWriter appends deny records to a local JSONL file. A nil
 // writer is valid and records nothing — callers never need to nil-check.
@@ -60,10 +65,10 @@ func (w *FallbackAuditWriter) Record(ar policy.ActionRequest, d Decision, transp
 		SessionID: ar.SessionID,
 		TenantID:  tenantID,
 		Transport: transport,
-		Request:   ar,
+		Request:   fallbackRedactor.RedactRequest(ar),
 		Result: policy.CheckResult{
 			Decision: decision,
-			Reason:   d.Reason,
+			Reason:   fallbackRedactor.RedactString(d.Reason),
 			Rule:     d.Rule,
 		},
 	}

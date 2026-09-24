@@ -72,6 +72,10 @@ type Config struct {
 	Logger           audit.Logger
 	DashboardEnabled bool
 	Notifier         *notify.Dispatcher
+	// Redactor, when set, masks secrets in requests on the SSE stream and the
+	// pending-approvals list (v1.2, `serve --audit-redact`). The audit trail
+	// itself is redacted by the audit pipeline.
+	Redactor *notify.Redactor
 	// APIKey protects the approve/deny endpoints. If empty, a warning is
 	// logged and the endpoints are open (suitable for localhost-only deployments).
 	APIKey string
@@ -1497,7 +1501,21 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 // handlePendingList returns pending approval actions.
 func (s *Server) handlePendingList(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(s.approval.List(TenantIDFromContext(r.Context())))
+	list := s.approval.List(TenantIDFromContext(r.Context()))
+	if s.cfg.Redactor == nil {
+		_ = json.NewEncoder(w).Encode(list)
+		return
+	}
+	// List returns the queue's own entries; redact copies so the stored
+	// request, which replay matching compares, stays intact.
+	var out []PendingAction
+	for _, pa := range list {
+		cp := *pa
+		cp.Request = s.cfg.Redactor.RedactRequest(cp.Request)
+		cp.Result.Reason = s.cfg.Redactor.RedactString(cp.Result.Reason)
+		out = append(out, cp)
+	}
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 // handleEventStream is a Server-Sent Events endpoint for live updates.
@@ -1527,6 +1545,10 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case event := <-ch:
+			if s.cfg.Redactor != nil {
+				event.Request = s.cfg.Redactor.RedactRequest(event.Request)
+				event.Result.Reason = s.cfg.Redactor.RedactString(event.Result.Reason)
+			}
 			data, _ := json.Marshal(event)
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
