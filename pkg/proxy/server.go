@@ -431,8 +431,8 @@ func NewServer(cfg Config) *Server {
 	// requires Bearer OR session, and the state-changing approve/deny
 	// routes additionally require CSRF when authenticated via session.
 	//
-	// Method-prefixed wildcard syntax is Go 1.22+; the Dockerfile pins
-	// golang:1.25.12-alpine so this is safe.
+	// Method-prefixed wildcard syntax needs Go 1.22+; go.mod requires Go
+	// 1.25, so every supported build has it.
 	mux.HandleFunc("POST /v1/t/{tenant}/check", s.withTenant(s.handleCheck))
 	mux.HandleFunc("POST /v1/t/{tenant}/approve/{id}",
 		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, true, s.handleApprove)))

@@ -1,6 +1,6 @@
 # Deploying AgentGuard in Production
 
-This guide covers the four decisions you **must** get right before exposing AgentGuard beyond `localhost`:
+This guide covers what you **must** get right before exposing AgentGuard beyond `localhost`:
 
 1. [Setting an API key](#1-always-set-an-api-key) (and what happens if you do not)
 2. [Running behind a TLS-terminating reverse proxy](#2-behind-a-tls-terminating-reverse-proxy)
@@ -35,7 +35,7 @@ AgentGuard changes how it binds based on whether `--api-key` is set:
 | **unset** | `127.0.0.1:<port>` **only** | Processes on the same host (all gated endpoints become open) |
 | **set** | `0.0.0.0:<port>` (all interfaces) | Anything with the Bearer token (or a valid session cookie) |
 
-Source: `pkg/proxy/server.go:283-289`.
+Source: the bind-address logic in `proxy.NewServer` (`pkg/proxy/server.go`).
 
 **Symptom if you forget:** agents running on a different host get `connection refused` or `connect: timed out`. The server log shows:
 
@@ -50,7 +50,7 @@ export AGENTGUARD_API_KEY="$(openssl rand -hex 32)"
 agentguard serve --api-key "$AGENTGUARD_API_KEY" ...
 ```
 
-The same key is used by `agentguard approve|deny|status|audit` (falls back to `AGENTGUARD_API_KEY` env; see `cmd/agentguard/main.go:256-261`) and by the Python / TypeScript SDKs (`AGENTGUARD_API_KEY` env var).
+The same key is used by `agentguard approve|deny|status|audit` (falls back to `AGENTGUARD_API_KEY` env; see `resolveAPIKey` in `cmd/agentguard/main.go`) and by the Python / TypeScript SDKs (`AGENTGUARD_API_KEY` env var).
 
 > **Note:** `/v1/check`, `/health`, `/metrics`, `/auth/login`, and `/auth/logout` are open by design even when `--api-key` is set. See [section 4](#4-v1check-is-intentionally-open).
 
@@ -68,7 +68,7 @@ Most production deployments terminate TLS at an nginx / HAProxy / ALB / Cloudfla
 Secure: r.TLS != nil || s.cfg.TLSTerminatedUpstream
 ```
 
-(`pkg/proxy/auth.go:221, 231`.)
+(`handleLogin` in `pkg/proxy/auth.go`.)
 
 Modern browsers reject non-`Secure` cookies from `SameSite=Strict` origins served over HTTPS — so the cookie is set, **then silently dropped on the next request**, and `/dashboard` bounces back to the login form. Users see an infinite redirect loop.
 
@@ -82,7 +82,7 @@ This forces `Secure=true` on session cookies regardless of `r.TLS`. Only use it 
 
 ### 2b. Approval links point at the wrong host
 
-`approval_url` in `POST /v1/check` responses and in webhook/Slack notifications is built from `cfg.BaseURL`. If you do not set `--base-url`, AgentGuard defaults to `http://localhost:<port>` (`cmd/agentguard/main.go:154-156`) — Slack messages will link to `http://localhost:8080/...` which is useless to a human approver on their laptop.
+`approval_url` in `POST /v1/check` responses and in webhook/Slack notifications is built from `cfg.BaseURL`. If you do not set `--base-url`, AgentGuard defaults to `http://localhost:<port>` (`runServe` in `cmd/agentguard/main.go`) — Slack messages will link to `http://localhost:8080/...` which is useless to a human approver on their laptop.
 
 **Fix:** set `--base-url` to the public URL the dashboard is reachable at:
 
@@ -219,7 +219,7 @@ spec:
 | **unset** (default) | **Permissive-localhost**: reflects any `http://localhost:*` or `http://127.0.0.1:*` origin. Everything else is rejected. | Local development, same-host deployments. |
 | `https://app.example.com` (exact) | **Strict**: only the named origin gets `Access-Control-Allow-Origin` back. | Production, dashboard served from a known SPA origin. |
 
-Source: `pkg/proxy/server.go:926-956`.
+Source: `withCORS` in `pkg/proxy/server.go`.
 
 Permissive-localhost is safe because:
 
@@ -274,7 +274,7 @@ agentguard-mcp-gateway --upstream "fs:npx -y @modelcontextprotocol/server-filesy
 - `--fail-mode=deny` — if the AgentGuard server is unreachable, refuse rather than passthrough.
 - `--listen 127.0.0.1:<port>` — inbound is not authenticated unless you set `--proxy-api-key`. The LLM proxy refuses any non-loopback `--listen` without that key, including `:<port>` with no host (which binds every interface).
 - 30 s graceful-shutdown window (systemd `TimeoutStopSec=30s`, Kubernetes `terminationGracePeriodSeconds: 30`). The LLM proxy buffers tool calls inside streaming responses; a hard kill truncates the client's response.
-- Pin proxy binary and AgentGuard server to the same minor version; wire protocol is stable within `0.x.y`, not across majors.
+- Keep the proxies and the server on the same release. The `/v1/check` wire protocol is frozen across 1.x ([`COMPATIBILITY.md`](COMPATIBILITY.md)), so a mixed 1.x pair interoperates, but only same-release pairs are tested together.
 
 Examples (systemd unit, Kubernetes sidecar, MCP client configs): [`QUICKSTART_MCP.md`](QUICKSTART_MCP.md), [`QUICKSTART_LLM_PROXY.md`](QUICKSTART_LLM_PROXY.md). Wire-format reference: [`MCP_GATEWAY.md`](MCP_GATEWAY.md), [`LLM_API_PROXY.md`](LLM_API_PROXY.md).
 
