@@ -147,6 +147,8 @@ All notable changes to this project will be documented in this file.
 
 ## [0.7.0] — 2026-06-12
 
+*(Corrected in v1.1.1: 0.7.0 was never tagged or published — no Go module version or PyPI release exists. These changes first shipped in an installable release in 0.9.0.)*
+
 > The consistency + durability release. Three workstreams land together (v0.6.0 was tagged but had no standalone release notes or CHANGELOG entry — its milestone is documented here):
 >
 > 1. **Persistent multi-tenant state** (the v0.6 milestone): `serve` is stateful by default — approvals, rate limits, and cost accumulators survive restarts via a zero-config SQLite store, and per-tenant policies are first-class (`agentguard tenant put`, isolated runtime state, tenant-scoped audit).
@@ -279,6 +281,8 @@ All notable changes to this project will be documented in this file.
 - (no v0.5-specific fixes beyond those rolled into the above; security findings tracked in the v0.5 audit reports.)
 
 ## [0.4.1] — 2026-04-22
+
+*(Corrected in v1.1.1: 0.4.1 was never tagged or published — no Go module version or PyPI release exists. These changes first shipped in an installable release in 0.5.0.)*
 
 > This release focuses on behavioral fixes and observability. Server behavior changes are opt-in or clearly surfaced; SDK and audit-log contracts remain backward-compatible with v0.4.0.
 >

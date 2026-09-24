@@ -8,6 +8,8 @@ For a single-line summary of each change, see `CHANGELOG.md`. For deep-dive rele
 
 ## v0.4.0 → v0.4.1
 
+*(Corrected in v1.1.1: v0.4.1 was never tagged or published — no Go module version or PyPI release exists. Its changes first shipped in v0.5.0, so these steps apply when you upgrade from v0.4.0 to v0.5.0 or later.)*
+
 ### What happens automatically
 
 On first start of a v0.4.1 binary against an audit file written by v0.4.0:
@@ -172,11 +174,16 @@ The only behavioural difference an operator might notice: v0.5.0 Python SDK on C
 
 ## v0.5.x → v0.7.0 (includes the v0.6 milestone)
 
-v0.5.2 was a maintenance release (toolchain refresh, no migration). The
-v0.6 milestone (persistence + multi-tenancy) shipped without standalone
-release notes and is documented under v0.7.0 — upgrading from any v0.5.x
-directly to v0.7.0 is the supported path. Full detail:
-[`releases/v0.7.0.md`](releases/v0.7.0.md).
+v0.5.2 was a maintenance release (toolchain refresh, no migration).
+**v0.7.0 was never tagged or published** — there is no v0.7.0 Go module
+version and no v0.7.0 PyPI release. The v0.6 milestone (persistence +
+multi-tenancy) was tagged only as `V0.6.0`, an uppercase tag `go install`
+can't resolve (PyPI does have `agentguardproxy==0.6.0`). The changes below
+first shipped in an installable release in **v0.9.0**: upgrade from v0.5.x
+straight to v0.9.0 or later and apply this section together with
+§ v0.7.0 → v0.9.0. Full detail: [`releases/v0.7.0.md`](releases/v0.7.0.md).
+*(Corrected in v1.1.1: this section previously said upgrading directly to
+v0.7.0 was the supported path; v0.7.0 was never published.)*
 
 ### What happens automatically
 
@@ -238,9 +245,9 @@ lost, matching v0.5.x's in-memory behaviour.
 
 2. **(Optional) Forward your audit log to WORM storage** if you want tamper-evidence — see the README audit bullet and [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
-### Rollback to v0.7.0
+### Rollback (there is no v0.7.0 build)
 
-Trivial. v0.9.0 introduces no on-disk state, no schema bumps, and no wire-protocol changes — reinstall the v0.7.0 binaries/SDKs and start. No data migration is required either way.
+v0.9.0 introduces no on-disk state, no schema bumps, and no wire-protocol changes, but v0.7.0 was never published, so there is nothing to reinstall at that version. Roll back to v0.5.2 instead — see *Rollback to v0.5.x* above: v0.5.x ignores `agentguard.db`, so pending approvals stored there are lost. *(Corrected in v1.1.1: this previously said to reinstall the v0.7.0 binaries/SDKs.)*
 
 ---
 
