@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/Caua-ferraz/AgentGuard/cmd/internal/buildinfo"
 )
 
 // Update check: a single, best-effort lookup of the latest published
@@ -82,14 +84,20 @@ func waitForUpdateCheck(done <-chan struct{}, timeout time.Duration) {
 //
 //   - `serve`: never. The long-running enforcement server makes no outbound
 //     connection of its own.
-//   - Dev builds: an untagged version string ("dev" anywhere in it) or the
-//     Makefile's "dev" commit fallback (no git metadata at build time).
+//   - Dev builds: an untagged version string ("dev" anywhere in it), or the
+//     "dev" commit placeholder on a binary whose Go build info carries no
+//     tagged release version. `go install …@vX.Y.Z` / `@latest` builds keep
+//     commit=dev (no -ldflags) but record the tag, so they DO check; a
+//     `go build` of an untagged or modified checkout does not.
 //   - AGENTGUARD_NO_UPDATE_CHECK set to anything other than "0".
 func shouldSkipUpdateCheck(currentVersion, currentCommit, subcommand string) bool {
 	if subcommand == "serve" {
 		return true
 	}
-	if currentVersion == "" || strings.Contains(currentVersion, "dev") || currentCommit == "dev" {
+	if currentVersion == "" || strings.Contains(currentVersion, "dev") {
+		return true
+	}
+	if currentCommit == "dev" && buildinfo.ReleaseVersion() == "" {
 		return true
 	}
 	if v := os.Getenv("AGENTGUARD_NO_UPDATE_CHECK"); v != "" && v != "0" {

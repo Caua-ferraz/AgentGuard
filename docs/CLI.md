@@ -384,10 +384,18 @@ Startup migrations run automatically inside `agentguard serve` before the audit 
 
 ```bash
 agentguard version
-# agentguard 1.0.0 (abc1234)
+# agentguard 1.1.0 (abc1234)
 ```
 
-The `version` string is baked in at build time via `-ldflags "-X main.version=... -X main.commit=..."` (see `Makefile`).
+The version comes from the source; the part in parentheses identifies the build:
+
+| Built with | Shows |
+|---|---|
+| `make build` (`-ldflags "-X main.commit=…"`) | the git short hash, e.g. `abc1234` |
+| `go install …/cmd/agentguard@vX.Y.Z` or `@latest` | `module vX.Y.Z` (from Go build info) |
+| `go build` in a git checkout | the short VCS revision, with `-dirty` if the tree had local changes |
+| `make docker` (`--build-arg COMMIT=…`) | the git short hash |
+| any build with neither ldflags nor VCS information | `dev` |
 
 ### Update notice on startup (v0.5.1+)
 
@@ -397,7 +405,7 @@ The interactive subcommands (`check`, `validate`, `approve`, `deny`, `status`, `
 Notice: agentguard v1.0.0 is deprecated, version v1.1.0 available — https://github.com/Caua-ferraz/AgentGuard/releases/latest
 ```
 
-`serve` never performs the check: the enforcement server opens no outbound connection the operator did not configure (see [`THREAT_MODEL.md`](THREAT_MODEL.md#outbound-connections)). The check is also skipped when the binary was built with `commit=dev` or a version string containing `dev` (what a plain `go build` without the Makefile's ldflags produces), when `AGENTGUARD_NO_UPDATE_CHECK` is set to any value other than `0`, or when the HTTP request fails. Never touches stdout, never affects exit codes. Only the `agentguard` binary has the check; the MCP gateway and LLM proxy never had one.
+`serve` never performs the check: the enforcement server opens no outbound connection the operator did not configure (see [`THREAT_MODEL.md`](THREAT_MODEL.md#outbound-connections)). The check is also skipped for development builds — a version string containing `dev`, or no `-ldflags` commit (`commit=dev`) *and* no tagged release version in the Go build info, as with `go build` on an untagged or modified checkout. `go install …@vX.Y.Z` and `@latest` builds record the release tag, so they do check. It is also skipped when `AGENTGUARD_NO_UPDATE_CHECK` is set to any value other than `0`, or when the HTTP request fails. Never touches stdout, never affects exit codes. Only the `agentguard` binary has the check; the MCP gateway and LLM proxy never had one.
 
 ---
 

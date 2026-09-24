@@ -10,7 +10,11 @@ WORKDIR /app
 COPY go.mod go.sum* ./
 RUN go mod download 2>/dev/null || true
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o agentguard ./cmd/agentguard
+# COMMIT feeds `agentguard version` and the CLI update check (`make docker`
+# passes the git short hash). Left at "dev", the binary falls back to Go build
+# info, as a plain `go build` does.
+ARG COMMIT=dev
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X main.commit=${COMMIT}" -o agentguard ./cmd/agentguard
 
 # Runtime stage
 FROM alpine:3.22

@@ -57,7 +57,7 @@ validate-examples: build
 
 ## docker: Build Docker image
 docker:
-	docker build -t $(BINARY):$(VERSION) -t $(BINARY):latest .
+	docker build --build-arg COMMIT=$(COMMIT) -t $(BINARY):$(VERSION) -t $(BINARY):latest .
 
 ## docker-run: Run in Docker (needs AGENTGUARD_API_KEY in the environment)
 docker-run: require-api-key docker

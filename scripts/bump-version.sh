@@ -23,6 +23,7 @@
 #   docs/PROXY_ARCHITECTURE.md                 — "version": "X.Y.Z" (/health response example)
 #   docs/POLICY_REFERENCE.md                   — self-label "as of **vX.Y.Z**"
 #   docs/DEPLOYMENT.md                         — Compose/Kubernetes example image tags
+#   docs/CLI.md                                — `agentguard version` example output
 #
 # Portability: uses perl -i -pe for in-place edit. perl is present on macOS
 # (BSD) and Linux out of the box, unlike -i with no suffix (GNU sed only).
@@ -81,6 +82,7 @@ REPLACEMENTS=(
   'docs/PROXY_ARCHITECTURE.md|s/("version":\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
   'docs/POLICY_REFERENCE.md|s/(format as of \*\*v)[0-9]+\.[0-9]+\.[0-9]+(\*\*)/${1}'"$NEW"'${2}/'
   'docs/DEPLOYMENT.md|s/(image: (?:registry\.example\.com\/)?agentguard:)[0-9]+\.[0-9]+\.[0-9]+/${1}'"$NEW"'/'
+  'docs/CLI.md|s/(^# agentguard )[0-9]+\.[0-9]+\.[0-9]+( \()/${1}'"$NEW"'${2}/'
 )
 
 for entry in "${REPLACEMENTS[@]}"; do
@@ -143,6 +145,7 @@ TRACKED=(
   docs/PROXY_ARCHITECTURE.md
   docs/POLICY_REFERENCE.md
   docs/DEPLOYMENT.md
+  docs/CLI.md
 )
 grep -Hn "$OLD" "${TRACKED[@]}" 2>/dev/null || echo "  (none)"
 
@@ -197,6 +200,7 @@ check_canonical 'docs/MCP_GATEWAY.md'                       "\"version\":\s*\"$O
 check_canonical 'docs/PROXY_ARCHITECTURE.md'                "\"version\":\s*\"$OLD\""
 check_canonical 'docs/POLICY_REFERENCE.md'                  "format as of \*\*v$OLD\*\*"
 check_canonical 'docs/DEPLOYMENT.md'                        "image: (registry\.example\.com/)?agentguard:$OLD"
+check_canonical 'docs/CLI.md'                               "^# agentguard $OLD \\("
 
 if [ "$LEFTOVER" -ne 0 ]; then
   echo "Error: at least one canonical declaration still references $OLD — fix the script" >&2

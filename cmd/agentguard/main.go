@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Caua-ferraz/AgentGuard/cmd/internal/buildinfo"
 	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
 	"github.com/Caua-ferraz/AgentGuard/pkg/migrate"
 	_ "github.com/Caua-ferraz/AgentGuard/pkg/migrate/v040_to_v041" // register the v0.4.0 → v0.4.1 audit schema migration
@@ -325,7 +326,7 @@ Flags:
 		runTenant(os.Args[2:])
 
 	case "version":
-		fmt.Printf("agentguard %s (%s)\n", version, commit)
+		fmt.Printf("agentguard %s (%s)\n", version, buildinfo.Describe(commit))
 
 	default:
 		printUsage()

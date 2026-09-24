@@ -37,6 +37,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/Caua-ferraz/AgentGuard/cmd/internal/buildinfo"
 	"github.com/Caua-ferraz/AgentGuard/pkg/mcpgw"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
@@ -55,7 +56,7 @@ func main() {
 	// it works without --upstream.
 	for _, a := range args {
 		if a == "--version" || a == "-version" {
-			fmt.Printf("agentguard-mcp-gateway %s (%s)\n", version, commit)
+			fmt.Printf("agentguard-mcp-gateway %s (%s)\n", version, buildinfo.Describe(commit))
 			return
 		}
 	}
