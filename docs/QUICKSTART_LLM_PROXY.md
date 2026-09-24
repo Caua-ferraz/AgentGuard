@@ -100,8 +100,11 @@ Watch the dashboard at <http://127.0.0.1:8080/dashboard>. You should
 see one `ALLOW` entry with:
 
 - transport chip: `llm_api_proxy` (purple)
-- scope: `shell`
-- command: `bash` (the LLM tool name, mapped via the bundled scope map)
+- scope: `shell` (the bundled scope map sends the `bash` tool to `shell`)
+- command: the shell command the model asked to run, e.g. `ls /tmp` — for
+  shell-mapped tools the proxy checks the tool's `command` argument, not
+  the tool name. The tool name (`bash`) is in the audit entry's
+  `request.meta.tool_name`.
 
 Now edit `configs/default.yaml` — add a deny rule:
 
