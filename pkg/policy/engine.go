@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -1724,8 +1725,29 @@ func normalizeRequest(req ActionRequest) ActionRequest {
 	// stays within the hot-path budget.
 	req.Domain = strings.ToLower(stripControl(req.Domain))
 	req.URL = stripControl(req.URL)
+	// A request that carries only a URL is matched by its host, as the
+	// policy reference documents; before, domain rules never matched it and
+	// every url-only network/browser check fell through to default deny.
+	if req.Domain == "" && req.URL != "" {
+		req.Domain = urlHost(req.URL)
+	}
 	req.Path = normalizePath(req.Path)
 	return req
+}
+
+// urlHost returns the lower-cased host of an absolute URL (scheme://…),
+// without port, brackets or userinfo, so https://api.github.com@evil.com/
+// yields evil.com. It returns "" for anything it can't parse, which leaves
+// the request to default deny.
+func urlHost(raw string) string {
+	if !strings.Contains(raw, "://") {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
 }
 
 // stripControl removes NUL and other C0 control characters (0x00-0x1F and 0x7F)
