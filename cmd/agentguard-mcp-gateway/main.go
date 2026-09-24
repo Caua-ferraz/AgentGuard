@@ -10,6 +10,7 @@
 //	    --upstream "fs:npx -y @modelcontextprotocol/server-filesystem /tmp" \
 //	    --upstream "github:docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server" \
 //	    --guard-url http://127.0.0.1:8080 \
+//	    --policy /etc/agentguard/policy.yaml \
 //	    --api-key $AGENTGUARD_API_KEY \
 //	    --tenant-id local \
 //	    --fail-mode deny \
