@@ -1177,6 +1177,15 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid offset: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	var desc bool
+	switch r.URL.Query().Get("order") {
+	case "", "asc":
+	case "desc":
+		desc = true
+	default:
+		http.Error(w, `invalid order: want "asc" or "desc"`, http.StatusBadRequest)
+		return
+	}
 
 	// Scope the query to the request's tenant. Legacy /v1/audit has no tenant
 	// in the path → TenantIDFromContext returns LocalTenantID, so it returns
@@ -1191,6 +1200,7 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 		Decision:  r.URL.Query().Get("decision"),
 		Scope:     r.URL.Query().Get("scope"),
 		Transport: r.URL.Query().Get("transport"),
+		Desc:      desc,
 		Limit:     limit,
 		Offset:    offset,
 	}
@@ -2455,15 +2465,15 @@ var dashboardHTML = `<!DOCTYPE html>
     }
 
     // Load historical entries on page open so the feed isn't blank.
-    // Fetches the last MAX_FEED_ENTRIES audit entries (newest-first after reversing).
+    // Fetches the newest MAX_FEED_ENTRIES audit entries.
     function loadHistory() {
-      agFetch('/v1/audit?limit=' + MAX_FEED_ENTRIES)
+      agFetch('/v1/audit?order=desc&limit=' + MAX_FEED_ENTRIES)
         .then(r => r.json())
         .then(entries => {
           if (!entries || entries.length === 0) return;
           feed.querySelector('.empty')?.remove();
-          // Audit entries come oldest-first; reverse so newest is at the top.
-          entries.slice().reverse().forEach(entry => {
+          // order=desc: newest first, which is the feed's top-to-bottom order.
+          entries.forEach(entry => {
             feed.appendChild(renderEntry(entry));
           });
         })

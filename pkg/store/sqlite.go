@@ -543,7 +543,11 @@ func (s *SQLiteStore) QueryAudit(ctx context.Context, tenantID string, filter au
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
 	}
-	q += " ORDER BY id ASC"
+	if filter.Desc {
+		q += " ORDER BY id DESC"
+	} else {
+		q += " ORDER BY id ASC"
+	}
 	if filter.Limit > 0 {
 		q += " LIMIT ?"
 		args = append(args, filter.Limit)

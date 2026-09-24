@@ -107,3 +107,43 @@ func (q *ApprovalQueue) watcherCount() int {
 	defer q.mu.RUnlock()
 	return len(q.watchers)
 }
+
+func TestAuditQuery_OrderParam(t *testing.T) {
+	srv := newTestServer(t)
+	ts := httptest.NewServer(srv.http.Handler)
+	defer ts.Close()
+	for _, cmd := range []string{"ls one", "ls two", "ls three"} {
+		r, err := http.Post(ts.URL+"/v1/check", "application/json", strings.NewReader(`{"scope":"shell","command":"`+cmd+`"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+	}
+	get := func(q string) (int, []string) {
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/v1/audit?"+q, nil)
+		req.Header.Set("Authorization", "Bearer test-secret")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var entries []struct {
+			Request policy.ActionRequest `json:"request"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&entries)
+		var cmds []string
+		for _, e := range entries {
+			cmds = append(cmds, e.Request.Command)
+		}
+		return resp.StatusCode, cmds
+	}
+	if code, cmds := get("order=desc&limit=2"); code != 200 || strings.Join(cmds, ",") != "ls three,ls two" {
+		t.Errorf("order=desc: %d %v", code, cmds)
+	}
+	if code, cmds := get("limit=2"); code != 200 || strings.Join(cmds, ",") != "ls one,ls two" {
+		t.Errorf("default order: %d %v", code, cmds)
+	}
+	if code, _ := get("order=newest"); code != http.StatusBadRequest {
+		t.Errorf("order=newest: %d, want 400", code)
+	}
+}

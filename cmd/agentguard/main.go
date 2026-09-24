@@ -204,6 +204,7 @@ Environment:
 	auditScope := auditCmd.String("scope", "", "Filter by scope")
 	auditTransport := auditCmd.String("transport", "", "Filter by integration path (sdk|mcp_gateway|llm_api_proxy)")
 	auditLimit := auditCmd.Int("limit", 50, "Max entries to return")
+	auditOrder := auditCmd.String("order", "desc", "Entry order: desc (newest first) or asc (oldest first)")
 	auditKey := auditCmd.String("api-key", "", "Bearer token (overrides AGENTGUARD_API_KEY)")
 	auditCmd.Usage = func() {
 		fmt.Fprintf(os.Stderr, `Usage: agentguard audit [flags]
@@ -311,7 +312,7 @@ Flags:
 
 	case "audit":
 		_ = auditCmd.Parse(os.Args[2:])
-		runAuditQuery(*auditQueryURL, *auditAgent, *auditDecision, *auditScope, *auditTransport, *auditLimit, resolveAPIKey(*auditKey))
+		runAuditQuery(*auditQueryURL, *auditAgent, *auditDecision, *auditScope, *auditTransport, *auditOrder, *auditLimit, resolveAPIKey(*auditKey))
 
 	case "migrate":
 		_ = migrateCmd.Parse(os.Args[2:])
@@ -955,9 +956,12 @@ func statusReport(stdout, stderr io.Writer, baseURL, apiKey string) int {
 	return 0
 }
 
-func runAuditQuery(baseURL, agent, decision, scope, transport string, limit int, apiKey string) {
+func runAuditQuery(baseURL, agent, decision, scope, transport, order string, limit int, apiKey string) {
 	params := url.Values{}
 	params.Set("limit", fmt.Sprintf("%d", limit))
+	if order != "" {
+		params.Set("order", order)
+	}
 	if agent != "" {
 		params.Set("agent_id", agent)
 	}

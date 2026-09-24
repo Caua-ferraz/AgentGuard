@@ -246,7 +246,8 @@ Query the audit log.
 | `decision` | string | — | `ALLOW`, `DENY`, `REQUIRE_APPROVAL`. |
 | `scope` | string | — | Exact match on `request.scope`. |
 | `limit` | int | `auditDefaultLimit` (default 100) | Silently clamped at `auditMaxLimit` (default 1000). `<1` or non-integer → `400`. |
-| `offset` | int | `0` | Skip N matching entries. Must be ≥ 0. |
+| `offset` | int | `0` | Skip N matching entries. Must be ≥ 0. With `order=desc` it counts from the newest entry. |
+| `order` | string | `asc` | **(v1.2)** `asc` returns the oldest matches first (the original behaviour); `desc` returns the newest first. Anything else → `400`. |
 | `transport` | string | — | Filter on the `Entry.Transport` audit field. Recognised values: `sdk`, `mcp_gateway`, `llm_api_proxy`. Pre-v0.5 entries have no transport tag and are excluded when this filter is set. |
 
 ### Response
@@ -266,14 +267,17 @@ Array of entries (JSON Lines rows as JSON objects):
 
 ### Pagination
 
-Use `limit` + `offset` for stable pagination:
+Use `limit` + `offset` for pagination. The default order is oldest first; add `order=desc` for the most recent entries:
 
 ```bash
-curl -s -H "Authorization: Bearer $K" \
-  "http://localhost:8080/v1/audit?limit=100&offset=200"
+# the 100 most recent decisions
+curl -s -H "Authorization: Bearer $K" "http://localhost:8080/v1/audit?order=desc&limit=100"
+
+# stable export pages, oldest first
+curl -s -H "Authorization: Bearer $K" "http://localhost:8080/v1/audit?limit=100&offset=200"
 ```
 
-For large exports, prefer `curl` over the CLI subcommand — the CLI doesn't expose `offset`.
+For large exports, prefer `curl` over the CLI subcommand — the CLI doesn't expose `offset`. With `order=desc`, pages shift as new entries arrive; use the default order for exports.
 
 ---
 

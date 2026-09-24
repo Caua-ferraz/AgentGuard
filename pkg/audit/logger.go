@@ -132,6 +132,10 @@ type QueryFilter struct {
 	// Entry.EffectiveTransport so older entries (no Transport on
 	// disk) match the "sdk" value. Empty disables the filter.
 	Transport string `json:"transport,omitempty"`
+	// Desc returns the newest matches first (v1.2). Offset then counts from
+	// the newest entry. The default (false) keeps the original oldest-first
+	// order.
+	Desc bool `json:"desc,omitempty"`
 }
 
 // DefaultFilePermissions is the Unix file mode for newly created audit log files.
@@ -287,6 +291,14 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 	// Prometheus counter still counts every occurrence.
 	corruptLogged := false
 
+	// Newest-first: the file is append-only, so scan forward keeping only the
+	// newest skip+Limit matches (a window that is compacted as it slides),
+	// then reverse. Without a limit every match is kept.
+	keep := -1
+	if filter.Desc && filter.Limit > 0 {
+		keep = skip + filter.Limit
+	}
+
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -315,6 +327,13 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 		if !matchesFilter(entry, filter) {
 			continue
 		}
+		if filter.Desc {
+			results = append(results, entry)
+			if keep > 0 && len(results) >= 2*keep {
+				results = append(results[:0], results[len(results)-keep:]...)
+			}
+			continue
+		}
 		if skip > 0 {
 			skip--
 			continue
@@ -324,6 +343,9 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 		if filter.Limit > 0 && len(results) >= filter.Limit {
 			break
 		}
+	}
+	if filter.Desc {
+		results = newestFirst(results, skip, filter.Limit)
 	}
 
 	// Surface scanner errors. A silent EOF from bufio.Scanner.Scan can be
@@ -419,4 +441,20 @@ func readMetaFrom(r io.Reader, path string) (*MetaRecord, error) {
 			path, env.Meta.SchemaVersion, CurrentSchemaVersion)
 	}
 	return &env.Meta, nil
+}
+
+// newestFirst reverses oldest-first matches and applies offset and limit
+// counted from the newest entry.
+func newestFirst(matches []Entry, offset, limit int) []Entry {
+	for i, j := 0, len(matches)-1; i < j; i, j = i+1, j-1 {
+		matches[i], matches[j] = matches[j], matches[i]
+	}
+	if offset >= len(matches) {
+		return nil
+	}
+	matches = matches[offset:]
+	if limit > 0 && len(matches) > limit {
+		matches = matches[:limit]
+	}
+	return matches
 }

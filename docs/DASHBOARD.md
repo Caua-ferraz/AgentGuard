@@ -55,7 +55,7 @@ The dashboard is a single HTML page (`dashboardHTML` in `pkg/proxy/server.go`) t
 
 1. Fetches `/api/stats` once on page load.
 2. Fetches `/api/pending` once on page load.
-3. Fetches `/v1/audit?limit=200` once on page load (server clamps to `auditMaxLimit`, default 1000, so 200 passes through unclamped).
+3. Fetches `/v1/audit?order=desc&limit=200` once on page load — the 200 most recent entries (server clamps to `auditMaxLimit`, default 1000, so 200 passes through unclamped). Before v1.2 it fetched the oldest 200.
 4. Subscribes to `/api/stream` for live deltas.
 
 Sections you'll see:
@@ -64,7 +64,7 @@ Sections you'll see:
 |---|---|---|
 | **Stats bar** | `/api/stats` + SSE | `checks / allowed / denied / approvals / pending`. Updates live on each `check` event. |
 | **Pending Approvals** | `/api/pending` + SSE | Each entry shows scope, command/path/domain, agent, timestamp. Approve / Deny buttons. |
-| **Audit** | `/v1/audit?limit=200` | Most recent decisions. No auto-refresh — reload the page for a newer slice. |
+| **Audit** | `/v1/audit?order=desc&limit=200` | Most recent decisions. No auto-refresh — reload the page for a newer slice. |
 | **LIVE badge** | EventSource state | Green when `EventSource.readyState === OPEN`. |
 
 ---
