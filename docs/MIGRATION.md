@@ -385,7 +385,7 @@ Coming from 1.0.x? Read the Compatibility section of
    `@agentguard/sdk`, so the import path changes:
 
    ```bash
-   npm uninstall @agentguard/sdk   # your local build, or the unrelated npm package of that name
+   npm uninstall @agentguard/sdk   # the old package name
    npm install @lictorate/agentguard@1.1.1
    ```
 
