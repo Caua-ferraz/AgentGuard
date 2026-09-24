@@ -53,7 +53,10 @@ class TestCheckResult:
 # ---------------------------------------------------------------------------
 
 class TestGuardInit:
-    def test_default_url(self):
+    def test_default_url(self, monkeypatch):
+        # Guard() falls back to AGENTGUARD_URL, which CI jobs and developer
+        # shells may set; the default only applies without it.
+        monkeypatch.delenv("AGENTGUARD_URL", raising=False)
         g = Guard()
         assert g.base_url == DEFAULT_BASE_URL
 
