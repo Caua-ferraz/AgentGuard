@@ -96,20 +96,35 @@ just close the window).
 
 ## Verify (the satisfying part)
 
+First create a file to read — in a terminal, not through Claude:
+
+```bash
+echo "hello from AgentGuard" > /tmp/hello.txt
+```
+
 Open a new chat and ask:
 
 > "Read the file `/tmp/hello.txt` and tell me what's in it."
 
-(If the file doesn't exist, ask Claude to *create* it first — the default
-policy ALLOWs filesystem writes under `/tmp`.) Watch the dashboard — an
-`ALLOW` event appears in the live feed within a second.
+Claude calls `fs:read_text_file`. The `mcp_tool` rule `*:read_*` allows
+it and the filesystem rule for reads under `/tmp/**` allows the path, so
+the call goes through. Watch the dashboard — an `ALLOW` event appears in
+the live feed within a second.
 
-Now try:
+Now ask Claude to write a file:
+
+> "Create `/tmp/new.txt` containing `hi`."
+
+The dashboard logs a `DENY` from the rule `deny:mcp_tool:*:write_file`
+("Writes via MCP are blocked by default policy"). Claude reports that the
+tool returned an error with that reason embedded.
+
+Finally:
 
 > "Read `/etc/passwd`."
 
-The dashboard logs a `DENY`. Claude reports the tool returned an error
-with the policy reason embedded.
+Also a `DENY`: `/etc` isn't on the filesystem read allow-list, so the
+request falls through to default deny.
 
 That's the loop. Every tool call → policy check → audit log → live
 dashboard. No agent code change required.
