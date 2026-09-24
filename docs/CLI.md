@@ -24,8 +24,8 @@ Run 'agentguard <command> -h' for per-command flag help.
 
 Global conventions:
 - All subcommands use Go's stdlib `flag` package. Flags must precede positional args (`agentguard approve --api-key $K <id>`, **not** `agentguard approve <id> --api-key $K`).
-- `--api-key` on client subcommands (`approve`, `deny`, `status`, `audit`) falls back to the `AGENTGUARD_API_KEY` env var.
-- Exit code `0` = success; `1` = any failure.
+- `--api-key` on `serve` and on the client subcommands (`approve`, `deny`, `status`, `audit`) falls back to the `AGENTGUARD_API_KEY` env var.
+- Exit code `0` = success, `1` = failure, `2` = invalid flags (Go's `flag` package; `-h` exits `0`). `check` has its own codes — see below.
 
 ---
 
@@ -247,7 +247,7 @@ fi
 
 ### Behavior notes
 
-- The subcommand is **one-shot** — no policy hot-reload. Each invocation reloads the policy. Long-running pipelines that re-invoke `check` per action pay the load cost each time. (`--watch <jsonl-file>` for streaming evaluation is tracked as a v0.6 follow-up.)
+- Without `--watch`, the subcommand is **one-shot** — no policy hot-reload. Each invocation reloads the policy, so pipelines that re-invoke `check` per action pay the load cost each time; `--watch <jsonl-file>` streams requests through a single policy load instead.
 - The decoder rejects unknown JSON fields. A typo like `"actions":"read"` (instead of `"action":"read"`) returns exit `3`, so silent default-deny on a malformed request is impossible.
 - Cost-scope evaluations DO reserve session cost into the in-memory accumulator for the lifetime of the process, but the accumulator is discarded on exit. Two consecutive `agentguard check` calls do not see each other's reservations — that's a server feature, not a CLI feature.
 
@@ -291,7 +291,7 @@ agentguard status
 #   [ap_456…] scope=cost  action=""                   agent=trading-bot
 ```
 
-If the server is running without `--api-key`, pending approvals appear unauthenticated. If you set `--api-key` on the server but not here, the pending list shows "unauthorized".
+If the server is running without `--api-key`, pending approvals appear unauthenticated. If you set `--api-key` on the server but not here, the pending list shows "unauthorized". `/api/pending` exists only when the server runs with `--dashboard`; without it the line reads `Pending approvals: unavailable (the server was started without --dashboard)`. The exit code is `1` only when the server can't be reached.
 
 ---
 
@@ -413,7 +413,7 @@ Notice: agentguard v1.0.0 is deprecated, version v1.1.0 available — https://gi
 
 | Var | Consumed by | Default |
 |---|---|---|
-| `AGENTGUARD_API_KEY` | `approve`, `deny`, `status`, `audit` (when `--api-key` unset) | empty |
+| `AGENTGUARD_API_KEY` | `serve`, `approve`, `deny`, `status`, `audit` (when `--api-key` unset) | empty |
 | `AGENTGUARD_URL` | SDKs (not the CLI) | `http://localhost:8080` |
 | `AGENTGUARD_NO_UPDATE_CHECK` | Every subcommand except `serve` (which never checks) — disables the GitHub Releases startup check when set to any value other than `0` | unset |
 
