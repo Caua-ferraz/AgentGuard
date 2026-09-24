@@ -36,7 +36,7 @@ LLM-proxy space.
                 │  ├─ /v1/messages          (Anthropic)│
                 │  ├─ /v1/embeddings        (passthru) │
                 │  ├─ /v1/models            (passthru) │
-                │  └─ /metrics, /health                │
+                │  └─ /healthz                         │
                 │                                      │
                 │  per-request:                        │
                 │  • parse body for tools[]            │
@@ -83,7 +83,7 @@ agentguard-llm-proxy \
 | `--upstream-anthropic`   | base URL for Anthropic-shape requests                     | `https://api.anthropic.com`  |
 | `--guard-url`            | central server `/v1/check` URL                            | `http://127.0.0.1:8080`      |
 | `--api-key`              | bearer for `/v1/check` **and** `POST /v1/audit` (from `AGENTGUARD_API_KEY`). Required for full forced-refusal audit fidelity when the central server is keyed (§ 5.4 Audit fidelity); without it those audits fall back to the lower-fidelity `/v1/check` path. | unset (warn) |
-| `--proxy-api-key`        | optional bearer the proxy itself enforces on inbound. Empty = no proxy auth (localhost-only safe). | unset |
+| `--proxy-api-key`        | optional key the proxy itself enforces on inbound API requests; callers send it in the `X-AgentGuard-Proxy-Auth` header (`<key>` or `Bearer <key>`). Empty = no proxy auth; required for a non-loopback `--listen` (§ 8.1). | unset |
 | `--tenant-id`            | tenant header value                                       | `local`                      |
 | `--fail-mode`            | `deny` / `allow` / `fail-closed-with-audit`               | `deny`                       |
 | `--fail-audit-log`       | local JSONL fallback audit for `fail-closed-with-audit` denials (empty disables) | `agentguard-fail-audit.jsonl` |
@@ -93,9 +93,10 @@ agentguard-llm-proxy \
 | `--log-level`            | stderr verbosity                                          | `info`                       |
 | `--version`              | print version and exit (checked before any other flag is parsed) | —                     |
 
-If `--api-key` is unset and `--listen` is non-loopback (`0.0.0.0:` or
-external IP), the proxy logs WARN and refuses to start in production
-(matches the central server's localhost-only fallback policy).
+If `--listen` is non-loopback (`0.0.0.0`, `[::]`, an external address,
+or an empty host such as `:8081`) and `--proxy-api-key` is unset, the
+proxy refuses to start — see § 8.1. `--api-key` is unrelated to this: it
+is the proxy's credential for the central server's `/v1/check`.
 
 ---
 
@@ -105,7 +106,9 @@ external IP), the proxy logs WARN and refuses to start in production
 
 The proxy is **dumb on auth**: it forwards `Authorization`,
 `x-api-key` (Anthropic), `OpenAI-Organization`, `OpenAI-Project`, and
-all other request headers to the upstream **verbatim**. The proxy
+all other request headers to the upstream **verbatim** — except
+hop-by-hop headers and the proxy's own `X-AgentGuard-Proxy-Auth` (§ 8.1),
+which are dropped. The proxy
 never reads the user's bearer token; the upstream is responsible for
 auth. The `Authorization` header for the **central guard server** is a
 separate concern (see § 3.2) — the proxy adds it on the
@@ -728,16 +731,17 @@ By default, the proxy enforces **no auth** of its own and binds to
 loopback (`127.0.0.1`). Treat this like the central guard server's
 no-API-key fallback: localhost is the implicit trust boundary.
 
-If `--proxy-api-key` is set, the proxy enforces `Authorization: Bearer
-<key>` on every inbound request. The shape mirrors the central
-server's auth (constant-time compare, 401 on mismatch). The
-**user-supplied** `Authorization` header (the OpenAI / Anthropic API
-key) is forwarded as a **second bearer** in the upstream request — the
-inbound and upstream credentials are independent.
+If `--proxy-api-key` is set, every API request (everything except
+`GET /healthz`) must carry the key in the **`X-AgentGuard-Proxy-Auth`**
+header — as `<key>` or `Bearer <key>`. The key is compared in constant
+time; a missing or wrong key gets `401` with
+`{"error":{"message":"unauthorized: X-AgentGuard-Proxy-Auth missing or invalid","type":"agentguard_error"}}`.
 
-This is consistent with how LiteLLM and similar proxies handle it: the
-proxy can be an internal trust boundary that re-keys the call to the
-real upstream.
+It is a separate header so it never collides with the caller's own
+provider credential: `Authorization` / `x-api-key` (the OpenAI /
+Anthropic key) pass through to the upstream unchanged, while
+`X-AgentGuard-Proxy-Auth` is stripped before forwarding. The proxy does
+not re-key calls — the upstream sees the caller's credential.
 
 If `--listen` is non-loopback **and** `--proxy-api-key` is unset, the
 proxy refuses to start (it prints the reason to stderr and exits with
