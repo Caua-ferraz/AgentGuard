@@ -120,20 +120,20 @@ Body is limited to `MaxRequestBodyBytes` (default 1 MB; configurable via `proxy.
 
 ```json
 {
+  "schema_version": "v1",
   "decision": "ALLOW",
   "reason": "Allowed by shell rule",
-  "matched_rule": "allow:shell:<pattern>",
-  "approval_id": "",
-  "approval_url": ""
+  "matched_rule": "allow:shell:ls *"
 }
 ```
 
 | Field | Present when |
 |---|---|
+| `schema_version` | always — `"v1"`. |
 | `decision` | always — `ALLOW`, `DENY`, or `REQUIRE_APPROVAL`. |
 | `reason` | always. |
-| `matched_rule` | always except default-deny fall-through. |
-| `approval_id` / `approval_url` | only when `decision == REQUIRE_APPROVAL`. |
+| `matched_rule` | always except the default-deny fall-through, where it is omitted. |
+| `approval_id` / `approval_url` | only when `decision == REQUIRE_APPROVAL`; omitted otherwise. |
 
 ### Response headers
 
@@ -149,8 +149,10 @@ Body is limited to `MaxRequestBodyBytes` (default 1 MB; configurable via `proxy.
 |---|---|
 | `200` | Policy evaluated (ALLOW / DENY / REQUIRE_APPROVAL — inspect body). |
 | `400` | Malformed JSON or unsupported `schema_version`. |
+| `405` | Method other than `POST`. |
 | `413` | Body exceeds `MaxRequestBodyBytes`. |
 | `500` | `crypto/rand` failure while generating an approval ID. Never silently returns a deterministic ID. |
+| `503` | A `REQUIRE_APPROVAL` decision arrived while every approval-queue slot holds an unresolved approval: `approval queue full; retry later`, with `Retry-After: 30`. |
 
 Rate-limit denials return `200` with `decision: "DENY"` and `matched_rule: "deny:ratelimit:<scope>"` — clients should treat that as a logical deny, not a transport error.
 
@@ -355,8 +357,9 @@ Sets cookies:
 | Code | Meaning |
 |---|---|
 | `200` | Session created. |
+| `400` | Body isn't valid JSON (or exceeds 4 KiB): `invalid request`. |
 | `401` | Invalid API key. |
-| `503` | `MaxSessions=1024` reached; `Retry-After: 5`. |
+| `503` | `MaxSessions=1024` reached (`Retry-After: 5`), or the server runs without `--api-key`, where login is disabled: `login disabled: server has no API key configured`. |
 
 Constant-time compare is used on the submitted key (`subtle.ConstantTimeCompare`).
 
@@ -371,7 +374,7 @@ POST /auth/logout HTTP/1.1
 Cookie: ag_session=…
 ```
 
-Returns `200` with no body. Safe to call with no session (no-op).
+Returns `204 No Content`. Safe to call with no session (no-op).
 
 ---
 
