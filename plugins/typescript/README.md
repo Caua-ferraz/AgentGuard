@@ -18,7 +18,7 @@ pnpm add @lictorate/agentguard
 yarn add @lictorate/agentguard
 ```
 
-Published to npm from 1.1.1. The `@agentguard/sdk` package on npm is an unrelated project, not this SDK.
+Published to npm from 1.1.1.
 
 ## Quick start
 

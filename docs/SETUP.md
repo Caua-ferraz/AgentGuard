@@ -191,8 +191,6 @@ npm run build
 cd /path/to/your-project && npm install /path/to/AgentGuard/plugins/typescript
 ```
 
-`@agentguard/sdk` on npm is an unrelated project, not this SDK.
-
 ### Usage
 
 ```typescript
