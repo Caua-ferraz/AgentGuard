@@ -45,6 +45,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/Caua-ferraz/AgentGuard/cmd/internal/buildinfo"
 	"github.com/Caua-ferraz/AgentGuard/pkg/llmproxy"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
@@ -52,7 +53,7 @@ import (
 // Versions injected at link time via -ldflags. Defaults are used
 // for `go run ./cmd/agentguard-llm-proxy` and `go test`.
 var (
-	version = "1.1.0"
+	version = "1.1.1"
 	commit  = "dev"
 )
 
@@ -63,7 +64,7 @@ func main() {
 	// so it works without any other config (mirrors mcp-gateway).
 	for _, a := range args {
 		if a == "--version" || a == "-version" {
-			fmt.Printf("agentguard-llm-proxy %s (%s)\n", version, commit)
+			fmt.Printf("agentguard-llm-proxy %s (%s)\n", version, buildinfo.Describe(commit))
 			return
 		}
 	}

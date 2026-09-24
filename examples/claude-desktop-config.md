@@ -23,9 +23,9 @@ opens it in your default editor.
 ## What this config does
 
 ```
-Claude Desktop ──stdio──► agentguard-mcp-gateway ──stdio──► server-filesystem
-                                  │                       ──stdio──► server-fetch
-                                  │                       ──stdio──► server-github
+Claude Desktop ──stdio──► agentguard-mcp-gateway ──stdio──► server-filesystem (npx)
+                                  │                       ──stdio──► mcp-server-fetch (uvx)
+                                  │                       ──stdio──► github-mcp-server (docker)
                                   │
                                   └─HTTP──► http://127.0.0.1:8080/v1/check
                                             (the central AgentGuard server,
@@ -35,12 +35,30 @@ Claude Desktop ──stdio──► agentguard-mcp-gateway ──stdio──► 
 ```
 
 The gateway namespaces tools per upstream — Claude sees `fs:read_text_file`,
-`fetch:fetch`, `github:create_issue`, etc. The same names appear in the
+`fetch:fetch`, `github:list_issues`, etc. The same names appear in the
 audit log so every decision is unambiguous.
 
 ## Setup (5 steps)
 
-1. **Install the binaries** (Go 1.22+):
+The example config starts three downstream MCP servers, each with its own
+launcher:
+
+| Upstream | Launcher | Install |
+|---|---|---|
+| `fs` — filesystem server | `npx` | [Node.js](https://nodejs.org/) 20+ |
+| `fetch` — fetch server | `uvx` | [uv](https://docs.astral.sh/uv/getting-started/installation/) |
+| `github` — [GitHub's MCP server](https://github.com/github/github-mcp-server) | `docker` | [Docker](https://docs.docker.com/get-started/get-docker/) |
+
+Install the launchers for the upstreams you keep and delete the
+`--upstream` entries you don't need. A missing launcher disables only
+that namespace: the gateway logs
+`info mcpgw: startup: upstream "fetch" failed to spawn: …` and serves the
+others. The GitHub server reads `GITHUB_PERSONAL_ACCESS_TOKEN` from the
+config's `env` block; the gateway passes its environment to every
+upstream, and `docker run -e GITHUB_PERSONAL_ACCESS_TOKEN` forwards it
+into the container.
+
+1. **Install the binaries** (Go 1.25+):
 
    ```bash
    go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@latest
@@ -101,8 +119,12 @@ In a Claude Desktop chat:
   `/tmp`, the call succeeds, and the dashboard shows an `ALLOW` event.
 - "Read `/etc/passwd`" → policy denies, Claude reports the tool returned an
   error, the dashboard shows a `DENY` event.
-- "Fetch `https://api.openai.com/v1/models`" → if you've enabled the
-  `fetch` upstream and a `network` rule, the gateway gates it.
+- "Fetch `https://api.github.com/zen`" → the default policy requires
+  approval for `fetch:*`: the tool returns an approval request (ID + URL)
+  and the dashboard lists it as pending. The call runs only when the
+  client retries with that approval ID (see the [approval flow](../docs/MCP_GATEWAY.md#6-approval-flow)),
+  and only for hosts on the policy's `network` allow-list —
+  `api.github.com` is; most others are denied even after approval.
 
 If actions appear in Claude but never show on the dashboard, see the
 **Common gotchas** section in [`docs/MCP_GATEWAY.md`](../docs/MCP_GATEWAY.md#11-client-integration).
@@ -123,14 +145,17 @@ file, so prefer the `env` block.
 
 ## Tenant ID
 
-v0.5 is single-tenant. Use `--tenant-id local` (the only value the
-central server recognizes). Multi-tenant routing lands in v0.6 — until
-then, `--tenant-id <anything-other-than-local>` returns 404 from
-`/v1/check`, the gateway hits its `--fail-mode` path, and every action
-denies (or is blanket-allowed, depending on your `--fail-mode`).
+`--tenant-id` picks the tenant whose policy evaluates the gateway's
+calls (they go to `/v1/t/<tenant>/check`). Keep `local` — the policy
+the server loads with `--policy` — unless you've registered another
+tenant on the central server with
+`agentguard tenant put <id> --policy <file.yaml>`. A tenant the server
+doesn't know answers `404`, which the gateway
+treats like an unreachable server: `--fail-mode` decides, so with `deny`
+every call is refused.
 
 ## Trimming the example
 
 The bundled config wires `fs`, `fetch`, and `github` upstreams. Remove any
-you don't need (each upstream costs an `npx` subprocess on startup) and
+you don't need (each one is a subprocess the gateway starts with it) and
 add others from <https://github.com/modelcontextprotocol/servers>.

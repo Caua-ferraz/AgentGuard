@@ -51,6 +51,7 @@ Auth posture is **identical** across both URL families — the middleware is URL
 | `POST /v1/deny/{id}` | `POST /v1/t/{tenant}/deny/{id}` | Bearer or session | yes |
 | `GET  /v1/status/{id}` | `GET  /v1/t/{tenant}/status/{id}` | Bearer or session | no |
 | `GET  /v1/audit` | `GET  /v1/t/{tenant}/audit` | Bearer or session | no |
+| `POST /v1/audit` | `POST /v1/t/{tenant}/audit` | Bearer or session | yes |
 | `GET  /api/pending` | `GET  /v1/t/{tenant}/api/pending` | Bearer or session | no |
 | `GET  /api/stream` | `GET  /v1/t/{tenant}/api/stream` | Bearer or session | no |
 | `GET  /api/stats` | `GET  /v1/t/{tenant}/api/stats` | Bearer or session | no |
@@ -119,20 +120,20 @@ Body is limited to `MaxRequestBodyBytes` (default 1 MB; configurable via `proxy.
 
 ```json
 {
+  "schema_version": "v1",
   "decision": "ALLOW",
   "reason": "Allowed by shell rule",
-  "matched_rule": "allow:shell:<pattern>",
-  "approval_id": "",
-  "approval_url": ""
+  "matched_rule": "allow:shell:ls *"
 }
 ```
 
 | Field | Present when |
 |---|---|
+| `schema_version` | always — `"v1"`. |
 | `decision` | always — `ALLOW`, `DENY`, or `REQUIRE_APPROVAL`. |
 | `reason` | always. |
-| `matched_rule` | always except default-deny fall-through. |
-| `approval_id` / `approval_url` | only when `decision == REQUIRE_APPROVAL`. |
+| `matched_rule` | always except the default-deny fall-through, where it is omitted. |
+| `approval_id` / `approval_url` | only when `decision == REQUIRE_APPROVAL`; omitted otherwise. |
 
 ### Response headers
 
@@ -148,8 +149,10 @@ Body is limited to `MaxRequestBodyBytes` (default 1 MB; configurable via `proxy.
 |---|---|
 | `200` | Policy evaluated (ALLOW / DENY / REQUIRE_APPROVAL — inspect body). |
 | `400` | Malformed JSON or unsupported `schema_version`. |
+| `405` | Method other than `POST`. |
 | `413` | Body exceeds `MaxRequestBodyBytes`. |
 | `500` | `crypto/rand` failure while generating an approval ID. Never silently returns a deterministic ID. |
+| `503` | A `REQUIRE_APPROVAL` decision arrived while every approval-queue slot holds an unresolved approval: `approval queue full; retry later`, with `Retry-After: 30`. |
 
 Rate-limit denials return `200` with `decision: "DENY"` and `matched_rule: "deny:ratelimit:<scope>"` — clients should treat that as a logical deny, not a transport error.
 
@@ -274,6 +277,55 @@ For large exports, prefer `curl` over the CLI subcommand — the CLI doesn't exp
 
 ---
 
+## `POST /v1/audit` · `POST /v1/t/{tenant}/audit`
+
+Records a DENY that was decided **outside** the policy engine, without running the engine. `agentguard-llm-proxy` uses it when it refuses a tool call on its own — for example `deny:llm_api_proxy:malformed_tool_call` — so the central audit log records the verdict the client actually received.
+
+### Request
+
+```http
+POST /v1/audit HTTP/1.1
+Authorization: Bearer $KEY
+Content-Type: application/json
+
+{
+  "schema_version": "v1",
+  "rule": "deny:llm_api_proxy:malformed_tool_call",
+  "reason": "malformed tool call arguments — refused",
+  "request": {"scope": "shell", "command": "bash", "agent_id": "llm-proxy", "meta": {"transport": "llm_api_proxy"}}
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `rule` | string | yes | Recorded as `matched_rule`. Empty or blank → `400 rule is required`. |
+| `reason` | string | no | Recorded as `reason`. |
+| `request` | object | no | The action the refusal was for, in the `/v1/check` request shape. `meta.transport` sets the entry's `transport` tag (default `sdk`). |
+| `schema_version` | string | no | Defaults to `"v1"`; any other value → `400`. |
+
+The decision is always **DENY**: the endpoint never takes a decision from the caller (a `"decision"` field in the body is ignored), so it cannot write an ALLOW into the trail.
+
+### Response
+
+Same shape as `/v1/check`. The entry goes through the same audit-write path, so it also appears on `/api/stream` as a `check` event and counts toward the decision metrics.
+
+```json
+{"schema_version":"v1","decision":"DENY","reason":"malformed tool call arguments — refused","matched_rule":"deny:llm_api_proxy:malformed_tool_call"}
+```
+
+### Status codes
+
+| Code | Meaning |
+|---|---|
+| `200` | Recorded. |
+| `400` | Malformed JSON, unsupported `schema_version` (JSON error body), or missing `rule`. |
+| `401` | Missing/invalid Bearer token or session. |
+| `403` | Session valid but `X-CSRF-Token` missing or mismatched. |
+| `404` | Tenant-aware route with an unregistered tenant: `{"error":"tenant not found"}`. |
+| `413` | Body exceeds `MaxRequestBodyBytes`. |
+
+---
+
 ## `POST /auth/login`
 
 Exchange an API key for a browser session.
@@ -305,8 +357,9 @@ Sets cookies:
 | Code | Meaning |
 |---|---|
 | `200` | Session created. |
+| `400` | Body isn't valid JSON (or exceeds 4 KiB): `invalid request`. |
 | `401` | Invalid API key. |
-| `503` | `MaxSessions=1024` reached; `Retry-After: 5`. |
+| `503` | `MaxSessions=1024` reached (`Retry-After: 5`), or the server runs without `--api-key`, where login is disabled: `login disabled: server has no API key configured`. |
 
 Constant-time compare is used on the submitted key (`subtle.ConstantTimeCompare`).
 
@@ -321,14 +374,14 @@ POST /auth/logout HTTP/1.1
 Cookie: ag_session=…
 ```
 
-Returns `200` with no body. Safe to call with no session (no-op).
+Returns `204 No Content`. Safe to call with no session (no-op).
 
 ---
 
 ## `GET /health`
 
 ```json
-{ "status": "ok", "version": "1.1.0" }
+{ "status": "ok", "version": "1.1.1" }
 ```
 
 Always `200` once the HTTP server is accepting connections. Use for liveness probes (see [`DEPLOYMENT.md`](DEPLOYMENT.md)). The legacy `/health` body shape is unchanged in v0.5 — for the richer operator probe see `/v1/health` below.
@@ -344,7 +397,7 @@ Operator-grade health endpoint introduced in v0.5. Richer than `/health`: includ
 ```json
 {
   "status": "ok",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "tenant": "local",
   "last_request_at": "2026-05-05T19:04:54.646Z",
   "last_policy_load_at": "2026-05-05T19:04:53.549Z",
@@ -448,10 +501,10 @@ data: {"type":"check","timestamp":"2026-04-19T12:03:44Z","request":{…},"result
 
 | `type` | Fires on |
 |---|---|
-| `check` | Every `/v1/check` response (any decision). |
-| `approval_required` | REQUIRE_APPROVAL decision stored in queue. |
-| `denied` | DENY decision (also emits `check`). |
-| `resolved` | `/v1/approve/{id}` or `/v1/deny/{id}` resolved an entry. |
+| `check` | Every response from `/v1/check` (any decision, including rate-limit denies) and every `POST /v1/audit` record. `REQUIRE_APPROVAL` and `DENY` decisions arrive as `check` events — read `result.decision`. |
+| `resolved` | The first `approve` / `deny` of a pending approval. `result.decision` is `ALLOW` or `DENY`, `result.reason` is `manually allow` / `manually deny`. Repeating the same resolution does not send it again. |
+
+Events are unnamed SSE messages (no `event:` field), so an `EventSource` receives them through `onmessage`. Each carries `transport` (`sdk`, `mcp_gateway`, `llm_api_proxy`) and, for tenants other than `local`, `tenant`, alongside `request` and `result`. `approval_required` and `denied` are **notifier** event types (webhook / Slack / console), not stream events — see [`APPROVAL_WORKFLOW.md`](APPROVAL_WORKFLOW.md#2-notification-fan-out).
 
 Subscriber channel buffer is `64` (`SSEChannelBufferSize`). Slow consumers drop events — counted in `agentguard_sse_events_dropped_total{reason="slow_consumer"}`.
 
@@ -495,7 +548,7 @@ Most error responses are `text/plain` from `http.Error` (e.g. `"Method not allow
 - Tenant-routing 500 (provider infrastructure failure): `{"error":"policy provider error"}`
 - Health 404 (`/v1/t/<unknown>/health`): `{"error":"tenant not found"}`
 - Recovered panic 500: `{"error":"internal server error"}`
-- `/v1/check` schema mismatch 400: `{"error":"unsupported schema_version; expected v1","received":"v2"}`
+- `/v1/check` and `POST /v1/audit` schema mismatch 400: `{"error":"unsupported schema_version; expected v1","received":"v2"}`
 
 Other error responses (auth 401/403, `/v1/check` 400 for bad JSON, audit 400 for bad `?limit`) are plain-text and may differ between releases — programmatic clients should rely on the HTTP status code rather than message-text matching.
 
@@ -542,7 +595,7 @@ g = Guard("http://localhost:8080", agent_id="my-agent", tenant_id="")  # → /v1
 **TypeScript:**
 
 ```typescript
-import { AgentGuard } from "@agentguard/sdk";
+import { AgentGuard } from "@lictorate/agentguard";
 
 // Default — legacy /v1/... URLs.
 const g = new AgentGuard({ baseUrl: "http://localhost:8080", agentId: "my-agent" });

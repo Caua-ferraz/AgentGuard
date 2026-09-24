@@ -1,10 +1,10 @@
-.PHONY: build build-mcp-gateway build-llm-proxy test test-all lint run clean docker validate validate-examples bench dep-audit help
+.PHONY: build build-mcp-gateway build-llm-proxy test test-all lint run clean docker docker-run require-api-key validate validate-examples bench dep-audit help
 
 # Binary name
 BINARY=agentguard
 MCP_GATEWAY_BINARY=agentguard-mcp-gateway
 LLM_PROXY_BINARY=agentguard-llm-proxy
-VERSION=1.1.0
+VERSION=1.1.1
 COMMIT=$(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)"
 
@@ -57,11 +57,19 @@ validate-examples: build
 
 ## docker: Build Docker image
 docker:
-	docker build -t $(BINARY):$(VERSION) -t $(BINARY):latest .
+	docker build --build-arg COMMIT=$(COMMIT) -t $(BINARY):$(VERSION) -t $(BINARY):latest .
 
-## docker-run: Run in Docker
-docker-run: docker
-	docker run -d -p 8080:8080 --name agentguard $(BINARY):latest
+## docker-run: Run in Docker (needs AGENTGUARD_API_KEY in the environment)
+docker-run: require-api-key docker
+	docker run -d -p 8080:8080 --name agentguard \
+		-e AGENTGUARD_API_KEY \
+		-v agentguard-audit:/var/lib/agentguard \
+		$(BINARY):latest
+
+# Without an API key the server binds 127.0.0.1 inside the container, so
+# the published port is unreachable. Fail before building the image.
+require-api-key:
+	@test -n "$$AGENTGUARD_API_KEY" || { echo "AGENTGUARD_API_KEY is not set. Without it the server binds the container's own loopback and -p 8080:8080 is unreachable. Example: export AGENTGUARD_API_KEY=\"\$$(openssl rand -hex 32)\"" >&2; exit 1; }
 
 ## clean: Remove build artifacts
 clean:

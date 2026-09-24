@@ -68,9 +68,10 @@ the docs default to the Go binary.
 ```
 agentguard-mcp-gateway \
   --upstream "fs:npx -y @modelcontextprotocol/server-filesystem /tmp" \
-  --upstream "github:npx -y @modelcontextprotocol/server-github" \
+  --upstream "github:docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server" \
   --upstream "everything:npx -y @modelcontextprotocol/server-everything" \
   --guard-url http://127.0.0.1:8080 \
+  --policy /etc/agentguard/policy.yaml \
   --api-key $AGENTGUARD_API_KEY \
   --tenant-id local \
   --fail-mode deny \
@@ -86,7 +87,7 @@ agentguard-mcp-gateway \
 | `--fail-mode`       | no         | `deny` / `allow` / `fail-closed-with-audit`. Default `deny`. `fail-closed-with-audit` denies with the distinct Rule `deny:gateway:fail_closed_audit` **and** records the denial in the local `--fail-audit-log` file. See [`PROXY_ARCHITECTURE.md`](./PROXY_ARCHITECTURE.md) § 6.1. |
 | `--fail-audit-log`  | no         | local JSONL fallback audit file for `fail-closed-with-audit` denials. Default `agentguard-fail-audit.jsonl`; empty disables. |
 | `--policy`          | no         | Path to AgentGuard policy YAML. **Required** when `--policy-mode strict` (the default). Used to resolve `tool_scope_map` overrides for the dual-check (`mcp_tool` + mapped scope). |
-| `--policy-mode`     | no         | `strict` (default) or `fast`. `strict` requires `--policy` and fails closed if the file is missing/invalid; `fast` skips loading and uses only the gateway's built-in default mapping. |
+| `--policy-mode`     | no         | `strict` (default) or `fast`. `strict` requires `--policy` and fails closed if the file is missing/invalid; `fast` runs only the `mcp_tool` check and never consults `tool_scope_map` (`--policy` is optional). |
 | `--log-level`       | no         | stderr verbosity. Default `info`.               |
 | `--upstream-timeout`| no         | per-frame upstream-response timeout. Default `30s`. |
 | `--reconnect-cap`   | no         | upper bound on reconnect backoff. Default `60s`. |
@@ -156,7 +157,7 @@ Sequence:
      "id": 1,
      "result": {
        "protocolVersion": "2025-11-25",
-       "serverInfo": { "name": "agentguard-mcp-gateway", "version": "1.1.0" },
+       "serverInfo": { "name": "agentguard-mcp-gateway", "version": "1.1.1" },
        "capabilities": {
          "tools": { "listChanged": true }
        }
@@ -224,7 +225,7 @@ and concatenating the arrays.
     "tools": [
       { "name": "fs:read_file",     "description": "...", "inputSchema": {...} },
       { "name": "fs:write_file",    "description": "...", "inputSchema": {...} },
-      { "name": "github:create_issue", "description": "...", "inputSchema": {...} }
+      { "name": "github:list_issues", "description": "...", "inputSchema": {...} }
     ]
   }
 }
@@ -312,37 +313,18 @@ agentguard-mcp-gateway --policy-mode strict   # dual-check (default)
 agentguard-mcp-gateway --policy-mode fast     # single-check (mcp_tool only)
 ```
 
-`fast` mode dispatches one check with `scope: "mcp_tool"` and stamps
-the inferred mapped scope as `meta["mapped_scope"]` — operators who
-want filesystem semantics in `fast` mode have to write `mcp_tool` rules
-that key on `meta.mapped_scope`. Most won't; that's why `strict` is the
+`fast` mode dispatches one check with `scope: "mcp_tool"` and never
+consults `tool_scope_map`, so only `mcp_tool` rules apply — filesystem,
+network and shell rules never see the call. That's why `strict` is the
 default.
 
 #### 4.4.4 Tool-scope mapping table
 
-Two layers — built-in defaults + policy-YAML override.
+The mapping comes only from the policy's `tool_scope_map` — the gateway
+has **no built-in table**. A tool that matches no entry is checked under
+`mcp_tool` alone (see below).
 
-Built-in (compiled into the gateway):
-
-```go
-var defaultToolScopeMap = []toolScopePattern{
-    // pattern        scope        path-arg         url-arg      action-from-name
-    {"*:read_*",      "filesystem", "path,file_path", "",          "read"},
-    {"*:write_*",     "filesystem", "path,file_path", "",          "write"},
-    {"*:edit_*",      "filesystem", "path,file_path", "",          "write"},
-    {"*:delete_*",    "filesystem", "path,file_path", "",          "delete"},
-    {"*:list_*",      "filesystem", "path,file_path", "",          "read"},
-    {"*:fetch_*",     "network",    "",               "url",       ""},
-    {"*:get_*",       "network",    "",               "url",       ""},
-    {"*:post_*",      "network",    "",               "url",       ""},
-    {"*:browse_*",    "browser",    "",               "url",       ""},
-    {"*:execute_*",   "shell",      "",               "",          ""},
-    {"*:run_*",       "shell",      "",               "",          ""},
-    {"*:exec_*",      "shell",      "",               "",          ""},
-}
-```
-
-Policy-YAML override — `tool_scope_map` is a **top-level list** (same level as `rules:`; see [`POLICY_REFERENCE.md`](POLICY_REFERENCE.md#tool_scope_map) for why it's a list, not a map):
+`tool_scope_map` is a **top-level list** (same level as `rules:`; see [`POLICY_REFERENCE.md`](POLICY_REFERENCE.md#tool_scope_map) for why it's a list, not a map):
 
 ```yaml
 tool_scope_map:
@@ -350,15 +332,13 @@ tool_scope_map:
     scope: filesystem
   - pattern: "fs:write_file"
     scope: filesystem
-  - pattern: "github:*"
+  - pattern: "fetch:*"        # the fetch tool's `url` arg gives the network check a domain
     scope: network
   - pattern: "*:execute_*"
     scope: shell
 ```
 
-Merge semantics: policy entries are evaluated **before** built-ins.
-First match wins. Operators can shadow a built-in by pinning a more
-specific pattern earlier.
+First match wins, in list order — put more specific patterns first.
 
 A tool that matches **no** mapping is checked only under `mcp_tool` —
 operators who want default-deny on unknown tools write:
@@ -412,7 +392,7 @@ tool_scope_map:
     scope: filesystem
   - pattern: "fs:write_file"
     scope: filesystem
-  - pattern: "github:*"
+  - pattern: "fetch:*"        # the fetch tool's `url` arg gives the network check a domain
     scope: network
 ```
 
@@ -684,13 +664,14 @@ way out. That is deferred — see `Bridge.handleNotification`.
 | Approval round-trip      | _meta prefix variants, expired id (404), unresolved id (still pending)      |
 | Cancellation             | cancel propagates to upstream and the policy check goroutine                |
 | Stdout serialisation     | concurrent upstream responses don't interleave bytes                        |
-| Real upstream            | spawn `npx -y @modelcontextprotocol/server-everything`, drive a full session|
+| Real upstream            | spawn the stub MCP server subprocess via the real `StdioUpstream`, drive a full session|
 
-The "real upstream" test is the equivalent of the Python integration
-suite — it lives in a separate `integration-tests` CI job that runs
-against the real upstream framework (non-blocking on PRs to avoid
-upstream-flake failures; promoted to required once stability data
-accumulates).
+The "real upstream" tests (`pkg/mcpgw/at_real_protocol_test.go`) run
+`Bridge` plus the real `StdioUpstream` against a stub MCP server
+subprocess built from `pkg/mcpgw/testdata/stub_server`, instead of
+`npx -y @modelcontextprotocol/server-everything`, so they need no
+network and give deterministic replies. They run in the blocking Go
+`test` job with the rest of `go test ./...`, and skip under `-short`.
 
 ---
 
@@ -752,7 +733,7 @@ Copy [`examples/claude-desktop-config.json`](../examples/claude-desktop-config.j
 the table above.
 
 The gateway namespaces tools per upstream (`fs:read_text_file`,
-`github:create_issue`, …), so policies written against namespaced names
+`github:list_issues`, …), so policies written against namespaced names
 work without changes. Strict policy mode (the default) requires
 `--policy <path>` because the gateway resolves the
 `tool_scope_map` locally to drive the dual-check (mcp_tool + mapped
@@ -809,12 +790,15 @@ call against the central server, which hot-reloads via `--watch`. But
 adding a *new upstream* (a new `--upstream` flag) does require a
 gateway restart, which means restarting the MCP client.
 
-**Missing `npx`.** All bundled examples use `npx -y …` for upstreams.
-If `npx` isn't on PATH inside the MCP client's environment (a
-notoriously common Windows issue), the upstream subprocess fails to
-launch and the gateway logs a degraded-upstream WARN to stderr — visible
-in Claude Desktop's `mcp.log` and equivalents. Install Node 18+ and
-verify `npx --version` before debugging deeper.
+**Missing launcher (`npx`, `uvx`, `docker`).** The bundled examples start
+the filesystem server with `npx`, the fetch server with `uvx`, and
+GitHub's MCP server with `docker`. If a launcher isn't on `PATH` inside
+the MCP client's environment (a notoriously common Windows issue for
+`npx`), that upstream fails to spawn and the gateway logs
+`info mcpgw: startup: upstream "<ns>" failed to spawn: …` to stderr —
+visible in Claude Desktop's `mcp.log` and equivalents — while the other
+upstreams keep working. Check the launcher on its own (`npx --version`,
+`uvx --version`, `docker version`) before debugging deeper.
 
 **Cookie-based auth on macOS.** AgentGuard's session cookies depend on
 the connection's TLS state. When the central server runs on plain HTTP

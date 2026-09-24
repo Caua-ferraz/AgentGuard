@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Caua-ferraz/AgentGuard/cmd/internal/buildinfo"
 	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
 	"github.com/Caua-ferraz/AgentGuard/pkg/migrate"
 	_ "github.com/Caua-ferraz/AgentGuard/pkg/migrate/v040_to_v041" // register the v0.4.0 → v0.4.1 audit schema migration
@@ -29,7 +30,7 @@ import (
 )
 
 var (
-	version = "1.1.0"
+	version = "1.1.1"
 	commit  = "dev"
 )
 
@@ -45,7 +46,7 @@ func main() {
 	policyFile := serveCmd.String("policy", "configs/default.yaml", "Path to policy file")
 	port := serveCmd.Int("port", 8080, "Port to listen on")
 	dashboard := serveCmd.Bool("dashboard", false, "Enable web dashboard")
-	watch := serveCmd.Bool("watch", false, "Watch policy file for changes")
+	watch := serveCmd.Bool("watch", false, "Log each policy hot-reload (reloading itself is always on)")
 	auditPath := serveCmd.String("audit-log", "audit.jsonl", "Path to audit log file")
 	apiKey := serveCmd.String("api-key", "", "Bearer token for approve/deny endpoints")
 	baseURL := serveCmd.String("base-url", "", "External base URL for approval links (default: http://localhost:<port>)")
@@ -325,7 +326,7 @@ Flags:
 		runTenant(os.Args[2:])
 
 	case "version":
-		fmt.Printf("agentguard %s (%s)\n", version, commit)
+		fmt.Printf("agentguard %s (%s)\n", version, buildinfo.Describe(commit))
 
 	default:
 		printUsage()
@@ -345,7 +346,7 @@ Commands:
   check       Run a one-shot policy check against a local policy file
   approve     Approve a pending action by ID
   deny        Deny a pending action by ID
-  status      Show connected agents and pending actions
+  status      Show server health and pending approvals
   audit       Query the audit log
   tenant      Manage per-tenant policies in the store (put|list|rm)
   migrate     Run on-disk schema migrations (see docs/FILE_FORMATS.md)
@@ -842,65 +843,83 @@ func runResolve(baseURL, approvalID, action, apiKey string) {
 }
 
 func runStatus(baseURL, apiKey string) {
+	if code := statusReport(os.Stdout, os.Stderr, baseURL, apiKey); code != 0 {
+		os.Exit(code)
+	}
+}
+
+// statusReport is the testable core of `agentguard status`: it writes the
+// report to stdout/stderr and returns the process exit code (1 only when the
+// server can't be reached at all; the pending list is best-effort).
+func statusReport(stdout, stderr io.Writer, baseURL, apiKey string) int {
 	url := strings.TrimRight(baseURL, "/")
+	client := &http.Client{Timeout: 10 * time.Second}
 
 	// Health check (unauthenticated)
-	resp, err := http.Get(url + "/health")
+	resp, err := client.Get(url + "/health")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Cannot connect to AgentGuard at %s: %v\n", baseURL, err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "Cannot connect to AgentGuard at %s: %v\n", baseURL, err)
+		return 1
 	}
 	resp.Body.Close()
-	fmt.Printf("AgentGuard server: OK (%s)\n", baseURL)
+	fmt.Fprintf(stdout, "AgentGuard server: OK (%s)\n", baseURL)
 
 	// Pending approvals (requires auth when server has --api-key)
 	pendingReq, err := http.NewRequest(http.MethodGet, url+"/api/pending", nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 0
 	}
 	attachAuth(pendingReq, apiKey)
-	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err = client.Do(pendingReq)
 	if err != nil {
-		fmt.Println("Pending approvals: unavailable (dashboard not enabled?)")
-		return
+		fmt.Fprintf(stdout, "Pending approvals: unavailable (%v)\n", err)
+		return 0
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusUnauthorized {
-		fmt.Println("Pending approvals: unauthorized (set --api-key or AGENTGUARD_API_KEY)")
-		return
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized:
+		fmt.Fprintln(stdout, "Pending approvals: unauthorized (set --api-key or AGENTGUARD_API_KEY)")
+		return 0
+	case resp.StatusCode == http.StatusNotFound:
+		// /api/pending is registered only when the server runs --dashboard.
+		fmt.Fprintln(stdout, "Pending approvals: unavailable (the server was started without --dashboard)")
+		return 0
+	case resp.StatusCode != http.StatusOK:
+		fmt.Fprintf(stdout, "Pending approvals: unavailable (HTTP %d)\n", resp.StatusCode)
+		return 0
 	}
 
 	var pending []map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&pending); err != nil {
-		fmt.Fprintf(os.Stderr, "Error decoding pending list: %v\n", err)
-		return
+		fmt.Fprintf(stderr, "Error decoding pending list: %v\n", err)
+		return 0
 	}
 
 	if len(pending) == 0 {
-		fmt.Println("Pending approvals: none")
-	} else {
-		fmt.Printf("Pending approvals: %d\n", len(pending))
-		for _, p := range pending {
-			id, _ := p["id"].(string)
-			req, ok := p["request"].(map[string]interface{})
-			if !ok {
-				fmt.Printf("  [%s] (unable to parse request)\n", id)
-				continue
-			}
-			scope, _ := req["scope"].(string)
-			cmd, _ := req["command"].(string)
-			agent, _ := req["agent_id"].(string)
-			if cmd == "" {
-				cmd, _ = req["domain"].(string)
-			}
-			if cmd == "" {
-				cmd, _ = req["path"].(string)
-			}
-			fmt.Printf("  [%s] scope=%s action=%q agent=%s\n", id, scope, cmd, agent)
-		}
+		fmt.Fprintln(stdout, "Pending approvals: none")
+		return 0
 	}
+	fmt.Fprintf(stdout, "Pending approvals: %d\n", len(pending))
+	for _, p := range pending {
+		id, _ := p["id"].(string)
+		req, ok := p["request"].(map[string]interface{})
+		if !ok {
+			fmt.Fprintf(stdout, "  [%s] (unable to parse request)\n", id)
+			continue
+		}
+		scope, _ := req["scope"].(string)
+		cmd, _ := req["command"].(string)
+		agent, _ := req["agent_id"].(string)
+		if cmd == "" {
+			cmd, _ = req["domain"].(string)
+		}
+		if cmd == "" {
+			cmd, _ = req["path"].(string)
+		}
+		fmt.Fprintf(stdout, "  [%s] scope=%s action=%q agent=%s\n", id, scope, cmd, agent)
+	}
+	return 0
 }
 
 func runAuditQuery(baseURL, agent, decision, scope, transport string, limit int, apiKey string) {

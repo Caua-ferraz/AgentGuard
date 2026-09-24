@@ -91,7 +91,7 @@ Dashboard always requests `limit=200`; the server clamps at `auditMaxLimit` (def
 
 ## SSE (`/api/stream`) behavior
 
-- The dashboard opens an `EventSource` on page load and listens for four event types: `check`, `approval_required`, `denied`, `resolved`.
+- The dashboard opens an `EventSource` on page load and handles every message on it (the stream sends unnamed `check` and `resolved` events — see [`API.md`](API.md#get-apistream)). Each event is added to the feed and refreshes the counters; a `REQUIRE_APPROVAL` decision or a `resolved` event also refreshes the pending list.
 - On a slow consumer, the server drops events silently and increments `agentguard_sse_events_dropped_total{reason="slow_consumer"}`. The UI will appear to miss events.
 - **There is no client-side auto-reconnect beyond what `EventSource` does natively.** If the server restarts, the browser reconnects on its own within a few seconds. If the reverse proxy closes the stream (idle timeout), `EventSource` also reconnects.
 

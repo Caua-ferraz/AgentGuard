@@ -2,6 +2,76 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.1] — 2026-09-23
+
+> **A patch release from an audit of names, ownership and docs against the code.** It checked every install command, contact address, example config and documented behaviour against what exists. The worst findings weren't in the code. The docs told TypeScript users to install `@agentguard/sdk`, an npm package owned by an unrelated project. The security contact address didn't exist, so vulnerability reports sent to it were never received. Three release notes told Docker users to pull an image that was never published. And the example MCP configs launched a fetch server package that has never existed. One finding was in the code: `agentguard-llm-proxy --listen :PORT` started on every interface with no inbound auth.
+>
+> **No public API change.** No exported identifier in `pkg/` was added, removed or changed. The one new Go package, `cmd/internal/buildinfo`, is internal to the module. Config keys, routes, wire fields, the audit format (`schema_version: 2`) and the policy schema (`version: "1"`) are unchanged. See *Compatibility* for the behaviour changes, one of which is a deliberate fail-closed correction.
+
+### Fixed
+
+- **`agentguard-llm-proxy --listen :PORT` no longer starts unauthenticated on every interface.** A listen address with no host binds all interfaces, but `isLoopbackHost("")` returned true, so the proxy skipped the rule that non-loopback binds require `--proxy-api-key`. An empty host is now non-loopback, like `0.0.0.0`. The refusal says the address binds every interface and suggests `127.0.0.1:PORT`.
+- **The update notice and `agentguard version` now recognise `go install` release builds.** Binaries built without the Makefile's `-ldflags` keep `commit=dev`, and the update check skipped every such build, so `go install …@latest` (the install path the README documents) never showed the notice, and `version` printed `(dev)`. The new `cmd/internal/buildinfo` reads Go build info: a tagged module version (`vX.Y.Z`) counts as a release build, and `version` in all three binaries prints the best identifier available (the ldflags commit, else the VCS revision with `-dirty`, else `module vX.Y.Z`). `serve` still never checks. The Dockerfile takes a `COMMIT` build arg, which `make docker` sets to the git short hash.
+- **`make docker-run` and the documented `docker run` commands pass `AGENTGUARD_API_KEY`.** Without a key the server binds `127.0.0.1`, which in a container is the container's own loopback, so the published port never answered. `make docker-run` now fails with an explanation before building when the variable is unset, and mounts the audit volume.
+- **`agentguard status` explains a server without `--dashboard`.** It printed `Error decoding pending list: json: cannot unmarshal number …`; it now prints `Pending approvals: unavailable (the server was started without --dashboard)` and reports other non-200 statuses plainly. The exit code is unchanged.
+- **CLI help text.** `status` no longer claims to show connected agents, and `--watch` says it logs each policy reload (the server always hot-reloads its policy).
+- **`scripts/bump-version.sh` checks for leftover versions on macOS.** The final check used `grep -P`, which BSD grep lacks, and read the error as "no leftover". It now uses perl, and treats a perl error as a failure. The script also keeps the `docs/DEPLOYMENT.md` image tags and the `docs/CLI.md` version example current.
+
+### Added
+
+- **npm publishing for the TypeScript SDK.** `.github/workflows/publish-npm.yml` runs when a GitHub release is published (or by manual dispatch), checks that the release tag matches `package.json`'s version, runs `npm ci`, build and test, and publishes. It authenticates with npm trusted publishing (GitHub OIDC), so no npm token is stored in the repository, and npm attaches provenance to each version it publishes. A version that's already on npm is skipped. npm accepts a trusted publisher only for a package that already exists, so 1.1.1, the first version, was published by hand and has no provenance.
+
+### Changed
+
+- **The TypeScript SDK is published to npm as `@lictorate/agentguard`, starting with 1.1.1.** It was never on npm before, and its `package.json` name, `@agentguard/sdk`, belongs to an unrelated npm project. Install and import examples use the new name, and warn that `@agentguard/sdk` is unrelated.
+- **`plugins/typescript/package-lock.json` is committed, and CI installs with `npm ci`.** The lockfile was gitignored, so the `dep-audit` job's `npm audit` failed on every run (hidden by `continue-on-error`) and each build resolved a fresh dependency tree.
+- **The example MCP configs launch the official fetch and GitHub servers.** They started `npx -y @modelcontextprotocol/server-fetch`, which has never existed on npm (the gateway ran with an empty `fetch` namespace), and the deprecated `@modelcontextprotocol/server-github`. They now use `uvx mcp-server-fetch` and `docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server`. Each client guide lists the launcher (npx, uvx or docker) each upstream needs.
+- **`configs/default.yaml` sends calls to those servers to approval.** The official fetch server's only tool, `fetch:fetch`, matched no `mcp_tool` rule and was denied by default; it now requires approval, and the mapped `network` check still limits approved fetches to allow-listed hosts. `github:*` already required approval, but `tool_scope_map` mapped it to `network`, and GitHub's tools carry owner and repo rather than a URL, so every call was denied even after approval. That mapping is removed.
+
+### Documentation
+
+- **New:** a `docs/MIGRATION.md` section for 1.1.0 → 1.1.1; a "Latency budget" section in `docs/CONTRIBUTING.md` (the hot-path rules CI enforces, previously cited from an unpublished file); and a `POST /v1/audit` section in `docs/API.md` (the DENY-only audit-ingest endpoint added in 1.0.0).
+- **Quickstarts:** the MCP quickstart asked Claude to write a file, which the default policy denies through the gateway; it now shows a read being allowed and a write being denied. The LLM proxy quickstart shows the shell command the dashboard records, not the tool name.
+- **MCP Gateway:** the reference command includes the `--policy` flag that the default strict mode requires. The docs no longer claim a built-in tool-to-scope table or a `mapped_scope` field in the gateway; neither exists. The documented spawn-failure log line matches what the gateway logs.
+- **LLM API Proxy:** the inbound auth header is `X-AgentGuard-Proxy-Auth`, not `Authorization`; the proxy serves only `/healthz` (no `/metrics` or `/health`); the non-loopback refusal is keyed on `--proxy-api-key`; hop-by-hop headers are dropped.
+- **Deployment:** the Compose example builds the image and the Kubernetes example points at your own registry, because AgentGuard publishes no image. The Kubernetes `args` gain `--policy`, without which the pod failed to start. Stale source line numbers are replaced with function names.
+- **API reference:** `/api/stream` sends only `check` and `resolved` events (also corrected in `OBSERVABILITY.md` and `DASHBOARD.md`); `/v1/check`, `/auth/login` and `/auth/logout` status codes and examples match the server.
+- **SDK references:** both SDKs raise `AgentGuardAuthError` on a 401/403 approval poll; pending approvals survive a server restart; tenant routing (`tenant_id` / `tenantId`, `AGENTGUARD_TENANT_ID`), `approval_id` and every fail-mode trigger are documented; the Python docs warn that the unrelated `agentguard-sdk` package installs the same `agentguard` import name.
+- **Floors and support:** example docs state Go 1.25+ (not 1.22+) and the TypeScript SDK states Node 20+ (not 18+). `SECURITY.md` supports the latest minor line (1.1.x), not 0.5.x.
+- **CLI reference:** `AGENTGUARD_API_KEY` is read by `serve` too; exit code 2 means invalid flags; `--watch` logs reloads rather than enabling them; `status` needs a server started with `--dashboard`; the `version` output is documented for each build type.
+- **Also corrected:** `docs/ADAPTERS.md` (compatibility matrix through 1.1.x, the `mcp` 1.x/2.x status, which CI legs block), the "real upstream" test description in `docs/MCP_GATEWAY.md`, the example configs' single-tenant guidance, and `docs/CONTRIBUTING.md` (the full list of files the version bump touches, the release checklist, the project structure).
+
+### Errata
+
+Corrected in place in earlier CHANGELOG entries, release notes and `docs/MIGRATION.md`; each correction carries a *(Corrected in v1.1.1: …)* note.
+
+- **The security, conduct and support contact address was misspelled** as `cauaferraz@gmail.com` in `SECURITY.md` and seven other files. That address doesn't exist, so anything sent to it was never received. The correct address is **`cauaferrazp@gmail.com`**. If you reported something to the old address, please resend it.
+- **The TypeScript SDK was not on npm** at 0.5.2, 0.9.0 or 1.0.0. Those release notes, the 0.9.0 and 1.0.0 CHANGELOG entries and `MIGRATION.md` said it was published as `@agentguard/sdk`, and some gave `npm install @agentguard/sdk@X` commands. That package is unrelated to AgentGuard.
+- **No Docker image has ever been published.** The 0.5.2, 0.9.0 and 1.0.0 release notes said to `docker pull` one; they now say to build from the repository's `Dockerfile`.
+- **v0.7.0 and v0.4.1 were never published.** `MIGRATION.md` gave v0.7.0 as the upgrade target and the rollback point; it now names installable versions (upgrade to v0.9.0, roll back to v0.5.2).
+- **Links to `docs/v1.0-multinode-PLAN.md`**, which was never committed, in the 1.0.0 CHANGELOG entry and release notes now point to `COMPATIBILITY.md` and `OPERATIONS.md`.
+
+### Compatibility
+
+- **One fail-closed correction.** `agentguard-llm-proxy --listen :PORT` without `--proxy-api-key` now exits with status 2 instead of starting. Use `127.0.0.1:PORT`, or set `--proxy-api-key`.
+- **The shipped default policy changed** for the `fetch` and `github` MCP namespaces (see *Changed*). A policy file you copied earlier is unaffected.
+- **`go install` builds now make the startup update check** from interactive subcommands, as documented; `serve` never does. Set `AGENTGUARD_NO_UPDATE_CHECK=1` to opt out.
+- **`agentguard version`'s parenthesised build identifier** is `module vX.Y.Z` or a VCS revision where it used to be `dev`.
+- **TypeScript import path:** code that imported a local build as `@agentguard/sdk` imports `@lictorate/agentguard`. The exports are unchanged.
+- **`make docker-run` requires `AGENTGUARD_API_KEY`.**
+- Downgrade to 1.1.0 is safe: nothing on disk changed. See `docs/MIGRATION.md`.
+
+### Verification
+
+- **Go** (1.26.7): `go build ./...`, `go vet ./...` and `gofmt -l .` are clean, `golangci-lint run ./...` at CI's version (v2.12.2) reports 0 issues, and `go test -race ./...` passes in all 21 packages.
+- **Python** (3.13, with the `dev`, `langchain`, `crewai` and `mcp` extras that CI's `python-test` job installs): 354 passed, 3 skipped, 35 integration tests deselected. The real-server E2E file ran with 15 passes; CI requires at least 10.
+- **TypeScript:** `npm ci` from the committed lockfile, the `tsc` build, and 95 jest tests pass.
+- **Policies:** `agentguard validate` accepts all three shipped policy files.
+- **LLM proxy bind check, on the built binary:** `--listen :18081`, `[::]:18081` and `0.0.0.0:18081` without `--proxy-api-key` exit with status 2; `127.0.0.1:18081`, and `:18082` with a key, start and answer `/healthz`.
+- **Version bump:** `scripts/bump-version.sh 1.1.1` passed its leftover check, and all three binaries report `1.1.1`.
+- **Docs:** every relative link and anchor in tracked Markdown resolves. A sweep for the stale strings this release removes (`@agentguard/sdk`, the misspelled address, `server-fetch`, `server-github`, `docker pull`, `Go 1.22+`, Node 18, the unpublished plan link) finds only corrections, warnings and historical text.
+- **Not run for this release:** the Docker image build and CI's real-framework `integration-tests` matrix. CI runs both.
+
 ## [1.1.0] — 2026-09-13
 
 > **A correctness-and-honesty release, from a review of the packages no prior audit had opened** (`pkg/metrics`, `pkg/depaudit`, `pkg/migrate`, `cmd/agentguard`, and both plugin SDKs). Six findings, all fixed. Two of them are behaviours the docs described that the code never implemented: `agentguard migrate --reset-checkpoint` deleted a file that did not exist and reported success, and the SDKs could not replay an approval at all, so the one-shot / validity / cost-reservation semantics documented for `/v1/check` never applied to SDK callers. A third is a defect invisible from the outside: the default audit pipeline never exposed its file path, so **no production deployment had ever written a replay checkpoint** — every boot re-scanned the entire live audit log, and the decision counters restarted from zero. Landing alongside them are five LLM-proxy gating fixes (B6, B7, B17, B18, B21), each one a stream or response the firewall could not evaluate and forwarded, dropped, or wrongly refused anyway. Landing alongside *those* are five more that only a running cluster could produce: a migration race that killed replicas at boot, a rotation that destroyed archives, a flush deadlock between nodes, streaming refusals that reached the client but never the audit trail, and a checkpoint path no deployment had ever written to. Eighteen fixes in all.
@@ -82,7 +152,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- **PostgreSQL multi-node backend — shared state across replicas.** A Postgres `--store-dsn` (`postgres://…` / `postgresql://…`) selects a new `store.PostgresStore` (pgx v5, `database/sql` stdlib driver, pure-Go, mirroring `SQLiteStore`) behind the existing frozen `store.Store` interface. Approvals, rate-limit consumption, and cost accumulators are the shared durable tier; each node keeps its in-memory state authoritative and **converges in the background** via per-node-rows-summed consumption tables (`rate_consumption`, `cost_consumption`) and interval approval re-hydrate + merge. The zero-config single-node SQLite default is unchanged — the reconcile ticker never starts on SQLite. New exported surface for embedders: `store.NewPostgresStore`, the reconcile delta types (`ratelimit.BucketDelta`, `policy.CostDelta`, `store.RateConsumption`/`CostConsumption`), and the `ApprovalReplayRefusedTotal` / `IncApprovalReplayRefused` metric accessors. Design: [`docs/v1.0-multinode-PLAN.md`](docs/v1.0-multinode-PLAN.md); operator sizing: [`docs/OPERATIONS.md`](docs/OPERATIONS.md#multi-instance-deployments).
+- **PostgreSQL multi-node backend — shared state across replicas.** A Postgres `--store-dsn` (`postgres://…` / `postgresql://…`) selects a new `store.PostgresStore` (pgx v5, `database/sql` stdlib driver, pure-Go, mirroring `SQLiteStore`) behind the existing frozen `store.Store` interface. Approvals, rate-limit consumption, and cost accumulators are the shared durable tier; each node keeps its in-memory state authoritative and **converges in the background** via per-node-rows-summed consumption tables (`rate_consumption`, `cost_consumption`) and interval approval re-hydrate + merge. The zero-config single-node SQLite default is unchanged — the reconcile ticker never starts on SQLite. New exported surface for embedders: `store.NewPostgresStore`, the reconcile delta types (`ratelimit.BucketDelta`, `policy.CostDelta`, `store.RateConsumption`/`CostConsumption`), and the `ApprovalReplayRefusedTotal` / `IncApprovalReplayRefused` metric accessors. Semantics: [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md#topology); operator sizing: [`docs/OPERATIONS.md`](docs/OPERATIONS.md#multi-instance-deployments). *(Corrected in v1.1.1: this linked an internal design doc that was never published.)*
 - **`--node-id` serve flag** (default: OS hostname) — stable identifier for this node in multi-node reconciliation. Each replica MUST have a distinct value; an empty value disables reconciliation. Additive; single-node deployments never need it.
 - **`--reconcile-interval` serve flag** (default `2s`) — cadence of the background rate-limit/cost/approval reconciliation loop. **Takes effect only with a Postgres `--store-dsn`**; on the SQLite backend it is forced to `0` and the loop never starts. `0` disables reconciliation.
 - **`--approval-validity` serve flag** (default `5m`) — how long a resolved ALLOW is honored by the `/v1/check` approval-id retry, measured from resolution. Past the window the retry re-enters the approval flow under a new id; `0` restores the unbounded pre-v1.0 window. The default matches the SDKs' `wait_for_approval` poll window.
@@ -94,9 +164,9 @@ All notable changes to this project will be documented in this file.
 - **Distributed rate limiting is bounded-overshoot by design, not global-strict.** Because reconciliation is background-only (to hold the no-sync-DB-on-`/v1/check` invariant), a cluster's aggregate admissions may exceed a single global budget by up to **≈ `reconcile-interval` × peak-rate × replicas** before convergence. This is a deliberate, documented trade — global-strict limiting would require a synchronous cross-node check on the hot path, which the latency budget forbids. Single-node behavior is exactly as before (the reconcile path is a proven no-op). See [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md#topology).
 - **Go toolchain pinned to `go1.25.12`** in `go.mod` (`toolchain` directive) — carries the stdlib fix for **GO-2026-5856** (crypto/tls Encrypted Client Hello privacy leak); go1.25.11 and earlier trip the CI govulncheck gate. See *Security*.
 - **MCP Gateway protocol-coverage docs truthed-up (no behavior change to drop paths).** The gateway brokers `tools/*` only: `resources/*` and `prompts/*` capabilities are **masked** by `MergeCapabilities` (default dispatch is `MethodNotFound`), not "forwarded verbatim" as the old [`docs/MCP_GATEWAY.md`](docs/MCP_GATEWAY.md) § 3.3 / § 10 claimed. `notifications/cancelled` is documented as a latent no-op (host-space vs gateway-internal request-id spaces — § 8.4, which had overstated forward-to-upstream + cancel + audit). Server-initiated requests (`sampling/createMessage`, `roots/list`, `elicitation/create`) still drop, but a dropped frame carrying a `method` now logs at **Info** (was Debug) so operators see unsupported server→client requests. The README gained an "MCP brokers tools only" limitation bullet.
-- **Contributor-facing `CLAUDE.md` now enumerates the latency hot path** — the exact packages/functions on the read-a-byte/forward path (`pkg/llmproxy` streaming/forward/parsers, `pkg/policy` `Engine.Check` & matchers, `pkg/proxy` `handleCheck`, `pkg/ratelimit` `Allow`, `pkg/internal/gateclient`), verified against code, so the "no sync DB / no blocking I/O / no per-request allocs on the hot path" rule is checkable rather than folklore.
+- **Contributor-facing `CLAUDE.md` now enumerates the latency hot path** — the exact packages/functions on the read-a-byte/forward path (`pkg/llmproxy` streaming/forward/parsers, `pkg/policy` `Engine.Check` & matchers, `pkg/proxy` `handleCheck`, `pkg/ratelimit` `Allow`, `pkg/internal/gateclient`), verified against code, so the "no sync DB / no blocking I/O / no per-request allocs on the hot path" rule is checkable rather than folklore. *(Corrected in v1.1.1: `CLAUDE.md` is not part of the published repository; the rule and the hot-path list are now in [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md#latency-budget).)*
 - **v1.0 documentation-accuracy pass.** README, COMPATIBILITY, MIGRATION, and the current-state docs are corrected to describe the shipped 1.0 behavior — multi-node Postgres, the bounded-overshoot semantics, approval write-once/one-shot lifecycle, and the F1–F3 fixes below — replacing v0.9-era "single-node is the supported topology / Postgres is post-v1" wording.
-- **Version set to 1.0.0** across all three binaries (`agentguard`, `agentguard-mcp-gateway`, `agentguard-llm-proxy`), both SDKs (`agentguardproxy` on PyPI, `@agentguard/sdk` on npm), and the docs' canonical version references.
+- **Version set to 1.0.0** across all three binaries (`agentguard`, `agentguard-mcp-gateway`, `agentguard-llm-proxy`), both SDKs (`agentguardproxy` on PyPI; the TypeScript SDK's `package.json`), and the docs' canonical version references. *(Corrected in v1.1.1: the TypeScript SDK was not published to npm at this release, and `@agentguard/sdk` is an unrelated package. The SDK is on npm as `@lictorate/agentguard` from 1.1.1.)*
 
 ### Fixed
 
@@ -139,13 +209,15 @@ All notable changes to this project will be documented in this file.
 - **Audit "tamper-evident" claim corrected (the one real defect).** The README and FAQ marketed the audit log as "tamper-evident," but the code provides an **append-only** JSON-Lines log with no cryptographic integrity chain. The wording is now accurate: AgentGuard writes an append-only audit trail, and **tamper-evidence is achieved by forwarding it to append-only / WORM storage** (S3 Object Lock, a SIEM, or syslog) — AgentGuard does not seal the log itself. No code or on-disk format changed; this is a documentation correction only. (Closes internal-audit finding **L4** by truth-up, not by crypto — in-process hash-chaining / Merkle checkpoints were evaluated and deferred out of core scope.)
 - **`/v1/check` latency telemetry corrected.** `X-AgentGuard-Total-Ms` and the `agentguard_request_duration_ms` SLO histogram are now measured end-to-end (after the audit enqueue), matching their documented "end-to-end" definition; previously they were captured before the audit write and understated a slow audit backend. Response-header / metric change only — no wire-format or gating change.
 - **Single-node posture stated plainly.** README Limitations now declares single-node (`replicas: 1`) the **supported, stable topology**, with PostgreSQL / multi-node explicitly a v1.0 requirement (post-v0.9). No behavior change.
-- **Version set to 0.9.0** across all three binaries (`agentguard`, `agentguard-mcp-gateway`, `agentguard-llm-proxy`) and both SDKs (`agentguardproxy` on PyPI, `@agentguard/sdk` on npm).
+- **Version set to 0.9.0** across all three binaries (`agentguard`, `agentguard-mcp-gateway`, `agentguard-llm-proxy`) and both SDKs (`agentguardproxy` on PyPI; the TypeScript SDK's `package.json`). *(Corrected in v1.1.1: the TypeScript SDK was not published to npm at this release, and `@agentguard/sdk` is an unrelated package. The SDK is on npm as `@lictorate/agentguard` from 1.1.1.)*
 - **Planning-doc cleanup.** The stale `docs/v0.8-DESIGN.md` (a rejected crypto/RBAC/Merkle plan) was removed. The v1.0 roadmap (Postgres/multi-node + validation hardening) is tracked in the README [Roadmap](README.md#roadmap), and the deferred RBAC / secret-redaction / audit-crypto work is recorded in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) under *Post-v1, only if a concrete need arises*.
 
 ### Compatibility
 - **No migration required.** The `/v1/check` request/response shapes, the audit `schema_version: 2` JSONL format, the policy schema (`version: "1"`), and every CLI flag/subcommand are unchanged from v0.7. Upgrading is a binary/SDK swap. See [`MIGRATION.md`](docs/MIGRATION.md) § v0.7.0 → v0.9.0.
 
 ## [0.7.0] — 2026-06-12
+
+*(Corrected in v1.1.1: 0.7.0 was never tagged or published — no Go module version or PyPI release exists. These changes first shipped in an installable release in 0.9.0.)*
 
 > The consistency + durability release. Three workstreams land together (v0.6.0 was tagged but had no standalone release notes or CHANGELOG entry — its milestone is documented here):
 >
@@ -279,6 +351,8 @@ All notable changes to this project will be documented in this file.
 - (no v0.5-specific fixes beyond those rolled into the above; security findings tracked in the v0.5 audit reports.)
 
 ## [0.4.1] — 2026-04-22
+
+*(Corrected in v1.1.1: 0.4.1 was never tagged or published — no Go module version or PyPI release exists. These changes first shipped in an installable release in 0.5.0.)*
 
 > This release focuses on behavioral fixes and observability. Server behavior changes are opt-in or clearly surfaced; SDK and audit-log contracts remain backward-compatible with v0.4.0.
 >

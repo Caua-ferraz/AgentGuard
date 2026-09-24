@@ -7,10 +7,13 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Caua-ferraz/AgentGuard/cmd/internal/buildinfo"
 )
 
 // pointUpdateCheckAt redirects the check to a local server for the test's
@@ -66,6 +69,39 @@ func TestShouldSkipUpdateCheck(t *testing.T) {
 			}
 			if got := shouldSkipUpdateCheck(c.version, c.commit, c.subcommand); got != c.want {
 				t.Errorf("shouldSkipUpdateCheck(%q,%q,%q) = %v, want %v", c.version, c.commit, c.subcommand, got, c.want)
+			}
+		})
+	}
+}
+
+// A binary built without the Makefile's -ldflags keeps commit=dev. Whether it
+// is a release build is decided from Go build info: `go install …@vX.Y.Z` and
+// `@latest` record the tag and must check; source builds must not.
+func TestShouldSkipUpdateCheck_DevCommitUsesBuildInfo(t *testing.T) {
+	t.Setenv("AGENTGUARD_NO_UPDATE_CHECK", "")
+	cases := []struct {
+		name          string
+		moduleVersion string
+		want          bool
+	}{
+		{"go install @v1.1.1", "v1.1.1", false},
+		{"go build of a checkout", "(devel)", true},
+		{"go install @master (pseudo-version)", "v1.1.2-0.20260923120000-abcdef123456", true},
+		{"modified checkout of a tag", "v1.1.1+dirty", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			prev := buildinfo.Read
+			buildinfo.Read = func() (*debug.BuildInfo, bool) {
+				return &debug.BuildInfo{Main: debug.Module{Version: c.moduleVersion}}, true
+			}
+			t.Cleanup(func() { buildinfo.Read = prev })
+			if got := shouldSkipUpdateCheck("1.1.1", "dev", "check"); got != c.want {
+				t.Errorf("shouldSkipUpdateCheck(dev commit, module %q) = %v, want %v", c.moduleVersion, got, c.want)
+			}
+			// serve never calls out, whatever the build.
+			if !shouldSkipUpdateCheck("1.1.1", "dev", "serve") {
+				t.Errorf("serve must always skip (module %q)", c.moduleVersion)
 			}
 		})
 	}

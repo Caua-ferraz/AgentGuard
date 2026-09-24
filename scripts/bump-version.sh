@@ -22,15 +22,18 @@
 #   docs/MCP_GATEWAY.md                        — "version": "X.Y.Z" (MCP serverInfo example)
 #   docs/PROXY_ARCHITECTURE.md                 — "version": "X.Y.Z" (/health response example)
 #   docs/POLICY_REFERENCE.md                   — self-label "as of **vX.Y.Z**"
+#   docs/DEPLOYMENT.md                         — Compose/Kubernetes example image tags
+#   docs/CLI.md                                — `agentguard version` example output
 #
 # Portability: uses perl -i -pe for in-place edit. perl is present on macOS
 # (BSD) and Linux out of the box, unlike -i with no suffix (GNU sed only).
 
 set -eo pipefail
 
-# grep -P refuses to run in multibyte non-UTF-8 locales (Git Bash on Windows
-# defaults to one), and check_canonical would read that error as "no leftover"
-# — a silent false-OK on the final verification. Pin a locale grep -P accepts.
+# Pin a UTF-8 locale so perl reads these files (which contain non-ASCII
+# characters) the same way on every platform. check_canonical uses perl, not
+# `grep -P`: BSD grep on macOS has no -P, and the old check read that error
+# as "no leftover" — a silent false-OK on the final verification.
 export LC_ALL=C.UTF-8
 
 if [ $# -ne 1 ]; then
@@ -78,6 +81,8 @@ REPLACEMENTS=(
   'docs/MCP_GATEWAY.md|s/("version":\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
   'docs/PROXY_ARCHITECTURE.md|s/("version":\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
   'docs/POLICY_REFERENCE.md|s/(format as of \*\*v)[0-9]+\.[0-9]+\.[0-9]+(\*\*)/${1}'"$NEW"'${2}/'
+  'docs/DEPLOYMENT.md|s/(image: (?:registry\.example\.com\/)?agentguard:)[0-9]+\.[0-9]+\.[0-9]+/${1}'"$NEW"'/'
+  'docs/CLI.md|s/(^# agentguard )[0-9]+\.[0-9]+\.[0-9]+( \()/${1}'"$NEW"'${2}/'
 )
 
 for entry in "${REPLACEMENTS[@]}"; do
@@ -98,15 +103,15 @@ done
 
 # package-lock.json has many "version" lines (one per transitive dep). Only
 # rewrite occurrences whose previous line is the root package's own
-# `"name": "@agentguard/sdk"` declaration. There are two such occurrences
+# `"name": "@lictorate/agentguard"` declaration. There are two such occurrences
 # (the top-level field and the entry under packages.""). A state variable
-# `$g` is set when the previous line names @agentguard/sdk and consumed by
+# `$g` is set when the previous line names @lictorate/agentguard and consumed by
 # the very next "version" line so transitive-dep versions stay untouched.
 PLOCK='plugins/typescript/package-lock.json'
 if [ -f "$PLOCK" ]; then
   perl -i -pe '
     if ($g) { s/("version"\s*:\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/; $g = 0; }
-    if (/"name"\s*:\s*"\@agentguard\/sdk"/) { $g = 1; }
+    if (/"name"\s*:\s*"\@lictorate\/agentguard"/) { $g = 1; }
   ' "$PLOCK"
   if ! grep -Fq "\"version\": \"$NEW\"" "$PLOCK"; then
     echo "Error: $PLOCK did not pick up $NEW — check the perl block" >&2
@@ -139,6 +144,8 @@ TRACKED=(
   docs/MCP_GATEWAY.md
   docs/PROXY_ARCHITECTURE.md
   docs/POLICY_REFERENCE.md
+  docs/DEPLOYMENT.md
+  docs/CLI.md
 )
 grep -Hn "$OLD" "${TRACKED[@]}" 2>/dev/null || echo "  (none)"
 
@@ -151,10 +158,16 @@ LEFTOVER=0
 check_canonical() {
   local file="$1"
   local pattern="$2"
-  if [ -f "$file" ] && grep -Pq "$pattern" "$file"; then
-    echo "  FAIL: $file still has canonical declaration matching $pattern" >&2
-    LEFTOVER=1
-  fi
+  [ -f "$file" ] || return 0
+  # perl exits 0 on a match, 1 on no match; anything else (a bad regex, an
+  # unreadable file) is an error and must not pass as "no leftover".
+  local rc=0
+  PAT="$pattern" perl -ne 'BEGIN { $p = $ENV{PAT} } if (/$p/) { $hit = 1; last } END { $? ||= ($hit ? 0 : 1) }' "$file" || rc=$?
+  case "$rc" in
+    0) echo "  FAIL: $file still has canonical declaration matching $pattern" >&2; LEFTOVER=1 ;;
+    1) ;;
+    *) echo "  FAIL: could not check $file (perl exited $rc)" >&2; LEFTOVER=1 ;;
+  esac
 }
 check_canonical 'cmd/agentguard/main.go'                    "^\s*version\s*=\s*\"$OLD\""
 check_canonical 'cmd/agentguard-mcp-gateway/main.go'        "^\s*version\s*=\s*\"$OLD\""
@@ -172,7 +185,7 @@ check_canonical 'plugins/typescript/package.json'           "^\s*\"version\"\s*:
 if [ -f 'plugins/typescript/package-lock.json' ]; then
   if perl -ne '
     if ($g && /"version"\s*:\s*"'"$OLD"'"/) { print; exit 1; }
-    $g = (/"name"\s*:\s*"\@agentguard\/sdk"/) ? 1 : 0;
+    $g = (/"name"\s*:\s*"\@lictorate\/agentguard"/) ? 1 : 0;
   ' 'plugins/typescript/package-lock.json'; then
     :  # no leftovers
   else
@@ -186,6 +199,8 @@ check_canonical 'docs/API.md'                               "\"version\":\s*\"$O
 check_canonical 'docs/MCP_GATEWAY.md'                       "\"version\":\s*\"$OLD\""
 check_canonical 'docs/PROXY_ARCHITECTURE.md'                "\"version\":\s*\"$OLD\""
 check_canonical 'docs/POLICY_REFERENCE.md'                  "format as of \*\*v$OLD\*\*"
+check_canonical 'docs/DEPLOYMENT.md'                        "image: (registry\.example\.com/)?agentguard:$OLD"
+check_canonical 'docs/CLI.md'                               "^# agentguard $OLD \\("
 
 if [ "$LEFTOVER" -ne 0 ]; then
   echo "Error: at least one canonical declaration still references $OLD — fix the script" >&2

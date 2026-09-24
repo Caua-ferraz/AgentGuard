@@ -2,7 +2,7 @@
 
 Companion to the short [`plugins/python/README.md`](../plugins/python/README.md). This page covers the details you need when things go sideways: fail modes, timeouts, exception semantics, adapter internals, and testing patterns.
 
-Package on PyPI: `agentguardproxy`. Import name: `agentguard`.
+Package on PyPI: `agentguardproxy`. Import name: `agentguard`. `agentguard-sdk` on PyPI is an unrelated project that also installs an `agentguard` module — don't install both in the same environment.
 
 Source: `plugins/python/agentguard/core.py` (Guard client, exceptions, constants), `plugins/python/agentguard/decorators.py` (`@guarded`), and `plugins/python/agentguard/adapters/*.py` (framework integrations). The package `__init__.py` re-exports the public surface — always import from the package root.
 
@@ -41,6 +41,7 @@ from agentguard import (
     Guard, CheckResult, guarded,
     AgentGuardError, AgentGuardDenied,
     AgentGuardApprovalRequired, AgentGuardApprovalTimeout,
+    AgentGuardAuthError,
 )
 ```
 
@@ -54,6 +55,7 @@ The core SDK has **no runtime dependencies** — it uses only the standard libra
 |---|---|---|
 | `AGENTGUARD_URL` | `http://localhost:8080` | `Guard(base_url="")` fallback. |
 | `AGENTGUARD_API_KEY` | *(empty)* | `Guard(api_key="")` fallback. Sent as `Authorization: Bearer <key>` on `/v1/approve/{id}`, `/v1/deny/{id}`, and every poll of `/v1/status/{id}` inside `wait_for_approval`. |
+| `AGENTGUARD_TENANT_ID` | *(empty)* | `Guard(tenant_id=None)` fallback. A value other than `local` routes every call to `/v1/t/<tenant>/…` (see [`API.md`](API.md#url-families-legacy-vs-tenant-aware-v05)). |
 
 Explicit arguments always win over env vars; env vars always win over package defaults.
 
@@ -68,6 +70,7 @@ Guard(
     timeout: int = 5,
     api_key: str = "",
     fail_mode: str = "deny",   # or "allow"
+    tenant_id: Optional[str] = None,
 )
 ```
 
@@ -76,6 +79,7 @@ Guard(
 - `timeout` — per-HTTP-call timeout in seconds. Applies to `/v1/check`, `/v1/approve`, `/v1/deny`, and each poll inside `wait_for_approval`.
 - `api_key` — empty string falls back to `AGENTGUARD_API_KEY`. Required whenever the server is started with `--api-key`.
 - `fail_mode` — see [Fail-mode semantics](#fail-mode-semantics). Invalid values raise `ValueError` at construction so misconfiguration fails at startup rather than mid-request.
+- `tenant_id` — `None` falls back to `AGENTGUARD_TENANT_ID`; an explicit `""` ignores the env var. Empty or `"local"` uses the legacy `/v1/…` URLs; any other value uses `/v1/t/<tenant>/…`, with the tenant URL-encoded.
 
 `Guard` instances are thread-safe for concurrent `check()` calls (all state read-only after init). They are cheap; creating one per request is fine, and reusing one is slightly cheaper.
 
@@ -134,11 +138,12 @@ Convenience booleans: `.allowed`, `.denied`, `.needs_approval`.
 
 ## Fail-mode semantics
 
-Exactly three transport errors collapse into a synthetic `CheckResult` controlled by `fail_mode`:
+These failures of `check()` collapse into a synthetic `CheckResult` controlled by `fail_mode`:
 
-- `urllib.error.URLError` — connection-phase failure (connect refused, DNS, SSL handshake).
+- `urllib.error.URLError` — connection-phase failure (connect refused, DNS, SSL handshake), and HTTP error statuses (urllib raises `HTTPError`, a `URLError` subclass, for `4xx`/`5xx`).
 - `OSError` — post-connect failure (`ConnectionResetError`, `BrokenPipeError`, `socket.timeout` surfaced from `resp.read()`).
 - `json.JSONDecodeError` — the body parsed as non-JSON; from the caller's perspective this is indistinguishable from an unreachable proxy.
+- A response that isn't a valid decision: a `Content-Type` other than `application/json`, or a JSON body without a `decision` field (reason `AgentGuard returned unexpected content-type …` / `AgentGuard returned malformed response body`).
 
 ```python
 # fail_mode="deny" (default)
@@ -162,7 +167,7 @@ CheckResult(decision="ALLOW", reason="AgentGuard unreachable (allow): <original 
 | `wait_for_approval(timeout=300)` | 300s | Wall-clock deadline for the whole poll loop. |
 | `wait_for_approval(poll_interval=2)` | 2s | Sleep between polls. |
 
-`wait_for_approval` quietly swallows individual poll failures (`URLError`, other `OSError`s, and a body that is not JSON) and keeps retrying until the deadline — the assumption is that the server is momentarily unreachable but will come back within the approval window. A final deadline miss returns `CheckResult(decision="DENY", reason="Approval timed out")`, which the `@guarded(wait_for_approval=True)` wrapper surfaces as `AgentGuardApprovalTimeout`.
+`wait_for_approval` quietly swallows individual poll failures (`URLError`, HTTP errors other than `401`/`403`, other `OSError`s, and a body that is not JSON) and keeps retrying until the deadline — the assumption is that the server is momentarily unreachable but will come back within the approval window. A final deadline miss returns `CheckResult(decision="DENY", reason="Approval timed out")`, which the `@guarded(wait_for_approval=True)` wrapper surfaces as `AgentGuardApprovalTimeout`.
 
 **Pick `timeout` higher than your human-SLA.** If approvers need 15 minutes on average, `timeout=300` will fire false negatives.
 
@@ -180,7 +185,7 @@ guard.wait_for_approval("ap_1a2b3c…",
                         poll_interval=2)  # CheckResult
 ```
 
-All three send `Authorization: Bearer <api_key>` when `api_key` is set. If the server was started without `--api-key`, the key is ignored. If the server **was** started with `--api-key` and you do not set one on the SDK side, you will get `401` on approve/deny and `wait_for_approval` will loop until the deadline.
+All three send `Authorization: Bearer <api_key>` when `api_key` is set. If the server was started without `--api-key`, the key is ignored. If the server **was** started with `--api-key` and you do not set one on the SDK side, the server answers `401`: `approve`/`deny` return `False`, and `wait_for_approval` raises `AgentGuardAuthError` (with `.status`) on the first `401`/`403` instead of polling until the deadline.
 
 `approve`/`deny` treat any `URLError` as failure and return `False`. They do **not** distinguish network error from 4xx. If you need that distinction, call the HTTP API directly.
 
@@ -188,14 +193,15 @@ All three send `Authorization: Bearer <api_key>` when `api_key` is set. If the s
 
 ## Exception hierarchy
 
-All raised by the `@guarded` decorator. All extend `PermissionError` so legacy `except PermissionError:` keeps working.
+The first three subclasses are raised by the `@guarded` decorator; `AgentGuardAuthError` is raised by `wait_for_approval` (and so also through `@guarded(wait_for_approval=True)`) when a status poll gets `401`/`403`. All extend `PermissionError` so legacy `except PermissionError:` keeps working.
 
 ```
 PermissionError
 └── AgentGuardError         .result: Optional[CheckResult]
     ├── AgentGuardDenied
     ├── AgentGuardApprovalRequired   .approval_id, .approval_url
-    └── AgentGuardApprovalTimeout    .approval_id
+    ├── AgentGuardApprovalTimeout    .approval_id
+    └── AgentGuardAuthError          .status
 ```
 
 The `.result` attribute lets you skip re-parsing the reason string:

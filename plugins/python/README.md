@@ -20,6 +20,8 @@ pip install agentguardproxy[browser-use]
 pip install agentguardproxy[all]
 ```
 
+The package is `agentguardproxy`; the import name is `agentguard`. `agentguard-sdk` on PyPI is an unrelated project that also installs an `agentguard` module — don't install both in the same environment.
+
 ## Quick start
 
 ```python
@@ -55,6 +57,7 @@ else:
 |---|---|---|
 | `AGENTGUARD_URL` | `http://localhost:8080` | `Guard(base_url="")` fallback |
 | `AGENTGUARD_API_KEY` | *(empty)* | `Guard(api_key="")` fallback; sent as `Authorization: Bearer <key>` on `/v1/approve`, `/v1/deny`, `/v1/status` |
+| `AGENTGUARD_TENANT_ID` | *(empty)* | `Guard(tenant_id=None)` fallback; a value other than `local` routes calls to `/v1/t/<tenant>/…` |
 
 ### Fail mode
 
@@ -67,7 +70,7 @@ guard = Guard("http://localhost:8080")
 guard = Guard("http://localhost:8080", fail_mode="allow")
 ```
 
-Three classes of transport failure are caught: `urllib.error.URLError` (connection refused / DNS / SSL), `OSError` (post-connect timeouts and resets), and `json.JSONDecodeError` (garbage response body).
+Fail mode applies to transport failures — `urllib.error.URLError` (connection refused / DNS / SSL, and HTTP error statuses), `OSError` (post-connect timeouts and resets), `json.JSONDecodeError` (garbage response body) — and to responses that aren't a valid decision (a non-JSON `Content-Type`, or a body without `decision`).
 
 ## The `@guarded` decorator
 
@@ -94,7 +97,7 @@ On `REQUIRE_APPROVAL` the decorator raises `AgentGuardApprovalRequired` immediat
 def expensive_call(prompt: str): ...
 ```
 
-All three exceptions (`AgentGuardDenied`, `AgentGuardApprovalRequired`, `AgentGuardApprovalTimeout`) extend `PermissionError`, so existing `except PermissionError:` handlers keep working unchanged.
+All AgentGuard exceptions (`AgentGuardDenied`, `AgentGuardApprovalRequired`, `AgentGuardApprovalTimeout`, `AgentGuardAuthError`) extend `PermissionError`, so existing `except PermissionError:` handlers keep working unchanged.
 
 ## Framework adapters
 
@@ -160,11 +163,11 @@ python -m agentguard.adapters.mcp --guard-url http://localhost:8080
 
 ## API reference (summary)
 
-### `Guard(base_url="", agent_id="", timeout=5, api_key="", fail_mode="deny")`
+### `Guard(base_url="", agent_id="", timeout=5, api_key="", fail_mode="deny", tenant_id=None)`
 
 | Method | Behavior |
 |---|---|
-| `check(scope, *, action, command, path, domain, url, session_id, est_cost, meta)` | POST `/v1/check`. Returns `CheckResult`. Transport failure → fail-closed `DENY` (or `ALLOW` if `fail_mode="allow"`). |
+| `check(scope, *, action, command, path, domain, url, session_id, est_cost, meta, approval_id)` | POST `/v1/check` (`approval_id` replays a resolved approval — see the quick start). Returns `CheckResult`. Transport failure → fail-closed `DENY` (or `ALLOW` if `fail_mode="allow"`). |
 | `approve(id)` / `deny(id)` | POST `/v1/approve/{id}` / `/v1/deny/{id}`. Returns `bool` success. Sends Bearer if `api_key` set. |
 | `wait_for_approval(id, timeout=300, poll_interval=2)` | Polls `GET /v1/status/{id}` until `resolved` or deadline. Timeout → `CheckResult(DENY, "Approval timed out")`. |
 
@@ -178,6 +181,7 @@ Fields: `decision`, `reason`, `matched_rule`, `approval_id`, `approval_url`. Pro
 - `AgentGuardDenied` — policy said DENY.
 - `AgentGuardApprovalRequired` — policy said REQUIRE_APPROVAL and the decorator was not configured to wait. Carries `.approval_id`, `.approval_url`.
 - `AgentGuardApprovalTimeout` — `wait_for_approval` deadline elapsed. Carries `.approval_id`.
+- `AgentGuardAuthError` — a `wait_for_approval` status poll got `401`/`403` (API key missing or wrong). Carries `.status`.
 
 ## License
 

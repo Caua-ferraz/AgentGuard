@@ -8,6 +8,8 @@ For a single-line summary of each change, see `CHANGELOG.md`. For deep-dive rele
 
 ## v0.4.0 → v0.4.1
 
+*(Corrected in v1.1.1: v0.4.1 was never tagged or published — no Go module version or PyPI release exists. Its changes first shipped in v0.5.0, so these steps apply when you upgrade from v0.4.0 to v0.5.0 or later.)*
+
 ### What happens automatically
 
 On first start of a v0.4.1 binary against an audit file written by v0.4.0:
@@ -96,7 +98,7 @@ This deletes `<path>.replay-checkpoint` — the file `agentguard serve` reads �
    - `go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-mcp-gateway@v0.5.0`
    - `go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@v0.5.0`
 
-   Both share the central server's policy file (mount the same `policy.yaml` into all three processes; `--watch` on the central server still hot-reloads).
+   Both share the central server's policy file (mount the same `policy.yaml` into all three processes; each one hot-reloads it when it changes).
 
 5. **Update Python SDK installs** to Python 3.9+. v0.5 drops 3.8 (upstream EOL October 2024). The `pyproject.toml` floor is now `requires-python = ">=3.9"`.
 
@@ -172,11 +174,16 @@ The only behavioural difference an operator might notice: v0.5.0 Python SDK on C
 
 ## v0.5.x → v0.7.0 (includes the v0.6 milestone)
 
-v0.5.2 was a maintenance release (toolchain refresh, no migration). The
-v0.6 milestone (persistence + multi-tenancy) shipped without standalone
-release notes and is documented under v0.7.0 — upgrading from any v0.5.x
-directly to v0.7.0 is the supported path. Full detail:
-[`releases/v0.7.0.md`](releases/v0.7.0.md).
+v0.5.2 was a maintenance release (toolchain refresh, no migration).
+**v0.7.0 was never tagged or published** — there is no v0.7.0 Go module
+version and no v0.7.0 PyPI release. The v0.6 milestone (persistence +
+multi-tenancy) was tagged only as `V0.6.0`, an uppercase tag `go install`
+can't resolve (PyPI does have `agentguardproxy==0.6.0`). The changes below
+first shipped in an installable release in **v0.9.0**: upgrade from v0.5.x
+straight to v0.9.0 or later and apply this section together with
+§ v0.7.0 → v0.9.0. Full detail: [`releases/v0.7.0.md`](releases/v0.7.0.md).
+*(Corrected in v1.1.1: this section previously said upgrading directly to
+v0.7.0 was the supported path; v0.7.0 was never published.)*
 
 ### What happens automatically
 
@@ -231,14 +238,16 @@ lost, matching v0.5.x's in-memory behaviour.
    go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-mcp-gateway@v0.9.0
    go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@v0.9.0
    pip install --upgrade "agentguardproxy==0.9.0"
-   npm install @agentguard/sdk@0.9.0
+   # TypeScript SDK: not on npm at 0.9.0 — build it from plugins/typescript
    ```
+
+   *(Corrected in v1.1.1: this block previously ended with `npm install @agentguard/sdk@0.9.0`. That npm package is unrelated to AgentGuard; the TypeScript SDK was not published at 0.9.0. It is on npm as `@lictorate/agentguard` from 1.1.1.)*
 
 2. **(Optional) Forward your audit log to WORM storage** if you want tamper-evidence — see the README audit bullet and [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
-### Rollback to v0.7.0
+### Rollback (there is no v0.7.0 build)
 
-Trivial. v0.9.0 introduces no on-disk state, no schema bumps, and no wire-protocol changes — reinstall the v0.7.0 binaries/SDKs and start. No data migration is required either way.
+v0.9.0 introduces no on-disk state, no schema bumps, and no wire-protocol changes, but v0.7.0 was never published, so there is nothing to reinstall at that version. Roll back to v0.5.2 instead — see *Rollback to v0.5.x* above: v0.5.x ignores `agentguard.db`, so pending approvals stored there are lost. *(Corrected in v1.1.1: this previously said to reinstall the v0.7.0 binaries/SDKs.)*
 
 ---
 
@@ -291,8 +300,11 @@ Trivial. v0.9.0 introduces no on-disk state, no schema bumps, and no wire-protoc
    go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-mcp-gateway@v1.0.0
    go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@v1.0.0
    pip install --upgrade "agentguardproxy==1.0.0"
-   npm install @agentguard/sdk@1.0.0
+   # TypeScript SDK: not on npm at 1.0.0 — build it from plugins/typescript
    ```
+
+   *(Corrected in v1.1.1: this block previously ended with `npm install @agentguard/sdk@1.0.0`. That npm package is unrelated to AgentGuard; the TypeScript SDK was not published at 1.0.0. It is on npm as `@lictorate/agentguard` from 1.1.1.)*
+
 2. If you run (or plan to run) more than one replica: provision PostgreSQL,
    set `--store-dsn postgres://…` and a distinct `--node-id` per replica,
    and read the bounded-overshoot semantics in
@@ -307,6 +319,99 @@ Two things degrade on rollback: one-shot consumption stamps stop being
 enforced (v0.9 predates them — previously-spent ALLOWs become replayable
 within their retention window), and any Postgres-backed deployment must
 return to single-node SQLite (v0.9 has no Postgres backend).
+
+---
+
+## v1.1.0 → v1.1.1
+
+Coming from 1.0.x? Read the Compatibility section of
+[`CHANGELOG.md`](../CHANGELOG.md) § 1.1.0 first. This section covers only
+1.1.0 → 1.1.1.
+
+### What happens automatically
+
+- Nothing on disk changes: no store schema, audit format or checkpoint
+  change. `/v1/check`, the audit format (`schema_version: 2`) and the policy
+  schema (`version: "1"`) are unchanged.
+
+### Behavior changes worth knowing about
+
+- **`agentguard-llm-proxy --listen :PORT` refuses to start without
+  `--proxy-api-key`.** A listen address with no host binds every interface,
+  but 1.1.0 treated it as loopback and started with no inbound auth. It now
+  exits with status 2 and says `--listen ":8081" has no host, so it binds
+  every interface …`. Use `127.0.0.1:PORT` for loopback only, or set
+  `--proxy-api-key` if you meant to listen on every interface.
+- **The shipped `configs/default.yaml` changed for the example fetch and
+  GitHub MCP servers.** This only matters if you run that file itself; a
+  copy you made earlier keeps its old rules.
+  - `fetch:*` calls require approval. After approval, the mapped `network`
+    check still applies, so only allow-listed hosts pass. In 1.1.0 the
+    official fetch server's `fetch:fetch` tool matched no rule and was
+    denied by default.
+  - `github:*` is no longer in `tool_scope_map`. GitHub calls still require
+    approval, and an approved call now runs. In 1.1.0 the mapped `network`
+    check found no domain in GitHub's arguments and denied every call,
+    approved or not.
+- **`go install` builds show the update notice.** The interactive
+  subcommands of a binary installed with `go install …@vX.Y.Z` or `@latest`
+  now check the GitHub Releases API at startup, as
+  [`CLI.md`](CLI.md#update-notice-on-startup-v051) describes; in 1.1.0 those
+  builds reported `commit=dev` and skipped the check. `serve` still never
+  checks. Set `AGENTGUARD_NO_UPDATE_CHECK=1` to opt out.
+- **`agentguard version` identifies more builds.** A `go install` build
+  prints `agentguard 1.1.1 (module v1.1.1)` instead of `(dev)`, and a
+  `go build` in a git checkout prints the short revision. A script that
+  matched the literal `(dev)` needs updating.
+- **`make docker-run` requires `AGENTGUARD_API_KEY`.** It passes the key
+  into the container and stops before building the image when the variable
+  is unset. Without a key the server binds the container's own loopback, so
+  the published port never answered.
+
+### What you should do
+
+1. **Swap the binaries and the Python SDK to 1.1.1.**
+
+   ```bash
+   go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@v1.1.1
+   go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-mcp-gateway@v1.1.1
+   go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@v1.1.1
+   pip install --upgrade "agentguardproxy==1.1.1"
+   ```
+
+2. **TypeScript SDK: install it from npm and update your imports.** The SDK
+   is on npm as `@lictorate/agentguard` from 1.1.1. Before that it could
+   only be built from `plugins/typescript`, where its package name was
+   `@agentguard/sdk`, so the import path changes:
+
+   ```bash
+   npm uninstall @agentguard/sdk   # your local build, or the unrelated npm package of that name
+   npm install @lictorate/agentguard@1.1.1
+   ```
+
+   ```ts
+   // before
+   import { AgentGuard } from '@agentguard/sdk';
+   // after
+   import { AgentGuard } from '@lictorate/agentguard';
+   ```
+
+3. If you start the LLM proxy with `--listen :PORT`, change it to
+   `127.0.0.1:PORT` or add `--proxy-api-key`.
+4. If your MCP client config still launches
+   `npx -y @modelcontextprotocol/server-fetch` (a package that never existed
+   on npm, so that namespace was always empty) or the deprecated
+   `@modelcontextprotocol/server-github`, switch to the launchers in
+   [`examples/`](../examples/): `uvx mcp-server-fetch` and GitHub's
+   `ghcr.io/github/github-mcp-server` image.
+
+### Rollback to v1.1.0
+
+Supported: nothing on disk changed. Rolling back brings back the
+`--listen :PORT` hole, where the proxy starts on every interface with no
+inbound auth, so use `127.0.0.1:PORT` or set `--proxy-api-key` before you
+roll back. `@lictorate/agentguard` has no 1.1.0 release on npm; to roll the
+TypeScript SDK back, build `plugins/typescript` at the `v1.1.0` tag.
 
 ---
 

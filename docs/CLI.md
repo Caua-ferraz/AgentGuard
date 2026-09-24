@@ -24,8 +24,8 @@ Run 'agentguard <command> -h' for per-command flag help.
 
 Global conventions:
 - All subcommands use Go's stdlib `flag` package. Flags must precede positional args (`agentguard approve --api-key $K <id>`, **not** `agentguard approve <id> --api-key $K`).
-- `--api-key` on client subcommands (`approve`, `deny`, `status`, `audit`) falls back to the `AGENTGUARD_API_KEY` env var.
-- Exit code `0` = success; `1` = any failure.
+- `--api-key` on `serve` and on the client subcommands (`approve`, `deny`, `status`, `audit`) falls back to the `AGENTGUARD_API_KEY` env var.
+- Exit code `0` = success, `1` = failure, `2` = invalid flags (Go's `flag` package; `-h` exits `0`). `check` has its own codes — see below.
 
 ---
 
@@ -247,7 +247,7 @@ fi
 
 ### Behavior notes
 
-- The subcommand is **one-shot** — no policy hot-reload. Each invocation reloads the policy. Long-running pipelines that re-invoke `check` per action pay the load cost each time. (`--watch <jsonl-file>` for streaming evaluation is tracked as a v0.6 follow-up.)
+- Without `--watch`, the subcommand is **one-shot** — no policy hot-reload. Each invocation reloads the policy, so pipelines that re-invoke `check` per action pay the load cost each time; `--watch <jsonl-file>` streams requests through a single policy load instead.
 - The decoder rejects unknown JSON fields. A typo like `"actions":"read"` (instead of `"action":"read"`) returns exit `3`, so silent default-deny on a malformed request is impossible.
 - Cost-scope evaluations DO reserve session cost into the in-memory accumulator for the lifetime of the process, but the accumulator is discarded on exit. Two consecutive `agentguard check` calls do not see each other's reservations — that's a server feature, not a CLI feature.
 
@@ -291,7 +291,7 @@ agentguard status
 #   [ap_456…] scope=cost  action=""                   agent=trading-bot
 ```
 
-If the server is running without `--api-key`, pending approvals appear unauthenticated. If you set `--api-key` on the server but not here, the pending list shows "unauthorized".
+If the server is running without `--api-key`, pending approvals appear unauthenticated. If you set `--api-key` on the server but not here, the pending list shows "unauthorized". `/api/pending` exists only when the server runs with `--dashboard`; without it the line reads `Pending approvals: unavailable (the server was started without --dashboard)`. The exit code is `1` only when the server can't be reached.
 
 ---
 
@@ -384,10 +384,18 @@ Startup migrations run automatically inside `agentguard serve` before the audit 
 
 ```bash
 agentguard version
-# agentguard 1.0.0 (abc1234)
+# agentguard 1.1.1 (abc1234)
 ```
 
-The `version` string is baked in at build time via `-ldflags "-X main.version=... -X main.commit=..."` (see `Makefile`).
+The version comes from the source; the part in parentheses identifies the build:
+
+| Built with | Shows |
+|---|---|
+| `make build` (`-ldflags "-X main.commit=…"`) | the git short hash, e.g. `abc1234` |
+| `go install …/cmd/agentguard@vX.Y.Z` or `@latest` | `module vX.Y.Z` (from Go build info) |
+| `go build` in a git checkout | the short VCS revision, with `-dirty` if the tree had local changes |
+| `make docker` (`--build-arg COMMIT=…`) | the git short hash |
+| any build with neither ldflags nor VCS information | `dev` |
 
 ### Update notice on startup (v0.5.1+)
 
@@ -397,7 +405,7 @@ The interactive subcommands (`check`, `validate`, `approve`, `deny`, `status`, `
 Notice: agentguard v1.0.0 is deprecated, version v1.1.0 available — https://github.com/Caua-ferraz/AgentGuard/releases/latest
 ```
 
-`serve` never performs the check: the enforcement server opens no outbound connection the operator did not configure (see [`THREAT_MODEL.md`](THREAT_MODEL.md#outbound-connections)). The check is also skipped when the binary was built with `commit=dev` or a version string containing `dev` (what a plain `go build` without the Makefile's ldflags produces), when `AGENTGUARD_NO_UPDATE_CHECK` is set to any value other than `0`, or when the HTTP request fails. Never touches stdout, never affects exit codes. Only the `agentguard` binary has the check; the MCP gateway and LLM proxy never had one.
+`serve` never performs the check: the enforcement server opens no outbound connection the operator did not configure (see [`THREAT_MODEL.md`](THREAT_MODEL.md#outbound-connections)). The check is also skipped for development builds — a version string containing `dev`, or no `-ldflags` commit (`commit=dev`) *and* no tagged release version in the Go build info, as with `go build` on an untagged or modified checkout. `go install …@vX.Y.Z` and `@latest` builds record the release tag, so they do check. It is also skipped when `AGENTGUARD_NO_UPDATE_CHECK` is set to any value other than `0`, or when the HTTP request fails. Never touches stdout, never affects exit codes. Only the `agentguard` binary has the check; the MCP gateway and LLM proxy never had one.
 
 ---
 
@@ -405,7 +413,7 @@ Notice: agentguard v1.0.0 is deprecated, version v1.1.0 available — https://gi
 
 | Var | Consumed by | Default |
 |---|---|---|
-| `AGENTGUARD_API_KEY` | `approve`, `deny`, `status`, `audit` (when `--api-key` unset) | empty |
+| `AGENTGUARD_API_KEY` | `serve`, `approve`, `deny`, `status`, `audit` (when `--api-key` unset) | empty |
 | `AGENTGUARD_URL` | SDKs (not the CLI) | `http://localhost:8080` |
 | `AGENTGUARD_NO_UPDATE_CHECK` | Every subcommand except `serve` (which never checks) — disables the GitHub Releases startup check when set to any value other than `0` | unset |
 

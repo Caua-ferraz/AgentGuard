@@ -219,9 +219,12 @@ Details: [`docs/DEPLOYMENT.md` §3](DEPLOYMENT.md#3-cors).
 
 ```bash
 docker run -d -p 8080:8080 \
+  -e AGENTGUARD_API_KEY="$AGENTGUARD_API_KEY" \
   -v agentguard-audit:/var/lib/agentguard \
   agentguard:latest
 ```
+
+Keep `-e AGENTGUARD_API_KEY`: without an API key the server binds `127.0.0.1` inside the container and the published port refuses connections.
 
 ---
 
@@ -229,7 +232,7 @@ docker run -d -p 8080:8080 \
 
 ### MCP client shows zero tools after pointing at `agentguard-mcp-gateway`
 
-The gateway started but no `--upstream` is wired, or the upstream subprocess crashed at boot. Run the gateway in the foreground and watch for `WARN mcpgw upstream <name> spawn failed: ...`. Verify the upstream command runs standalone. Details: [`MCP_GATEWAY.md`](MCP_GATEWAY.md).
+The gateway started but no `--upstream` is wired, or the upstream subprocess crashed at boot. Run the gateway in the foreground and watch for `info mcpgw: startup: upstream "<name>" failed to spawn: …` (a missing launcher such as `npx`, `uvx` or `docker` shows up here). Verify the upstream command runs standalone. Details: [`MCP_GATEWAY.md`](MCP_GATEWAY.md).
 
 ### LLM API Proxy: SDK hangs / `unexpected end of stream`
 
@@ -255,4 +258,4 @@ The client's `OPENAI_BASE_URL` is missing the `/v1` suffix, or the request is a 
 - Check `/metrics` on the central server AND on each proxy — counters, gauges, histograms, dispatch drops.
 - Response headers on `/v1/check`: `X-AgentGuard-Policy-Ms`, `X-AgentGuard-Audit-Ms`, `X-AgentGuard-Total-Ms` (timings in ms, 3 decimals).
 - Version skew: all three binaries report their version via `agentguard version` / `agentguard-mcp-gateway --version` / `agentguard-llm-proxy --version`. Mismatch is the most common ops-time bug after a partial upgrade.
-- Open an issue with: versions of all binaries, sanitized policy snippet, and the relevant log lines from both the proxy and the central server. Security-sensitive reports go to `cauaferraz@gmail.com` — not the issue tracker.
+- Open an issue with: versions of all binaries, sanitized policy snippet, and the relevant log lines from both the proxy and the central server. Security-sensitive reports go to `cauaferrazp@gmail.com` — not the issue tracker.

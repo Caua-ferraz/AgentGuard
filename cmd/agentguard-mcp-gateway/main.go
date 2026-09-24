@@ -8,8 +8,9 @@
 //
 //	agentguard-mcp-gateway \
 //	    --upstream "fs:npx -y @modelcontextprotocol/server-filesystem /tmp" \
-//	    --upstream "github:npx -y @modelcontextprotocol/server-github" \
+//	    --upstream "github:docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server" \
 //	    --guard-url http://127.0.0.1:8080 \
+//	    --policy /etc/agentguard/policy.yaml \
 //	    --api-key $AGENTGUARD_API_KEY \
 //	    --tenant-id local \
 //	    --fail-mode deny \
@@ -36,6 +37,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/Caua-ferraz/AgentGuard/cmd/internal/buildinfo"
 	"github.com/Caua-ferraz/AgentGuard/pkg/mcpgw"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
@@ -43,7 +45,7 @@ import (
 // Versions are injected at link time via -ldflags. Defaults are used
 // for `go run ./cmd/agentguard-mcp-gateway` and `go test`.
 var (
-	version = "1.1.0"
+	version = "1.1.1"
 	commit  = "dev"
 )
 
@@ -54,7 +56,7 @@ func main() {
 	// it works without --upstream.
 	for _, a := range args {
 		if a == "--version" || a == "-version" {
-			fmt.Printf("agentguard-mcp-gateway %s (%s)\n", version, commit)
+			fmt.Printf("agentguard-mcp-gateway %s (%s)\n", version, buildinfo.Describe(commit))
 			return
 		}
 	}

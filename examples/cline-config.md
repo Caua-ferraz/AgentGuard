@@ -54,7 +54,25 @@ The Cline-specific keys:
 
 ## Setup
 
-1. **Install binaries** (Go 1.22+):
+The example config starts three downstream MCP servers, each with its own
+launcher:
+
+| Upstream | Launcher | Install |
+|---|---|---|
+| `fs` — filesystem server | `npx` | [Node.js](https://nodejs.org/) 20+ |
+| `fetch` — fetch server | `uvx` | [uv](https://docs.astral.sh/uv/getting-started/installation/) |
+| `github` — [GitHub's MCP server](https://github.com/github/github-mcp-server) | `docker` | [Docker](https://docs.docker.com/get-started/get-docker/) |
+
+Install the launchers for the upstreams you keep and delete the
+`--upstream` entries you don't need. A missing launcher disables only
+that namespace: the gateway logs
+`info mcpgw: startup: upstream "fetch" failed to spawn: …` and serves the
+others. The GitHub server reads `GITHUB_PERSONAL_ACCESS_TOKEN` from the
+config's `env` block; the gateway passes its environment to every
+upstream, and `docker run -e GITHUB_PERSONAL_ACCESS_TOKEN` forwards it
+into the container.
+
+1. **Install binaries** (Go 1.25+):
 
    ```bash
    go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@latest
@@ -95,8 +113,10 @@ Open the Cline chat in VS Code and ask:
 - "Read `/tmp/test.txt`" — Cline calls `fs:read_text_file` through the
   gateway, AgentGuard's default policy ALLOWs it, dashboard shows the
   event.
-- "List recent issues from `<your repo>`" — gateway routes via `github:`,
-  AgentGuard either ALLOWs or surfaces an approval depending on policy.
+- "List recent issues from `<your repo>`" — gateway routes via `github:`;
+  the default policy requires approval for every `github:*` call, so the
+  tool returns an approval request and the dashboard lists it (see the
+  [approval flow](../docs/MCP_GATEWAY.md#6-approval-flow)).
 - "Read `/etc/passwd`" — DENY, dashboard shows the deny event.
 
 ## API key handling
@@ -111,11 +131,14 @@ when the `--api-key` flag is absent.
 
 ## Tenant ID
 
-v0.5 is single-tenant. Use `--tenant-id local` (the only value the
-central server recognizes). Multi-tenant routing lands in v0.6 — until
-then, `--tenant-id <anything-other-than-local>` returns 404 from
-`/v1/check`, the gateway hits its `--fail-mode` path, and every action
-denies (or is blanket-allowed, depending on your `--fail-mode`).
+`--tenant-id` picks the tenant whose policy evaluates the gateway's
+calls (they go to `/v1/t/<tenant>/check`). Keep `local` — the policy
+the server loads with `--policy` — unless you've registered another
+tenant on the central server with
+`agentguard tenant put <id> --policy <file.yaml>`. A tenant the server
+doesn't know answers `404`, which the gateway
+treats like an unreachable server: `--fail-mode` decides, so with `deny`
+every call is refused.
 
 ## Notes
 

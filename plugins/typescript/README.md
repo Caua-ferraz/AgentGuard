@@ -6,22 +6,24 @@ TypeScript / JavaScript client for [AgentGuard](https://github.com/Caua-ferraz/A
 - **Fail-closed by default.** If the proxy is unreachable, `check()` resolves to `DENY`. Opt in to `failMode: 'allow'` if your threat model requires it.
 - **Types included.** Ships `.d.ts` alongside CommonJS `dist/`.
 
-> **Runtime requirement:** Node.js **18+** (for native `fetch`), or any browser / Deno / Bun / Workers runtime that provides `fetch` and `AbortController` globally. Node 16 and earlier will need a `fetch` polyfill such as `undici`.
+> **Runtime requirement:** Node.js **20+** (the `engines` field in `package.json`; CI tests 20, 22 and 24), or any browser / Deno / Bun / Workers runtime that provides `fetch` and `AbortController` globally.
 
 ## Install
 
 ```bash
-npm install @agentguard/sdk
+npm install @lictorate/agentguard
 # or
-pnpm add @agentguard/sdk
+pnpm add @lictorate/agentguard
 # or
-yarn add @agentguard/sdk
+yarn add @lictorate/agentguard
 ```
+
+Published to npm from 1.1.1. The `@agentguard/sdk` package on npm is an unrelated project, not this SDK.
 
 ## Quick start
 
 ```ts
-import { AgentGuard } from '@agentguard/sdk';
+import { AgentGuard } from '@lictorate/agentguard';
 
 const guard = new AgentGuard({
   baseUrl: 'http://localhost:8080',   // or set AGENTGUARD_URL
@@ -53,6 +55,7 @@ if (result.allowed) {
 |---|---|---|
 | `AGENTGUARD_URL` | `http://localhost:8080` | `baseUrl` fallback (explicit options override). |
 | `AGENTGUARD_API_KEY` | *(empty)* | `apiKey` fallback. Sent as `Authorization: Bearer <key>` on `/v1/approve`, `/v1/deny`, and every poll of `/v1/status` inside `waitForApproval`. |
+| `AGENTGUARD_TENANT_ID` | *(empty)* | `tenantId` fallback (an explicit `tenantId`, even `''`, wins). A value other than `local` routes calls to `/v1/t/<tenant>/…`. |
 
 `process.env` reads are guarded — the SDK works in browser / Workers / Deno runtimes that do not expose `process`.
 
@@ -66,12 +69,12 @@ const guard = new AgentGuard('http://localhost:8080');
 const guard = new AgentGuard({ baseUrl: '…', failMode: 'allow' });
 ```
 
-Any thrown/rejected error from `fetch` (connection refused, DNS failure, TLS handshake, body-read failure, `AbortController` timeout) collapses into the fail-mode response. This matches the Python SDK's semantics.
+Any thrown/rejected error from `fetch` (connection refused, DNS failure, TLS handshake, body-read failure, `AbortController` timeout) collapses into the fail-mode response, and so does a response that isn't a valid decision: a non-2xx status, a `Content-Type` other than `application/json`, a body that isn't JSON, or one without `decision`. This matches the Python SDK's semantics.
 
 ## The `guarded` higher-order function
 
 ```ts
-import { AgentGuard, guarded, AgentGuardDeniedError } from '@agentguard/sdk';
+import { AgentGuard, guarded, AgentGuardDeniedError } from '@lictorate/agentguard';
 
 const guard = new AgentGuard('http://localhost:8080');
 
@@ -108,7 +111,7 @@ const reviewed = guarded(guard, 'cost', makeExpensiveCall, {
 
 ## Error classes
 
-All thrown by `guarded` on deny/approval. Every class extends the built-in `Error`, so plain `catch (e)` handlers still work.
+`guarded` throws the first three on deny/approval; `AgentGuardAuthError` comes from `waitForApproval` (and so also from `guarded` with `waitForApproval: true`). Every class extends the built-in `Error`, so plain `catch (e)` handlers still work.
 
 | Class | Thrown when | Extra fields |
 |---|---|---|
@@ -116,6 +119,7 @@ All thrown by `guarded` on deny/approval. Every class extends the built-in `Erro
 | `AgentGuardDeniedError` | decision was DENY (or REQUIRE_APPROVAL resolved to DENY) | `.result` |
 | `AgentGuardApprovalRequiredError` | REQUIRE_APPROVAL, not waiting | `.approvalId`, `.approvalUrl` |
 | `AgentGuardApprovalTimeoutError` | `waitForApproval` deadline elapsed | `.approvalId` |
+| `AgentGuardAuthError` | a `waitForApproval` status poll got `401`/`403` (API key missing or wrong) | `.status` |
 
 ```ts
 try {
@@ -145,6 +149,7 @@ new AgentGuard({
   apiKey?: string,    // default: process.env.AGENTGUARD_API_KEY ?? ''
   timeout?: number,   // ms, default 5000
   failMode?: 'deny' | 'allow',  // default 'deny'
+  tenantId?: string,  // default: process.env.AGENTGUARD_TENANT_ID ?? ''; not 'local' → /v1/t/<tenant>/…
 });
 ```
 
@@ -184,11 +189,11 @@ Returns `Promise<boolean>` — `true` iff the server responded 2xx. Swallows net
 waitForApproval(id: string, timeoutMs = 300_000, pollIntervalMs = 2_000): Promise<CheckResult>
 ```
 
-Polls `GET /v1/status/{id}` with the Bearer token attached. Poll-level errors are swallowed and retried until the deadline. On deadline elapse returns `{ decision: 'DENY', reason: 'Approval timed out' }`.
+Polls `GET /v1/status/{id}` with the Bearer token attached. A `401`/`403` throws `AgentGuardAuthError` (with `.status`) immediately — the API key is wrong or missing, so waiting can't help. Other poll-level errors (network failures, other non-2xx responses, a per-poll timeout, a body that isn't JSON) are retried until the deadline. On deadline elapse returns `{ decision: 'DENY', reason: 'Approval timed out' }`.
 
 **Tune `timeoutMs` to the human SLA.** If approvers routinely take 5 minutes, `300_000` (5 min) will fire false negatives.
 
-**Restart kills in-flight approvals.** The approval queue is in-memory on the server — a proxy restart loses every pending ID. Handle the timeout by re-issuing `check()` (which yields a new approval ID).
+**Restarts pause approvals; they don't kill them.** Since v0.6 the server persists the approval queue by default (`--persist`), so pending IDs survive a restart and `waitForApproval` picks up where it left off. The exceptions: a server started with `--persist=false` loses every pending ID on restart, and an approval created in the last ≥1 s store-sync window before a hard crash may be gone. In both cases the status endpoint answers `404` for that ID, `waitForApproval` keeps polling until `timeoutMs`, and you get `{ decision: 'DENY', reason: 'Approval timed out' }` — re-issue `check()` to get a new approval ID.
 
 ### `CheckResult`
 
@@ -212,9 +217,9 @@ The getter convenience properties are computed from `decision`.
 
 The package ships CommonJS (`main: "dist/index.js"`) with types (`types: "dist/index.d.ts"`). It works out of the box in:
 
-- Node 18+ (CommonJS or ESM via default-interop).
+- Node 20+ (CommonJS or ESM via default-interop).
 - Bundlers (webpack, esbuild, Rollup, Vite) — imports compile cleanly.
-- TypeScript projects (types resolve through `@agentguard/sdk`).
+- TypeScript projects (types resolve through `@lictorate/agentguard`).
 
 Browser / Workers / Deno runtimes: no polyfills needed — the SDK uses only `fetch`, `AbortController`, `setTimeout`. `process.env` reads are guarded.
 
@@ -224,10 +229,10 @@ Both SDKs talk to the same `/v1/check` endpoint and share identical behavior on 
 
 | Concern | Python | TypeScript |
 |---|---|---|
-| Env fallback | `AGENTGUARD_URL`, `AGENTGUARD_API_KEY` | same |
+| Env fallback | `AGENTGUARD_URL`, `AGENTGUARD_API_KEY`, `AGENTGUARD_TENANT_ID` | same |
 | Fail mode | `fail_mode="deny"` (default) / `"allow"` | `failMode: 'deny'` (default) / `'allow'` |
 | Approval wait | `wait_for_approval(timeout=300, poll_interval=2)` | `waitForApproval(timeoutMs=300_000, pollIntervalMs=2_000)` |
-| Exceptions | `AgentGuardDenied`, `AgentGuardApprovalRequired`, `AgentGuardApprovalTimeout` (all `PermissionError`) | `AgentGuardDeniedError`, `AgentGuardApprovalRequiredError`, `AgentGuardApprovalTimeoutError` (all `Error`) |
+| Exceptions | `AgentGuardDenied`, `AgentGuardApprovalRequired`, `AgentGuardApprovalTimeout`, `AgentGuardAuthError` (all `PermissionError`) | `AgentGuardDeniedError`, `AgentGuardApprovalRequiredError`, `AgentGuardApprovalTimeoutError`, `AgentGuardAuthError` (all `Error`) |
 | Decorator / HOF | `@guarded(scope, guard, wait_for_approval=…)` | `guarded(guard, scope, fn, { waitForApproval: … })` |
 
 ## Related docs

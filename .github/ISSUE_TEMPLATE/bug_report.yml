@@ -19,7 +19,7 @@ body:
     attributes:
       label: AgentGuard version
       description: Output of `agentguard version`. SDK version too if relevant.
-      placeholder: "agentguard 0.5.0 (commit abc1234)"
+      placeholder: "agentguard X.Y.Z (abc1234)"
     validations:
       required: true
 

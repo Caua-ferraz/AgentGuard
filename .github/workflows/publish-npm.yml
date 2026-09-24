@@ -1,0 +1,73 @@
+name: Publish TypeScript SDK to npm
+
+# Publishes plugins/typescript as @lictorate/agentguard when a GitHub release
+# is published — the same trigger as publish-pypi.yml.
+#
+# Authenticates with npm trusted publishing (GitHub OIDC), so no npm token
+# is stored in this repository. On npmjs.com, @lictorate/agentguard's trusted
+# publisher must name the repository Caua-ferraz/AgentGuard and the workflow
+# file publish-npm.yml; renaming this file stops publishing until the setting
+# is updated. `id-token: write` lets the job request the OIDC token, and npm
+# attaches provenance automatically. Trusted publishing needs npm >= 11.5.1.
+#
+# npm only accepts a trusted publisher for a package that already exists, so
+# the first version (1.1.1) was published by hand. A version that's already
+# on npm is skipped, so publishing that release here is a no-op.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/typescript
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      # A release tagged v1.2.3 must publish package.json version 1.2.3.
+      # Catches a release cut before scripts/bump-version.sh was run.
+      - name: Check package version matches the release tag
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "v${pkg}" != "${TAG}" ]; then
+            echo "package.json version ${pkg} does not match release tag ${TAG}" >&2
+            exit 1
+          fi
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Update npm (trusted publishing needs >= 11.5.1)
+        run: npm install -g npm@^11.5.1
+
+      - name: Publish
+        run: |
+          spec="$(node -p "const p = require('./package.json'); p.name + '@' + p.version")"
+          if npm view "${spec}" version >/dev/null 2>&1; then
+            echo "${spec} is already on npm; nothing to publish."
+            exit 0
+          fi
+          npm publish --access public

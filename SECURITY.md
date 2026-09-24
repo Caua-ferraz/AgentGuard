@@ -8,15 +8,18 @@ receive security fixes and how to report a vulnerability privately.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.5.x   | Yes                |
-| < 0.5   | No                 |
+| 1.1.x   | Yes                |
+| < 1.1   | No                 |
 
-Older versions do not receive backports. If you are running a release line
-that is no longer supported, please upgrade to the latest 0.5.x release.
+Security fixes ship on the latest minor release line (currently 1.1.x).
+Older lines, including 1.0.x, do not receive backports — upgrade to the
+latest 1.1.x release. Releases within 1.x follow the compatibility policy
+in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md); each release's
+CHANGELOG entry lists any behaviour changes.
 
 ## Reporting a Vulnerability
 
-Please report suspected vulnerabilities by email to **cauaferraz@gmail.com**.
+Please report suspected vulnerabilities by email to **cauaferrazp@gmail.com**.
 
 Do **not** open a public GitHub issue, pull request, or discussion thread for
 security reports. Public reports give attackers a head start before a fix is

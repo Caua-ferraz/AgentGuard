@@ -1,6 +1,6 @@
 # Policy Reference
 
-Canonical reference for the AgentGuard policy YAML format as of **v1.1.0**.
+Canonical reference for the AgentGuard policy YAML format as of **v1.1.1**.
 
 Source of truth: `pkg/policy/engine.go` (types) and `pkg/policy/engine.go:Engine.Check` (evaluation). Examples here are the shapes the Go YAML decoder accepts — unknown keys are silently ignored.
 
@@ -308,7 +308,7 @@ tool_scope_map:
     scope: filesystem
   - pattern: "fs:*"
     scope: filesystem
-  - pattern: "github:*"
+  - pattern: "fetch:*"
     scope: network
   - pattern: "*:execute_*"
     scope: shell
@@ -337,6 +337,8 @@ When the dual-check fires, the gateway projects the tool-call arguments into the
 
 Rules in the mapped scope (`filesystem`, `network`, etc.) match on these fields exactly as they would for an SDK or proxy request — there is no MCP-specific matching path.
 
+**Map a tool only if its arguments carry what the mapped scope checks.** A tool mapped to `network` with no `url`/`domain`/`host`/`hostname` argument projects an empty `Domain`, so domain allow rules such as `api.github.com` never match and every call falls through to default deny. GitHub's MCP server is the common case (its tools take `owner`/`repo`), which is why `configs/default.yaml` leaves `github:*` unmapped and gates it with an `mcp_tool` `require_approval` rule instead.
+
 ### Why the list form, not an inline map
 
 A YAML map (`fs:read_file: filesystem`) would be more compact, but Go map iteration is non-deterministic and the dual-check is first-match-wins. Operators write a few extra lines per entry; the gateway guarantees the same scope for the same tool name on every host regardless of YAML library quirks.
@@ -353,7 +355,7 @@ See [`docs/MCP_GATEWAY.md`](./MCP_GATEWAY.md) for the gateway's full wire format
 
 ## LLM API Proxy tool scope mapping
 
-The LLM API Proxy (`agentguard-llm-proxy`) inspects upstream model responses for `tool_calls` and gates each call against operator policy **using the same `tool_scope_map:` section** the MCP Gateway uses. There is no separate `llm_tool_scope_map:` key — the bare tool names emitted by chat-style models (`bash`, `read_file`, `web_search`) and the namespaced names emitted by MCP servers (`fs:read_file`, `github:create_issue`) occupy disjoint regions of the pattern space, so a single mapping table covers both transports without ambiguity.
+The LLM API Proxy (`agentguard-llm-proxy`) inspects upstream model responses for `tool_calls` and gates each call against operator policy **using the same `tool_scope_map:` section** the MCP Gateway uses. There is no separate `llm_tool_scope_map:` key — the bare tool names emitted by chat-style models (`bash`, `read_file`, `web_search`) and the namespaced names emitted by MCP servers (`fs:read_text_file`, `github:list_issues`) occupy disjoint regions of the pattern space, so a single mapping table covers both transports without ambiguity.
 
 ### Bundled defaults
 

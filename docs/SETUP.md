@@ -74,7 +74,7 @@ go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@latest
 
 ```bash
 curl http://localhost:8080/health
-# {"status":"ok","version":"1.1.0"}
+# {"status":"ok","version":"1.1.1"}
 ```
 
 Open `http://localhost:8080/dashboard` in your browser to see the live dashboard.
@@ -181,15 +181,22 @@ rules and per-framework gotchas live in [`ADAPTERS.md`](ADAPTERS.md).
 ### Install
 
 ```bash
+# From npm (published from 1.1.1)
+npm install @lictorate/agentguard
+
+# Or from source: build the package, then install it into your project
 cd plugins/typescript
-npm install
+npm ci
 npm run build
+cd /path/to/your-project && npm install /path/to/AgentGuard/plugins/typescript
 ```
+
+`@agentguard/sdk` on npm is an unrelated project, not this SDK.
 
 ### Usage
 
 ```typescript
-import { AgentGuard } from '@agentguard/sdk';
+import { AgentGuard } from '@lictorate/agentguard';
 
 const guard = new AgentGuard({
   baseUrl: 'http://localhost:8080',
@@ -254,12 +261,19 @@ Two additional binaries enforce at the wire. Both need `--guard-url` pointing at
 ```bash
 docker build -t agentguard:latest .
 
+# The API key is required: without it the server binds 127.0.0.1 inside
+# the container and the published port is unreachable.
 # Default policy is baked in; mount a named volume so the audit log
 # survives container restarts.
+export AGENTGUARD_API_KEY="$(openssl rand -hex 32)"
 docker run -d -p 8080:8080 --name agentguard \
+  -e AGENTGUARD_API_KEY="$AGENTGUARD_API_KEY" \
   -v agentguard-audit:/var/lib/agentguard \
   agentguard:latest
 ```
+
+`make docker-run` does the same build and run, and stops early if
+`AGENTGUARD_API_KEY` isn't set.
 
 Custom-policy mounts, the non-root uid-10001 volume-permission gotcha,
 Compose, and Kubernetes manifests are in
@@ -281,10 +295,14 @@ Policies are YAML files in `configs/`. See the included examples:
 
 ### Policy Hot-Reload
 
-Start with `--watch` to reload policies on file change without restarting:
+Policy edits take effect without a restart: the server always watches the
+`--policy` file (fsnotify, falling back to a 2 s modification-time poll
+where fsnotify isn't available). `--watch` only adds a log line for each
+reload:
 
 ```bash
 agentguard serve --policy configs/default.yaml --watch
+# 2026/09/23 21:59:11 Policy reloaded: default-sandbox (56 rules)
 ```
 
 ### Everything else in the policy file
