@@ -261,12 +261,19 @@ Two additional binaries enforce at the wire. Both need `--guard-url` pointing at
 ```bash
 docker build -t agentguard:latest .
 
+# The API key is required: without it the server binds 127.0.0.1 inside
+# the container and the published port is unreachable.
 # Default policy is baked in; mount a named volume so the audit log
 # survives container restarts.
+export AGENTGUARD_API_KEY="$(openssl rand -hex 32)"
 docker run -d -p 8080:8080 --name agentguard \
+  -e AGENTGUARD_API_KEY="$AGENTGUARD_API_KEY" \
   -v agentguard-audit:/var/lib/agentguard \
   agentguard:latest
 ```
+
+`make docker-run` does the same build and run, and stops early if
+`AGENTGUARD_API_KEY` isn't set.
 
 Custom-policy mounts, the non-root uid-10001 volume-permission gotcha,
 Compose, and Kubernetes manifests are in

@@ -219,9 +219,12 @@ Details: [`docs/DEPLOYMENT.md` §3](DEPLOYMENT.md#3-cors).
 
 ```bash
 docker run -d -p 8080:8080 \
+  -e AGENTGUARD_API_KEY="$AGENTGUARD_API_KEY" \
   -v agentguard-audit:/var/lib/agentguard \
   agentguard:latest
 ```
+
+Keep `-e AGENTGUARD_API_KEY`: without an API key the server binds `127.0.0.1` inside the container and the published port refuses connections.
 
 ---
 
