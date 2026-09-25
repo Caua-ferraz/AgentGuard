@@ -1,0 +1,178 @@
+name: Release binaries, installers and image
+
+# Builds what a release needs to be installable without a Go toolchain:
+#   - archives with all three binaries for Linux, macOS and Windows on amd64
+#     and arm64, plus checksums.txt (scripts/build-release.sh);
+#   - install.sh / install.ps1, stamped with the release's version, so
+#     .../releases/latest/download/install.sh always installs the newest one;
+#   - the multi-arch container image ghcr.io/<owner>/agentguard;
+# and signs build provenance for every archive, installer and the image
+# (verify with `gh attestation verify <file> --repo Caua-ferraz/AgentGuard`).
+#
+# Runs on every published release. It can also backfill an existing release:
+# Actions -> this workflow -> Run workflow, with the tag (for example v1.2.0).
+# The build script and Dockerfile come from the branch the workflow runs on,
+# the sources from the tag, so an older release gets the same set of assets.
+# Re-running replaces the uploaded files (--clobber) and re-pushes the tags.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build and attach assets to (e.g. v1.2.0)'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-assets-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  binaries:
+    name: Archives and installers
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # upload the release assets
+      id-token: write      # sign the build provenance
+      attestations: write  # store the attestation
+    steps:
+      # Only plain vX.Y.Z tags: the Go module proxy ignores anything else, and
+      # the value ends up in file names and a sed expression below.
+      - name: Check the tag
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "tag '$TAG' is not of the form vX.Y.Z" >&2
+            exit 1
+          fi
+
+      - name: Check out the build scripts
+        uses: actions/checkout@v4
+        with:
+          path: tooling
+
+      - name: Check out the release sources
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          path: src
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.7'   # keep in step with go.mod's toolchain directive and ci.yml
+          cache-dependency-path: src/go.sum
+
+      # build-release.sh refuses a --version that differs from the version
+      # string in the sources, so a mistagged release fails here.
+      - name: Build the archives
+        run: |
+          tooling/scripts/build-release.sh --src src --out dist \
+            --version "${TAG#v}" --commit "$(git -C src rev-parse --short HEAD)"
+
+      - name: Add the installers
+        run: |
+          for f in install.sh install.ps1; do
+            sed "s/@AGENTGUARD_VERSION@/${TAG#v}/" "tooling/scripts/$f" > "dist/$f"
+          done
+          (cd dist && sha256sum install.sh install.ps1 >> checksums.txt)
+
+      - name: Sign build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/install.sh
+            dist/install.ps1
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" \
+            dist/*.tar.gz dist/*.zip dist/checksums.txt dist/install.sh dist/install.ps1 \
+            --clobber --repo "$GITHUB_REPOSITORY"
+
+  image:
+    name: Container image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write      # push to ghcr.io
+      id-token: write      # sign the build provenance
+      attestations: write  # store the attestation
+    steps:
+      - name: Check the tag
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "tag '$TAG' is not of the form vX.Y.Z" >&2
+            exit 1
+          fi
+
+      - name: Check out the Dockerfile
+        uses: actions/checkout@v4
+        with:
+          path: tooling
+
+      - name: Check out the release sources
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          path: src
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      # The Dockerfile cross-compiles in a builder on the runner's own
+      # platform, so the arm64 image needs no emulation. Only the newest
+      # release moves :latest, so backfilling an older tag never rolls
+      # `docker pull ...:latest` users back.
+      - name: Build and push
+        id: push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/agentguard"
+          version="${TAG#v}"
+          tags=(--tag "$image:$version")
+          latest="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          if [ "$latest" = "$TAG" ]; then
+            tags+=(--tag "$image:latest")
+          fi
+          source="https://github.com/$GITHUB_REPOSITORY"
+          description="AgentGuard, the firewall for AI agents"
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --file tooling/Dockerfile \
+            --build-arg COMMIT="$(git -C src rev-parse --short HEAD)" \
+            --label "org.opencontainers.image.source=$source" \
+            --label "org.opencontainers.image.version=$version" \
+            --label "org.opencontainers.image.licenses=Apache-2.0" \
+            --label "org.opencontainers.image.description=$description" \
+            --annotation "index:org.opencontainers.image.source=$source" \
+            --annotation "index:org.opencontainers.image.description=$description" \
+            --annotation "index:org.opencontainers.image.licenses=Apache-2.0" \
+            "${tags[@]}" \
+            --metadata-file metadata.json \
+            --push src
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "digest=$(jq -r '."containerimage.digest"' metadata.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Sign build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ steps.push.outputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

@@ -1,4 +1,4 @@
-.PHONY: build build-mcp-gateway build-llm-proxy test test-all lint run clean docker docker-run require-api-key validate validate-examples bench dep-audit help
+.PHONY: build build-mcp-gateway build-llm-proxy test test-all lint run clean docker docker-run release-artifacts require-api-key validate validate-examples bench dep-audit help
 
 # Binary name
 BINARY=agentguard
@@ -65,6 +65,10 @@ docker-run: require-api-key docker
 		-e AGENTGUARD_API_KEY \
 		-v agentguard-audit:/var/lib/agentguard \
 		$(BINARY):latest
+
+## release-artifacts: Build the release archives for every platform into dist/ (what the release workflow uploads)
+release-artifacts:
+	./scripts/build-release.sh --version $(VERSION) --commit $(COMMIT) --out dist
 
 # Without an API key the server binds 127.0.0.1 inside the container, so
 # the published port is unreachable. Fail before building the image.

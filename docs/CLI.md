@@ -418,6 +418,8 @@ The interactive subcommands (`check`, `validate`, `approve`, `deny`, `status`, `
 Notice: agentguard v1.0.0 is deprecated, version v1.1.0 available — https://github.com/Caua-ferraz/AgentGuard/releases/latest
 ```
 
+To update, use the method you installed with: run the install command again (`curl -fsSL https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/install.sh | sh`, or on Windows `irm https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/install.ps1 | iex`), pull the new `ghcr.io/caua-ferraz/agentguard` tag, or `go install …@latest`. See [`SETUP.md`](SETUP.md#1-install).
+
 `serve` never performs the check: the enforcement server opens no outbound connection the operator did not configure (see [`THREAT_MODEL.md`](THREAT_MODEL.md#outbound-connections)). The check is also skipped for development builds — a version string containing `dev`, or no `-ldflags` commit (`commit=dev`) *and* no tagged release version in the Go build info, as with `go build` on an untagged or modified checkout. `go install …@vX.Y.Z` and `@latest` builds record the release tag, so they do check. It is also skipped when `AGENTGUARD_NO_UPDATE_CHECK` is set to any value other than `0`, or when the HTTP request fails. Never touches stdout, never affects exit codes. Only the `agentguard` binary has the check; the MCP gateway and LLM proxy never had one.
 
 ---
