@@ -95,6 +95,8 @@ git push && git push --tags
 # approve it on npmjs.com to make it public, see below).
 ```
 
+Publishing also fires `release-assets.yml`, which builds the archives, installers and container image and attaches them to the release, about three minutes of work. Until it finishes, `…/releases/latest/download/install.sh` already points at the new release but returns 404. When it succeeds, `installer-smoke.yml` runs the published one-liners on Linux, macOS and Windows and the container image; check it is green before announcing the release.
+
 The publish workflows only trigger on `release: [published]` events or via manual `workflow_dispatch`. Pushing the tag alone does **not** trigger them. (This caught v0.5.1 — the tag was pushed but the release was never drafted, so PyPI stayed on v0.5.0 until the operator pressed Publish.)
 
 `publish-npm.yml` uses npm trusted publishing, so there's no npm token to store or rotate. On npmjs.com, `@lictorate/agentguard`'s trusted publisher names the repository `Caua-ferraz/AgentGuard` and the workflow file `publish-npm.yml`. If you rename the workflow file, update that setting too, or publishing fails. The workflow refuses to publish when the release tag doesn't match `plugins/typescript/package.json`'s version, and skips a version that's already on npm. Each version carries provenance that links it to the workflow run.

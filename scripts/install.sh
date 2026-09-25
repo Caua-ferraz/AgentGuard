@@ -140,9 +140,23 @@ fi
 case ":$PATH:" in
   *":$dir:"*) ;;
   *)
+    # Name the startup file the user's shell actually reads: macOS defaults
+    # to zsh, which never reads ~/.profile; bash reads ~/.bash_profile for
+    # macOS's login shells and ~/.bashrc for Linux terminals.
+    login_shell="${SHELL:-}"
+    case "${login_shell##*/}" in
+      zsh) rc=".zshrc" ;;
+      bash) if [ "$os" = darwin ]; then rc=".bash_profile"; else rc=".bashrc"; fi ;;
+      fish) rc="" ;;
+      *) rc=".profile" ;;
+    esac
     say ""
-    say "$dir is not on your PATH. Add it, for example:"
-    say "  echo 'export PATH=\"$dir:\$PATH\"' >> ~/.profile && . ~/.profile"
+    say "$dir is not on your PATH. Add it, then open a new terminal:"
+    if [ -n "$rc" ]; then
+      say "  echo 'export PATH=\"$dir:\$PATH\"' >> ~/$rc"
+    else
+      say "  fish_add_path $dir"
+    fi
     ;;
 esac
 
