@@ -157,7 +157,7 @@ func TestFetchUpdateNotice(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			pointUpdateCheckAt(t, c.handler)
-			got := fetchUpdateNotice("1.0.0")
+			got := fetchUpdateNotice("1.0.0", "abc1234")
 			if c.want == "" && got != "" {
 				t.Fatalf("want silence, got %q", got)
 			}
@@ -166,6 +166,16 @@ func TestFetchUpdateNotice(t *testing.T) {
 			}
 			if got != "" && !strings.Contains(got, "releases/latest") {
 				t.Errorf("notice must link to the releases page: %q", got)
+			}
+			if got != "" {
+				for _, part := range []string{"is available", "(you have v1.0.0)", "Update: "} {
+					if !strings.Contains(got, part) {
+						t.Errorf("notice %q lacks %q", got, part)
+					}
+				}
+				if strings.Contains(got, "deprecated") {
+					t.Errorf("a newer release does not make this one deprecated: %q", got)
+				}
 			}
 		})
 	}
@@ -176,7 +186,7 @@ func TestFetchUpdateNotice_HangingServerIsBounded(t *testing.T) {
 		<-r.Context().Done() // never answer; the client's deadline ends it
 	})
 	start := time.Now()
-	got := fetchUpdateNotice("1.0.0")
+	got := fetchUpdateNotice("1.0.0", "abc1234")
 	elapsed := time.Since(start)
 	if got != "" {
 		t.Errorf("hanging server must yield silence, got %q", got)
@@ -227,5 +237,34 @@ func TestSubcommandOf(t *testing.T) {
 	}
 	if got := subcommandOf(nil); got != "" {
 		t.Errorf("got %q, want empty", got)
+	}
+}
+
+// The notice names the update command for the way this copy was installed:
+// the container image, `go install`, or the one-line installer for its OS.
+func TestUpdateCommand(t *testing.T) {
+	cases := []struct {
+		name, distribution, commit, moduleVersion, goos, want string
+	}{
+		{"container image", "container", "abc1234", "", "linux", updateByDockerImage},
+		{"go install @v1.2.0", "", "dev", "v1.2.0", "linux", updateByGoInstall},
+		{"go install on Windows", "", "dev", "v1.2.0", "windows", updateByGoInstall},
+		{"release archive, Linux", "", "abc1234", "", "linux", updateByInstallSh},
+		{"release archive, macOS", "", "abc1234", "", "darwin", updateByInstallSh},
+		{"release archive, Windows", "", "abc1234", "", "windows", updateByInstallPs1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("AGENTGUARD_DISTRIBUTION", c.distribution)
+			prevRead, prevGOOS := buildinfo.Read, goos
+			buildinfo.Read = func() (*debug.BuildInfo, bool) {
+				return &debug.BuildInfo{Main: debug.Module{Version: c.moduleVersion}}, true
+			}
+			goos = c.goos
+			t.Cleanup(func() { buildinfo.Read, goos = prevRead, prevGOOS })
+			if got := updateCommand(c.commit); got != c.want {
+				t.Errorf("updateCommand(%q) = %q, want %q", c.commit, got, c.want)
+			}
+		})
 	}
 }

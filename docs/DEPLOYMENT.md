@@ -136,7 +136,9 @@ agentguard serve --api-key "$AGENTGUARD_API_KEY" --bind 127.0.0.1 --tls-terminat
 Every release publishes a multi-arch image (linux/amd64 and linux/arm64) to
 `ghcr.io/caua-ferraz/agentguard`, tagged with the version and `latest`. It
 holds all three binaries; the server is the default entrypoint. Pin the
-version tag in production so an upgrade is a deliberate change. To build the
+version tag in production so an upgrade is a deliberate change. The image sets
+`AGENTGUARD_DISTRIBUTION=container`, so the CLI's update notice (never shown
+by `serve`) suggests pulling a new image rather than the one-line installer. To build the
 image yourself instead, replace `image:` with `build: .` at the repo root.
 
 ```yaml

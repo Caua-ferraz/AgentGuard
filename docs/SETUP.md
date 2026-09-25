@@ -53,6 +53,26 @@ The installers never overwrite an existing starter policy. To check provenance a
 
 If you installed this way, the commands below work without the leading `./`; use the starter policy path the installer printed in place of `configs/default.yaml`.
 
+#### Update
+
+Run the same install command again. It replaces the three binaries, keeps your policy, and says what changed: `Updated AgentGuard 1.2.0 -> 1.3.0`, `Reinstalled AgentGuard 1.3.0 (it was already on this version)`, or — when `AGENTGUARD_VERSION` pins an older release — `Downgraded AgentGuard 1.3.0 -> 1.2.0` followed by a warning. The `agentguard` CLI prints a one-line notice with the right command when a newer release is out (`serve` never checks; see [`CLI.md`](CLI.md#update-notice-on-startup-v051)).
+
+#### Uninstall
+
+```bash
+# Linux / macOS (add --purge to delete the policy folder too)
+curl -fsSL https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/install.sh | sh -s -- --uninstall
+```
+
+```powershell
+# Windows (also set $env:AGENTGUARD_PURGE=1 to delete the policy folder too)
+$env:AGENTGUARD_UNINSTALL=1; irm https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/install.ps1 | iex
+```
+
+The uninstall removes the three binaries — on Windows also the folder's entry on your user PATH — and keeps your policy folder, printing where it is. Audit logs and the state database live wherever you ran `agentguard serve`, so it cannot know their path and leaves them alone. Run it as the same user that installed (with `sudo` for a root install in `/usr/local/bin`); with `AGENTGUARD_INSTALL_DIR` set, it removes from that folder. On Windows, stop any running AgentGuard first: the uninstall refuses rather than removing half of it. `AGENTGUARD_UNINSTALL=1` works on Linux and macOS too; on Windows the variable is cleared once read, so a later install in the same window installs.
+
+For the container image, stop and remove the container; `docker volume rm agentguard-audit` (or whatever volume you mounted at `/var/lib/agentguard`) deletes the audit trail.
+
 #### Or build from source
 
 ```bash

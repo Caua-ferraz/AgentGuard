@@ -41,6 +41,10 @@ RUN apk --no-cache add ca-certificates \
 COPY --from=builder /out/ /usr/local/bin/
 COPY configs/default.yaml /etc/agentguard/default.yaml
 
+# Tells the CLI's update notice that this copy updates by pulling a new image,
+# not by re-running the one-line installer.
+ENV AGENTGUARD_DISTRIBUTION=container
+
 # Run as non-root. /var/lib/agentguard is the default writable location for
 # the audit log; mount a volume here in production so the log survives
 # container restarts.

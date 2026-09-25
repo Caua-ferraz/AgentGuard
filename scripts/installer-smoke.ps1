@@ -1,5 +1,5 @@
-# installer-smoke.ps1 — install AgentGuard on Windows the way a user does,
-# then check what the installer left behind. Run by
+# installer-smoke.ps1 — install (and uninstall) AgentGuard on Windows the way
+# a user does, then check what the installer left behind. Run by
 # .github/workflows/installer-smoke.yml under Windows PowerShell 5.1 and 7.
 #
 #   -Mode published  the public one-liner: irm .../releases/latest/download/install.ps1 | iex
@@ -40,6 +40,31 @@ function Install-AgentGuard {
     return @{ Out = $out; Code = $code }
 }
 
+# Uninstall and the updated/downgraded/reinstalled messages arrived after the
+# v1.2.0 installer; they are checked only when the installer under test has
+# them (this checkout's always does; a published one from v1.2.0 does not).
+$source = if ($Mode -eq 'published') { (Invoke-WebRequest -UseBasicParsing $Url).Content } else { Get-Content -Raw "$PSScriptRoot\install.ps1" }
+$newer = $source -match 'AGENTGUARD_UNINSTALL'
+
+# Runs the installer under test in uninstall mode, the way the docs say to.
+function Uninstall-AgentGuard([switch] $Purge) {
+    $env:AGENTGUARD_UNINSTALL = '1'
+    if ($Purge) { $env:AGENTGUARD_PURGE = '1' }
+    $r = Install-AgentGuard
+    Remove-Item Env:AGENTGUARD_UNINSTALL, Env:AGENTGUARD_PURGE -ErrorAction SilentlyContinue
+    return $r
+}
+
+# A stand-in agentguard.exe whose --version prints the given release, built
+# with the C# compiler Windows PowerShell 5.1 ships, so no Go is needed.
+function New-VersionStub([string] $Folder, [string] $Version) {
+    $exe = Join-Path $Folder 'agentguard.exe'
+    Remove-Item $exe -Force -ErrorAction SilentlyContinue
+    $class = 'Stub' + ($Version -replace '\D', '')
+    $src = "public static class $class { public static void Main() { System.Console.WriteLine(""agentguard $Version""); } }"
+    Add-Type -TypeDefinition $src -OutputAssembly $exe -OutputType ConsoleApplication
+}
+
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }
 Write-Host "== $Mode installer via $Engine, windows/$arch, expecting $Want"
 
@@ -75,7 +100,8 @@ if ($LASTEXITCODE -eq 0) { Pass 'starter policy validates' } else { Fail 'starte
 # 5. Running it again reinstalls cleanly and keeps the operator's policy.
 Add-Content -Path $policy -Value '# operator edit'
 $r2 = Install-AgentGuard
-if ($r2.Code -eq 0 -and $r2.Out -match "Installed AgentGuard $WantRe") { Pass "rerun reinstalls $Want" } else { Write-Host $r2.Out; Fail 'unexpected rerun output' }
+$againLine = if ($newer) { "Reinstalled AgentGuard $Want" } else { "Installed AgentGuard $Want" }
+if ($r2.Code -eq 0 -and $r2.Out -match [regex]::Escape($againLine)) { Pass "rerun: $againLine" } else { Write-Host $r2.Out; Fail "expected '$againLine' on rerun" }
 if ((Get-Content $policy -Tail 1) -eq '# operator edit') { Pass 'rerun kept the existing policy' } else { Fail 'rerun overwrote the policy' }
 
 # 6. A tampered archive is refused and nothing is installed. The mirror is
@@ -107,6 +133,61 @@ try {
 }
 if ($t.Code -ne 0 -and $t.Out -match 'checksum mismatch') { Pass 'tampered archive refused (checksum mismatch)' } else { Write-Host $t.Out; Fail 'tampered archive was not refused for its checksum' }
 if (-not (Test-Path (Join-Path $target 'agentguard.exe'))) { Pass 'nothing installed from the tampered archive' } else { Fail 'a binary was installed' }
+
+# 7. The installer says whether it updated, downgraded (with a warning) or
+#    reinstalled, judged by the version the binary already there reports.
+if ($newer) {
+    $stub = Join-Path $tmp ('ag-stub-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $stub | Out-Null
+    $saved = @{ Dir = $env:AGENTGUARD_INSTALL_DIR; Path = $env:AGENTGUARD_NO_MODIFY_PATH }
+    $env:AGENTGUARD_INSTALL_DIR = $stub
+    $env:AGENTGUARD_NO_MODIFY_PATH = '1'
+
+    New-VersionStub $stub '9.9.9'
+    $s = Install-AgentGuard
+    if ($s.Code -eq 0 -and $s.Out -match "Downgraded AgentGuard 9\.9\.9 -> $WantRe") { Pass "over 9.9.9: Downgraded 9.9.9 -> $Want" } else { Write-Host $s.Out; Fail 'no Downgraded line' }
+    if ($s.Out -match "Warning: $WantRe is older than the 9\.9\.9 you had") { Pass 'downgrade warns' } else { Write-Host $s.Out; Fail 'no downgrade warning' }
+
+    New-VersionStub $stub '0.1.0'
+    $s = Install-AgentGuard
+    if ($s.Code -eq 0 -and $s.Out -match "Updated AgentGuard 0\.1\.0 -> $WantRe") { Pass "over 0.1.0: Updated 0.1.0 -> $Want" } else { Write-Host $s.Out; Fail 'no Updated line' }
+    if ($s.Out -match 'Warning:') { Write-Host $s.Out; Fail 'an update must not warn' }
+
+    $env:AGENTGUARD_INSTALL_DIR = $saved.Dir; $env:AGENTGUARD_NO_MODIFY_PATH = $saved.Path
+}
+
+# 8. Uninstall removes the binaries (and on Windows the PATH entry) and keeps
+#    the policy, saying where; a second run finds nothing and still succeeds;
+#    AGENTGUARD_PURGE=1 also deletes the policy folder; purge on its own is
+#    refused.
+if ($newer) {
+    $confdir = Join-Path $env:APPDATA 'agentguard'
+    $u = Uninstall-AgentGuard
+    $u.Out.Trim() -split "`n" | ForEach-Object { Write-Host "    | $($_.TrimEnd())" }
+    if ($u.Code -ne 0) { Fail "uninstall exited $($u.Code)" }
+    foreach ($t in 'agentguard', 'agentguard-mcp-gateway', 'agentguard-llm-proxy') {
+        if (-not (Test-Path (Join-Path $dir "$t.exe"))) { Pass "uninstall removed $t.exe" } else { Fail "uninstall left $dir\$t.exe" }
+    }
+    $onPath = ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';') -contains $dir
+    if ($env:AGENTGUARD_NO_MODIFY_PATH -eq '1') {
+        if (-not $onPath) { Pass 'user PATH still untouched (AGENTGUARD_NO_MODIFY_PATH=1)' } else { Fail 'user PATH gained the folder' }
+    } else {
+        if (-not $onPath) { Pass 'uninstall took the folder off the user PATH' } else { Fail 'install folder still on the user PATH' }
+    }
+    if ((Test-Path $policy) -and $u.Out -match [regex]::Escape("Kept your policy folder $confdir")) { Pass 'uninstall kept the policy and said where' } else { Fail 'uninstall did not keep or name the policy folder' }
+
+    $u2 = Uninstall-AgentGuard
+    if ($u2.Code -eq 0 -and $u2.Out -match 'not installed in') { Pass 'second uninstall: nothing to remove, exit 0' } else { Write-Host $u2.Out; Fail 'second uninstall output' }
+
+    $null = Install-AgentGuard
+    $p = Uninstall-AgentGuard -Purge
+    if ($p.Code -eq 0 -and -not (Test-Path (Join-Path $dir 'agentguard.exe')) -and -not (Test-Path $confdir)) { Pass "purge removed the binaries and $confdir" } else { Write-Host $p.Out; Fail 'purge left files behind' }
+
+    $env:AGENTGUARD_PURGE = '1'
+    $m = Install-AgentGuard
+    Remove-Item Env:AGENTGUARD_PURGE -ErrorAction SilentlyContinue
+    if ($m.Code -ne 0 -and $m.Out -match 'only applies together with AGENTGUARD_UNINSTALL') { Pass 'purge on its own is refused' } else { Write-Host $m.Out; Fail 'purge on its own was not refused' }
+}
 
 Write-Host 'ALL PASS'
 # Explicit: $LASTEXITCODE still holds the tampered install's deliberate

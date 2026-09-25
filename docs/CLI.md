@@ -415,10 +415,19 @@ The version comes from the source; the part in parentheses identifies the build:
 The interactive subcommands (`check`, `validate`, `approve`, `deny`, `status`, `audit`, `migrate`, `tenant`, `version`) kick off an async best-effort check against the GitHub Releases API at startup (800 ms wait budget, 1.5 s HTTP timeout). If a newer release exists, one line lands on stderr before subcommand output; otherwise silent.
 
 ```
-Notice: agentguard v1.0.0 is deprecated, version v1.1.0 available — https://github.com/Caua-ferraz/AgentGuard/releases/latest
+Notice: AgentGuard v1.3.0 is available (you have v1.2.0). Update: curl -fsSL https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/install.sh | sh — what's new: https://github.com/Caua-ferraz/AgentGuard/releases/latest
 ```
 
-To update, use the method you installed with: run the install command again (`curl -fsSL https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/install.sh | sh`, or on Windows `irm https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/install.ps1 | iex`), pull the new `ghcr.io/caua-ferraz/agentguard` tag, or `go install …@latest`. See [`SETUP.md`](SETUP.md#1-install).
+The command it names depends on how this copy was installed:
+
+| Installed with | Update command in the notice |
+|---|---|
+| The one-line installer or a release archive, Linux / macOS | `curl -fsSL …/releases/latest/download/install.sh \| sh` |
+| The one-line installer or a release archive, Windows | `irm …/releases/latest/download/install.ps1 \| iex` |
+| `go install …@vX.Y.Z` / `@latest` | `go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@latest` |
+| The container image (it sets `AGENTGUARD_DISTRIBUTION=container`) | `docker pull ghcr.io/caua-ferraz/agentguard:latest`, then recreate the container |
+
+Re-running the installer replaces the binaries and keeps your policy; it says whether it updated, downgraded (with a warning) or reinstalled the same version. See [`SETUP.md`](SETUP.md#update).
 
 `serve` never performs the check: the enforcement server opens no outbound connection the operator did not configure (see [`THREAT_MODEL.md`](THREAT_MODEL.md#outbound-connections)). The check is also skipped for development builds — a version string containing `dev`, or no `-ldflags` commit (`commit=dev`) *and* no tagged release version in the Go build info, as with `go build` on an untagged or modified checkout. `go install …@vX.Y.Z` and `@latest` builds record the release tag, so they do check. It is also skipped when `AGENTGUARD_NO_UPDATE_CHECK` is set to any value other than `0`, or when the HTTP request fails. Never touches stdout, never affects exit codes. Only the `agentguard` binary has the check; the MCP gateway and LLM proxy never had one.
 
