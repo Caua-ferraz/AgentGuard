@@ -257,6 +257,11 @@ var urlAlias = clihelp.Options{Aliases: map[string]string{"guard-url": "url"}}
 // is a search order, which the command's help spells out.
 var policyHelp = clihelp.Options{HideDefault: map[string]bool{"policy": true}}
 
+// serverHelp also hides --node-id's default: it is this machine's hostname,
+// which the flag's description already names, and printing it would make
+// the help differ from host to host (and overflow on long hostnames).
+var serverHelp = clihelp.Options{HideDefault: map[string]bool{"policy": true, "node-id": true}}
+
 // ── Policy file discovery ────────────────────────────────────────────────
 
 const defaultPolicyPath = "configs/default.yaml"

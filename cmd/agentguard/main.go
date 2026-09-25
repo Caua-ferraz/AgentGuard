@@ -309,7 +309,7 @@ with --dashboard, the web dashboard. Agents reach it through the SDKs, the
 MCP gateway or the LLM API proxy, which all call its /v1/check endpoint.
 
 `)
-	clihelp.WriteGroups(w, fs, serverFlagGroups, policyHelp)
+	clihelp.WriteGroups(w, fs, serverFlagGroups, serverHelp)
 	fmt.Fprint(w, `
 Policy file, when --policy is not given: AGENTGUARD_POLICY, then
 configs/default.yaml in the current folder, then the starter policy the

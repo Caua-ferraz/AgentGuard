@@ -266,6 +266,11 @@ func TestServerHelp_GroupsEveryFlag(t *testing.T) {
 	})
 	var help bytes.Buffer
 	serverUsage(&help, fs)
+	// The help must not depend on the machine: --node-id defaults to the
+	// hostname, which once pushed a line past 80 columns on a CI runner.
+	if host := defaultNodeID(); strings.Contains(help.String(), "(default "+host) {
+		t.Errorf("server help prints this machine's hostname %q as a default", host)
+	}
 	for _, want := range []string{"Usage: agentguard server", "'agentguard serve'", "--audit-compress", "--audit-compress=false turns it off", "(default 8080)"} {
 		if !strings.Contains(help.String(), want) {
 			t.Errorf("server help lacks %q", want)
