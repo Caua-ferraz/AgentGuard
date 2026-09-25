@@ -109,3 +109,6 @@ if ($t.Code -ne 0 -and $t.Out -match 'checksum mismatch') { Pass 'tampered archi
 if (-not (Test-Path (Join-Path $target 'agentguard.exe'))) { Pass 'nothing installed from the tampered archive' } else { Fail 'a binary was installed' }
 
 Write-Host 'ALL PASS'
+# Explicit: $LASTEXITCODE still holds the tampered install's deliberate
+# failure, and the Actions PowerShell wrapper exits with $LASTEXITCODE.
+exit 0
