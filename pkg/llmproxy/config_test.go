@@ -2,9 +2,14 @@ package llmproxy
 
 import (
 	"bytes"
+	"errors"
+	"flag"
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
+
+	"github.com/Caua-ferraz/AgentGuard/internal/clihelp"
 )
 
 func TestConfig_Defaults(t *testing.T) {
@@ -224,5 +229,31 @@ func TestConfig_OSEnvIsolation(t *testing.T) {
 	}
 	if cfg.APIKey != "isolated" {
 		t.Errorf("APIKey = %q, want isolated", cfg.APIKey)
+	}
+}
+
+// agentguard-llm-proxy -h prints every flag in a group, as --flag, within 80 columns.
+func TestConfig_HelpGroupsEveryFlag(t *testing.T) {
+	var out bytes.Buffer
+	_, err := ParseConfigWithOutput([]string{"-h"}, &out)
+	if !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("err = %v, want flag.ErrHelp", err)
+	}
+	help := out.String()
+	if strings.Contains(help, clihelp.Ungrouped+":") {
+		t.Errorf("a flag is missing from the help groups:\n%s", help)
+	}
+	for _, want := range []string{"--listen string", "--guard-url string", "--version", "AGENTGUARD_URL"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help lacks %q", want)
+		}
+	}
+	for _, line := range strings.Split(help, "\n") {
+		if utf8.RuneCountInString(line) > clihelp.Width {
+			t.Errorf("line wider than %d: %q", clihelp.Width, line)
+		}
+		if strings.HasPrefix(line, "  -") && !strings.HasPrefix(line, "  --") {
+			t.Errorf("flag written with one dash: %q", line)
+		}
 	}
 }

@@ -14,6 +14,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
+
+	"github.com/Caua-ferraz/AgentGuard/internal/clihelp"
 )
 
 // runMainEnv tells the re-executed test binary to run main() with the
@@ -100,6 +103,78 @@ func TestCLI_Help(t *testing.T) {
 	}
 	agentguard(t, dir, nil, "help", "tenant", "put").expect(t, 0, "Usage: agentguard tenant put", "")
 	agentguard(t, dir, nil, "check", "--help").expect(t, 0, "Usage: agentguard check", "")
+}
+
+// Every help page: exits 0, fits 80 columns, has an example, and leaves no
+// flag out of its groups.
+func TestCLI_HelpPages(t *testing.T) {
+	dir := t.TempDir()
+	pages := [][]string{
+		{"server", "-h"}, {"validate", "-h"}, {"check", "-h"}, {"approve", "-h"}, {"deny", "-h"},
+		{"status", "-h"}, {"audit", "-h"}, {"tenant", "-h"}, {"tenant", "put", "-h"},
+		{"tenant", "list", "-h"}, {"tenant", "rm", "-h"}, {"migrate", "-h"}, {"help", "help"},
+	}
+	for _, args := range pages {
+		r := agentguard(t, dir, nil, args...)
+		if r.code != 0 {
+			t.Errorf("agentguard %q: exit %d", args, r.code)
+		}
+		if !strings.Contains(r.stdout, "Example") {
+			t.Errorf("agentguard %q: no example", args)
+		}
+		if strings.Contains(r.stdout, clihelp.Ungrouped+":") {
+			t.Errorf("agentguard %q: a flag is missing from the help groups", args)
+		}
+		for _, line := range strings.Split(r.stdout, "\n") {
+			if utf8.RuneCountInString(line) > clihelp.Width {
+				t.Errorf("agentguard %q: line wider than %d: %q", args, clihelp.Width, line)
+			}
+		}
+	}
+}
+
+func TestCLI_TopLevelHelpGetsYouStarted(t *testing.T) {
+	r := agentguard(t, t.TempDir(), nil, "help")
+	for _, want := range []string{
+		"Get started:", "agentguard server --dashboard", "http://localhost:8080/dashboard",
+		"agentguard-mcp-gateway", "agentguard-llm-proxy",
+		"https://github.com/Caua-ferraz/AgentGuard/blob/v" + version + "/docs/CLI.md",
+	} {
+		if !strings.Contains(r.stdout, want) {
+			t.Errorf("top-level help lacks %q", want)
+		}
+	}
+	for _, line := range strings.Split(r.stdout, "\n") {
+		if utf8.RuneCountInString(line) > clihelp.Width {
+			t.Errorf("line wider than %d: %q", clihelp.Width, line)
+		}
+	}
+}
+
+func TestCLI_ClientHelpShowsAliasOnce(t *testing.T) {
+	r := agentguard(t, t.TempDir(), nil, "approve", "-h")
+	if !strings.Contains(r.stdout, "--url, --guard-url string") {
+		t.Errorf("approve help doesn't show --guard-url on --url's line:\n%s", r.stdout)
+	}
+	if strings.Contains(r.stdout, "\n  --guard-url") {
+		t.Errorf("approve help lists --guard-url on its own line:\n%s", r.stdout)
+	}
+}
+
+// `version -h` failed with "unexpected argument" and `help version` printed
+// the whole command list.
+func TestCLI_VersionAndHelpHaveTheirOwnHelp(t *testing.T) {
+	dir := t.TempDir()
+	agentguard(t, dir, nil, "version", "-h").expect(t, 0, "Usage: agentguard version", "")
+	agentguard(t, dir, nil, "help", "version").expect(t, 0, "Usage: agentguard version", "")
+	agentguard(t, dir, nil, "help", "help").expect(t, 0, "Usage: agentguard help [<command>", "")
+}
+
+func TestCLI_TenantPutNamesTheStore(t *testing.T) {
+	dir := t.TempDir()
+	policy := filepath.Join(repoRootForDocs(t), "configs", "default.yaml")
+	agentguard(t, dir, nil, "tenant", "put", "acme", "--policy", policy, "--data-dir", dir).
+		expect(t, 0, "A server sees it only if it uses this same store", "")
 }
 
 func TestCLI_UnknownCommand(t *testing.T) {

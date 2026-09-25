@@ -2,9 +2,9 @@ package main
 
 // cli.go is the command-line plumbing every agentguard subcommand shares:
 // the command table and "did you mean" suggestions, flag parsing that
-// accepts flags after positional arguments, the --help layout, policy-file
-// discovery, the server-URL fallback and the "can't reach the server"
-// message.
+// accepts flags after positional arguments, policy-file discovery, the
+// server-URL fallback and the "can't reach the server" message. The flag
+// section of each --help is printed by internal/clihelp.
 
 import (
 	"errors"
@@ -15,8 +15,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
+
+	"github.com/Caua-ferraz/AgentGuard/internal/clihelp"
 )
 
 // exitUsage is the exit status for a malformed command line (unknown
@@ -47,7 +48,7 @@ var commands = []command{
 	{Name: "approve", Group: "Work with a running server", Summary: "Approve a pending action by ID"},
 	{Name: "deny", Group: "Work with a running server", Summary: "Deny a pending action by ID"},
 	{Name: "audit", Group: "Work with a running server", Summary: "Query the audit log"},
-	{Name: "migrate", Group: "Other", Summary: "Run on-disk schema migrations (see docs/FILE_FORMATS.md)"},
+	{Name: "migrate", Group: "Other", Summary: "Upgrade the audit log's format (the server does this at startup)"},
 	{Name: "version", Group: "Other", Summary: "Print version information (also: --version)"},
 	{Name: "help", Group: "Other", Summary: "Show help for a command"},
 }
@@ -249,143 +250,12 @@ func flagWasSet(fs *flag.FlagSet, names ...string) bool {
 
 // ── Help layout ──────────────────────────────────────────────────────────
 
-// flagGroup is a titled set of flags in a command's help.
-type flagGroup struct {
-	Title string
-	Names []string
-}
+// urlAlias prints --guard-url on --url's line in the client commands' help.
+var urlAlias = clihelp.Options{Aliases: map[string]string{"guard-url": "url"}}
 
-const helpWidth = 80
-
-// writeFlagGroups prints fs's flags under the given group titles, in the
-// order listed. A flag no group names is printed under "Other" so nothing
-// is ever hidden from the help.
-func writeFlagGroups(w io.Writer, fs *flag.FlagSet, groups []flagGroup) {
-	listed := map[string]bool{}
-	for _, g := range groups {
-		for _, n := range g.Names {
-			listed[n] = true
-		}
-	}
-	var other []string
-	fs.VisitAll(func(f *flag.Flag) {
-		if !listed[f.Name] {
-			other = append(other, f.Name)
-		}
-	})
-	if len(other) > 0 {
-		groups = append(groups, flagGroup{Title: "Other", Names: other})
-	}
-
-	col := 0
-	for _, g := range groups {
-		for _, n := range g.Names {
-			if l := len(flagLabel(fs.Lookup(n))); l > col && l <= 30 {
-				col = l
-			}
-		}
-	}
-	for i, g := range groups {
-		if i > 0 {
-			fmt.Fprintln(w)
-		}
-		fmt.Fprintf(w, "%s:\n", g.Title)
-		for _, n := range g.Names {
-			f := fs.Lookup(n)
-			if f == nil {
-				continue
-			}
-			writeFlag(w, f, col)
-		}
-	}
-}
-
-// writeFlags prints every flag of fs in alphabetical order under "Flags:".
-func writeFlags(w io.Writer, fs *flag.FlagSet) {
-	var names []string
-	fs.VisitAll(func(f *flag.Flag) { names = append(names, f.Name) })
-	sort.Strings(names)
-	writeFlagGroups(w, fs, []flagGroup{{Title: "Flags", Names: names}})
-}
-
-// flagLabel is the left column for f: "--port int", "--dashboard".
-func flagLabel(f *flag.Flag) string {
-	typ, _ := flag.UnquoteUsage(f)
-	if typ == "" {
-		return "--" + f.Name
-	}
-	return "--" + f.Name + " " + typ
-}
-
-// writeFlag prints one flag: its label, then the description wrapped to
-// helpWidth. A label wider than col puts the description on the next line.
-func writeFlag(w io.Writer, f *flag.Flag, col int) {
-	_, usage := flag.UnquoteUsage(f)
-	desc := usage + defaultNote(f)
-	label := flagLabel(f)
-	indent := 2 + col + 2
-	lines := wrap(desc, helpWidth-indent)
-	pad := strings.Repeat(" ", indent)
-	if len(label) > col {
-		fmt.Fprintf(w, "  %s\n", label)
-		for _, l := range lines {
-			fmt.Fprintf(w, "%s%s\n", pad, l)
-		}
-		return
-	}
-	for i, l := range lines {
-		if i == 0 {
-			fmt.Fprintf(w, "  %-*s  %s\n", col, label, l)
-		} else {
-			fmt.Fprintf(w, "%s%s\n", pad, l)
-		}
-	}
-}
-
-// defaultNote says what a flag does when it isn't given.
-func defaultNote(f *flag.Flag) string {
-	typ, _ := flag.UnquoteUsage(f)
-	switch {
-	case f.Name == "policy":
-		// Its default is a search order, which the command's help spells out.
-		return ""
-	case typ == "" && f.DefValue == "true":
-		return fmt.Sprintf(" (on by default; --%s=false turns it off)", f.Name)
-	case typ == "":
-		return ""
-	case f.DefValue == "" || f.DefValue == "0" || f.DefValue == "0s":
-		return ""
-	default:
-		return fmt.Sprintf(" (default %s)", f.DefValue)
-	}
-}
-
-// wrap splits s into lines of at most width runes, breaking at spaces.
-func wrap(s string, width int) []string {
-	if width < 30 {
-		width = 30
-	}
-	var lines []string
-	line := ""
-	for _, word := range strings.Fields(s) {
-		switch {
-		case line == "":
-			line = word
-		case len(line)+1+len(word) > width:
-			lines = append(lines, line)
-			line = word
-		default:
-			line += " " + word
-		}
-	}
-	if line != "" {
-		lines = append(lines, line)
-	}
-	if len(lines) == 0 {
-		lines = []string{""}
-	}
-	return lines
-}
+// policyHelp hides --policy's "(default configs/default.yaml)": the default
+// is a search order, which the command's help spells out.
+var policyHelp = clihelp.Options{HideDefault: map[string]bool{"policy": true}}
 
 // ── Policy file discovery ────────────────────────────────────────────────
 

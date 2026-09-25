@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/Caua-ferraz/AgentGuard/internal/clihelp"
 )
 
 // fakeServer answers every request with status and body, and records the
@@ -269,7 +271,7 @@ func TestServerHelp_GroupsEveryFlag(t *testing.T) {
 			t.Errorf("server help lacks %q", want)
 		}
 	}
-	for _, bad := range []string{"\nOther:", "  -port"} {
+	for _, bad := range []string{"\n" + clihelp.Ungrouped + ":", "  -port"} {
 		if strings.Contains(help.String(), bad) {
 			t.Errorf("server help contains %q", bad)
 		}

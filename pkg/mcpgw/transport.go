@@ -35,6 +35,23 @@ var DefaultBackoffSchedule = []time.Duration{
 	60 * time.Second,
 }
 
+// BackoffSchedule is DefaultBackoffSchedule with no wait longer than
+// maxWait (--reconnect-cap): every step above it becomes maxWait, which is
+// then the last step. maxWait <= 0 keeps the default schedule.
+func BackoffSchedule(maxWait time.Duration) []time.Duration {
+	if maxWait <= 0 {
+		return DefaultBackoffSchedule
+	}
+	var out []time.Duration
+	for _, d := range DefaultBackoffSchedule {
+		if d >= maxWait {
+			return append(out, maxWait)
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
 // MaxStdoutLineBytes bumps bufio.Scanner's per-line cap from the 64 KiB
 // default to 4 MiB so tool argument JSON (legitimately large for some
 // upstream responses, e.g., a filesystem read returning a big file)

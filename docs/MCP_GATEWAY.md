@@ -90,7 +90,7 @@ agentguard-mcp-gateway \
 | `--policy-mode`     | no         | `strict` (default) or `fast`. `strict` requires `--policy` and fails closed if the file is missing/invalid; `fast` runs only the `mcp_tool` check and never consults `tool_scope_map` (`--policy` is optional). |
 | `--log-level`       | no         | stderr verbosity. Default `info`.               |
 | `--upstream-timeout`| no         | per-frame upstream-response timeout. Default `30s`. |
-| `--reconnect-cap`   | no         | upper bound on reconnect backoff. Default `60s`. |
+| `--reconnect-cap`   | no         | longest wait between attempts to restart an upstream that exited. The waits grow 1s, 2s, 5s, 30s, 60s and stop at this value. Default `60s`. |
 | `--version`         | no         | print version and exit. Checked before any other flag is parsed, so it works without `--upstream`. |
 
 The gateway takes flags only. A stray word is an error (exit 2) instead of

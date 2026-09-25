@@ -22,12 +22,25 @@ Work with a running server:
   audit       Query the audit log
 
 Other:
-  migrate     Run on-disk schema migrations (see docs/FILE_FORMATS.md)
+  migrate     Upgrade the audit log's format (the server does this at startup)
   version     Print version information (also: --version)
   help        Show help for a command
 
+Get started:
+  agentguard server --dashboard
+      Start the server, then open http://localhost:8080/dashboard
+  agentguard check --scope shell --command "rm -rf /"
+      Try the policy on one action, no server needed
+
+Also installed:
+  agentguard-mcp-gateway   Guards the tools of an MCP client (Claude Desktop,
+                           Cursor, …)
+  agentguard-llm-proxy     Guards tool calls in OpenAI / Anthropic SDK code
+
 Run 'agentguard help <command>' (or 'agentguard <command> -h') for its flags.
 ```
+
+Every command's help (`agentguard help <command>`) has examples and says what its exit codes mean; the full list also shows the environment variables and a link to this page for the installed version.
 
 Global conventions:
 - `agentguard serve` is the same command as `agentguard server` and keeps working for the whole 1.x line ([`COMPATIBILITY.md`](COMPATIBILITY.md#frozen-surface-4--cli-flags--subcommands)).

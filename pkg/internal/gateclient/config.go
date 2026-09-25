@@ -52,14 +52,14 @@ type GateFlags struct {
 func RegisterGateFlags(fs *flag.FlagSet, policyHelp string) *GateFlags {
 	return &GateFlags{
 		fs:         fs,
-		GuardURL:   fs.String("guard-url", DefaultGuardURL, "Central AgentGuard server base URL (defaults to $AGENTGUARD_URL when set)"),
-		APIKey:     fs.String("api-key", "", "Bearer token for /v1/check (defaults to $AGENTGUARD_API_KEY)"),
+		GuardURL:   fs.String("guard-url", DefaultGuardURL, "Central AgentGuard server URL. Env: AGENTGUARD_URL"),
+		APIKey:     fs.String("api-key", "", "Bearer token for /v1/check. Env: AGENTGUARD_API_KEY"),
 		TenantID:   fs.String("tenant-id", DefaultTenantID, "Tenant ID for the central server"),
-		FailMode:   fs.String("fail-mode", DefaultFailMode, `Fail mode when /v1/check is unreachable: "deny" | "allow" | "fail-closed-with-audit"`),
-		LogLevel:   fs.String("log-level", DefaultLogLevel, `Stderr verbosity: "info" | "debug"`),
+		FailMode:   fs.String("fail-mode", DefaultFailMode, "What to do when /v1/check can't be reached: deny, allow, or fail-closed-with-audit (deny, and record it in --fail-audit-log)"),
+		LogLevel:   fs.String("log-level", DefaultLogLevel, "Stderr verbosity: info or debug"),
 		PolicyPath: fs.String("policy", "", policyHelp),
 		FailAuditLog: fs.String("fail-audit-log", DefaultFailAuditLog,
-			`Local JSONL file recording denials made while the central server is unreachable (used only with --fail-mode fail-closed-with-audit; empty disables)`),
+			"Local JSON Lines file for the denials made while the central server is unreachable. Used only with --fail-mode fail-closed-with-audit; empty disables it."),
 	}
 }
 

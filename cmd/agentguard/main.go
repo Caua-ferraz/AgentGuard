@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Caua-ferraz/AgentGuard/cmd/internal/buildinfo"
+	"github.com/Caua-ferraz/AgentGuard/internal/clihelp"
 	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
 	"github.com/Caua-ferraz/AgentGuard/pkg/migrate"
 	_ "github.com/Caua-ferraz/AgentGuard/pkg/migrate/v040_to_v041" // register the v0.4.0 → v0.4.1 audit schema migration
@@ -85,6 +86,10 @@ func run(args []string) int {
 		return runMigrateCmd(rest)
 	case "version":
 		if len(rest) > 0 {
+			if isHelpFlag(rest[0]) {
+				printVersionUsage(os.Stdout)
+				return 0
+			}
 			fmt.Fprintf(os.Stderr, "agentguard version: unexpected argument %q\n", rest[0])
 			return exitUsage
 		}
@@ -107,11 +112,46 @@ func runHelp(args []string) int {
 	if !ok {
 		return unknownCommand(args[0])
 	}
-	if name == "help" || name == "version" {
-		printUsage(os.Stdout)
+	switch name {
+	case "help":
+		printHelpUsage(os.Stdout)
+		return 0
+	case "version":
+		printVersionUsage(os.Stdout)
 		return 0
 	}
 	return run(append([]string{name}, append(args[1:], "-h")...))
+}
+
+func isHelpFlag(arg string) bool {
+	return arg == "-h" || arg == "-help" || arg == "--help"
+}
+
+func printHelpUsage(w io.Writer) {
+	fmt.Fprint(w, `Usage: agentguard help [<command> [<subcommand>]]
+
+Without a command, list every command. With one, show its help: the same
+text as 'agentguard <command> -h'.
+
+Examples:
+  agentguard help server
+  agentguard help tenant put
+`)
+}
+
+func printVersionUsage(w io.Writer) {
+	fmt.Fprint(w, `Usage: agentguard version
+       agentguard --version
+
+Print this binary's version and the build it came from, e.g.
+"agentguard 1.2.0 (abc1234)".
+`)
+}
+
+// docsURL is the CLI reference for this release, so the link matches the
+// installed binary rather than whatever is on master.
+func docsURL() string {
+	return "https://github.com/Caua-ferraz/AgentGuard/blob/v" + version + "/docs/CLI.md"
 }
 
 func printUsage(w io.Writer) {
@@ -129,6 +169,17 @@ Usage:
 		}
 	}
 	fmt.Fprint(w, `
+Get started:
+  agentguard server --dashboard
+      Start the server, then open http://localhost:8080/dashboard
+  agentguard check --scope shell --command "rm -rf /"
+      Try the policy on one action, no server needed
+
+Also installed:
+  agentguard-mcp-gateway   Guards the tools of an MCP client (Claude Desktop,
+                           Cursor, …)
+  agentguard-llm-proxy     Guards tool calls in OpenAI / Anthropic SDK code
+
 Environment:
   AGENTGUARD_API_KEY          API key when --api-key is not set
                               (server, approve, deny, status, audit)
@@ -141,6 +192,7 @@ Environment:
 
 Run 'agentguard help <command>' (or 'agentguard <command> -h') for its flags.
 Flags can go before or after arguments: agentguard approve <id> --url <url>
+Docs: `+docsURL()+`
 `)
 }
 
@@ -168,7 +220,7 @@ type serverFlags struct {
 func newServerFlags() (*flag.FlagSet, *serverFlags) {
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
 	f := &serverFlags{}
-	f.policy = fs.String("policy", defaultPolicyPath, "Policy file. When not given: AGENTGUARD_POLICY, then configs/default.yaml in the current folder, then the installer's starter policy")
+	f.policy = fs.String("policy", defaultPolicyPath, "Policy file. When not given, it is looked for as described under \"Policy file\" below.")
 	f.port = fs.Int("port", 8080, "Port to listen on")
 	f.bind = fs.String("bind", "", "Host or IP to listen on. Empty: every interface when --api-key is set, 127.0.0.1 otherwise. A non-loopback --bind requires --api-key.")
 	f.dashboard = fs.Bool("dashboard", false, "Serve the web dashboard at /dashboard (the approval UI)")
@@ -237,7 +289,7 @@ func newServerFlags() (*flag.FlagSet, *serverFlags) {
 
 // serverFlagGroups is the layout of `agentguard server -h`. Every server
 // flag must appear in exactly one group (TestServerHelp_GroupsEveryFlag).
-var serverFlagGroups = []flagGroup{
+var serverFlagGroups = []clihelp.Group{
 	{Title: "Network", Names: []string{"port", "bind", "dashboard", "base-url"}},
 	{Title: "Security", Names: []string{"api-key", "allowed-origin", "tls-terminated-upstream"}},
 	{Title: "Policy", Names: []string{"policy", "watch", "approval-validity", "session-cost-ttl", "session-cost-sweep-interval", "tenant-policy-refresh-interval"}},
@@ -257,7 +309,7 @@ with --dashboard, the web dashboard. Agents reach it through the SDKs, the
 MCP gateway or the LLM API proxy, which all call its /v1/check endpoint.
 
 `)
-	writeFlagGroups(w, fs, serverFlagGroups)
+	clihelp.WriteGroups(w, fs, serverFlagGroups, policyHelp)
 	fmt.Fprint(w, `
 Policy file, when --policy is not given: AGENTGUARD_POLICY, then
 configs/default.yaml in the current folder, then the starter policy the
@@ -331,7 +383,15 @@ AGENTGUARD_POLICY, then configs/default.yaml, then the installer's
 starter policy.
 
 `)
-		writeFlags(w, fs)
+		clihelp.WriteFlags(w, fs, policyHelp)
+		fmt.Fprint(w, `
+Examples:
+  agentguard validate my-policy.yaml
+  agentguard validate --strict        # the policy the server would load
+
+Exit status: 0 valid, 1 invalid (or has warnings, with --strict),
+2 command-line mistake.
+`)
 	}
 	positional, code, ok := parseCommand(fs, usage, args)
 	if !ok {
@@ -371,15 +431,15 @@ func runResolveCmd(action string, args []string) int {
 in 'agentguard status', the dashboard and approval notifications.
 
 `, action, verb)
-		writeFlags(w, fs)
+		clihelp.WriteFlags(w, fs, urlAlias)
 		fmt.Fprintf(w, `
-Environment:
-  AGENTGUARD_URL       Used when --url is not set.
-  AGENTGUARD_API_KEY   Used when --api-key is not set.
+Examples:
+  agentguard %[1]s ap_7f3a
+  agentguard %[1]s ap_7f3a --url http://guard.internal:8080 --api-key "$KEY"
 
-Example:
-  agentguard %s ap_7f3a --url http://agentguard.internal:8080
-`, action)
+Exit status: 0 %[2]s, 1 the server refused or couldn't be reached,
+2 command-line mistake.
+`, action, map[string]string{"approve": "approved", "deny": "denied"}[action])
 	}
 	positional, code, ok := parseCommand(fs, usage, args)
 	if !ok {
@@ -408,14 +468,17 @@ func runStatusCmd(args []string) int {
 		fmt.Fprint(w, `Usage: agentguard status [flags]
 
 Show the health of a running AgentGuard server and its pending-approval
-queue.
+queue. The queue is listed only when the server runs with --dashboard.
 
 `)
-		writeFlags(w, fs)
+		clihelp.WriteFlags(w, fs, urlAlias)
 		fmt.Fprint(w, `
-Environment:
-  AGENTGUARD_URL       Used when --url is not set.
-  AGENTGUARD_API_KEY   Used when --api-key is not set.
+Examples:
+  agentguard status
+  agentguard status --url http://guard.internal:8080 --api-key "$KEY"
+
+Exit status: 0 the server is up, 1 it can't be reached (so status works as
+a health check), 2 command-line mistake.
 `)
 	}
 	positional, code, ok := parseCommand(fs, usage, args)
@@ -440,7 +503,7 @@ func runAuditCmd(args []string) int {
 	var q auditQuery
 	fs.StringVar(&q.Agent, "agent", "", "Filter by agent ID")
 	fs.StringVar(&q.Decision, "decision", "", "Filter by decision (ALLOW, DENY, REQUIRE_APPROVAL)")
-	fs.StringVar(&q.Scope, "scope", "", "Filter by scope")
+	fs.StringVar(&q.Scope, "scope", "", "Filter by scope (shell, filesystem, network, browser, data, cost, mcp_tool)")
 	fs.StringVar(&q.Transport, "transport", "", "Filter by integration path (sdk|mcp_gateway|llm_api_proxy)")
 	fs.IntVar(&q.Limit, "limit", 50, "Max entries to return")
 	fs.StringVar(&q.Order, "order", "desc", "Entry order: desc (newest first) or asc (oldest first)")
@@ -452,14 +515,14 @@ Query the audit log of a running AgentGuard server (newest first),
 optionally filtered by agent, decision, scope, or transport.
 
 `)
-		writeFlags(w, fs)
+		clihelp.WriteFlags(w, fs, urlAlias)
 		fmt.Fprint(w, `
-Environment:
-  AGENTGUARD_URL       Used when --url is not set.
-  AGENTGUARD_API_KEY   Used when --api-key is not set.
-
-Example:
+Examples:
   agentguard audit --decision DENY --limit 20
+  agentguard audit --agent my-bot --scope shell --order asc
+
+Exit status: 0 success (also when nothing matches), 1 the server refused or
+couldn't be reached, 2 command-line mistake.
 `)
 	}
 	positional, code, ok := parseCommand(fs, usage, args)
@@ -481,22 +544,30 @@ Example:
 func runMigrateCmd(args []string) int {
 	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
 	var o migrateCmdOpts
-	fs.StringVar(&o.AuditPath, "audit-log", "audit.jsonl", "Path to audit log file")
-	fs.StringVar(&o.CheckpointPath, "checkpoint", "", "Path to the replay checkpoint the server reads at boot (default: <audit-log>"+audit.CheckpointSuffix+", the file 'agentguard server' writes)")
-	fs.StringVar(&o.BackupDir, "backup-dir", "", "Directory for rollback backups (default: same dir as --audit-log)")
-	fs.BoolVar(&o.DryRun, "dry-run", false, "Log intended actions without touching disk")
-	fs.BoolVar(&o.List, "list", false, "List registered migrations and exit")
-	fs.StringVar(&o.ID, "id", "", "Run only the named migration (operator override; runs even if Detect=false)")
-	fs.BoolVar(&o.ResetCheckpoint, "reset-checkpoint", false, "Delete the replay checkpoint before running (forces full replay on next start)")
+	fs.StringVar(&o.AuditPath, "audit-log", "audit.jsonl", "The audit log to migrate (the server's --audit-log)")
+	fs.StringVar(&o.CheckpointPath, "checkpoint", "", "The replay checkpoint the server reads at startup (default: <audit-log>"+audit.CheckpointSuffix+", the file the server writes)")
+	fs.StringVar(&o.BackupDir, "backup-dir", "", "Where to keep a copy of each file before changing it, for rollback (default: the audit log's folder)")
+	fs.BoolVar(&o.DryRun, "dry-run", false, "Show what would change without writing anything")
+	fs.BoolVar(&o.List, "list", false, "List the known migrations and exit")
+	fs.StringVar(&o.ID, "id", "", "Run only this migration, even if it finds nothing to migrate")
+	fs.BoolVar(&o.ResetCheckpoint, "reset-checkpoint", false, "Delete the replay checkpoint first, so the next server start replays the whole audit log")
 	usage := func(w io.Writer) {
 		fmt.Fprint(w, `Usage: agentguard migrate [flags]
 
-Run on-disk schema migrations against the audit log (see
-docs/FILE_FORMATS.md). Registered migrations that detect an old format
-are applied in order; --list shows them without running anything.
+Upgrade the audit log's on-disk format to the one this version writes.
+
+You rarely need this: the server applies these migrations itself when it
+starts. Use migrate to run them ahead of an upgrade, to preview them
+(--dry-run), or to reset a damaged replay checkpoint (--reset-checkpoint).
 
 `)
-		writeFlags(w, fs)
+		clihelp.WriteFlags(w, fs, clihelp.Options{})
+		fmt.Fprint(w, `
+Examples:
+  agentguard migrate --list
+  agentguard migrate --audit-log /var/lib/agentguard/audit.jsonl --dry-run
+  agentguard migrate --audit-log /var/lib/agentguard/audit.jsonl
+`)
 	}
 	positional, code, ok := parseCommand(fs, usage, args)
 	if !ok {
@@ -1337,8 +1408,8 @@ func runTenant(args []string) int {
 
 	name := "tenant " + sub
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	storeDSN := fs.String("store-dsn", "", "Store DSN (empty => <data-dir>/agentguard.db)")
-	dataDir := fs.String("data-dir", ".", "Directory holding agentguard.db")
+	storeDSN := fs.String("store-dsn", "", "The server's --store-dsn, if it uses one (empty: <data-dir>/agentguard.db)")
+	dataDir := fs.String("data-dir", ".", "The server's --data-dir: the folder holding agentguard.db")
 	var policyPath *string
 	if sub == "put" {
 		policyPath = fs.String("policy", "", "Policy YAML file to register (required)")
@@ -1349,7 +1420,7 @@ func runTenant(args []string) int {
 			fmt.Fprint(w, `Usage: agentguard tenant put <tenant-id> --policy <file.yaml> [flags]
 
 Validate a policy YAML file and register it for a tenant in the durable
-store.
+store. Running it again replaces the tenant's policy.
 
 `)
 		case "list":
@@ -1366,7 +1437,26 @@ Remove a tenant's policy from the durable store.
 
 `)
 		}
-		writeFlags(w, fs)
+		clihelp.WriteFlags(w, fs, clihelp.Options{})
+		fmt.Fprint(w, tenantStoreWarning)
+		switch sub {
+		case "put":
+			fmt.Fprint(w, `
+Examples:
+  agentguard tenant put acme --policy acme.yaml
+  agentguard tenant put acme --policy acme.yaml --data-dir /var/lib/agentguard
+`)
+		case "list":
+			fmt.Fprint(w, `
+Example:
+  agentguard tenant list --data-dir /var/lib/agentguard
+`)
+		case "rm":
+			fmt.Fprint(w, `
+Example:
+  agentguard tenant rm acme --data-dir /var/lib/agentguard
+`)
+		}
 	}
 	positional, code, ok := parseCommand(fs, usage, args[1:])
 	if !ok {
@@ -1417,6 +1507,7 @@ Remove a tenant's policy from the durable store.
 		}
 		fmt.Printf("Registered tenant %q: %s (%d rules across %d scopes) in %s\n",
 			tenant, pol.Name, pol.RuleCount(), pol.ScopeCount(), path)
+		fmt.Println("A server sees it only if it uses this same store (the same --data-dir or --store-dsn).")
 
 	case "list":
 		tenants, err := st.ListPolicyTenants(ctx)
@@ -1448,6 +1539,14 @@ Remove a tenant's policy from the durable store.
 	return 0
 }
 
+// tenantStoreWarning is in every tenant help page: a tenant written to one
+// store and a server reading another fail silently, the tenant simply
+// never exists for that server.
+const tenantStoreWarning = `
+Use the same --data-dir (or --store-dsn) as the server. Otherwise the
+server never sees these tenants, and nothing reports an error.
+`
+
 // printTenantUsage is the `agentguard tenant` dispatcher-level help —
 // each subcommand prints its own (see usage in runTenant).
 func printTenantUsage(w io.Writer) {
@@ -1461,6 +1560,9 @@ Subcommands:
   put <tenant-id> --policy <file.yaml>   Validate and register a tenant policy
   list                                   List registered tenant IDs
   rm <tenant-id>                         Remove a tenant policy
+`+tenantStoreWarning+`
+Example:
+  agentguard tenant put acme --policy acme.yaml --data-dir /var/lib/agentguard
 
 Run 'agentguard tenant <subcommand> -h' for details on each subcommand.
 `)

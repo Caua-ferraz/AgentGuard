@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Caua-ferraz/AgentGuard/internal/clihelp"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 	schemav1 "github.com/Caua-ferraz/AgentGuard/pkg/proxy/schema/v1"
 )
@@ -78,61 +79,69 @@ type checkCmdFlags struct {
 	Meta string
 }
 
+// checkFlagGroups is the layout of `agentguard check -h`: describe one action
+// with flags, or give requests as JSON.
+var checkFlagGroups = []clihelp.Group{
+	{Title: "Describe the action", Names: []string{"scope", "command", "path", "action", "domain", "url", "agent-id", "session-id", "est-cost", "meta"}},
+	{Title: "Or give requests as JSON (pick one)", Names: []string{"request", "stdin", "batch", "watch"}},
+	{Title: "Policy and output", Names: []string{"policy", "tenant-id", "output"}},
+}
+
 // runCheck is the entry point invoked by main.go's subcommand dispatch.
 // It owns flag parsing and forwards execution to executeCheck, which is
 // pure (no os.Stdin / os.Stdout reads) so tests can inject buffers.
 func runCheck(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	usage := func(w io.Writer) {
-		fmt.Fprintf(w, `Usage: agentguard check [flags]
+		fmt.Fprint(w, `Usage: agentguard check [flags]
 
-Run a single policy check (or a batch from stdin) against a local policy
-file without going through the HTTP server. Useful in CI pipelines and
-one-shot scripts.
+Check actions against a policy file locally, with no server: the verdict is
+the exit code and a line on stdout. Useful in CI pipelines and scripts.
 
-Input modes (mutually exclusive):
-  --request <json>     Single check from a JSON string
-  --stdin              Single check from one JSON object on stdin
-  --batch              Batch check from JSONL (one JSON object per line) on stdin
-  --watch <file>       Follow a JSONL file (tail -f) and verdict each appended
-                       request with ONE policy load for the whole stream; the
-                       policy file hot-reloads on edit. Runs until interrupted.
-  (default)            Single check built from per-field flags
+Examples:
+  # Would this command be allowed?
+  agentguard check --scope shell --command "rm -rf ./build"
+  # One request as JSON
+  agentguard check --request '{"scope":"network","domain":"api.openai.com"}'
+  # Many requests, one JSON object per line; exits with the most severe verdict
+  agentguard check --batch < actions.jsonl
+  # Gate a CI step on the verdict
+  agentguard check --scope shell --command "$CMD" && sh -c "$CMD"
 
+`)
+		clihelp.WriteGroups(w, fs, checkFlagGroups, policyHelp)
+		fmt.Fprint(w, `
 Without --policy it uses the file 'agentguard server' would load:
 AGENTGUARD_POLICY, then configs/default.yaml, then the installer's
 starter policy.
 
-`)
-		writeFlags(w, fs)
-		fmt.Fprintf(w, `
 Exit codes:
   0  ALLOW (or every entry ALLOW in batch mode)
   1  DENY  (or any entry DENY in batch mode)
   2  REQUIRE_APPROVAL (or any approval and no deny in batch mode)
-  3  Error (missing/invalid policy, malformed JSON, flag misuse)
+  3  Error (missing/invalid policy, malformed JSON, command-line mistake)
 `)
 	}
 
 	f := &checkCmdFlags{}
-	fs.StringVar(&f.PolicyPath, "policy", "", "Policy file path (found automatically when not given)")
-	fs.StringVar(&f.TenantID, "tenant-id", "", "Tenant ID (default \"local\")")
-	fs.StringVar(&f.RequestStr, "request", "", "JSON request string for single check")
-	fs.BoolVar(&f.Stdin, "stdin", false, "Read a single JSON request object from stdin")
-	fs.BoolVar(&f.Batch, "batch", false, "Read JSONL (one request per line) from stdin")
-	fs.StringVar(&f.Watch, "watch", "", "Follow a JSONL file (tail -f) and verdict each appended request")
-	fs.StringVar(&f.OutputFmt, "output", "text", "Output format: text | json")
+	fs.StringVar(&f.PolicyPath, "policy", "", "Policy file (found automatically when not given; see below)")
+	fs.StringVar(&f.TenantID, "tenant-id", "", "Tenant whose policy applies (default local)")
+	fs.StringVar(&f.RequestStr, "request", "", "One request as a JSON string")
+	fs.BoolVar(&f.Stdin, "stdin", false, "Read one JSON request from stdin")
+	fs.BoolVar(&f.Batch, "batch", false, "Read JSON Lines (one request per line) from stdin")
+	fs.StringVar(&f.Watch, "watch", "", "Follow a JSON Lines file like tail -f and check each new line, with one policy load that reloads on edit. Runs until Ctrl-C.")
+	fs.StringVar(&f.OutputFmt, "output", "text", "Output format: text or json (the /v1/check response, one per request)")
 
-	fs.StringVar(&f.Scope, "scope", "", "Request scope (shell, filesystem, network, ...)")
-	fs.StringVar(&f.Command, "command", "", "Shell command to evaluate")
-	fs.StringVar(&f.Action, "action", "", "Action name (read|write|delete|...)")
-	fs.StringVar(&f.Path, "path", "", "Filesystem path")
-	fs.StringVar(&f.Domain, "domain", "", "Network domain")
-	fs.StringVar(&f.URL, "url", "", "Request URL")
-	fs.StringVar(&f.AgentID, "agent-id", "", "Agent identifier (for per-agent overrides)")
-	fs.StringVar(&f.SessionID, "session-id", "", "Session identifier (for cost accumulators)")
-	fs.Float64Var(&f.EstCost, "est-cost", 0, "Estimated cost (cost scope)")
-	fs.StringVar(&f.Meta, "meta", "", "Comma-separated k=v pairs (e.g. \"team=ml,prio=high\")")
+	fs.StringVar(&f.Scope, "scope", "", "Kind of action: shell, filesystem, network, browser, data, cost or mcp_tool. Required unless the request is given as JSON.")
+	fs.StringVar(&f.Command, "command", "", "Shell command (shell), or the tool as ns:tool (mcp_tool)")
+	fs.StringVar(&f.Action, "action", "", "What is done to --path: read, write, delete, ... (filesystem)")
+	fs.StringVar(&f.Path, "path", "", "File path (filesystem)")
+	fs.StringVar(&f.Domain, "domain", "", "Domain (network, browser)")
+	fs.StringVar(&f.URL, "url", "", "URL the action targets (network, browser). Not the AgentGuard server: check needs none.")
+	fs.StringVar(&f.AgentID, "agent-id", "", "Agent ID, for the policy's per-agent overrides")
+	fs.StringVar(&f.SessionID, "session-id", "", "Session ID, for cost limits")
+	fs.Float64Var(&f.EstCost, "est-cost", 0, "Estimated cost of the action (cost)")
+	fs.StringVar(&f.Meta, "meta", "", "Extra fields as comma-separated k=v pairs, e.g. team=ml,prio=high")
 
 	// --watch runs until interrupted; wire SIGINT/SIGTERM so Ctrl-C
 	// returns the aggregate exit code instead of killing the process
