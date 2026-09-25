@@ -10,10 +10,15 @@ All notable changes to this project will be documented in this file.
 - **One-line installers that also update.** `install.sh` (Linux, macOS) and `install.ps1` (Windows) are attached to each release, stamped with its version, so `…/releases/latest/download/install.sh` always installs the newest release. They check the archive against `checksums.txt` before installing anything, install all three binaries, write a starter policy only when none exists, and print `Updated X -> Y` when run over an older install. `AGENTGUARD_VERSION`, `AGENTGUARD_INSTALL_DIR` and `AGENTGUARD_DOWNLOAD_URL` pin a version, choose the folder, or point at a mirror. See [`docs/SETUP.md`](docs/SETUP.md#1-install).
 - **Published container image.** `ghcr.io/caua-ferraz/agentguard` is pushed for every release, for linux/amd64 and linux/arm64, tagged with the version and `latest`. Only the newest release moves `latest`. The image holds all three binaries; the server is still the default entrypoint.
 - **Assets for existing releases.** The `Release binaries, installers and image` workflow can be run by hand with a tag to build and attach the same assets to a release published before it existed.
+- **Installer smoke test.** After every release's assets are uploaded, `.github/workflows/installer-smoke.yml` installs AgentGuard the documented ways (the one-liners on Linux x64 and arm64, Alpine, macOS on Apple silicon and Intel, and Windows PowerShell 5.1 and 7, plus the container image) and checks the version, all three binaries, the starter policy, a rerun that keeps the operator's policy, and that a tampered archive is refused. Pull requests that touch the installers run the same checks against their own scripts.
 
 ### Changed
 
 - **The Dockerfile cross-compiles.** The builder stage runs on the build host's platform and compiles for BuildKit's `TARGETOS`/`TARGETARCH`, so a multi-arch build needs no CPU emulation. A plain `docker build` still produces an image for the host, with the same entrypoint and default command.
+
+### Fixed
+
+- **The PATH hint names the file your shell reads.** When the install folder is not on `PATH`, `install.sh` suggested adding it to `~/.profile`, which zsh — macOS's default shell — never reads, so `agentguard` vanished in the next terminal. It now names `~/.zshrc` for zsh, `~/.bash_profile` for bash on macOS, `~/.bashrc` for bash on Linux, `fish_add_path` for fish, and `~/.profile` otherwise. The installers attached to v1.2.0 still print `~/.profile`.
 
 ## [1.2.0] — 2026-09-24
 

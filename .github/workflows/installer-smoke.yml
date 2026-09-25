@@ -1,0 +1,154 @@
+name: Installer smoke test
+
+# Installs AgentGuard the way the README and agentguard.lictorate.com tell
+# people to — the one-line installers and the container image — and checks
+# what each leaves behind: all three binaries at the right version, a
+# starter policy that validates, a rerun that keeps the operator's policy, a
+# tampered archive refused. Linux (x64, arm64, Alpine/busybox), macOS (Apple
+# silicon, Intel), Windows (PowerShell 5.1 and 7). The checks live in
+# scripts/installer-smoke.sh and scripts/installer-smoke.ps1.
+#
+# - After every successful "Release binaries, installers and image" run: the
+#   published one-liners, against the latest release.
+# - On pull requests that touch the installers: this branch's scripts,
+#   installing the latest release, so a broken installer fails before it ships.
+# - By hand, in either mode.
+
+on:
+  workflow_run:
+    workflows: ["Release binaries, installers and image"]
+    types: [completed]
+  pull_request:
+    paths:
+      - scripts/install.sh
+      - scripts/install.ps1
+      - scripts/installer-smoke.sh
+      - scripts/installer-smoke.ps1
+      - .github/workflows/installer-smoke.yml
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "published = the public one-liners; local = this branch's installer scripts"
+        type: choice
+        options: [published, local]
+        default: published
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-smoke-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MODE: ${{ github.event_name == 'pull_request' && 'local' || inputs.mode || 'published' }}
+
+jobs:
+  release:
+    name: Latest release
+    # A failed asset upload is its own red run; there is nothing to install.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.latest.outputs.version }}
+    steps:
+      - name: Look up the latest release
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "Testing the $MODE installers against $tag"
+
+  unix:
+    name: ${{ matrix.name }}
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "Linux x64 (dash, non-root)", os: ubuntu-latest }
+          - { name: "Linux arm64 (dash, non-root)", os: ubuntu-24.04-arm }
+          - { name: "macOS Apple silicon", os: macos-latest }
+          - { name: "macOS Intel", os: macos-15-intel }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install and check
+        env:
+          WANT_VERSION: ${{ needs.release.outputs.version }}
+        run: sh scripts/installer-smoke.sh
+
+  alpine:
+    name: Linux x64 Alpine (busybox + wget, root)
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install and check
+        env:
+          WANT_VERSION: ${{ needs.release.outputs.version }}
+        run: docker run --rm -v "$PWD:/w:ro" -e MODE -e WANT_VERSION alpine:3 sh /w/scripts/installer-smoke.sh
+
+  windows:
+    name: Windows (${{ matrix.engine }})
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [powershell, pwsh]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install and check
+        shell: powershell
+        env:
+          WANT_VERSION: ${{ needs.release.outputs.version }}
+          ENGINE: ${{ matrix.engine }}
+        run: ./scripts/installer-smoke.ps1 -Mode $env:MODE -Want $env:WANT_VERSION -Engine $env:ENGINE
+
+  image:
+    name: Container image
+    needs: release
+    # The image doesn't change with the installer scripts; PRs skip it.
+    if: github.event_name != 'pull_request' && (inputs.mode || 'published') == 'published'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run it the documented way and check the API
+        env:
+          WANT_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/agentguard:latest"
+          status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+
+          v="$(docker run --rm "$image" --version)"
+          [[ "$v" == *"$WANT_VERSION"* ]] || { echo "FAIL  :latest is '$v', expected $WANT_VERSION"; exit 1; }
+          echo "PASS  :latest is $v"
+
+          # Without a key the server binds to 127.0.0.1 inside the container,
+          # so the documented command supplies one — made here the way
+          # agentguard.lictorate.com's Docker tab makes it when none is set.
+          export AGENTGUARD_API_KEY="${AGENTGUARD_API_KEY:-$(openssl rand -hex 32)}"
+          docker run -d --name agentguard -p 8080:8080 \
+            -e AGENTGUARD_API_KEY \
+            -v agentguard-audit:/var/lib/agentguard \
+            "$image" >/dev/null
+          for _ in $(seq 1 30); do [ "$(status http://127.0.0.1:8080/health)" = 200 ] && break; sleep 1; done
+
+          fail() { echo "FAIL  $1"; docker logs agentguard; exit 1; }
+          [ "$(status http://127.0.0.1:8080/health)" = 200 ] || fail "/health did not answer 200"
+          echo "PASS  /health answers 200"
+          [ "$(status http://127.0.0.1:8080/v1/audit)" = 401 ] || fail "/v1/audit answered without a key"
+          echo "PASS  /v1/audit refuses a request without the key"
+          [ "$(status -H "Authorization: Bearer $AGENTGUARD_API_KEY" http://127.0.0.1:8080/v1/audit)" = 200 ] ||
+            fail "/v1/audit refused the key"
+          echo "PASS  /v1/audit accepts the key"
+          echo "ALL PASS"
