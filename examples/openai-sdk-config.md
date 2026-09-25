@@ -60,7 +60,7 @@ exists.
    ```bash
    git clone https://github.com/Caua-ferraz/AgentGuard.git
    cd AgentGuard
-   agentguard serve \
+   agentguard server \
        --policy configs/default.yaml \
        --dashboard \
        --watch \

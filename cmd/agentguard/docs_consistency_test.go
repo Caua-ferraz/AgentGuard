@@ -73,17 +73,17 @@ func TestDocs_CheckpointPathMatchesCode(t *testing.T) {
 	}
 }
 
-// The update check is skipped for `serve`. The CLI doc must say so, and
-// must not claim the check runs for "every subcommand".
-func TestDocs_UpdateCheckSkipsServe(t *testing.T) {
+// The update check is skipped for `server` (and its `serve` alias). The CLI
+// doc must say so, and must not claim the check runs for "every subcommand".
+func TestDocs_UpdateCheckSkipsServer(t *testing.T) {
 	root := repoRootForDocs(t)
 	b, err := os.ReadFile(filepath.Join(root, "docs", "CLI.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(b)
-	if !strings.Contains(text, "`serve` never") {
-		t.Errorf("docs/CLI.md must state that `serve` never performs the update check")
+	if !strings.Contains(text, "`server` never performs the check (nor does `serve`") {
+		t.Errorf("docs/CLI.md must state that `server` (and `serve`) never performs the update check")
 	}
 	if strings.Contains(text, "Every subcommand kicks off") {
 		t.Errorf("docs/CLI.md still claims every subcommand performs the update check")

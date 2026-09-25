@@ -23,7 +23,7 @@ Setup:
 Run AgentGuard side (two terminals):
 
   # Terminal 1
-  agentguard serve \\
+  agentguard server \\
       --policy configs/default.yaml \\
       --dashboard \\
       --watch \\

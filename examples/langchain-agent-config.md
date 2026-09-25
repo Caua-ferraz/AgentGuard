@@ -63,7 +63,7 @@ synthetic refusal.
 3. **Start the central AgentGuard server** in one terminal:
 
    ```bash
-   agentguard serve \
+   agentguard server \
        --policy configs/default.yaml \
        --dashboard \
        --watch \
@@ -116,7 +116,7 @@ rules:
 
 `tool_scope_map` is a list of `pattern` / `scope` entries. For a tool mapped to `shell`, the proxy checks the tool's `command` argument; `list_tmp_files` takes no arguments, so the check runs with the tool name as the command — that's why the `allow` rule names it. In `configs/default.yaml`, add the mapping at the top of the existing `tool_scope_map:` list and the `pattern:` line to the existing `shell` block's `allow:` list, rather than a second `shell` block (a second block is merged into the first, and `agentguard validate` warns about it).
 
-The proxy reloads its policy file on its own when you save it; so does `agentguard serve`. See
+The proxy reloads its policy file on its own when you save it; so does `agentguard server`. See
 [`docs/POLICY_REFERENCE.md` § "LLM API Proxy tool scope mapping"](../docs/POLICY_REFERENCE.md)
 for the full schema.
 

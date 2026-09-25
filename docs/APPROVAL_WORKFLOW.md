@@ -181,7 +181,7 @@ Approver opens the dashboard at `<base-url>/dashboard`, which lists pending appr
 
 ```bash
 AGENTGUARD_API_KEY=$KEY agentguard approve ap_1a2b…
-# Action approve: approved
+# Approved ap_1a2b…
 
 agentguard deny ap_1a2b… --url https://guardrails.example
 ```

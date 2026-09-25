@@ -139,6 +139,7 @@ Flags:
     	Print version and exit (checked before any other flag is parsed)
 
 Environment:
+  AGENTGUARD_URL       Used when --guard-url is not set.
   AGENTGUARD_API_KEY   Used when --api-key is not set.
 `)
 	}
@@ -152,6 +153,9 @@ Environment:
 	reconnectCap := fs.Duration("reconnect-cap", 60*time.Second, "Upper bound on reconnect backoff")
 
 	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
+	if err := gateclient.RejectArgs(fs.Args(), `put each --upstream command in quotes, e.g. --upstream "fs:npx -y @modelcontextprotocol/server-filesystem /tmp"`); err != nil {
 		return nil, err
 	}
 

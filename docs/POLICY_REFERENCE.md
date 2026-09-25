@@ -605,7 +605,7 @@ Pattern matching is where most policy bugs come from.
 > The direction of the risk matters: on a **deny** rule an over-matching `*` makes
 > the deny *broader* (fail-safe), but on an **allow** rule it *widens* access
 > (fail-open). Audit ALLOW path rules for a bare `*` first, and write path bounds
-> with `**` so the depth is explicit. `agentguard serve` / policy load also emits
+> with `**` so the depth is explicit. `agentguard server` / policy load also emits
 > a non-fatal warning for exactly this pattern shape — see
 > [Load-time validation](#load-time-validation).
 

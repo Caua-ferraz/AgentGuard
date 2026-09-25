@@ -111,7 +111,7 @@ Rule-level keys (allow/deny/require_approval, rate limits, cost limits) continue
 
 ## Validation errors
 
-`agentguard validate <policy.yaml>` and `agentguard serve` both run the same validators. A failure prints the offending YAML path:
+`agentguard validate <policy.yaml>` and `agentguard server` both run the same validators. A failure prints the offending YAML path:
 
 ```
 INVALID: proxy.session.ttl: time: unknown unit "hr" in duration "1hr"

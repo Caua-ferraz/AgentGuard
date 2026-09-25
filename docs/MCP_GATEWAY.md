@@ -81,7 +81,7 @@ agentguard-mcp-gateway \
 | flag                | repeatable | meaning                                         |
 |---------------------|------------|-------------------------------------------------|
 | `--upstream "<ns>:<cmd>"` | yes  | Downstream MCP server. `ns` is the namespace prefix; `cmd` is tokenized by the gateway's own `SplitCommandLine` (double quotes and `\` escapes only — no single quotes, `$VAR` expansion, or pipes). If `ns:` is omitted, the namespace defaults to the first whitespace-delimited token of `cmd`. |
-| `--guard-url`       | no         | central server URL. Default `http://127.0.0.1:8080`. Must be an `http`/`https` URL with a host. |
+| `--guard-url`       | no         | central server URL. Falls back to `AGENTGUARD_URL` env, then `http://127.0.0.1:8080`. Must be an `http`/`https` URL with a host. |
 | `--api-key`         | no         | bearer for `/v1/check`. Falls back to `AGENTGUARD_API_KEY` env. |
 | `--tenant-id`       | no         | default `local`. Must be non-empty.             |
 | `--fail-mode`       | no         | `deny` / `allow` / `fail-closed-with-audit`. Default `deny`. `fail-closed-with-audit` denies with the distinct Rule `deny:gateway:fail_closed_audit` **and** records the denial in the local `--fail-audit-log` file. See [`PROXY_ARCHITECTURE.md`](./PROXY_ARCHITECTURE.md) § 6.1. |
@@ -92,6 +92,12 @@ agentguard-mcp-gateway \
 | `--upstream-timeout`| no         | per-frame upstream-response timeout. Default `30s`. |
 | `--reconnect-cap`   | no         | upper bound on reconnect backoff. Default `60s`. |
 | `--version`         | no         | print version and exit. Checked before any other flag is parsed, so it works without `--upstream`. |
+
+The gateway takes flags only. A stray word is an error (exit 2) instead of
+being ignored: `agentguard-mcp-gateway version` answers `did you mean
+--version?`, and an unquoted `--upstream fs:npx … /tmp` reports the lost
+`/tmp` rather than launching the server without it. Quote each `--upstream`
+command.
 
 Stdout is reserved for JSON-RPC. All logging goes to stderr — the MCP
 spec explicitly permits this (the host MAY capture or ignore it).

@@ -24,10 +24,11 @@ import (
 //   - MUST NOT slow down or interfere with the command — bounded wait,
 //     all errors swallowed.
 //   - No new external dependencies.
-//   - The `serve` subcommand never performs the check. The enforcement
-//     server's outbound connections must be exactly the ones the operator
-//     configured (policy notifiers, the durable store, nothing else) — see
-//     docs/THREAT_MODEL.md. Interactive subcommands keep the notice.
+//   - The `server` subcommand (and its `serve` alias) never performs the
+//     check. The enforcement server's outbound connections must be exactly
+//     the ones the operator configured (policy notifiers, the durable store,
+//     nothing else) — see docs/THREAT_MODEL.md. Interactive subcommands keep
+//     the notice.
 const (
 	defaultUpdateCheckEndpoint = "https://api.github.com/repos/Caua-ferraz/AgentGuard/releases/latest"
 	updateHTTPTimeout          = 1500 * time.Millisecond
@@ -94,8 +95,10 @@ func waitForUpdateCheck(done <-chan struct{}, timeout time.Duration) {
 
 // shouldSkipUpdateCheck reports whether this invocation must not call out.
 //
-//   - `serve`: never. The long-running enforcement server makes no outbound
-//     connection of its own.
+//   - `server` (or its `serve` alias): never. The long-running enforcement
+//     server makes no outbound connection of its own.
+//   - Help, no command at all, or a mistyped command: nothing ran that the
+//     notice could accompany, and help should print without a network wait.
 //   - Dev builds: an untagged version string ("dev" anywhere in it), or the
 //     "dev" commit placeholder on a binary whose Go build info carries no
 //     tagged release version. `go install …@vX.Y.Z` / `@latest` builds keep
@@ -103,7 +106,7 @@ func waitForUpdateCheck(done <-chan struct{}, timeout time.Duration) {
 //     `go build` of an untagged or modified checkout does not.
 //   - AGENTGUARD_NO_UPDATE_CHECK set to anything other than "0".
 func shouldSkipUpdateCheck(currentVersion, currentCommit, subcommand string) bool {
-	if subcommand == "serve" {
+	if name, known := lookupCommand(subcommand); !known || name == "server" || name == "help" {
 		return true
 	}
 	if currentVersion == "" || strings.Contains(currentVersion, "dev") {

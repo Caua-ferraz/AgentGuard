@@ -195,6 +195,7 @@ Flags:
     	Print version and exit (checked before any other flag is parsed)
 
 Environment:
+  AGENTGUARD_URL       Used when --guard-url is not set.
   AGENTGUARD_API_KEY   Used when --api-key is not set.
 `)
 	}
@@ -211,13 +212,17 @@ Environment:
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
+	if err := gateclient.RejectArgs(fs.Args(), ""); err != nil {
+		return nil, err
+	}
+	gate.ApplyEnv()
 
 	cfg := &Config{
 		Listen:               *listen,
 		UpstreamOpenAI:       *upstreamOpenAI,
 		UpstreamAnthropic:    *upstreamAnthropic,
 		GuardURL:             *gate.GuardURL,
-		APIKey:               gateclient.ResolveAPIKey(*gate.APIKey),
+		APIKey:               *gate.APIKey,
 		ProxyAPIKey:          *proxyAPIKey,
 		TenantID:             *gate.TenantID,
 		FailMode:             *gate.FailMode,

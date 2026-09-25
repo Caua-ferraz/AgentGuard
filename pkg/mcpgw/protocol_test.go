@@ -307,6 +307,7 @@ func TestMergeCapabilities_MasksResourcesAndPrompts(t *testing.T) {
 
 // TestParseConfig exercises ParseConfig's flag-parsing + validation.
 func TestParseConfig(t *testing.T) {
+	t.Setenv("AGENTGUARD_URL", "")
 	cases := []struct {
 		name    string
 		args    []string
@@ -361,6 +362,13 @@ func TestParseConfig(t *testing.T) {
 				"--upstream", "fs:cmd1",
 				"--upstream", "fs:cmd2",
 			},
+			wantErr: true,
+		},
+		{
+			// An unquoted --upstream command: "/tmp" used to be dropped
+			// without a word, launching the server without its argument.
+			name:    "stray positional argument -> error",
+			args:    []string{"--upstream", "fs:npx", "/tmp", "--policy-mode", "fast"},
 			wantErr: true,
 		},
 		{

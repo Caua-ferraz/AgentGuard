@@ -18,7 +18,7 @@ INFO: binding to 127.0.0.1:8080 (localhost only) — set --api-key to listen on 
 
 ```bash
 export AGENTGUARD_API_KEY="$(openssl rand -hex 32)"
-agentguard serve --api-key "$AGENTGUARD_API_KEY" ...
+agentguard server --api-key "$AGENTGUARD_API_KEY" ...
 ```
 
 Details: [`docs/DEPLOYMENT.md` §1](DEPLOYMENT.md#1-always-set-an-api-key).
@@ -34,7 +34,7 @@ Details: [`docs/DEPLOYMENT.md` §1](DEPLOYMENT.md#1-always-set-an-api-key).
 **Fix:** add `--tls-terminated-upstream`.
 
 ```bash
-agentguard serve --tls-terminated-upstream ...
+agentguard server --tls-terminated-upstream ...
 ```
 
 Details: [`docs/DEPLOYMENT.md` §2a](DEPLOYMENT.md#2a-session-cookies-without-secure--login-loop).
@@ -48,17 +48,17 @@ Details: [`docs/DEPLOYMENT.md` §2a](DEPLOYMENT.md#2a-session-cookies-without-se
 **Fix:**
 
 ```bash
-agentguard serve --base-url https://guard.example.com ...
+agentguard server --base-url https://guard.example.com ...
 ```
 
 ---
 
 ## Policy edits do not take effect
 
-**Likely cause (a):** `--watch` is not enabled. Without it, the policy is loaded once at startup and never re-read.
+**Likely cause (a):** the server loaded a different file than the one you edited. The startup log names it: `Loaded policy: <name> from <path> …`. Without `--policy`, the server picks the file itself (see [`CLI.md`](CLI.md#policy-file)). Reloading is always on; `--watch` only adds a `Policy reloaded: …` log line per reload, which shows whether an edit was picked up:
 
 ```bash
-agentguard serve --watch ...
+agentguard server --policy ./my-policy.yaml --watch ...
 ```
 
 **Likely cause (b):** the file's mtime did not change. The watcher polls `os.Stat(path).ModTime()` every 2s (`pkg/policy/watcher.go` `DefaultPollInterval`). If you edited through a tool that preserves mtime, touch the file:
@@ -224,7 +224,7 @@ Details: [`docs/DEPRECATIONS.md`](DEPRECATIONS.md) and [`docs/POLICY_REFERENCE.m
 **Fix:** set the exact frontend origin.
 
 ```bash
-agentguard serve --allowed-origin https://app.example.com ...
+agentguard server --allowed-origin https://app.example.com ...
 ```
 
 Details: [`docs/DEPLOYMENT.md` §3](DEPLOYMENT.md#3-cors).

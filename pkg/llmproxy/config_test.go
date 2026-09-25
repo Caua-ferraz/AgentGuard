@@ -9,6 +9,7 @@ import (
 
 func TestConfig_Defaults(t *testing.T) {
 	t.Setenv("AGENTGUARD_API_KEY", "")
+	t.Setenv("AGENTGUARD_URL", "")
 	cfg, err := ParseConfigWithOutput(nil, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -49,6 +50,36 @@ func TestConfig_APIKeyEnvFallback(t *testing.T) {
 	}
 	if cfg.APIKey != "flag-token" {
 		t.Errorf("APIKey = %q, want flag-token", cfg.APIKey)
+	}
+}
+
+func TestConfig_GuardURLEnvFallback(t *testing.T) {
+	t.Setenv("AGENTGUARD_API_KEY", "")
+	t.Setenv("AGENTGUARD_URL", "http://guard.internal:8080")
+	cfg, err := ParseConfigWithOutput(nil, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.GuardURL != "http://guard.internal:8080" {
+		t.Errorf("GuardURL = %q, want the AGENTGUARD_URL value", cfg.GuardURL)
+	}
+	cfg, err = ParseConfigWithOutput([]string{"--guard-url", "http://flag:1"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.GuardURL != "http://flag:1" {
+		t.Errorf("GuardURL = %q, the flag must win", cfg.GuardURL)
+	}
+}
+
+// A positional argument used to be ignored: `agentguard-llm-proxy version`
+// started the proxy.
+func TestConfig_RejectsPositionalArgs(t *testing.T) {
+	t.Setenv("AGENTGUARD_API_KEY", "")
+	for _, args := range [][]string{{"version"}, {"--listen", "127.0.0.1:9", "extra"}} {
+		if _, err := ParseConfigWithOutput(args, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "unexpected argument") {
+			t.Errorf("ParseConfig(%q) err = %v, want unexpected argument", args, err)
+		}
 	}
 }
 

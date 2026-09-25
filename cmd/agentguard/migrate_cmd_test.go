@@ -3,7 +3,7 @@ package main
 // Tests for `agentguard migrate` (review finding R2).
 //
 // The defect: the CLI computed the replay checkpoint as
-// `<audit-dir>/.replay-checkpoint` while `agentguard serve` reads and writes
+// `<audit-dir>/.replay-checkpoint` while `agentguard server` reads and writes
 // `<audit-log>.replay-checkpoint`, so `--reset-checkpoint` deleted a file
 // that never existed and reported success, and a CLI-run migration left the
 // live checkpoint pointing at byte offsets of the old file. No test drove

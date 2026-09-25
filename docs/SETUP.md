@@ -51,11 +51,11 @@ irm https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/install.p
 
 The installers never overwrite an existing starter policy. To check provenance as well as checksums, download an archive from the [releases page](https://github.com/Caua-ferraz/AgentGuard/releases) and run `gh attestation verify <archive> --repo Caua-ferraz/AgentGuard`.
 
-If you installed this way, the commands below work without the leading `./`; use the starter policy path the installer printed in place of `configs/default.yaml`.
+If you installed this way, the commands below work without the leading `./`, and you can leave out `--policy configs/default.yaml`: `server`, `validate` and `check` find the installer's starter policy on their own ([`CLI.md`](CLI.md#policy-file)).
 
 #### Update
 
-Run the same install command again. It replaces the three binaries, keeps your policy, and says what changed: `Updated AgentGuard 1.2.0 -> 1.3.0`, `Reinstalled AgentGuard 1.3.0 (it was already on this version)`, or — when `AGENTGUARD_VERSION` pins an older release — `Downgraded AgentGuard 1.3.0 -> 1.2.0` followed by a warning. The `agentguard` CLI prints a one-line notice with the right command when a newer release is out (`serve` never checks; see [`CLI.md`](CLI.md#update-notice-on-startup-v051)).
+Run the same install command again. It replaces the three binaries, keeps your policy, and says what changed: `Updated AgentGuard 1.2.0 -> 1.3.0`, `Reinstalled AgentGuard 1.3.0 (it was already on this version)`, or — when `AGENTGUARD_VERSION` pins an older release — `Downgraded AgentGuard 1.3.0 -> 1.2.0` followed by a warning. The `agentguard` CLI prints a one-line notice with the right command when a newer release is out (`server` never checks; see [`CLI.md`](CLI.md#update-notice-on-startup-v051)).
 
 #### Uninstall
 
@@ -69,7 +69,7 @@ curl -fsSL https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/in
 $env:AGENTGUARD_UNINSTALL=1; irm https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/install.ps1 | iex
 ```
 
-The uninstall removes the three binaries — on Windows also the folder's entry on your user PATH — and keeps your policy folder, printing where it is. Audit logs and the state database live wherever you ran `agentguard serve`, so it cannot know their path and leaves them alone. Run it as the same user that installed (with `sudo` for a root install in `/usr/local/bin`); with `AGENTGUARD_INSTALL_DIR` set, it removes from that folder. On Windows, stop any running AgentGuard first: the uninstall refuses rather than removing half of it. `AGENTGUARD_UNINSTALL=1` works on Linux and macOS too; on Windows the variable is cleared once read, so a later install in the same window installs.
+The uninstall removes the three binaries — on Windows also the folder's entry on your user PATH — and keeps your policy folder, printing where it is. Audit logs and the state database live wherever you ran `agentguard server`, so it cannot know their path and leaves them alone. Run it as the same user that installed (with `sudo` for a root install in `/usr/local/bin`); with `AGENTGUARD_INSTALL_DIR` set, it removes from that folder. On Windows, stop any running AgentGuard first: the uninstall refuses rather than removing half of it. `AGENTGUARD_UNINSTALL=1` works on Linux and macOS too; on Windows the variable is cleared once read, so a later install in the same window installs.
 
 For the container image, stop and remove the container; `docker volume rm agentguard-audit` (or whatever volume you mounted at `/var/lib/agentguard`) deletes the audit trail.
 
@@ -108,13 +108,13 @@ go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@latest
 
 ```bash
 # Basic
-./agentguard serve --policy configs/default.yaml
+./agentguard server --policy configs/default.yaml
 
-# With dashboard and live policy reload
-./agentguard serve --policy configs/default.yaml --dashboard --watch
+# With the dashboard, logging each policy reload (reloading is always on)
+./agentguard server --policy configs/default.yaml --dashboard --watch
 
 # Custom port
-./agentguard serve --policy configs/default.yaml --port 9090 --dashboard
+./agentguard server --policy configs/default.yaml --port 9090 --dashboard
 ```
 
 ### 4. Verify It's Running
@@ -164,14 +164,14 @@ for local dev, but approve/deny/audit/status are unauthenticated. For
 anything beyond local dev, set an API key:
 
 ```bash
-./agentguard serve \
+./agentguard server \
   --policy configs/default.yaml \
   --api-key YOUR_SECRET \
   --dashboard
 
 # Or via environment (server + CLI both read this):
 export AGENTGUARD_API_KEY=YOUR_SECRET
-./agentguard serve --policy configs/default.yaml --dashboard
+./agentguard server --policy configs/default.yaml --dashboard
 ```
 
 Which endpoints the key gates (and which stay open), the dashboard
@@ -265,10 +265,10 @@ See the package README in
 
 ```bash
 # Start the server
-agentguard serve --policy configs/default.yaml --dashboard --watch
+agentguard server --policy configs/default.yaml --dashboard --watch
 
 # With authentication (also reads AGENTGUARD_API_KEY from the environment)
-agentguard serve --policy configs/default.yaml --api-key YOUR_SECRET --dashboard
+agentguard server --policy configs/default.yaml --api-key YOUR_SECRET --dashboard
 
 # Validate policy files (no server needed)
 agentguard validate --policy configs/default.yaml
@@ -287,14 +287,14 @@ agentguard audit --agent my-bot --decision DENY --limit 20 --api-key YOUR_SECRET
 agentguard version
 ```
 
-The full `serve` flag table (persistence, audit rotation, buffered async
+The full `server` flag table (persistence, audit rotation, buffered async
 logger, session-cost TTL, base-url/CORS) lives in
-[`CLI.md`](CLI.md#agentguard-serve); `agentguard serve -h` prints the same
+[`CLI.md`](CLI.md#agentguard-server); `agentguard server -h` prints the same
 list.
 
 ### Wire-level enforcement points
 
-Two additional binaries enforce at the wire. Both need `--guard-url` pointing at `agentguard serve`, and both read `AGENTGUARD_API_KEY` for authenticated server calls.
+Two additional binaries enforce at the wire. Both need `--guard-url` pointing at `agentguard server`, and both read `AGENTGUARD_API_KEY` for authenticated server calls.
 
 - **`agentguard-mcp-gateway`** — sits between an MCP client and one or more MCP servers. Quickstart with copy-paste configs: [`QUICKSTART_MCP.md`](QUICKSTART_MCP.md). Reference: [`MCP_GATEWAY.md`](MCP_GATEWAY.md).
 - **`agentguard-llm-proxy`** — sits between OpenAI / Anthropic SDK code and the providers. Quickstart: [`QUICKSTART_LLM_PROXY.md`](QUICKSTART_LLM_PROXY.md). Reference: [`LLM_API_PROXY.md`](LLM_API_PROXY.md).
@@ -346,7 +346,7 @@ where fsnotify isn't available). `--watch` only adds a log line for each
 reload:
 
 ```bash
-agentguard serve --policy configs/default.yaml --watch
+agentguard server --policy configs/default.yaml --watch
 # 2026/09/23 21:59:11 Policy reloaded: default-sandbox (56 rules)
 ```
 

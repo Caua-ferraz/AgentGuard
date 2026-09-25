@@ -51,7 +51,7 @@ export AGENTGUARD_API_KEY="$(openssl rand -hex 32)"
 git clone https://github.com/Caua-ferraz/AgentGuard.git
 cd AgentGuard
 
-agentguard serve \
+agentguard server \
     --policy configs/default.yaml \
     --dashboard \
     --watch \
@@ -117,7 +117,7 @@ rules:
 ```
 
 The proxy hot-reloads the policy file automatically (its own watcher —
-no flag needed; `--watch` on `agentguard serve` only logs reload
+no flag needed; `--watch` on `agentguard server` only logs reload
 activity). Modify the prompt in `examples/openai-sdk-config.py` to ask
 the model to `rm -rf /etc` and re-run. The model emits a tool call;
 AgentGuard intercepts it mid-stream and rewrites the response as a

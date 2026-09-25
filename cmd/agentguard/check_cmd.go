@@ -83,9 +83,8 @@ type checkCmdFlags struct {
 // pure (no os.Stdin / os.Stdout reads) so tests can inject buffers.
 func runCheck(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	fs.Usage = func() {
-		fmt.Fprintf(stderr, `Usage: agentguard check [flags]
+	usage := func(w io.Writer) {
+		fmt.Fprintf(w, `Usage: agentguard check [flags]
 
 Run a single policy check (or a batch from stdin) against a local policy
 file without going through the HTTP server. Useful in CI pipelines and
@@ -100,10 +99,13 @@ Input modes (mutually exclusive):
                        policy file hot-reloads on edit. Runs until interrupted.
   (default)            Single check built from per-field flags
 
-Flags:
+Without --policy it uses the file 'agentguard server' would load:
+AGENTGUARD_POLICY, then configs/default.yaml, then the installer's
+starter policy.
+
 `)
-		fs.PrintDefaults()
-		fmt.Fprintf(stderr, `
+		writeFlags(w, fs)
+		fmt.Fprintf(w, `
 Exit codes:
   0  ALLOW (or every entry ALLOW in batch mode)
   1  DENY  (or any entry DENY in batch mode)
@@ -113,7 +115,7 @@ Exit codes:
 	}
 
 	f := &checkCmdFlags{}
-	fs.StringVar(&f.PolicyPath, "policy", "", "Policy file path (required)")
+	fs.StringVar(&f.PolicyPath, "policy", "", "Policy file path (found automatically when not given)")
 	fs.StringVar(&f.TenantID, "tenant-id", "", "Tenant ID (default \"local\")")
 	fs.StringVar(&f.RequestStr, "request", "", "JSON request string for single check")
 	fs.BoolVar(&f.Stdin, "stdin", false, "Read a single JSON request object from stdin")
@@ -147,18 +149,35 @@ Exit codes:
 		f.watchStop = stop
 	}
 
-	if err := fs.Parse(args); err != nil {
-		// `-h` / `-help` returns flag.ErrHelp; the FlagSet has already
-		// printed the usage block via fs.Usage. Exit 0 in that case so
-		// `agentguard check -h` is a friendly help, not a usage error.
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() {}
+	positional, err := parseArgs(fs, args)
+	if err != nil {
+		// `-h` / `-help` returns flag.ErrHelp: print the usage to stdout and
+		// exit 0 so `agentguard check -h` is a friendly help, not a usage
+		// error.
 		if errors.Is(err, flag.ErrHelp) {
+			usage(stdout)
 			return exitAllow
 		}
 		// All other parse errors (unknown flag, bad numeric value, etc.)
-		// already wrote to stderr. Map to the documented "usage error"
-		// exit code so scripts can distinguish flag misuse from policy
-		// denials.
+		// map to the documented "usage error" exit code so scripts can
+		// distinguish flag misuse from policy denials.
+		fmt.Fprintf(stderr, "agentguard check: %s\nRun 'agentguard check -h' for help.\n", flagError(fs, err))
 		return exitError
+	}
+	if len(positional) > 0 {
+		fmt.Fprintf(stderr, "agentguard check: unexpected argument %q (describe the action with flags such as --scope and --command, or --request)\nRun 'agentguard check -h' for help.\n", positional[0])
+		return exitError
+	}
+	if !flagWasSet(fs, "policy") {
+		path, note, err := findPolicy("", false)
+		if err != nil {
+			fmt.Fprintf(stderr, "check: %v\n", err)
+			return exitError
+		}
+		fmt.Fprintf(stderr, "Using policy file %s (%s).\n", path, note)
+		f.PolicyPath = path
 	}
 	return executeCheck(f, stdin, stdout, stderr)
 }

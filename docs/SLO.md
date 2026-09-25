@@ -134,7 +134,7 @@ plus the HTTP-path persistence-on check
 (`TestIntegration_HotPathLatencyWithPersistence`). What remains for full
 SLO validation:
 
-1. A `vegeta`/`hey` harness against `agentguard serve` running with
+1. A `vegeta`/`hey` harness against `agentguard server` running with
    `--policy configs/default.yaml` and a tmpfs-backed audit log,
    driving 1 kRPS sustained for 5 minutes. **Still not automated** as
    of v1.0 (the in-suite concurrent soak — `pkg/persist`, 32 workers,

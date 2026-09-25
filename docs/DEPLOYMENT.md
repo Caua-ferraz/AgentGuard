@@ -13,7 +13,7 @@ Each section shows the exact flag/setting, the failure mode if you skip it, and 
 
 > **TL;DR** — minimum safe flags for a production server behind an HTTPS proxy:
 > ```bash
-> agentguard serve \
+> agentguard server \
 >   --policy /etc/agentguard/policy.yaml \
 >   --api-key "$AGENTGUARD_API_KEY" \
 >   --base-url https://guard.example.com \
@@ -49,7 +49,7 @@ INFO: binding to 127.0.0.1:8080 (localhost only) — set --api-key to listen on 
 
 ```bash
 export AGENTGUARD_API_KEY="$(openssl rand -hex 32)"
-agentguard serve --api-key "$AGENTGUARD_API_KEY" ...
+agentguard server --api-key "$AGENTGUARD_API_KEY" ...
 ```
 
 The same key is used by `agentguard approve|deny|status|audit` (falls back to `AGENTGUARD_API_KEY` env; see `resolveAPIKey` in `cmd/agentguard/main.go`) and by the Python / TypeScript SDKs (`AGENTGUARD_API_KEY` env var).
@@ -77,7 +77,7 @@ Modern browsers reject non-`Secure` cookies from `SameSite=Strict` origins serve
 **Fix:** pass `--tls-terminated-upstream`.
 
 ```bash
-agentguard serve --tls-terminated-upstream ...
+agentguard server --tls-terminated-upstream ...
 ```
 
 This forces `Secure=true` on session cookies regardless of `r.TLS`. Only use it when TLS is actually terminated upstream — marking cookies `Secure` over plaintext would make them unreadable.
@@ -89,7 +89,7 @@ This forces `Secure=true` on session cookies regardless of `r.TLS`. Only use it 
 **Fix:** set `--base-url` to the public URL the dashboard is reachable at:
 
 ```bash
-agentguard serve --base-url https://guard.example.com ...
+agentguard server --base-url https://guard.example.com ...
 ```
 
 ### 2c. nginx reference config
@@ -127,7 +127,7 @@ server {
 With nginx on the same host, start AgentGuard with `--bind 127.0.0.1` **(v1.2)** as well as `--api-key`, so the plaintext port is reachable only through nginx and not from the network:
 
 ```bash
-agentguard serve --api-key "$AGENTGUARD_API_KEY" --bind 127.0.0.1 --tls-terminated-upstream \
+agentguard server --api-key "$AGENTGUARD_API_KEY" --bind 127.0.0.1 --tls-terminated-upstream \
   --base-url https://guard.example.com ...
 ```
 
@@ -138,7 +138,7 @@ Every release publishes a multi-arch image (linux/amd64 and linux/arm64) to
 holds all three binaries; the server is the default entrypoint. Pin the
 version tag in production so an upgrade is a deliberate change. The image sets
 `AGENTGUARD_DISTRIBUTION=container`, so the CLI's update notice (never shown
-by `serve`) suggests pulling a new image rather than the one-line installer. To build the
+by `server`) suggests pulling a new image rather than the one-line installer. To build the
 image yourself instead, replace `image:` with `build: .` at the repo root.
 
 ```yaml
@@ -294,14 +294,14 @@ Examples (systemd unit, Kubernetes sidecar, MCP client configs): [`QUICKSTART_MC
 
 ## 6. Outbound connections
 
-`agentguard serve` opens exactly the outbound connections you configure and nothing else:
+`agentguard server` opens exactly the outbound connections you configure and nothing else:
 
 | Connection | Configured by | Notes |
 |---|---|---|
 | Durable store | `--store-dsn` | PostgreSQL only; the default SQLite store is a local file. |
 | Notifiers (webhook, Slack) | `notifications:` in the policy YAML | Payloads pass through the notifier redactor. |
 
-There is no telemetry, no crash reporting, and no update check from `serve`. The interactive `agentguard` subcommands (`check`, `status`, `migrate`, …) do query the GitHub Releases API once at startup for the update notice; set `AGENTGUARD_NO_UPDATE_CHECK=1` in scripted or air-gapped environments ([`CLI.md`](CLI.md#update-notice-on-startup-v051)). The MCP gateway connects only to `--guard-url` and the downstream MCP servers it spawns; the LLM proxy connects only to `--guard-url` and the configured upstream provider. The complete actor and boundary list is in [`THREAT_MODEL.md`](THREAT_MODEL.md).
+There is no telemetry, no crash reporting, and no update check from `server`. The interactive `agentguard` subcommands (`check`, `status`, `migrate`, …) do query the GitHub Releases API once at startup for the update notice; set `AGENTGUARD_NO_UPDATE_CHECK=1` in scripted or air-gapped environments ([`CLI.md`](CLI.md#update-notice-on-startup-v051)). The MCP gateway connects only to `--guard-url` and the downstream MCP servers it spawns; the LLM proxy connects only to `--guard-url` and the configured upstream provider. The complete actor and boundary list is in [`THREAT_MODEL.md`](THREAT_MODEL.md).
 
 ---
 

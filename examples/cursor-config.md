@@ -91,7 +91,7 @@ into the container.
 4. **Run the central server** in a terminal:
 
    ```bash
-   agentguard serve \
+   agentguard server \
      --policy .agentguard/policy.yaml \
      --dashboard \
      --watch \
