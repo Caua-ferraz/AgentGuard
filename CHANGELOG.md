@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Prebuilt binaries on every release.** Each GitHub release carries archives with `agentguard`, `agentguard-mcp-gateway` and `agentguard-llm-proxy` for Linux, macOS and Windows on amd64 and arm64, a `checksums.txt`, and signed build provenance (`gh attestation verify <file> --repo Caua-ferraz/AgentGuard`). Installing no longer needs a Go toolchain. `scripts/build-release.sh` (`make release-artifacts`) builds the same archives locally, and refuses a version that differs from the one in the sources.
+- **One-line installers that also update.** `install.sh` (Linux, macOS) and `install.ps1` (Windows) are attached to each release, stamped with its version, so `…/releases/latest/download/install.sh` always installs the newest release. They check the archive against `checksums.txt` before installing anything, install all three binaries, write a starter policy only when none exists, and print `Updated X -> Y` when run over an older install. `AGENTGUARD_VERSION`, `AGENTGUARD_INSTALL_DIR` and `AGENTGUARD_DOWNLOAD_URL` pin a version, choose the folder, or point at a mirror. See [`docs/SETUP.md`](docs/SETUP.md#1-install).
+- **Published container image.** `ghcr.io/caua-ferraz/agentguard` is pushed for every release, for linux/amd64 and linux/arm64, tagged with the version and `latest`. Only the newest release moves `latest`. The image holds all three binaries; the server is still the default entrypoint.
+- **Assets for existing releases.** The `Release binaries, installers and image` workflow can be run by hand with a tag to build and attach the same assets to a release published before it existed.
+
+### Changed
+
+- **The Dockerfile cross-compiles.** The builder stage runs on the build host's platform and compiles for BuildKit's `TARGETOS`/`TARGETARCH`, so a multi-arch build needs no CPU emulation. A plain `docker build` still produces an image for the host, with the same entrypoint and default command.
+
 ## [1.2.0] — 2026-09-24
 
 > **A security release from a full local test of 1.1.1.** Instead of relying on CI alone, the test ran every surface in a sandbox: the CLI, the server, approvals, audit, persistence, multi-tenant and multi-node PostgreSQL deployments, the MCP gateway, the LLM proxy, both SDKs and the dashboard. It found one high-severity bypass. A shell allow rule's glob matched the whole command line, so `allow: "ls *"` also allowed `ls /tmp; rm -rf /`, and chained commands got past the default policy's `sudo` and `rm -rf` approval rules. It also found nine medium-severity problems. Among them: a second rule block for a scope was silently ignored; secrets were stored verbatim in the audit trail; and `pip install agentguardproxy[all]` installed a CrewAI version on which the adapter gated nothing. Rerunning the test against the fixes found one more bypass, in the MCP gateway's network check.

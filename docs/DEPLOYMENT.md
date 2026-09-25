@@ -133,15 +133,16 @@ agentguard serve --api-key "$AGENTGUARD_API_KEY" --bind 127.0.0.1 --tls-terminat
 
 ### 2d. Docker Compose reference
 
-AgentGuard does not publish a prebuilt image, so Compose builds it from the
-repository's `Dockerfile` (save this file at the repo root, or point
-`build:` at your checkout).
+Every release publishes a multi-arch image (linux/amd64 and linux/arm64) to
+`ghcr.io/caua-ferraz/agentguard`, tagged with the version and `latest`. It
+holds all three binaries; the server is the default entrypoint. Pin the
+version tag in production so an upgrade is a deliberate change. To build the
+image yourself instead, replace `image:` with `build: .` at the repo root.
 
 ```yaml
 services:
   agentguard:
-    build: .                      # the repo's Dockerfile
-    image: agentguard:1.2.0       # tag for the locally built image
+    image: ghcr.io/caua-ferraz/agentguard:1.2.0
     restart: unless-stopped
     command: >
       serve
@@ -190,9 +191,9 @@ spec:
     spec:
       containers:
         - name: agentguard
-          # No prebuilt image is published: build the Dockerfile and push it
-          # to a registry your cluster can pull from.
-          image: registry.example.com/agentguard:1.2.0
+          # Published per release; or build the Dockerfile and push it to a
+          # registry your cluster can pull from.
+          image: ghcr.io/caua-ferraz/agentguard:1.2.0
           args:                   # replaces the image's CMD, so --policy must be repeated
             - serve
             - --policy=/etc/agentguard/default.yaml

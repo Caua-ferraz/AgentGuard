@@ -53,7 +53,8 @@ AgentGuard ships **three integration paths**, listed from "no code change" to "d
 For Claude Desktop and any MCP-aware client (Cursor, Cline, Continue, Zed), point your config at `agentguard-mcp-gateway` and every `tools/call` from the model is policy-checked before reaching the real MCP server:
 
 ```bash
-go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-mcp-gateway@latest
+# Installs all three binaries (Windows and other options: see "Install the server" below)
+curl -fsSL https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/install.sh | sh
 ```
 
 Then add the gateway to `claude_desktop_config.json` — copy the ready-made block from the 90-second walkthrough in [`docs/QUICKSTART_MCP.md`](docs/QUICKSTART_MCP.md) or from [`examples/claude-desktop-config.json`](examples/claude-desktop-config.json). Ready configs for Cursor, Cline, Continue, Zed: [`examples/`](examples/). Wire-format design + client-integration gotchas: [`docs/MCP_GATEWAY.md`](docs/MCP_GATEWAY.md).
@@ -63,7 +64,8 @@ Then add the gateway to `claude_desktop_config.json` — copy the ready-made blo
 For any code that already uses the OpenAI / Anthropic SDKs, set one environment variable and your existing client flows through AgentGuard:
 
 ```bash
-go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard-llm-proxy@latest
+# Installs all three binaries (Windows and other options: see "Install the server" below)
+curl -fsSL https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/install.sh | sh
 
 agentguard-llm-proxy \
     --listen 127.0.0.1:8081 \
@@ -115,20 +117,33 @@ The SDKs are not deprecated. They are the right answer when you control the agen
 
 ### Install the server
 
+One command installs all three binaries (`agentguard`, `agentguard-mcp-gateway`, `agentguard-llm-proxy`) and a starter policy. It needs no Go toolchain and checks the download against the release's `checksums.txt` before installing anything. **Run the same command again to update.**
+
 ```bash
-# From source
-git clone https://github.com/Caua-ferraz/AgentGuard.git
-cd AgentGuard && go build -o agentguard ./cmd/agentguard
+# Linux / macOS — installs to ~/.local/bin (or /usr/local/bin as root)
+curl -fsSL https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/install.sh | sh
+```
 
-# Or via Go install
-go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@latest
+```powershell
+# Windows (PowerShell) — installs to %LOCALAPPDATA%\Programs\AgentGuard\bin and adds it to your PATH
+irm https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/install.ps1 | iex
+```
 
-# Or Docker (build the image from the repo's Dockerfile first)
-docker build -t agentguard:latest .
+Pin a version with `AGENTGUARD_VERSION=1.2.0`, or choose the folder with `AGENTGUARD_INSTALL_DIR`. To install by hand, every [release](https://github.com/Caua-ferraz/AgentGuard/releases) has archives for Linux, macOS and Windows (amd64 and arm64), a `checksums.txt`, and signed build provenance you can check with `gh attestation verify <file> --repo Caua-ferraz/AgentGuard`.
+
+```bash
+# Docker — multi-arch image with all three binaries; the server is the default entrypoint
 docker run -d -p 8080:8080 \
   -e AGENTGUARD_API_KEY="$AGENTGUARD_API_KEY" \
   -v agentguard-audit:/var/lib/agentguard \
-  agentguard:latest
+  ghcr.io/caua-ferraz/agentguard:latest
+
+# Go
+go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@latest
+
+# From source
+git clone https://github.com/Caua-ferraz/AgentGuard.git
+cd AgentGuard && go build -o agentguard ./cmd/agentguard
 ```
 
 > **The `-e AGENTGUARD_API_KEY` is required, not optional.** Without an API key
@@ -137,7 +152,7 @@ docker run -d -p 8080:8080 \
 > host gets connection-refused. Set the key, or use `--network host` if you really
 > do want a loopback-only server.
 
-Prerequisites: Go 1.25+, Python 3.10+ (optional, for the SDK; 3.8 and 3.9 are unsupported — upstream EOL October 2024 and October 2025). See [`docs/SETUP.md`](docs/SETUP.md) for details.
+Prerequisites: none for the installers, the release archives or Docker; Go 1.25+ for `go install` or a source build; Python 3.10+ (optional, for the SDK; 3.8 and 3.9 are unsupported — upstream EOL October 2024 and October 2025). See [`docs/SETUP.md`](docs/SETUP.md) for details.
 
 ### Minimal policy
 

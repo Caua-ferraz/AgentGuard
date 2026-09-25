@@ -6,8 +6,8 @@ Get AgentGuard running on your machine in under 5 minutes.
 
 | Tool | Version | Check |
 |------|---------|-------|
-| Go | 1.25+ | `go version` |
-| Git | any | `git --version` |
+| Go (only to build from source or `go install`) | 1.25+ | `go version` |
+| Git (only to build from source) | any | `git --version` |
 | Python (optional, for the SDK) | 3.10+ | `python --version` |
 | Node.js (optional, for the TS SDK) | 20+ | `node --version` |
 | Docker (optional) | any | `docker --version` |
@@ -26,7 +26,34 @@ Layer-specific quickstarts: [`QUICKSTART_MCP.md`](QUICKSTART_MCP.md) · [`QUICKS
 
 ## Quick Start
 
-### 1. Clone and Build
+### 1. Install
+
+The installers download the prebuilt binaries for your OS and CPU, check them against the release's `checksums.txt`, install all three binaries, and write a starter policy if you don't have one yet. Running the same command again updates to the latest release.
+
+```bash
+# Linux / macOS — binaries in ~/.local/bin (or /usr/local/bin as root),
+# starter policy in ~/.config/agentguard/default.yaml (or /etc/agentguard/ as root)
+curl -fsSL https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/install.sh | sh
+```
+
+```powershell
+# Windows — binaries in %LOCALAPPDATA%\Programs\AgentGuard\bin (added to your user PATH),
+# starter policy in %APPDATA%\agentguard\default.yaml
+irm https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/install.ps1 | iex
+```
+
+| Variable | Effect |
+|---|---|
+| `AGENTGUARD_VERSION` | Install this version (e.g. `1.2.0`) instead of the latest |
+| `AGENTGUARD_INSTALL_DIR` | Install the binaries here |
+| `AGENTGUARD_DOWNLOAD_URL` | Download the release files from this base URL (a mirror, or an internal server for air-gapped hosts) |
+| `AGENTGUARD_NO_MODIFY_PATH=1` | Windows only: leave the user PATH unchanged |
+
+The installers never overwrite an existing starter policy. To check provenance as well as checksums, download an archive from the [releases page](https://github.com/Caua-ferraz/AgentGuard/releases) and run `gh attestation verify <archive> --repo Caua-ferraz/AgentGuard`.
+
+If you installed this way, the commands below work without the leading `./`; use the starter policy path the installer printed in place of `configs/default.yaml`.
+
+#### Or build from source
 
 ```bash
 git clone https://github.com/Caua-ferraz/AgentGuard.git

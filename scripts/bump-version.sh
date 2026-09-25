@@ -83,7 +83,7 @@ REPLACEMENTS=(
   'docs/MCP_GATEWAY.md|s/("version":\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
   'docs/PROXY_ARCHITECTURE.md|s/("version":\s*")[0-9]+\.[0-9]+\.[0-9]+(")/${1}'"$NEW"'${2}/'
   'docs/POLICY_REFERENCE.md|s/(format as of \*\*v)[0-9]+\.[0-9]+\.[0-9]+(\*\*)/${1}'"$NEW"'${2}/'
-  'docs/DEPLOYMENT.md|s/(image: (?:registry\.example\.com\/)?agentguard:)[0-9]+\.[0-9]+\.[0-9]+/${1}'"$NEW"'/'
+  'docs/DEPLOYMENT.md|s/(image: (?:registry\.example\.com\/|ghcr\.io\/caua-ferraz\/)?agentguard:)[0-9]+\.[0-9]+\.[0-9]+/${1}'"$NEW"'/'
   'docs/CLI.md|s/(^# agentguard )[0-9]+\.[0-9]+\.[0-9]+( \()/${1}'"$NEW"'${2}/'
 )
 
@@ -203,7 +203,7 @@ check_canonical 'docs/API.md'                               "\"version\":\s*\"$O
 check_canonical 'docs/MCP_GATEWAY.md'                       "\"version\":\s*\"$OLD\""
 check_canonical 'docs/PROXY_ARCHITECTURE.md'                "\"version\":\s*\"$OLD\""
 check_canonical 'docs/POLICY_REFERENCE.md'                  "format as of \*\*v$OLD\*\*"
-check_canonical 'docs/DEPLOYMENT.md'                        "image: (registry\.example\.com/)?agentguard:$OLD"
+check_canonical 'docs/DEPLOYMENT.md'                        "image: (registry\.example\.com/|ghcr\.io/caua-ferraz/)?agentguard:$OLD"
 check_canonical 'docs/CLI.md'                               "^# agentguard $OLD \\("
 
 if [ "$LEFTOVER" -ne 0 ]; then
