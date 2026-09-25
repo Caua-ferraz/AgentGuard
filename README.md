@@ -129,7 +129,7 @@ curl -fsSL https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/in
 irm https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/install.ps1 | iex
 ```
 
-Pin a version with `AGENTGUARD_VERSION=1.2.0`, or choose the folder with `AGENTGUARD_INSTALL_DIR`. To install by hand, every [release](https://github.com/Caua-ferraz/AgentGuard/releases) has archives for Linux, macOS and Windows (amd64 and arm64), a `checksums.txt`, and signed build provenance you can check with `gh attestation verify <file> --repo Caua-ferraz/AgentGuard`.
+Pin a version with `AGENTGUARD_VERSION=1.2.0`, or choose the folder with `AGENTGUARD_INSTALL_DIR`. To uninstall, add `| sh -s -- --uninstall` in place of `| sh` (Windows: `$env:AGENTGUARD_UNINSTALL=1;` before the command); your policy is kept unless you also pass `--purge` — see [`docs/SETUP.md`](docs/SETUP.md#uninstall). To install by hand, every [release](https://github.com/Caua-ferraz/AgentGuard/releases) has archives for Linux, macOS and Windows (amd64 and arm64), a `checksums.txt`, and signed build provenance you can check with `gh attestation verify <file> --repo Caua-ferraz/AgentGuard`.
 
 ```bash
 # Docker — multi-arch image with all three binaries; the server is the default entrypoint
