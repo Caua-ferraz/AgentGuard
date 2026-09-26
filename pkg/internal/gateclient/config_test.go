@@ -3,6 +3,8 @@ package gateclient
 import (
 	"bytes"
 	"flag"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -98,7 +100,18 @@ func TestRejectArgs(t *testing.T) {
 	}
 }
 
+// noSavedKey points the config folder at an empty temp folder, so a key
+// `agentguard setup` saved on the test machine can't leak in.
+func noSavedKey(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("APPDATA", dir)
+	return dir
+}
+
 func TestResolveAPIKey_FlagWinsOverEnv(t *testing.T) {
+	noSavedKey(t)
 	t.Setenv("AGENTGUARD_API_KEY", "env-token")
 	if got := ResolveAPIKey("flag-token"); got != "flag-token" {
 		t.Errorf("flag must win: got %q", got)
@@ -140,5 +153,28 @@ func TestValidateGateConfig(t *testing.T) {
 				t.Fatalf("error = %v, want substring %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// The key `agentguard setup` saves is the last fallback, after the flag and
+// AGENTGUARD_API_KEY.
+func TestResolveAPIKey_SavedKeyIsLastFallback(t *testing.T) {
+	dir := noSavedKey(t)
+	if err := os.MkdirAll(filepath.Join(dir, "agentguard"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agentguard", "api-key"), []byte("saved-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTGUARD_API_KEY", "")
+	if got := ResolveAPIKey(""); got != "saved-key" {
+		t.Errorf("saved key fallback: got %q", got)
+	}
+	t.Setenv("AGENTGUARD_API_KEY", "env-token")
+	if got := ResolveAPIKey(""); got != "env-token" {
+		t.Errorf("env must win over the saved key: got %q", got)
+	}
+	if got := ResolveAPIKey("flag-token"); got != "flag-token" {
+		t.Errorf("flag must win: got %q", got)
 	}
 }

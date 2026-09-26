@@ -7,7 +7,8 @@ Every `agentguard` (central server) subcommand, every flag, every env-var fallba
 ```
 agentguard <command> [flags]
 
-Run the server:
+Set up and run:
+  setup       Set up, update or remove AgentGuard on this computer (a menu)
   server      Start AgentGuard: policy engine, approvals, audit log, dashboard
 
 Policies:
@@ -27,8 +28,10 @@ Other:
   help        Show help for a command
 
 Get started:
+  agentguard setup
+      Set AgentGuard up to run at login, with a policy and an API key
   agentguard server --dashboard
-      Start the server, then open http://localhost:8080/dashboard
+      Or start the server yourself, then open http://localhost:8080/dashboard
   agentguard check --scope shell --command "rm -rf /"
       Try the policy on one action, no server needed
 
@@ -51,6 +54,31 @@ Global conventions:
 
 ---
 
+## `agentguard setup`
+
+Set AgentGuard up on this computer, keep it current and remove it, from a menu: move with ↑/↓, choose with Enter, go back with Esc. It has no flags; every action is a menu item. It needs a terminal: scripts use the [one-line installers](SETUP.md#1-install), which install, update and uninstall too.
+
+**Set up** (the first run) asks two questions — start AgentGuard at login? protect it with an API key? — then does this, skipping what's already there:
+
+| Step | Linux / macOS | Windows |
+|---|---|---|
+| Starter policy (an existing one is kept) | `~/.config/agentguard/default.yaml` | `%APPDATA%\agentguard\default.yaml` |
+| Data folder: audit log, state database, server log | `~/.local/share/agentguard` | `%LOCALAPPDATA%\AgentGuard\data` |
+| API key, readable only by you | `~/.config/agentguard/api-key` | `%APPDATA%\agentguard\api-key` |
+| Start at login, without admin rights | systemd user service `agentguard.service` / LaunchAgent `com.lictorate.agentguard` | Task Scheduler task `AgentGuard`, at your logon |
+
+The service runs `agentguard server --policy … --data-dir … --audit-log … --port 8080 --bind 127.0.0.1 --dashboard --api-key-file …`, on the next free port when 8080 is taken. The key goes in as a file, so it never appears in the service definition or the process list. `XDG_CONFIG_HOME` and `XDG_DATA_HOME` move the Linux and macOS folders.
+
+**Later runs** show whether the server is running and offer: open the dashboard (the API key goes to the clipboard for its login), update, start or restart the server, connection details (the URL, where the key is, the lines for the SDKs, and a Claude Desktop block with no secret in it), open the policy file, change settings, and — last, under a divider — uninstall.
+
+**Update** installs the newest release (or `AGENTGUARD_VERSION`) for this OS and CPU, from GitHub or from `AGENTGUARD_DOWNLOAD_URL`, like the installers. It checks the archive against the release's `checksums.txt`, swaps the three binaries in place — a running server keeps going until it restarts — and restarts the service. A `go install` copy gets the `go install` command instead; a source build and the container image don't update themselves.
+
+**Uninstall** offers, in this order: stop the server and don't start it at login; uninstall and keep the policy, key and data; uninstall everything; cancel. It removes the login service and the three binaries — on Windows also the installer's PATH entry, and the running `.exe` right after setup exits — works offline, and prints a link for feedback. Nothing is sent.
+
+Opening the menu checks GitHub for a newer release unless `AGENTGUARD_NO_UPDATE_CHECK` is set; the menu then offers "Check for updates". setup refuses to run as root (it sets AgentGuard up for your own user; for a system-wide server see [`DEPLOYMENT.md`](DEPLOYMENT.md)) and inside the container image.
+
+---
+
 ## `agentguard server`
 
 Start the AgentGuard server. This is the only subcommand that runs a long-lived process. `agentguard serve` is the same command.
@@ -66,6 +94,7 @@ Start the AgentGuard server. This is the only subcommand that runs a long-lived 
 | `--watch` | off | Log a line each time the policy file is reloaded. The reload itself always happens, with or without this flag (fsnotify events, with a 2 s mtime poll as fallback); no restart needed after policy edits. |
 | `--audit-log <path>` | `audit.jsonl` | Append-only JSON Lines file. Mode `0600`. Rotation is on by default; configurable via `--audit-max-size-mb`, `--audit-max-backups`, `--audit-max-age-days`, `--audit-compress`. Operators following older guidance should NOT also configure logrotate against `audit.jsonl` — the dual-rotator chain corrupts the rotation index. See [`OPERATIONS.md`](OPERATIONS.md#audit-log-rotation). |
 | `--api-key <key>` | `$AGENTGUARD_API_KEY` | Bearer token for gated endpoints. **If empty, the server binds to `127.0.0.1` only** (localhost-only). |
+| `--api-key-file <path>` | *(empty)* | Read the API key from the first line of this file instead of the command line, where other users of the machine could see it. `--api-key` wins over it; it wins over `AGENTGUARD_API_KEY`. The server refuses to start when the file can't be read or is empty, rather than run unprotected. `agentguard setup` uses it. |
 | `--base-url <url>` | `http://localhost:<port>` | External URL used when constructing `approval_url` in check responses. Set this behind a reverse proxy. |
 | `--allowed-origin <url>` | *(empty)* | Exact CORS origin. Empty = permissive-localhost (accepts any `http://localhost:*` or `http://127.0.0.1:*`). Set to `https://app.example` for strict single-origin. |
 | `--tls-terminated-upstream` | off | Issue session cookies with `Secure` even when `r.TLS == nil`. Set when behind a TLS-terminating proxy that does not forward `X-Forwarded-Proto`. See [`DEPLOYMENT.md`](DEPLOYMENT.md). |
@@ -455,19 +484,18 @@ The version comes from the source; the part in parentheses identifies the build:
 The interactive subcommands (`check`, `validate`, `approve`, `deny`, `status`, `audit`, `migrate`, `tenant`, `version`) kick off an async best-effort check against the GitHub Releases API at startup (800 ms wait budget, 1.5 s HTTP timeout). If a newer release exists, one line lands on stderr before subcommand output; otherwise silent.
 
 ```
-Notice: AgentGuard v1.3.0 is available (you have v1.2.0). Update: curl -fsSL https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/install.sh | sh — what's new: https://github.com/Caua-ferraz/AgentGuard/releases/latest
+Notice: AgentGuard v1.3.0 is available (you have v1.2.0). Update: agentguard setup — what's new: https://github.com/Caua-ferraz/AgentGuard/releases/latest
 ```
 
 The command it names depends on how this copy was installed:
 
 | Installed with | Update command in the notice |
 |---|---|
-| The one-line installer or a release archive, Linux / macOS | `curl -fsSL …/releases/latest/download/install.sh \| sh` |
-| The one-line installer or a release archive, Windows | `irm …/releases/latest/download/install.ps1 \| iex` |
+| The one-line installer or a release archive | `agentguard setup` (choose Update); re-running the installer works too |
 | `go install …@vX.Y.Z` / `@latest` | `go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@latest` |
 | The container image (it sets `AGENTGUARD_DISTRIBUTION=container`) | `docker pull ghcr.io/caua-ferraz/agentguard:latest`, then recreate the container |
 
-Re-running the installer replaces the binaries and keeps your policy; it says whether it updated, downgraded (with a warning) or reinstalled the same version. See [`SETUP.md`](SETUP.md#update).
+Both replace the binaries and keep your policy, and say whether they updated or downgraded (with a warning). See [`SETUP.md`](SETUP.md#update).
 
 `server` never performs the check (nor does `serve`, the same command): the enforcement server opens no outbound connection the operator did not configure (see [`THREAT_MODEL.md`](THREAT_MODEL.md#outbound-connections)). The check is also skipped for development builds — a version string containing `dev`, or no `-ldflags` commit (`commit=dev`) *and* no tagged release version in the Go build info, as with `go build` on an untagged or modified checkout. `go install …@vX.Y.Z` and `@latest` builds record the release tag, so they do check. It is also skipped when `AGENTGUARD_NO_UPDATE_CHECK` is set to any value other than `0`, or when the HTTP request fails. It is not run for `agentguard help` or a mistyped command either. Never touches stdout, never affects exit codes. Only the `agentguard` binary has the check; the MCP gateway and LLM proxy never had one.
 
@@ -482,7 +510,7 @@ Re-running the installer replaces the binaries and keeps your policy; it says wh
 | `AGENTGUARD_POLICY` | `server`, `validate`, `check` (when `--policy` unset) — see [Policy file](#policy-file) | unset |
 | `AGENTGUARD_NO_UPDATE_CHECK` | Every subcommand except `server` (which never checks) — disables the GitHub Releases startup check when set to any value other than `0` | unset |
 
-A flag always wins over its environment variable.
+A flag always wins over its environment variable. When no key is given at all, `approve`, `deny`, `status`, `audit`, the MCP gateway and the LLM proxy use the key [`agentguard setup`](#agentguard-setup) saved (`~/.config/agentguard/api-key`, `%APPDATA%\agentguard\api-key`). The server never picks that file up by itself — a key changes which interfaces it listens on — only through `--api-key-file`.
 
 ---
 

@@ -13,7 +13,10 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
+
+	"github.com/Caua-ferraz/AgentGuard/internal/localconfig"
 )
 
 // Default values for the shared gate flags. Both proxies document the
@@ -53,7 +56,7 @@ func RegisterGateFlags(fs *flag.FlagSet, policyHelp string) *GateFlags {
 	return &GateFlags{
 		fs:         fs,
 		GuardURL:   fs.String("guard-url", DefaultGuardURL, "Central AgentGuard server URL. Env: AGENTGUARD_URL"),
-		APIKey:     fs.String("api-key", "", "Bearer token for /v1/check. Env: AGENTGUARD_API_KEY"),
+		APIKey:     fs.String("api-key", "", "Bearer token for /v1/check. Env: AGENTGUARD_API_KEY, then the key agentguard setup saved"),
 		TenantID:   fs.String("tenant-id", DefaultTenantID, "Tenant ID for the central server"),
 		FailMode:   fs.String("fail-mode", DefaultFailMode, "What to do when /v1/check can't be reached: deny, allow, or fail-closed-with-audit (deny, and record it in --fail-audit-log)"),
 		LogLevel:   fs.String("log-level", DefaultLogLevel, "Stderr verbosity: info or debug"),
@@ -113,12 +116,17 @@ func RejectArgs(args []string, hint string) error {
 }
 
 // ResolveAPIKey returns the explicit flag value when set, otherwise the
-// AGENTGUARD_API_KEY env var.
+// AGENTGUARD_API_KEY env var, otherwise the key `agentguard setup` saved
+// for this user. The last one lets an MCP client's config start the
+// gateway with no secret in it.
 func ResolveAPIKey(flagValue string) string {
 	if flagValue != "" {
 		return flagValue
 	}
-	return os.Getenv("AGENTGUARD_API_KEY")
+	if k := os.Getenv("AGENTGUARD_API_KEY"); k != "" {
+		return k
+	}
+	return localconfig.ReadAPIKey(runtime.GOOS)
 }
 
 // ValidateGateConfig enforces the invariants shared by every gate

@@ -387,7 +387,7 @@ Both binaries share these flags:
 | flag                  | meaning                                            | default                |
 |-----------------------|----------------------------------------------------|------------------------|
 | `--guard-url`         | central server `/v1/check` base URL (from `AGENTGUARD_URL` env if unset) | `http://127.0.0.1:8080`|
-| `--api-key`           | bearer token for `/v1/check` (from `AGENTGUARD_API_KEY` env if unset) | unset (warn) |
+| `--api-key`           | bearer token for `/v1/check` (from `AGENTGUARD_API_KEY` env if unset, then the key `agentguard setup` saved) | unset (warn) |
 | `--tenant-id`         | tenant header value                                | `local`                |
 | `--fail-mode`         | `deny` / `allow` / `fail-closed-with-audit`        | `deny`                 |
 | `--log-level`         | `info` / `debug`                                   | `info`                 |

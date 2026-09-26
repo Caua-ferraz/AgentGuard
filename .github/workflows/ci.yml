@@ -78,6 +78,42 @@ jobs:
             go run ./cmd/agentguard validate --strict --policy "$f"
           done
 
+  setup-service:
+    # `agentguard setup` starts the server at login with the OS's own
+    # service manager: a systemd user service, a LaunchAgent, a Task
+    # Scheduler task. Unit tests check what it writes; this job installs the
+    # real thing on a throwaway runner, checks the server answers, restarts
+    # it and removes it (TestLoginService_Real).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.7'
+
+      - name: Start a systemd user instance (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo loginctl enable-linger "$USER"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          for _ in $(seq 1 20); do
+            [ -S "/run/user/$(id -u)/bus" ] && break
+            sleep 1
+          done
+          XDG_RUNTIME_DIR="/run/user/$(id -u)" systemctl --user show-environment >/dev/null
+
+      - name: Install, restart and remove the real login service
+        shell: bash
+        env:
+          AGENTGUARD_TEST_REAL_SERVICE: '1'
+        run: go test -run '^TestLoginService_Real$' -count=1 -v ./cmd/agentguard
+
   lint:
     runs-on: ubuntu-latest
     steps:

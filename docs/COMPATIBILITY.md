@@ -121,9 +121,11 @@ subcommand is removed. The same applies to the `agentguard-mcp-gateway` and
 
 `server` is the documented name for `serve`; both run the same command, and
 `serve` stays for the whole 1.x line. Additions since 1.2.0 are all of the
-kind this surface allows: the `server` and `help` subcommands, the `--guard-url`
-alias of `--url` on the client subcommands, and environment fallbacks for flags
-left unset (`AGENTGUARD_URL`, `AGENTGUARD_POLICY`). When `--policy` is not
+kind this surface allows: the `server`, `help` and `setup` subcommands, the
+server's `--api-key-file` flag, the `--guard-url` alias of `--url` on the client
+subcommands, and fallbacks for flags left unset (`AGENTGUARD_URL`,
+`AGENTGUARD_POLICY`, and the API key `agentguard setup` saves, which the client
+subcommands, the MCP gateway and the LLM proxy use when no key is given). When `--policy` is not
 given and `configs/default.yaml` is missing, `server`, `validate` and `check`
 look for the installer's starter policy instead of failing. Flags may now follow
 positional arguments; before, a flag after one was ignored without a word. A

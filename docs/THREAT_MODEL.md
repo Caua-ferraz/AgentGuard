@@ -72,7 +72,7 @@ It cannot approve, deny, read the audit trail, or reuse an approval it did not o
 
 ### Outbound connections
 
-The enforcement server initiates only the connections the operator configured: the PostgreSQL store (`--store-dsn`) and the policy's notifiers. `agentguard server` performs no update check and sends no telemetry. The interactive `agentguard` subcommands query the GitHub Releases API once at startup unless `AGENTGUARD_NO_UPDATE_CHECK` is set. CI, not the binaries, talks to OSV.dev, PyPI, npm, and the Go module proxy (`pkg/depaudit`). The MCP gateway reaches `--guard-url` and the MCP servers it spawns; the LLM proxy reaches `--guard-url` and the configured provider. Each of these peers is a trust decision the operator made; AgentGuard does not verify GitHub's answer beyond parsing a tag name and never executes anything based on it.
+The enforcement server initiates only the connections the operator configured: the PostgreSQL store (`--store-dsn`) and the policy's notifiers. `agentguard server` performs no update check and sends no telemetry. The interactive `agentguard` subcommands, `agentguard setup` included, query the GitHub Releases API once at startup unless `AGENTGUARD_NO_UPDATE_CHECK` is set. When you choose Update in `agentguard setup`, it downloads the release archive and `checksums.txt` from GitHub (or `AGENTGUARD_DOWNLOAD_URL`) and replaces its binaries only if the checksum matches — the same trust as the one-line installers: the checksum catches a corrupted or swapped download, not a compromised release; `gh attestation verify` checks provenance. CI, not the binaries, talks to OSV.dev, PyPI, npm, and the Go module proxy (`pkg/depaudit`). The MCP gateway reaches `--guard-url` and the MCP servers it spawns; the LLM proxy reaches `--guard-url` and the configured provider. Each of these peers is a trust decision the operator made; The update check only parses a tag name; setup's Update, which you choose, is the only place AgentGuard installs code.
 
 ### Supply chain — checked in CI
 
@@ -84,7 +84,7 @@ The enforcement server initiates only the connections the operator configured: t
    untrusted            semi-trusted             trusted
  ┌──────────┐  stream  ┌──────────────┐          ┌────────────┐
  │ LLM      │ ───────► │ LLM proxy    │ /v1/check│ agentguard │ ◄── operator
- │ provider │ ◄─────── │ (gate)       │ ───────► │ serve      │ ◄── approver
+ │ provider │ ◄─────── │ (gate)       │ ───────► │ server     │ ◄── approver
  └──────────┘          └──────────────┘          │ (policy,   │
  ┌──────────┐  frames  ┌──────────────┐          │  approvals,│ ◄── store (--store-dsn)
  │ MCP      │ ◄──────► │ MCP gateway  │ ───────► │  audit)    │ ──► notifiers

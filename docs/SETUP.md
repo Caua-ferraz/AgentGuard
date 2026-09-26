@@ -51,13 +51,17 @@ irm https://github.com/Caua-ferraz/AgentGuard/releases/latest/download/install.p
 
 The installers never overwrite an existing starter policy. To check provenance as well as checksums, download an archive from the [releases page](https://github.com/Caua-ferraz/AgentGuard/releases) and run `gh attestation verify <archive> --repo Caua-ferraz/AgentGuard`.
 
-If you installed this way, the commands below work without the leading `./`, and you can leave out `--policy configs/default.yaml`: `server`, `validate` and `check` find the installer's starter policy on their own ([`CLI.md`](CLI.md#policy-file)).
+Next, run **`agentguard setup`**. From a menu, it starts AgentGuard at login (no admin rights), protects it with an API key only you can read, and shows how to connect the SDKs and Claude Desktop; the same menu updates and uninstalls later ([`CLI.md`](CLI.md#agentguard-setup)).
+
+If you'd rather run the server yourself, the commands below work without the leading `./`, and you can leave out `--policy configs/default.yaml`: `server`, `validate` and `check` find the installer's starter policy on their own ([`CLI.md`](CLI.md#policy-file)).
 
 #### Update
 
-Run the same install command again. It replaces the three binaries, keeps your policy, and says what changed: `Updated AgentGuard 1.2.0 -> 1.3.0`, `Reinstalled AgentGuard 1.3.0 (it was already on this version)`, or — when `AGENTGUARD_VERSION` pins an older release — `Downgraded AgentGuard 1.3.0 -> 1.2.0` followed by a warning. The `agentguard` CLI prints a one-line notice with the right command when a newer release is out (`server` never checks; see [`CLI.md`](CLI.md#update-notice-on-startup-v051)).
+Run `agentguard setup` and choose **Update**: it downloads the new release, checks it against `checksums.txt`, swaps the binaries and restarts the server. Or run the same install command again. It replaces the three binaries, keeps your policy, and says what changed: `Updated AgentGuard 1.2.0 -> 1.3.0`, `Reinstalled AgentGuard 1.3.0 (it was already on this version)`, or — when `AGENTGUARD_VERSION` pins an older release — `Downgraded AgentGuard 1.3.0 -> 1.2.0` followed by a warning. The `agentguard` CLI prints a one-line notice with the right command when a newer release is out (`server` never checks; see [`CLI.md`](CLI.md#update-notice-on-startup-v051)).
 
 #### Uninstall
+
+Run `agentguard setup` and choose **Uninstall…**: it also removes the login service, works offline, and asks whether to keep your policy, key and data. Or use the installer:
 
 ```bash
 # Linux / macOS (add --purge to delete the policy folder too)

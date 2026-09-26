@@ -35,12 +35,13 @@ type command struct {
 }
 
 // commandGroups is the order the help lists the groups in.
-var commandGroups = []string{"Run the server", "Policies", "Work with a running server", "Other"}
+var commandGroups = []string{"Set up and run", "Policies", "Work with a running server", "Other"}
 
 // commands is every subcommand. "serve" stays an alias of "server" for the
 // whole 1.x line (docs/COMPATIBILITY.md, frozen surface 4).
 var commands = []command{
-	{Name: "server", Aliases: []string{"serve"}, Group: "Run the server", Summary: "Start AgentGuard: policy engine, approvals, audit log, dashboard"},
+	{Name: "setup", Group: "Set up and run", Summary: "Set up, update or remove AgentGuard on this computer (a menu)"},
+	{Name: "server", Aliases: []string{"serve"}, Group: "Set up and run", Summary: "Start AgentGuard: policy engine, approvals, audit log, dashboard"},
 	{Name: "validate", Group: "Policies", Summary: "Check that a policy file loads"},
 	{Name: "check", Group: "Policies", Summary: "Evaluate one action against a policy file (no server needed)"},
 	{Name: "tenant", Group: "Policies", Summary: "Manage per-tenant policies in the store (put|list|rm)"},
