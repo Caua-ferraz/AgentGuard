@@ -226,7 +226,8 @@
         }
 
         Write-Host ''
-        Write-Host "Next: agentguard server --policy `"$policy`" --dashboard"
+        Write-Host 'Next: agentguard setup   (a menu: starts it at login with an API key)'
+        Write-Host "  or run it yourself: agentguard server --policy `"$policy`" --dashboard"
         Write-Host "Docs: https://github.com/$Repo#quickstart"
         Write-Host 'To update later, run the same install command again.'
         Write-Host "To uninstall: `$env:AGENTGUARD_UNINSTALL=1; irm https://github.com/$Repo/releases/latest/download/install.ps1 | iex"

@@ -82,7 +82,7 @@ agentguard-llm-proxy \
 | `--upstream-openai`      | base URL for OpenAI-shape requests                        | `https://api.openai.com`     |
 | `--upstream-anthropic`   | base URL for Anthropic-shape requests                     | `https://api.anthropic.com`  |
 | `--guard-url`            | central server `/v1/check` URL (from `AGENTGUARD_URL` when unset) | `http://127.0.0.1:8080`      |
-| `--api-key`              | bearer for `/v1/check` **and** `POST /v1/audit` (from `AGENTGUARD_API_KEY`). Required for full forced-refusal audit fidelity when the central server is keyed (§ 5.4 Audit fidelity); without it those audits fall back to the lower-fidelity `/v1/check` path. | unset (warn) |
+| `--api-key`              | bearer for `/v1/check` **and** `POST /v1/audit` (from `AGENTGUARD_API_KEY`, then the key `agentguard setup` saved). Required for full forced-refusal audit fidelity when the central server is keyed (§ 5.4 Audit fidelity); without it those audits fall back to the lower-fidelity `/v1/check` path. | unset (warn) |
 | `--proxy-api-key`        | optional key the proxy itself enforces on inbound API requests; callers send it in the `X-AgentGuard-Proxy-Auth` header (`<key>` or `Bearer <key>`). Empty = no proxy auth; required for a non-loopback `--listen` (§ 8.1). | unset |
 | `--tenant-id`            | tenant header value                                       | `local`                      |
 | `--fail-mode`            | `deny` / `allow` / `fail-closed-with-audit`               | `deny`                       |

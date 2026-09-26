@@ -249,7 +249,8 @@ func TestSubcommandOf(t *testing.T) {
 }
 
 // The notice names the update command for the way this copy was installed:
-// the container image, `go install`, or the one-line installer for its OS.
+// the container image, `go install`, or `agentguard setup` for a release
+// archive (the installer's copy), on every OS.
 func TestUpdateCommand(t *testing.T) {
 	cases := []struct {
 		name, distribution, commit, moduleVersion, goos, want string
@@ -257,9 +258,9 @@ func TestUpdateCommand(t *testing.T) {
 		{"container image", "container", "abc1234", "", "linux", updateByDockerImage},
 		{"go install @v1.2.0", "", "dev", "v1.2.0", "linux", updateByGoInstall},
 		{"go install on Windows", "", "dev", "v1.2.0", "windows", updateByGoInstall},
-		{"release archive, Linux", "", "abc1234", "", "linux", updateByInstallSh},
-		{"release archive, macOS", "", "abc1234", "", "darwin", updateByInstallSh},
-		{"release archive, Windows", "", "abc1234", "", "windows", updateByInstallPs1},
+		{"release archive, Linux", "", "abc1234", "", "linux", updateBySetup},
+		{"release archive, macOS", "", "abc1234", "", "darwin", updateBySetup},
+		{"release archive, Windows", "", "abc1234", "", "windows", updateBySetup},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

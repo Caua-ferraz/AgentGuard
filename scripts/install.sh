@@ -274,7 +274,8 @@ esac
 
 say ""
 if [ -e "$policy" ]; then
-  say "Next: agentguard server --policy $policy --dashboard"
+  say "Next: agentguard setup   (a menu: starts it at login with an API key)"
+  say "  or run it yourself: agentguard server --policy $policy --dashboard"
 else
   say "Next: agentguard server --policy <policy.yaml> --dashboard"
 fi

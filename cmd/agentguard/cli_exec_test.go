@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -110,7 +111,7 @@ func TestCLI_Help(t *testing.T) {
 func TestCLI_HelpPages(t *testing.T) {
 	dir := t.TempDir()
 	pages := [][]string{
-		{"server", "-h"}, {"validate", "-h"}, {"check", "-h"}, {"approve", "-h"}, {"deny", "-h"},
+		{"setup", "-h"}, {"server", "-h"}, {"validate", "-h"}, {"check", "-h"}, {"approve", "-h"}, {"deny", "-h"},
 		{"status", "-h"}, {"audit", "-h"}, {"tenant", "-h"}, {"tenant", "put", "-h"},
 		{"tenant", "list", "-h"}, {"tenant", "rm", "-h"}, {"migrate", "-h"}, {"help", "help"},
 	}
@@ -175,6 +176,20 @@ func TestCLI_TenantPutNamesTheStore(t *testing.T) {
 	policy := filepath.Join(repoRootForDocs(t), "configs", "default.yaml")
 	agentguard(t, dir, nil, "tenant", "put", "acme", "--policy", policy, "--data-dir", dir).
 		expect(t, 0, "A server sees it only if it uses this same store", "")
+}
+
+// Without a terminal (a script, CI) setup can't show its menu: it prints
+// the status and points to the installers, and exits 2.
+func TestCLI_SetupNeedsATerminal(t *testing.T) {
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
+		t.Skip("setup refuses to run as root")
+	}
+	dir := t.TempDir()
+	env := []string{"XDG_CONFIG_HOME=" + dir, "XDG_DATA_HOME=" + dir, "APPDATA=" + dir, "LOCALAPPDATA=" + dir, "AGENTGUARD_DISTRIBUTION="}
+	agentguard(t, dir, env, "setup").expect(t, 2, "not set up yet", "")
+	agentguard(t, dir, env, "setup").expect(t, 2, "setup is interactive", "")
+	agentguard(t, dir, env, "setup", "--yes").expect(t, 2, "", "unknown flag --yes")
+	agentguard(t, dir, []string{"AGENTGUARD_DISTRIBUTION=container"}, "setup").expect(t, 1, "", "docker pull")
 }
 
 func TestCLI_UnknownCommand(t *testing.T) {

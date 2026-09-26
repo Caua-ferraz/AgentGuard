@@ -82,7 +82,7 @@ agentguard-mcp-gateway \
 |---------------------|------------|-------------------------------------------------|
 | `--upstream "<ns>:<cmd>"` | yes  | Downstream MCP server. `ns` is the namespace prefix; `cmd` is tokenized by the gateway's own `SplitCommandLine` (double quotes and `\` escapes only — no single quotes, `$VAR` expansion, or pipes). If `ns:` is omitted, the namespace defaults to the first whitespace-delimited token of `cmd`. |
 | `--guard-url`       | no         | central server URL. Falls back to `AGENTGUARD_URL` env, then `http://127.0.0.1:8080`. Must be an `http`/`https` URL with a host. |
-| `--api-key`         | no         | bearer for `/v1/check`. Falls back to `AGENTGUARD_API_KEY` env. |
+| `--api-key`         | no         | bearer for `/v1/check`. Falls back to `AGENTGUARD_API_KEY` env, then to the key `agentguard setup` saved — so an MCP client config needs no secret in it. |
 | `--tenant-id`       | no         | default `local`. Must be non-empty.             |
 | `--fail-mode`       | no         | `deny` / `allow` / `fail-closed-with-audit`. Default `deny`. `fail-closed-with-audit` denies with the distinct Rule `deny:gateway:fail_closed_audit` **and** records the denial in the local `--fail-audit-log` file. See [`PROXY_ARCHITECTURE.md`](./PROXY_ARCHITECTURE.md) § 6.1. |
 | `--fail-audit-log`  | no         | local JSONL fallback audit file for `fail-closed-with-audit` denials. Default `agentguard-fail-audit.jsonl`; empty disables. |

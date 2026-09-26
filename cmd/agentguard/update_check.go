@@ -36,6 +36,7 @@ const (
 	// Where the notice points, and the update command for each way of
 	// installing AgentGuard (see updateCommand).
 	latestReleaseURL    = "https://github.com/Caua-ferraz/AgentGuard/releases/latest"
+	updateBySetup       = "agentguard setup"
 	updateByInstallSh   = "curl -fsSL " + latestReleaseURL + "/download/install.sh | sh"
 	updateByInstallPs1  = "irm " + latestReleaseURL + "/download/install.ps1 | iex"
 	updateByGoInstall   = "go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@latest"
@@ -162,17 +163,16 @@ func fetchUpdateNotice(currentVersion, currentCommit string) string {
 //   - `go install`: the "dev" commit placeholder on a binary whose Go build
 //     info records a tagged release — the same signal shouldSkipUpdateCheck
 //     uses to tell it from a source build;
-//   - otherwise a release archive, from the one-line installer for this OS.
+//   - otherwise a release archive (the one-line installer), which
+//     `agentguard setup` updates in place.
 func updateCommand(currentCommit string) string {
 	switch {
 	case os.Getenv("AGENTGUARD_DISTRIBUTION") == "container":
 		return updateByDockerImage
 	case currentCommit == "dev" && buildinfo.ReleaseVersion() != "":
 		return updateByGoInstall
-	case goos == "windows":
-		return updateByInstallPs1
 	default:
-		return updateByInstallSh
+		return updateBySetup
 	}
 }
 

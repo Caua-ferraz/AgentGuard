@@ -20,6 +20,7 @@ import (
 
 	"github.com/Caua-ferraz/AgentGuard/cmd/internal/buildinfo"
 	"github.com/Caua-ferraz/AgentGuard/internal/clihelp"
+	"github.com/Caua-ferraz/AgentGuard/internal/localconfig"
 	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
 	"github.com/Caua-ferraz/AgentGuard/pkg/migrate"
 	_ "github.com/Caua-ferraz/AgentGuard/pkg/migrate/v040_to_v041" // register the v0.4.0 → v0.4.1 audit schema migration
@@ -65,6 +66,8 @@ func run(args []string) int {
 	}
 	rest := args[1:]
 	switch name {
+	case "setup":
+		return runSetupCmd(rest)
 	case "server":
 		return runServerCmd(rest)
 	case "validate":
@@ -170,8 +173,10 @@ Usage:
 	}
 	fmt.Fprint(w, `
 Get started:
+  agentguard setup
+      Set AgentGuard up to run at login, with a policy and an API key
   agentguard server --dashboard
-      Start the server, then open http://localhost:8080/dashboard
+      Or start the server yourself, then open http://localhost:8080/dashboard
   agentguard check --scope shell --command "rm -rf /"
       Try the policy on one action, no server needed
 
@@ -200,19 +205,19 @@ Docs: `+docsURL()+`
 
 // serverFlags holds the parsed `agentguard server` flags.
 type serverFlags struct {
-	policy, bind, auditPath, apiKey, baseURL, allowedOrigin *string
-	port                                                    *int
-	dashboard, watch, tlsTerminated                         *bool
-	sessionCostTTL, sessionCostSweep, approvalValidity      *time.Duration
-	auditMaxSizeMB, auditMaxBackups, auditMaxAgeDays        *int
-	auditCompress, auditBuffered, auditRedact               *bool
-	auditQueueSize, auditWorkers                            *int
-	auditOverflowPath                                       *string
-	debugPprof                                              *bool
-	debugPprofPort                                          *int
-	persist                                                 *bool
-	storeDSN, dataDir, auditBackend, nodeID, notifySpool    *string
-	tenantPolicyRefresh, reconcileInterval                  *time.Duration
+	policy, bind, auditPath, apiKey, apiKeyFile, baseURL, allowedOrigin *string
+	port                                                                *int
+	dashboard, watch, tlsTerminated                                     *bool
+	sessionCostTTL, sessionCostSweep, approvalValidity                  *time.Duration
+	auditMaxSizeMB, auditMaxBackups, auditMaxAgeDays                    *int
+	auditCompress, auditBuffered, auditRedact                           *bool
+	auditQueueSize, auditWorkers                                        *int
+	auditOverflowPath                                                   *string
+	debugPprof                                                          *bool
+	debugPprofPort                                                      *int
+	persist                                                             *bool
+	storeDSN, dataDir, auditBackend, nodeID, notifySpool                *string
+	tenantPolicyRefresh, reconcileInterval                              *time.Duration
 }
 
 // newServerFlags defines the `agentguard server` flags. Names, defaults and
@@ -227,6 +232,7 @@ func newServerFlags() (*flag.FlagSet, *serverFlags) {
 	f.watch = fs.Bool("watch", false, "Log a line each time the policy file is reloaded. The server always reloads the policy when the file changes; this flag only adds the log line.")
 	f.auditPath = fs.String("audit-log", "audit.jsonl", "Path to audit log file")
 	f.apiKey = fs.String("api-key", "", "Bearer token for the control and audit endpoints. Empty: no auth, and the server only listens on 127.0.0.1. Env: AGENTGUARD_API_KEY")
+	f.apiKeyFile = fs.String("api-key-file", "", "Read the API key from this file (its first line) instead of the command line, where other users could see it. --api-key wins over it; it wins over AGENTGUARD_API_KEY. The server won't start if the file can't be read or is empty.")
 	f.baseURL = fs.String("base-url", "", "External base URL for approval links (default: http://localhost:<port>)")
 	f.allowedOrigin = fs.String("allowed-origin", "", "Exact CORS origin to accept (e.g. https://app.example). Empty means permissive-localhost (any http://localhost:* or http://127.0.0.1:*) for backward compat.")
 	f.tlsTerminated = fs.Bool("tls-terminated-upstream", false, "Issue session cookies with Secure regardless of r.TLS — set when behind a TLS-terminating reverse proxy that does not forward X-Forwarded-Proto")
@@ -291,7 +297,7 @@ func newServerFlags() (*flag.FlagSet, *serverFlags) {
 // flag must appear in exactly one group (TestServerHelp_GroupsEveryFlag).
 var serverFlagGroups = []clihelp.Group{
 	{Title: "Network", Names: []string{"port", "bind", "dashboard", "base-url"}},
-	{Title: "Security", Names: []string{"api-key", "allowed-origin", "tls-terminated-upstream"}},
+	{Title: "Security", Names: []string{"api-key", "api-key-file", "allowed-origin", "tls-terminated-upstream"}},
 	{Title: "Policy", Names: []string{"policy", "watch", "approval-validity", "session-cost-ttl", "session-cost-sweep-interval", "tenant-policy-refresh-interval"}},
 	{Title: "Audit log", Names: []string{"audit-log", "audit-redact", "audit-backend", "audit-max-size-mb", "audit-max-backups", "audit-max-age-days", "audit-compress", "audit-buffered", "audit-queue-size", "audit-workers", "audit-overflow-path"}},
 	{Title: "Storage", Names: []string{"persist", "store-dsn", "data-dir"}},
@@ -340,9 +346,14 @@ func runServerCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "agentguard server: %v\n", err)
 		return 1
 	}
+	apiKey, err := serverAPIKey(*f.apiKey, *f.apiKeyFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentguard server: %v\n", err)
+		return 1
+	}
 	// Applied by main with os.Exit, after runServe returns: os.Exit skips
 	// defers, and every teardown in runServe has already run by then.
-	return runServe(policyPath, *f.port, *f.dashboard, *f.watch, *f.auditPath, resolveAPIKey(*f.apiKey), *f.baseURL, *f.allowedOrigin, *f.tlsTerminated, *f.sessionCostTTL, *f.sessionCostSweep, *f.approvalValidity, auditRotationOpts{
+	return runServe(policyPath, *f.port, *f.dashboard, *f.watch, *f.auditPath, apiKey, *f.baseURL, *f.allowedOrigin, *f.tlsTerminated, *f.sessionCostTTL, *f.sessionCostSweep, *f.approvalValidity, auditRotationOpts{
 		MaxSizeMB:  *f.auditMaxSizeMB,
 		MaxBackups: *f.auditMaxBackups,
 		MaxAgeDays: *f.auditMaxAgeDays,
@@ -422,7 +433,7 @@ Exit status: 0 valid, 1 invalid (or has warnings, with --strict),
 func runResolveCmd(action string, args []string) int {
 	fs := flag.NewFlagSet(action, flag.ContinueOnError)
 	serverFlag := addServerURLFlags(fs)
-	key := fs.String("api-key", "", "Bearer token. Env: AGENTGUARD_API_KEY")
+	key := fs.String("api-key", "", "Bearer token. Env: AGENTGUARD_API_KEY, then the key agentguard setup saved")
 	verb := map[string]string{"approve": "Approve", "deny": "Deny"}[action]
 	usage := func(w io.Writer) {
 		fmt.Fprintf(w, `Usage: agentguard %s <approval-id> [flags]
@@ -455,7 +466,7 @@ Exit status: 0 %[2]s, 1 the server refused or couldn't be reached,
 	if err != nil {
 		return usageError(action, "%v", err)
 	}
-	return runResolve(os.Stdout, os.Stderr, base, positional[0], action, resolveAPIKey(*key))
+	return runResolve(os.Stdout, os.Stderr, base, positional[0], action, resolveClientAPIKey(*key))
 }
 
 // ── status ───────────────────────────────────────────────────────────────
@@ -463,7 +474,7 @@ Exit status: 0 %[2]s, 1 the server refused or couldn't be reached,
 func runStatusCmd(args []string) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	serverFlag := addServerURLFlags(fs)
-	key := fs.String("api-key", "", "Bearer token. Env: AGENTGUARD_API_KEY")
+	key := fs.String("api-key", "", "Bearer token. Env: AGENTGUARD_API_KEY, then the key agentguard setup saved")
 	usage := func(w io.Writer) {
 		fmt.Fprint(w, `Usage: agentguard status [flags]
 
@@ -492,7 +503,7 @@ a health check), 2 command-line mistake.
 	if err != nil {
 		return usageError("status", "%v", err)
 	}
-	return statusReport(os.Stdout, os.Stderr, base, resolveAPIKey(*key))
+	return statusReport(os.Stdout, os.Stderr, base, resolveClientAPIKey(*key))
 }
 
 // ── audit ────────────────────────────────────────────────────────────────
@@ -507,7 +518,7 @@ func runAuditCmd(args []string) int {
 	fs.StringVar(&q.Transport, "transport", "", "Filter by integration path (sdk|mcp_gateway|llm_api_proxy)")
 	fs.IntVar(&q.Limit, "limit", 50, "Max entries to return")
 	fs.StringVar(&q.Order, "order", "desc", "Entry order: desc (newest first) or asc (oldest first)")
-	key := fs.String("api-key", "", "Bearer token. Env: AGENTGUARD_API_KEY")
+	key := fs.String("api-key", "", "Bearer token. Env: AGENTGUARD_API_KEY, then the key agentguard setup saved")
 	usage := func(w io.Writer) {
 		fmt.Fprint(w, `Usage: agentguard audit [flags]
 
@@ -536,7 +547,7 @@ couldn't be reached, 2 command-line mistake.
 	if err != nil {
 		return usageError("audit", "%v", err)
 	}
-	return runAuditQuery(os.Stdout, os.Stderr, base, q, resolveAPIKey(*key))
+	return runAuditQuery(os.Stdout, os.Stderr, base, q, resolveClientAPIKey(*key))
 }
 
 // ── migrate ──────────────────────────────────────────────────────────────
@@ -1055,6 +1066,36 @@ func resolveAPIKey(flagVal string) string {
 		return flagVal
 	}
 	return os.Getenv("AGENTGUARD_API_KEY")
+}
+
+// resolveClientAPIKey is resolveAPIKey for the commands that talk to a
+// server (approve, deny, status, audit), with one more fallback: the key
+// `agentguard setup` saved, so they work against the server setup runs
+// without exporting anything.
+func resolveClientAPIKey(flagVal string) string {
+	if k := resolveAPIKey(flagVal); k != "" {
+		return k
+	}
+	return localconfig.ReadAPIKey(goos)
+}
+
+// serverAPIKey is the server's key: --api-key, else the first line of
+// --api-key-file, else AGENTGUARD_API_KEY. A key file that was asked for
+// but can't be read, or is empty, is an error: starting without the key
+// would open the control endpoints the operator meant to protect.
+func serverAPIKey(flagVal, file string) (string, error) {
+	if flagVal != "" || file == "" {
+		return resolveAPIKey(flagVal), nil
+	}
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return "", fmt.Errorf("--api-key-file: %w", err)
+	}
+	key := localconfig.FirstLine(b)
+	if key == "" {
+		return "", fmt.Errorf("--api-key-file %s is empty", file)
+	}
+	return key, nil
 }
 
 // attachAuth adds a Bearer header when the key is non-empty.
