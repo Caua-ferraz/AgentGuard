@@ -23,6 +23,7 @@ Work with a running server:
   audit       Query the audit log
 
 Other:
+  hook        Checks Claude Code's tool calls (its hook; setup connects it)
   migrate     Upgrade the audit log's format (the server does this at startup)
   version     Print version information (also: --version)
   help        Show help for a command
@@ -73,9 +74,17 @@ The service runs `agentguard server --policy … --data-dir … --audit-log … 
 
 **Update** installs the newest release (or `AGENTGUARD_VERSION`) for this OS and CPU, from GitHub or from `AGENTGUARD_DOWNLOAD_URL`, like the installers. It checks the archive against the release's `checksums.txt`, swaps the three binaries in place — a running server keeps going until it restarts — and restarts the service. A `go install` copy gets the `go install` command instead; a source build and the container image don't update themselves.
 
-**Uninstall** offers, in this order: stop the server and don't start it at login; uninstall and keep the policy, key and data; uninstall everything; cancel. It removes the login service and the three binaries — on Windows also the installer's PATH entry, and the running `.exe` right after setup exits — works offline, and prints a link for feedback. Nothing is sent.
+**Connect Claude Code** (shown when Claude Code is installed) adds AgentGuard's hook to Claude Code's settings so its tool calls are checked, and offers to add the Claude Code rules to an older policy; **Disconnect Claude Code** takes the hook out again. See [`CLAUDE_CODE.md`](CLAUDE_CODE.md).
+
+**Uninstall** offers, in this order: stop the server and don't start it at login; uninstall and keep the policy, key and data; uninstall everything; cancel. It removes the login service, AgentGuard's hook from Claude Code's settings, and the three binaries — on Windows also the installer's PATH entry, and the running `.exe` right after setup exits — works offline, and prints a link for feedback. Nothing is sent.
 
 Opening the menu checks GitHub for a newer release unless `AGENTGUARD_NO_UPDATE_CHECK` is set; the menu then offers "Check for updates". setup refuses to run as root (it sets AgentGuard up for your own user; for a system-wide server see [`DEPLOYMENT.md`](DEPLOYMENT.md)) and inside the container image.
+
+---
+
+## `agentguard hook claude-code`
+
+The command Claude Code runs before each shell command, file read or edit, web fetch and MCP tool call, once `agentguard setup` has connected it. It reads the call as JSON on stdin, checks it on the running server as agent `claude-code` (transport `claude_code` in the audit log), and answers Claude Code: nothing when the policy allows it, a block with the reason when it denies it; a call that needs approval waits up to 5 minutes for one. When the server can't be reached, the call goes ahead with a warning. It finds the server through `AGENTGUARD_URL`, else the one setup runs, and the key through `AGENTGUARD_API_KEY`, else the saved one. You don't run it yourself; see [`CLAUDE_CODE.md`](CLAUDE_CODE.md).
 
 ---
 

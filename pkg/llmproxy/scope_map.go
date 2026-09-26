@@ -65,6 +65,19 @@ const UnmappedScope = "unmapped"
 //     with different field semantics; operators wire it
 //     via SDK est_cost rather than via tool-name mapping)
 var DefaultLLMToolScopeMap = []policy.ToolScopeMapping{
+	// --- Claude Code's built-in tools, by their exact names (tool names
+	// are matched case-sensitively, so "Bash" needs its own entry) ---
+	{Pattern: "Bash", Scope: "shell"},
+	{Pattern: "PowerShell", Scope: "shell"},
+	{Pattern: "Read", Scope: "filesystem"},
+	{Pattern: "Write", Scope: "filesystem"},
+	{Pattern: "Edit", Scope: "filesystem"},
+	{Pattern: "MultiEdit", Scope: "filesystem"},
+	{Pattern: "NotebookEdit", Scope: "filesystem"},
+	{Pattern: "Glob", Scope: "filesystem"},
+	{Pattern: "Grep", Scope: "filesystem"},
+	{Pattern: "WebFetch", Scope: "network"},
+
 	// --- Shell / command execution ---
 	{Pattern: "bash", Scope: "shell"},
 	{Pattern: "sh", Scope: "shell"},

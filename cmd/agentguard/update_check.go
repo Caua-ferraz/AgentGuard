@@ -100,6 +100,8 @@ func waitForUpdateCheck(done <-chan struct{}, timeout time.Duration) {
 //     server makes no outbound connection of its own.
 //   - Help, no command at all, or a mistyped command: nothing ran that the
 //     notice could accompany, and help should print without a network wait.
+//   - `hook`: it runs before every Claude Code tool call, so it must answer
+//     in milliseconds, and nobody reads its stderr.
 //   - Dev builds: an untagged version string ("dev" anywhere in it), or the
 //     "dev" commit placeholder on a binary whose Go build info carries no
 //     tagged release version. `go install …@vX.Y.Z` / `@latest` builds keep
@@ -107,7 +109,7 @@ func waitForUpdateCheck(done <-chan struct{}, timeout time.Duration) {
 //     `go build` of an untagged or modified checkout does not.
 //   - AGENTGUARD_NO_UPDATE_CHECK set to anything other than "0".
 func shouldSkipUpdateCheck(currentVersion, currentCommit, subcommand string) bool {
-	if name, known := lookupCommand(subcommand); !known || name == "server" || name == "help" {
+	if name, known := lookupCommand(subcommand); !known || name == "server" || name == "help" || name == "hook" {
 		return true
 	}
 	if currentVersion == "" || strings.Contains(currentVersion, "dev") {

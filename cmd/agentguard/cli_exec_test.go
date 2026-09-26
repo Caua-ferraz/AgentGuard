@@ -111,7 +111,7 @@ func TestCLI_Help(t *testing.T) {
 func TestCLI_HelpPages(t *testing.T) {
 	dir := t.TempDir()
 	pages := [][]string{
-		{"setup", "-h"}, {"server", "-h"}, {"validate", "-h"}, {"check", "-h"}, {"approve", "-h"}, {"deny", "-h"},
+		{"setup", "-h"}, {"hook", "-h"}, {"server", "-h"}, {"validate", "-h"}, {"check", "-h"}, {"approve", "-h"}, {"deny", "-h"},
 		{"status", "-h"}, {"audit", "-h"}, {"tenant", "-h"}, {"tenant", "put", "-h"},
 		{"tenant", "list", "-h"}, {"tenant", "rm", "-h"}, {"migrate", "-h"}, {"help", "help"},
 	}
@@ -185,7 +185,7 @@ func TestCLI_SetupNeedsATerminal(t *testing.T) {
 		t.Skip("setup refuses to run as root")
 	}
 	dir := t.TempDir()
-	env := []string{"XDG_CONFIG_HOME=" + dir, "XDG_DATA_HOME=" + dir, "APPDATA=" + dir, "LOCALAPPDATA=" + dir, "AGENTGUARD_DISTRIBUTION="}
+	env := []string{"XDG_CONFIG_HOME=" + dir, "XDG_DATA_HOME=" + dir, "APPDATA=" + dir, "LOCALAPPDATA=" + dir, "CLAUDE_CONFIG_DIR=" + dir, "AGENTGUARD_DISTRIBUTION="}
 	agentguard(t, dir, env, "setup").expect(t, 2, "not set up yet", "")
 	agentguard(t, dir, env, "setup").expect(t, 2, "setup is interactive", "")
 	agentguard(t, dir, env, "setup", "--yes").expect(t, 2, "", "unknown flag --yes")
@@ -234,6 +234,8 @@ func TestCLI_ArgumentMistakes(t *testing.T) {
 	agentguard(t, dir, nil, "server", "--prot", "1").expect(t, 2, "", "unknown flag --prot (did you mean --port?)")
 	agentguard(t, dir, nil, "audit", "--url", "localhost:8080").expect(t, 2, "", "include the scheme")
 	agentguard(t, dir, nil, "check", "extra").expect(t, 3, "", `unexpected argument "extra"`)
+	agentguard(t, dir, nil, "hook").expect(t, 2, "", "missing the agent")
+	agentguard(t, dir, nil, "hook", "cursor").expect(t, 2, "", `unknown agent "cursor"`)
 
 	// A mistyped tenant subcommand is caught before the store is opened, so
 	// it no longer leaves an empty agentguard.db behind.

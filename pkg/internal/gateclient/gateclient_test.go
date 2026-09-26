@@ -31,6 +31,14 @@ func TestInferFilesystemAction(t *testing.T) {
 		"remove_dir":  "delete",
 		"unlink":      "delete",
 		"unknown":     "",
+		// Claude Code's tools, by their own names.
+		"Read":         "read",
+		"Glob":         "read",
+		"Grep":         "read",
+		"Write":        "write",
+		"Edit":         "write",
+		"MultiEdit":    "write",
+		"NotebookEdit": "write",
 	}
 	for in, want := range cases {
 		if got := InferFilesystemAction(in); got != want {

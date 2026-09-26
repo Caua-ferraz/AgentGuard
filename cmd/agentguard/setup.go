@@ -200,6 +200,12 @@ func (s *setup) menu() []menuItem {
 			add("Run the server in this terminal", "Ctrl-C stops it", s.runHere)
 		}
 		add("Connection details", "URL, API key, SDK and Claude Desktop settings", s.printDetails)
+		switch {
+		case claudeConnected(claudeSettingsPath()):
+			add("Disconnect Claude Code", "stop checking its tool calls", s.disconnectClaude)
+		case claudeCodeDetected():
+			add("Connect Claude Code", "check its tool calls against your policy", s.connectClaude)
+		}
 		add("Open the policy file", s.state.Policy, s.openPolicy)
 		add("Change settings", "start at login, API key", s.doSetup)
 		items = append(items, menuItem{Option: tui.Option{Separator: true}})
@@ -242,6 +248,9 @@ func (s *setup) printStatus() {
 		}
 		row("Server", strings.Join(parts, " · "))
 		row("Policy", s.state.Policy)
+		if claudeConnected(claudeSettingsPath()) {
+			row("Claude", "Claude Code is connected: its tool calls are checked")
+		}
 	}
 	switch {
 	case s.updateTarget() != "":
@@ -491,6 +500,57 @@ func (s *setup) openPolicy() (bool, int) {
 	return back()
 }
 
+// ── Claude Code ─────────────────────────────────────────────────────────
+
+func (s *setup) connectClaude() (bool, int) {
+	has, err := policyHasClaudeRules(s.state.Policy)
+	if err != nil {
+		s.fail("Policy", err.Error())
+		return back()
+	}
+	if !has {
+		i, err := s.ui.Select("Your policy has no rules for Claude Code", []tui.Option{
+			{Label: "Add AgentGuard's Claude Code rules", Hint: "recommended: read and edit your projects; risky commands need approval"},
+			{Label: "Connect without them", Hint: "the sandbox rules apply, which block most of its work"},
+			{Label: "Cancel"},
+		}, 0)
+		if err != nil || i == tui.Back || i == 2 {
+			return back()
+		}
+		if i == 0 {
+			if err := addClaudeRules(s.state.Policy); err != nil {
+				s.fail("Policy", err.Error())
+				s.note("Add the Claude Code block by hand: https://github.com/Caua-ferraz/AgentGuard/blob/v" + version + "/docs/CLAUDE_CODE.md")
+				return back()
+			}
+			s.ok("Policy", "added the Claude Code rules to "+s.state.Policy+" (the old file is kept as .agentguard-backup)")
+		}
+	}
+	path := claudeSettingsPath()
+	if err := connectClaudeCode(path, s.m.exe); err != nil {
+		s.fail("Claude Code", err.Error())
+		return back()
+	}
+	s.ok("Claude Code", "connected in "+path+" (the old file is kept as .agentguard-backup)")
+	s.note("New Claude Code sessions check Bash, file reads and edits, web fetches and MCP tools.")
+	s.note("A call that needs approval waits up to 5 minutes: approve it at " + baseURL(s.state.Port) + "/dashboard or with 'agentguard approve <id>'.")
+	if serverHealth(s.state.Port) == "" {
+		s.note("The server isn't running: until it is, Claude Code's calls go ahead with a warning.")
+	}
+	return back()
+}
+
+func (s *setup) disconnectClaude() (bool, int) {
+	path := claudeSettingsPath()
+	if _, err := disconnectClaudeCode(path); err != nil {
+		s.fail("Claude Code", err.Error())
+		return back()
+	}
+	s.ok("Claude Code", "disconnected: removed AgentGuard's hook from "+path)
+	s.note("Your policy keeps its Claude Code rules; they do nothing while Claude Code isn't connected.")
+	return back()
+}
+
 // ── Connection details ──────────────────────────────────────────────────
 
 func (s *setup) printDetails() (bool, int) {
@@ -633,7 +693,19 @@ func (s *setup) doUninstall() (bool, int) {
 			s.state.LoginStart = false
 			_ = saveState(s.m, s.state)
 		}
+		if claudeConnected(claudeSettingsPath()) {
+			s.note("Claude Code stays connected: while the server is stopped, its tool calls go ahead with a warning.")
+		}
 		return back()
+	}
+
+	// Before the binaries go: a hook pointing at a deleted program would
+	// show an error on every Claude Code tool call.
+	if removed, err := disconnectClaudeCode(claudeSettingsPath()); err != nil {
+		s.fail("Claude Code", err.Error())
+		return back()
+	} else if removed {
+		s.ok("Claude Code", "disconnected (removed AgentGuard's hook from "+claudeSettingsPath()+")")
 	}
 
 	if !writable(s.m.binDir) {

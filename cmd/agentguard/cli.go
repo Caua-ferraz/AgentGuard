@@ -49,6 +49,7 @@ var commands = []command{
 	{Name: "approve", Group: "Work with a running server", Summary: "Approve a pending action by ID"},
 	{Name: "deny", Group: "Work with a running server", Summary: "Deny a pending action by ID"},
 	{Name: "audit", Group: "Work with a running server", Summary: "Query the audit log"},
+	{Name: "hook", Group: "Other", Summary: "Checks Claude Code's tool calls (its hook; setup connects it)"},
 	{Name: "migrate", Group: "Other", Summary: "Upgrade the audit log's format (the server does this at startup)"},
 	{Name: "version", Group: "Other", Summary: "Print version information (also: --version)"},
 	{Name: "help", Group: "Other", Summary: "Show help for a command"},

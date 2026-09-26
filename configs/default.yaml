@@ -307,3 +307,66 @@ notifications:
   on_deny:
     - type: log
       level: warn
+
+# --- Per-agent rules ---
+agents:
+  # --- Claude Code ---
+  # Rules for Claude Code's tool calls, which `agentguard hook claude-code`
+  # checks as agent "claude-code" (connect it with `agentguard setup`). A
+  # coding agent works on your real project, so the sandbox rules above would
+  # block most of its work: these replace them for Claude Code only, scope by
+  # scope. Scopes not listed here (mcp_tool, browser) keep the rules above.
+  # "replace" drops the base deny and approval lists for the scopes below
+  # (the default "merge" keeps them), so everyday commands such as
+  # `python -m pytest` don't wait for approval; each scope's own lists here
+  # are complete on their own.
+  claude-code:
+    override_mode: replace
+    override:
+      - scope: filesystem
+        deny:
+          - action: read
+            paths: ["**/.ssh/**", "**/.aws/**", "**/.gnupg/**"]
+            message: "Keys and cloud credentials are off-limits to Claude Code"
+          - action: write
+            paths: ["**/.ssh/**", "**/.aws/**", "**/.gnupg/**", "/etc/**", "/usr/**", "C:/Windows/**"]
+            message: "Claude Code doesn't write to system folders or credentials"
+        require_approval:
+          - action: read
+            paths: ["**/.env", "**/.env.*"]
+          - action: write
+            paths: ["**/.env", "**/.env.*"]
+        allow:
+          - action: read
+            paths: ["**"]
+          - action: write
+            paths: ["**"]
+
+      - scope: shell
+        deny:
+          - pattern: ":(){ :|:& };:"
+          - pattern: "dd if=/dev/*"
+          - pattern: "> /dev/sda"
+        require_approval:
+          - pattern: "sudo *"
+          - pattern: "rm -rf *"
+          - pattern: "rm -fr *"
+          - pattern: "git push --force*"
+          - pattern: "git push -f*"
+          - pattern: "git reset --hard*"
+          - pattern: "git clean -*"
+          - pattern: "curl * | *sh"
+          - pattern: "wget * | *sh"
+          - pattern: "chmod 777 *"
+          - pattern: "Remove-Item * -Recurse*"
+        allow:
+          - pattern: "*"
+
+      - scope: network
+        deny:
+          - domain: "169.254.169.254"
+            message: "Cloud metadata endpoints are off-limits"
+          - domain: "metadata.google.internal"
+            message: "Cloud metadata endpoints are off-limits"
+        allow:
+          - domain: "*"

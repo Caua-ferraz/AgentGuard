@@ -310,7 +310,7 @@ func projectPath(scope string, args map[string]interface{}) string {
 	if scope != "filesystem" {
 		return ""
 	}
-	for _, k := range []string{"path", "file_path", "filepath", "target", "target_path", "filename", "file", "destination", "src", "dst"} {
+	for _, k := range []string{"path", "file_path", "notebook_path", "filepath", "target", "target_path", "filename", "file", "destination", "src", "dst"} {
 		if v, ok := args[k]; ok {
 			if s, ok := v.(string); ok && s != "" {
 				return s

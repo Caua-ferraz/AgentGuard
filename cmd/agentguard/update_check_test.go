@@ -55,6 +55,7 @@ func TestShouldSkipUpdateCheck(t *testing.T) {
 		{"serve (alias of server) never calls out", "1.0.0", "abc1234", "serve", "", true},
 		{"help does not wait on the network", "1.0.0", "abc1234", "--help", "", true},
 		{"mistyped command", "1.0.0", "abc1234", "sever", "", true},
+		{"the Claude Code hook never waits on the network", "1.0.0", "abc1234", "hook", "", true},
 		{"version checks", "1.0.0", "abc1234", "--version", "", false},
 		{"dev commit (plain go build)", "1.0.0", "dev", "check", "", true},
 		{"dev version string", "1.0.0-dev", "abc1234", "check", "", true},

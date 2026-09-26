@@ -332,3 +332,23 @@ func TestDefaultLLMToolScopeMap_OnlyKnownScopes(t *testing.T) {
 		}
 	}
 }
+
+// Claude Code routed through the proxy names its tools Bash, Edit, … —
+// capitalised, so they need their own entries: the lowercase ones don't
+// match, and an unmapped tool is denied.
+func TestDefaultLLMToolScopeMap_ClaudeCodeTools(t *testing.T) {
+	cases := map[string]string{
+		"Bash": "shell", "PowerShell": "shell",
+		"Read": "filesystem", "Write": "filesystem", "Edit": "filesystem", "MultiEdit": "filesystem",
+		"NotebookEdit": "filesystem", "Glob": "filesystem", "Grep": "filesystem",
+		"WebFetch": "network",
+	}
+	for tool, want := range cases {
+		if got := MapLLMToolScope(tool, DefaultLLMToolScopeMap); got != want {
+			t.Errorf("MapLLMToolScope(%q) = %q, want %q", tool, got, want)
+		}
+	}
+	if got := projectPath("filesystem", map[string]interface{}{"notebook_path": "/n.ipynb"}); got != "/n.ipynb" {
+		t.Errorf("NotebookEdit's notebook_path isn't read as the path: %q", got)
+	}
+}

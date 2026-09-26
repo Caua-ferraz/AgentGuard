@@ -279,12 +279,13 @@ func InferFilesystemAction(toolName string) string {
 	case strings.HasPrefix(tl, "read"), strings.HasPrefix(tl, "list"),
 		strings.HasPrefix(tl, "get"), strings.HasPrefix(tl, "stat"),
 		strings.HasPrefix(tl, "cat"), strings.HasPrefix(tl, "find"),
-		strings.HasPrefix(tl, "glob"):
+		strings.HasPrefix(tl, "glob"), strings.HasPrefix(tl, "grep"):
 		return "read"
 	case strings.HasPrefix(tl, "write"), strings.HasPrefix(tl, "edit"),
 		strings.HasPrefix(tl, "create"), strings.HasPrefix(tl, "append"),
 		strings.HasPrefix(tl, "save"), strings.HasPrefix(tl, "copy"),
-		strings.HasPrefix(tl, "move"):
+		strings.HasPrefix(tl, "move"), strings.HasPrefix(tl, "multiedit"),
+		strings.HasPrefix(tl, "notebookedit"):
 		return "write"
 	case strings.HasPrefix(tl, "delete"), strings.HasPrefix(tl, "remove"),
 		strings.HasPrefix(tl, "unlink"), strings.HasPrefix(tl, "rm"):
