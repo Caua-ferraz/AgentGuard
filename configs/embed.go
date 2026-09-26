@@ -9,3 +9,10 @@ import _ "embed"
 //
 //go:embed default.yaml
 var Default []byte
+
+// ClaudeCode is the policy block for Claude Code (agent "claude-code"): one
+// entry under `agents:`, indented for that position. The starter policy
+// ends with it; `agentguard setup` adds it to an older policy on request.
+//
+//go:embed claude-code.yaml
+var ClaudeCode []byte

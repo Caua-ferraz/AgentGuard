@@ -68,6 +68,8 @@ func run(args []string) int {
 	switch name {
 	case "setup":
 		return runSetupCmd(rest)
+	case "hook":
+		return runHookCmd(rest)
 	case "server":
 		return runServerCmd(rest)
 	case "validate":

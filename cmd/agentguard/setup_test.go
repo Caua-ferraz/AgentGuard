@@ -283,6 +283,8 @@ func (f *fakeService) LogHint() string { return "the log" }
 func testMachine(t *testing.T) machine {
 	t.Helper()
 	root := t.TempDir()
+	// Claude Code's settings too: the flows read and edit them.
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	m := machine{
 		goos: goos, goarch: "amd64", channel: channelRelease,
 		binDir:    filepath.Join(root, "bin"),
