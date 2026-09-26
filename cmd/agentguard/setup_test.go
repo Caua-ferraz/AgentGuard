@@ -62,6 +62,9 @@ func TestRenderSystemdUnit(t *testing.T) {
 		`"--api-key-file" "/home/u/.config/agentguard/api-key"`,
 		"Restart=on-failure",
 		"WantedBy=default.target",
+		// Only command lines take quotes; a quoted path here is "a bad unit
+		// file setting" (found by the real-service CI job).
+		"\nWorkingDirectory=/home/u/.local/share/agentguard\n",
 	} {
 		if !strings.Contains(unit, want) {
 			t.Errorf("unit lacks %q:\n%s", want, unit)

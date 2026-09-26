@@ -137,7 +137,7 @@ After=network.target
 
 [Service]
 ExecStart=` + strings.Join(words, " ") + `
-WorkingDirectory=` + systemdQuote(spec.WorkDir) + `
+WorkingDirectory=` + strings.ReplaceAll(spec.WorkDir, "%", "%%") + `
 Restart=on-failure
 RestartSec=5
 
