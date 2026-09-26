@@ -31,6 +31,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Caua-ferraz/AgentGuard/internal/clihelp"
 	"github.com/Caua-ferraz/AgentGuard/pkg/internal/gateclient"
 )
 
@@ -168,6 +169,17 @@ func ParseConfig(args []string) (*Config, error) {
 	return ParseConfigWithOutput(args, os.Stderr)
 }
 
+// proxyFlagGroups is the layout of `agentguard-llm-proxy -h`. Every flag
+// must be in one group (TestConfig_HelpGroupsEveryFlag).
+var proxyFlagGroups = []clihelp.Group{
+	{Title: "Listening", Names: []string{"listen", "proxy-api-key", "max-concurrent-streams", "max-buffer-bytes"}},
+	{Title: "Model providers", Names: []string{"upstream-openai", "upstream-anthropic"}},
+	{Title: "AgentGuard server", Names: []string{"guard-url", "api-key", "tenant-id"}},
+	{Title: "Policy", Names: []string{"policy"}},
+	{Title: "When the AgentGuard server is unreachable", Names: []string{"fail-mode", "fail-audit-log"}},
+	{Title: "Logging", Names: []string{"log-level"}},
+}
+
 // ParseConfigWithOutput is ParseConfig with the usage stream pluggable
 // for tests. Mirrors mcpgw.ParseConfigWithOutput.
 func ParseConfigWithOutput(args []string, errOut io.Writer) (*Config, error) {
@@ -188,13 +200,14 @@ Example:
   #   OPENAI_BASE_URL=http://127.0.0.1:8081/v1
   #   ANTHROPIC_BASE_URL=http://127.0.0.1:8081
 
-Flags:
 `)
-		fs.PrintDefaults()
-		fmt.Fprintf(errOut, `  -version
-    	Print version and exit (checked before any other flag is parsed)
+		clihelp.WriteGroups(errOut, fs, proxyFlagGroups, clihelp.Options{})
+		fmt.Fprint(errOut, `
+Other:
+  --version  Print the version and exit (checked before any other flag)
 
 Environment:
+  AGENTGUARD_URL       Used when --guard-url is not set.
   AGENTGUARD_API_KEY   Used when --api-key is not set.
 `)
 	}
@@ -211,13 +224,17 @@ Environment:
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
+	if err := gateclient.RejectArgs(fs.Args(), ""); err != nil {
+		return nil, err
+	}
+	gate.ApplyEnv()
 
 	cfg := &Config{
 		Listen:               *listen,
 		UpstreamOpenAI:       *upstreamOpenAI,
 		UpstreamAnthropic:    *upstreamAnthropic,
 		GuardURL:             *gate.GuardURL,
-		APIKey:               gateclient.ResolveAPIKey(*gate.APIKey),
+		APIKey:               *gate.APIKey,
 		ProxyAPIKey:          *proxyAPIKey,
 		TenantID:             *gate.TenantID,
 		FailMode:             *gate.FailMode,

@@ -34,7 +34,7 @@ lint:
 
 ## run: Build and start with default policy + dashboard
 run: build
-	./$(BINARY) serve --policy configs/default.yaml --dashboard --watch
+	./$(BINARY) server --policy configs/default.yaml --dashboard --watch
 
 ## validate: Validate all policy files
 validate: build

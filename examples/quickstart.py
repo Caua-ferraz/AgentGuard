@@ -10,7 +10,7 @@ and make API calls.
 
 2. Start AgentGuard:
 
-    agentguard serve --policy configs/default.yaml --dashboard
+    agentguard server --policy configs/default.yaml --dashboard
 
 3. Run this script:
 

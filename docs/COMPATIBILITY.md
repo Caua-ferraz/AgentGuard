@@ -119,6 +119,17 @@ frozen: a flag's name, default, and meaning do not change across the stabilized 
 subcommand is removed. The same applies to the `agentguard-mcp-gateway` and
 `agentguard-llm-proxy` flag sets. New flags and new subcommands may be added.
 
+`server` is the documented name for `serve`; both run the same command, and
+`serve` stays for the whole 1.x line. Additions since 1.2.0 are all of the
+kind this surface allows: the `server` and `help` subcommands, the `--guard-url`
+alias of `--url` on the client subcommands, and environment fallbacks for flags
+left unset (`AGENTGUARD_URL`, `AGENTGUARD_POLICY`). When `--policy` is not
+given and `configs/default.yaml` is missing, `server`, `validate` and `check`
+look for the installer's starter policy instead of failing. Flags may now follow
+positional arguments; before, a flag after one was ignored without a word. A
+stray positional argument is now an error instead of being ignored. See
+[`CLI.md`](CLI.md).
+
 Full reference: [`CLI.md`](CLI.md) · [`MCP_GATEWAY.md`](MCP_GATEWAY.md) ·
 [`LLM_API_PROXY.md`](LLM_API_PROXY.md).
 

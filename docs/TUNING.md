@@ -87,7 +87,7 @@ rules:
 ## CLI flags (restart to apply)
 
 ```bash
-agentguard serve \
+agentguard server \
   --policy /etc/agentguard/policy.yaml \
   --port 8080 \
   --api-key $KEY \

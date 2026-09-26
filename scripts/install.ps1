@@ -113,7 +113,7 @@
         } elseif (Test-Path $confdir) {
             Write-Host "Kept your policy folder $confdir (delete it yourself, or uninstall again with AGENTGUARD_PURGE=1)"
         }
-        Write-Host 'Audit logs and the state database live where you ran `agentguard serve`; they were not touched.'
+        Write-Host 'Audit logs and the state database live where you ran `agentguard server`; they were not touched.'
         return
     }
 
@@ -202,7 +202,7 @@
             Write-Host "Updated AgentGuard $previous -> $version in $dir"
         }
 
-        # Starter policy, so `serve` has something to load on a fresh machine.
+        # Starter policy, so `server` has something to load on a fresh machine.
         # An existing file is the operator's policy and is never overwritten.
         $policy = Join-Path $confdir 'default.yaml'
         if (-not (Test-Path $policy)) {
@@ -226,7 +226,7 @@
         }
 
         Write-Host ''
-        Write-Host "Next: agentguard serve --policy `"$policy`" --dashboard"
+        Write-Host "Next: agentguard server --policy `"$policy`" --dashboard"
         Write-Host "Docs: https://github.com/$Repo#quickstart"
         Write-Host 'To update later, run the same install command again.'
         Write-Host "To uninstall: `$env:AGENTGUARD_UNINSTALL=1; irm https://github.com/$Repo/releases/latest/download/install.ps1 | iex"

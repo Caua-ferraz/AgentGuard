@@ -90,8 +90,7 @@ func main() {
 	// itself runs without auth (single-host loopback dev mode), but
 	// production deployments should set both.
 	if cfg.APIKey == "" {
-		fmt.Fprintln(os.Stderr, "agentguard-llm-proxy: WARNING --api-key not set; /v1/check calls will be unauthenticated")
-		fmt.Fprintln(os.Stderr, "agentguard-llm-proxy: WARNING --api-key not set; if the central server is keyed, forced-refusal audits fall back to the lower-fidelity /v1/check path (POST /v1/audit is auth-gated). Set --api-key for full audit fidelity.")
+		fmt.Fprintln(os.Stderr, "agentguard-llm-proxy: WARNING --api-key not set: /v1/check calls are unauthenticated, and if the central server is keyed, forced-refusal audits fall back to the lower-fidelity /v1/check path (POST /v1/audit is auth-gated). Set --api-key or AGENTGUARD_API_KEY.")
 	}
 	if cfg.ProxyAPIKey == "" {
 		fmt.Fprintf(os.Stderr, "agentguard-llm-proxy: WARNING --proxy-api-key not set; %s header will not be enforced\n", llmproxy.ProxyAuthHeader)

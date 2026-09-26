@@ -194,6 +194,7 @@ func (b *Bridge) Run(ctx context.Context, in io.Reader, out io.Writer, errLog io
 		}
 		ns := spec.Namespace
 		up := NewStdioUpstreamWithOptions(spec, StdioUpstreamOptions{
+			Backoff:        BackoffSchedule(b.cfg.ReconnectCap),
 			Logger:         b.logger,
 			OnNotification: func(method string) { b.onUpstreamNotification(ns, method) },
 		})

@@ -45,7 +45,7 @@ default policy:
 export AGENTGUARD_API_KEY="$(openssl rand -hex 32)"
 
 git clone https://github.com/Caua-ferraz/AgentGuard.git
-agentguard serve \
+agentguard server \
   --policy AgentGuard/configs/default.yaml \
   --dashboard \
   --watch \

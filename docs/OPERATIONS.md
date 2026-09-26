@@ -6,7 +6,7 @@ Day-2 concerns for running AgentGuard in production: log rotation, scaling, capa
 
 ## Audit log rotation
 
-**AgentGuard rotates `audit.jsonl` by default.** The size-triggered rotator is wired into `runServe` and active out of the box, controlled by these `agentguard serve` flags:
+**AgentGuard rotates `audit.jsonl` by default.** The size-triggered rotator is wired into `runServe` and active out of the box, controlled by these `agentguard server` flags:
 
 | Flag | Default | Purpose |
 |---|---|---|
@@ -61,7 +61,7 @@ Historical audit queries then become a two-tier lookup: recent entries from the 
 
 ## Audit redaction
 
-Since v1.2.0, `agentguard serve` masks secrets in every request before it is stored or shown (`--audit-redact`, default `true`). Matches are replaced with `[REDACTED]` in the command, path, domain, action, URL, reason and every `meta` value.
+Since v1.2.0, `agentguard server` masks secrets in every request before it is stored or shown (`--audit-redact`, default `true`). Matches are replaced with `[REDACTED]` in the command, path, domain, action, URL, reason and every `meta` value.
 
 **What is masked:** bearer tokens, `Authorization:` / `x-api-key:` / `api-key:` header values, AWS access keys (`AKIA…`), GitHub tokens (`ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`, `github_pat_`), Slack tokens (`xox?-`), LLM provider keys (`sk-…`), Google API keys (`AIza…`), JWTs, PEM private keys, and `secret=` / `token=` / `password=` / `api_key=` pairs — plus the policy's `notifications.redaction.extra_patterns`. It is pattern-based and best effort: a secret in a shape none of these match is stored as sent.
 
@@ -198,7 +198,7 @@ Tune by:
 If your agents use long-lived `session_id`s, the `sessionCosts` map can grow unbounded. Two flags control eviction:
 
 ```bash
-agentguard serve \
+agentguard server \
   --session-cost-ttl 24h \
   --session-cost-sweep-interval 1h \
   ...
@@ -218,7 +218,7 @@ Trade-off: a short TTL resets session totals mid-run if an agent goes idle longe
 Both wire-level enforcement points are **stateless** — they fan every gated request out to the AgentGuard server. Restart freely, no audit replay on boot.
 
 - **Health:** the LLM API Proxy serves `GET /healthz` on its listen port — use it as the readiness probe. The MCP Gateway is a stdio bridge with no HTTP listener; probe the process, not a port.
-- **Metrics:** neither proxy binary exposes `/metrics` — the central `agentguard serve` does. See [`OBSERVABILITY.md`](OBSERVABILITY.md#mcp-gateway--llm-api-proxy-metrics-v05) for what is and isn't observable at the proxies.
+- **Metrics:** neither proxy binary exposes `/metrics` — the central `agentguard server` does. See [`OBSERVABILITY.md`](OBSERVABILITY.md#mcp-gateway--llm-api-proxy-metrics-v05) for what is and isn't observable at the proxies.
 - **Shutdown:** the LLM API Proxy buffers tool calls inside streaming responses; give it 30 s graceful drain (`TimeoutStopSec=30s` / `terminationGracePeriodSeconds: 30`). A hard kill truncates the client's response.
 - **Version skew:** keep all binaries on the same `0.x.y`. The wire protocol is stable within a minor line; cross-minor mixing is unsupported. Upgrade the server first, then the proxies.
 - **Topology:** prefer per-agent sidecars — shared proxies couple every agent's lifecycle.

@@ -15,6 +15,7 @@ func newTestFlagSet() (*flag.FlagSet, *GateFlags) {
 
 func TestGateFlags_DefaultsAndOverrides(t *testing.T) {
 	t.Setenv("AGENTGUARD_API_KEY", "")
+	t.Setenv("AGENTGUARD_URL", "")
 
 	fs, gf := newTestFlagSet()
 	if err := fs.Parse(nil); err != nil {
@@ -45,6 +46,55 @@ func TestGateFlags_DefaultsAndOverrides(t *testing.T) {
 		*gf.FailMode != "allow" || *gf.LogLevel != "debug" || *gf.PolicyPath != "p.yaml" {
 		t.Errorf("overrides wrong: %q %q %q %q %q",
 			*gf.GuardURL, *gf.TenantID, *gf.FailMode, *gf.LogLevel, *gf.PolicyPath)
+	}
+}
+
+// AGENTGUARD_URL (read by the SDKs and the agentguard client commands)
+// fills --guard-url when the flag isn't given; the flag always wins.
+func TestGateFlags_GuardURLFromEnv(t *testing.T) {
+	t.Setenv("AGENTGUARD_API_KEY", "")
+	t.Setenv("AGENTGUARD_URL", "http://env-guard:9000")
+
+	fs, gf := newTestFlagSet()
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := gf.Resolve(); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if *gf.GuardURL != "http://env-guard:9000" {
+		t.Errorf("env fallback: GuardURL = %q", *gf.GuardURL)
+	}
+
+	fs, gf = newTestFlagSet()
+	if err := fs.Parse([]string{"--guard-url", DefaultGuardURL}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := gf.Resolve(); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if *gf.GuardURL != DefaultGuardURL {
+		t.Errorf("an explicit --guard-url (even the default value) must win: got %q", *gf.GuardURL)
+	}
+}
+
+func TestRejectArgs(t *testing.T) {
+	if err := RejectArgs(nil, ""); err != nil {
+		t.Errorf("no args: %v", err)
+	}
+	cases := map[string]string{
+		"version": "did you mean --version?",
+		"help":    "did you mean --help?",
+		"/tmp":    "takes flags only",
+	}
+	for arg, want := range cases {
+		err := RejectArgs([]string{arg, "more"}, "")
+		if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), `"`+arg+`"`) {
+			t.Errorf("RejectArgs(%q) = %v, want it to name the argument and say %q", arg, err, want)
+		}
+	}
+	if err := RejectArgs([]string{"x"}, "a hint"); err == nil || !strings.Contains(err.Error(), "a hint") {
+		t.Errorf("custom hint: %v", err)
 	}
 }
 

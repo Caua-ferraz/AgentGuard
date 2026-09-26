@@ -2,13 +2,19 @@ package llmproxy
 
 import (
 	"bytes"
+	"errors"
+	"flag"
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
+
+	"github.com/Caua-ferraz/AgentGuard/internal/clihelp"
 )
 
 func TestConfig_Defaults(t *testing.T) {
 	t.Setenv("AGENTGUARD_API_KEY", "")
+	t.Setenv("AGENTGUARD_URL", "")
 	cfg, err := ParseConfigWithOutput(nil, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -49,6 +55,36 @@ func TestConfig_APIKeyEnvFallback(t *testing.T) {
 	}
 	if cfg.APIKey != "flag-token" {
 		t.Errorf("APIKey = %q, want flag-token", cfg.APIKey)
+	}
+}
+
+func TestConfig_GuardURLEnvFallback(t *testing.T) {
+	t.Setenv("AGENTGUARD_API_KEY", "")
+	t.Setenv("AGENTGUARD_URL", "http://guard.internal:8080")
+	cfg, err := ParseConfigWithOutput(nil, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.GuardURL != "http://guard.internal:8080" {
+		t.Errorf("GuardURL = %q, want the AGENTGUARD_URL value", cfg.GuardURL)
+	}
+	cfg, err = ParseConfigWithOutput([]string{"--guard-url", "http://flag:1"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.GuardURL != "http://flag:1" {
+		t.Errorf("GuardURL = %q, the flag must win", cfg.GuardURL)
+	}
+}
+
+// A positional argument used to be ignored: `agentguard-llm-proxy version`
+// started the proxy.
+func TestConfig_RejectsPositionalArgs(t *testing.T) {
+	t.Setenv("AGENTGUARD_API_KEY", "")
+	for _, args := range [][]string{{"version"}, {"--listen", "127.0.0.1:9", "extra"}} {
+		if _, err := ParseConfigWithOutput(args, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "unexpected argument") {
+			t.Errorf("ParseConfig(%q) err = %v, want unexpected argument", args, err)
+		}
 	}
 }
 
@@ -193,5 +229,31 @@ func TestConfig_OSEnvIsolation(t *testing.T) {
 	}
 	if cfg.APIKey != "isolated" {
 		t.Errorf("APIKey = %q, want isolated", cfg.APIKey)
+	}
+}
+
+// agentguard-llm-proxy -h prints every flag in a group, as --flag, within 80 columns.
+func TestConfig_HelpGroupsEveryFlag(t *testing.T) {
+	var out bytes.Buffer
+	_, err := ParseConfigWithOutput([]string{"-h"}, &out)
+	if !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("err = %v, want flag.ErrHelp", err)
+	}
+	help := out.String()
+	if strings.Contains(help, clihelp.Ungrouped+":") {
+		t.Errorf("a flag is missing from the help groups:\n%s", help)
+	}
+	for _, want := range []string{"--listen string", "--guard-url string", "--version", "AGENTGUARD_URL"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help lacks %q", want)
+		}
+	}
+	for _, line := range strings.Split(help, "\n") {
+		if utf8.RuneCountInString(line) > clihelp.Width {
+			t.Errorf("line wider than %d: %q", clihelp.Width, line)
+		}
+		if strings.HasPrefix(line, "  -") && !strings.HasPrefix(line, "  --") {
+			t.Errorf("flag written with one dash: %q", line)
+		}
 	}
 }

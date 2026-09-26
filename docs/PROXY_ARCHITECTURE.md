@@ -81,7 +81,7 @@ The `audit.Entry` includes `Scope`, `Decision`, `Rule`, `Reason`,
 
 ### 2.3 Approval queue and SSE bus via `pkg/proxy.ApprovalQueue`
 
-The existing AgentGuard HTTP server (`agentguard serve`) owns the
+The existing AgentGuard HTTP server (`agentguard server`) owns the
 approval queue and the SSE bus. The two proxies do **not** maintain
 their own approval state. When a check returns `REQUIRE_APPROVAL` the
 proxy:
@@ -109,7 +109,7 @@ sees the response.
 
 ```
                         ┌─────────────────────────────────┐
-                        │      agentguard serve           │
+                        │      agentguard server           │
                         │  (central host: 127.0.0.1:8080) │
    /v1/check ─────►     │  • Engine.Check                 │
    /v1/approve ─────►   │  • ApprovalQueue + SSE bus      │
@@ -149,7 +149,8 @@ response cap), the fail-mode translation, the shared `Decision` type
 (re-exported by each proxy via type alias), and the shared CLI flag
 set + validation (`--guard-url`, `--api-key`, `--tenant-id`,
 `--fail-mode`, `--log-level`, `--policy`, with the AGENTGUARD_API_KEY
-env fallback). Each proxy keeps only its own scope-mapping and
+and AGENTGUARD_URL env fallbacks, and the check that rejects stray
+positional arguments). Each proxy keeps only its own scope-mapping and
 argument-projection logic. The package is internal — it is substrate,
 not public API; the per-binary synthetic Rule strings remain each
 proxy's stable contract.
@@ -212,7 +213,7 @@ binary:
 
 | binary                       | role                                                  |
 |------------------------------|-------------------------------------------------------|
-| `agentguard`                 | central server (`serve`, `validate`, `audit`, etc.)   |
+| `agentguard`                 | central server (`server`, `validate`, `audit`, etc.)  |
 | `agentguard-mcp-gateway`     | stdio bridge, child of an MCP host (Claude Desktop)   |
 | `agentguard-llm-proxy`       | HTTP server, sidecar for OpenAI/Anthropic-compatible callers |
 
@@ -265,7 +266,7 @@ fails CI because the `pkg/` tests run for all callers.
 All three binaries on `127.0.0.1`. Everything chats over loopback.
 
 ```
-agentguard serve --port 8080 --dashboard --policy configs/default.yaml
+agentguard server --port 8080 --dashboard --policy configs/default.yaml
 agentguard-mcp-gateway --guard-url http://127.0.0.1:8080 --upstream "fs:npx -y @modelcontextprotocol/server-filesystem /tmp"
 agentguard-llm-proxy --listen 127.0.0.1:8081 --guard-url http://127.0.0.1:8080
 ```
@@ -288,7 +289,7 @@ binary.
 
 ### 5.2 Single-host server
 
-One host runs `agentguard serve`. Gateways and proxies run as sidecars
+One host runs `agentguard server`. Gateways and proxies run as sidecars
 on the same host or on agent-facing hosts pointing at the central
 server's `/v1/check` over the network. Set `--api-key` on the central
 server and pass it to every gateway/proxy via `--api-key`.
@@ -322,7 +323,7 @@ cross-node approval visibility lags by at most one interval. See
 
 ## 6. Failure modes
 
-### 6.1 Central guard server (`agentguard serve`) is unreachable
+### 6.1 Central guard server (`agentguard server`) is unreachable
 
 This is the case the SDK already handles (`fail-mode: deny|allow`).
 Both proxies adopt the **same** flag for parity:
@@ -385,7 +386,7 @@ Both binaries share these flags:
 
 | flag                  | meaning                                            | default                |
 |-----------------------|----------------------------------------------------|------------------------|
-| `--guard-url`         | central server `/v1/check` base URL                | `http://127.0.0.1:8080`|
+| `--guard-url`         | central server `/v1/check` base URL (from `AGENTGUARD_URL` env if unset) | `http://127.0.0.1:8080`|
 | `--api-key`           | bearer token for `/v1/check` (from `AGENTGUARD_API_KEY` env if unset) | unset (warn) |
 | `--tenant-id`         | tenant header value                                | `local`                |
 | `--fail-mode`         | `deny` / `allow` / `fail-closed-with-audit`        | `deny`                 |

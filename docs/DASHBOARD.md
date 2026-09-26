@@ -19,7 +19,7 @@ For structured dashboards (Grafana, Datadog, etc.), use `/metrics` — see [`OBS
 ## Enabling it
 
 ```bash
-agentguard serve --dashboard --api-key $KEY
+agentguard server --dashboard --api-key $KEY
 ```
 
 Without `--api-key`, the dashboard is effectively unauthenticated — everyone on `127.0.0.1` (the only bind surface in that mode) sees everything. In production you always want `--api-key`.
@@ -141,7 +141,7 @@ User-controlled strings (commands, paths, reasons) are rendered via `textContent
 ## What the dashboard does NOT do
 
 - **It does not auto-refresh the audit tab.** SSE delivers real-time check events; audit listing requires a page reload for the full historical window.
-- **It does not let you edit policies.** Policy changes happen in YAML; hot-reload via `--watch`.
+- **It does not let you edit policies.** Policy changes happen in YAML; the server reloads the file when it changes.
 - **It does not show `/metrics`.** Use Prometheus/Grafana.
 - **It does not provide user management.** There is one API key; everyone who has it has full access.
 

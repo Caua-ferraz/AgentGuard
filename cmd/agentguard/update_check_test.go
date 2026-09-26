@@ -51,14 +51,18 @@ func TestShouldSkipUpdateCheck(t *testing.T) {
 		want       bool
 	}{
 		{"release build, interactive subcommand", "1.0.0", "abc1234", "check", "", false},
-		{"serve never calls out", "1.0.0", "abc1234", "serve", "", true},
+		{"server never calls out", "1.0.0", "abc1234", "server", "", true},
+		{"serve (alias of server) never calls out", "1.0.0", "abc1234", "serve", "", true},
+		{"help does not wait on the network", "1.0.0", "abc1234", "--help", "", true},
+		{"mistyped command", "1.0.0", "abc1234", "sever", "", true},
+		{"version checks", "1.0.0", "abc1234", "--version", "", false},
 		{"dev commit (plain go build)", "1.0.0", "dev", "check", "", true},
 		{"dev version string", "1.0.0-dev", "abc1234", "check", "", true},
 		{"empty version", "", "abc1234", "check", "", true},
 		{"env opt-out", "1.0.0", "abc1234", "check", "1", true},
 		{"env opt-out any value", "1.0.0", "abc1234", "status", "yes", true},
 		{"env 0 does not opt out", "1.0.0", "abc1234", "check", "0", false},
-		{"no subcommand (usage)", "1.0.0", "abc1234", "", "", false},
+		{"no subcommand (usage)", "1.0.0", "abc1234", "", "", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -99,27 +103,31 @@ func TestShouldSkipUpdateCheck_DevCommitUsesBuildInfo(t *testing.T) {
 			if got := shouldSkipUpdateCheck("1.1.1", "dev", "check"); got != c.want {
 				t.Errorf("shouldSkipUpdateCheck(dev commit, module %q) = %v, want %v", c.moduleVersion, got, c.want)
 			}
-			// serve never calls out, whatever the build.
-			if !shouldSkipUpdateCheck("1.1.1", "dev", "serve") {
-				t.Errorf("serve must always skip (module %q)", c.moduleVersion)
+			// server (and its serve alias) never calls out, whatever the build.
+			for _, sub := range []string{"server", "serve"} {
+				if !shouldSkipUpdateCheck("1.1.1", "dev", sub) {
+					t.Errorf("%s must always skip (module %q)", sub, c.moduleVersion)
+				}
 			}
 		})
 	}
 }
 
-func TestStartUpdateCheck_ServeNeverCallsOut(t *testing.T) {
+func TestStartUpdateCheck_ServerNeverCallsOut(t *testing.T) {
 	t.Setenv("AGENTGUARD_NO_UPDATE_CHECK", "")
 	hits := pointUpdateCheckAt(t, releaseJSON("v9.9.9"))
 
-	done := startUpdateCheck("1.0.0", "abc1234", "serve")
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("serve must return an already-closed channel (no goroutine, no request)")
+	for _, sub := range []string{"server", "serve"} {
+		done := startUpdateCheck("1.0.0", "abc1234", sub)
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("%s must return an already-closed channel (no goroutine, no request)", sub)
+		}
 	}
 	time.Sleep(150 * time.Millisecond) // give a stray goroutine time to show up
 	if got := hits.Load(); got != 0 {
-		t.Fatalf("serve made %d outbound request(s); want 0", got)
+		t.Fatalf("server made %d outbound request(s); want 0", got)
 	}
 }
 

@@ -159,7 +159,7 @@ if enabled "$uninstall"; then
   elif [ -d "$confdir" ]; then
     say "Kept your policy folder $confdir (delete it yourself, or uninstall again with --purge)"
   fi
-  say "Audit logs and the state database live where you ran \`agentguard serve\`; they were not touched."
+  say "Audit logs and the state database live where you ran \`agentguard server\`; they were not touched."
 
   # The installer never edits startup files, but it asked the user to.
   if [ "$dir" != /usr/local/bin ]; then
@@ -250,7 +250,7 @@ else
   say "Updated AgentGuard $previous -> $version in $dir"
 fi
 
-# Starter policy, so `serve` has something to load on a fresh machine. An
+# Starter policy, so `server` has something to load on a fresh machine. An
 # existing file is the operator's policy and is never overwritten.
 confdir="$(config_dir)"
 policy="$confdir/default.yaml"
@@ -274,9 +274,9 @@ esac
 
 say ""
 if [ -e "$policy" ]; then
-  say "Next: agentguard serve --policy $policy --dashboard"
+  say "Next: agentguard server --policy $policy --dashboard"
 else
-  say "Next: agentguard serve --policy <policy.yaml> --dashboard"
+  say "Next: agentguard server --policy <policy.yaml> --dashboard"
 fi
 say "Docs: https://github.com/$REPO#quickstart"
 say "To update later, run the same install command again."

@@ -508,8 +508,9 @@ func TestRunCheck_HelpExitsZero(t *testing.T) {
 	if code != exitAllow {
 		t.Fatalf("exit = %d, want %d (stderr=%q)", code, exitAllow, serr.String())
 	}
-	if !strings.Contains(serr.String(), "Usage:") {
-		t.Errorf("stderr should contain Usage block: %q", serr.String())
+	// Asked-for help goes to stdout, so it can be piped to a pager.
+	if !strings.Contains(sout.String(), "Usage:") {
+		t.Errorf("stdout should contain Usage block: %q", sout.String())
 	}
 }
 

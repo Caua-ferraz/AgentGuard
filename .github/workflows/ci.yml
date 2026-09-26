@@ -438,7 +438,7 @@ jobs:
           # from the host via port publish). Then poll /health until it
           # responds, and tear down.
           docker run -d --name agentguard-ci -p 18080:8080 agentguard:ci \
-            serve \
+            server \
               --policy /etc/agentguard/default.yaml \
               --port 8080 \
               --api-key ci-smoke-key \

@@ -150,7 +150,7 @@ The `/metrics` endpoint exposes Prometheus-compatible counters and histograms. W
 
 ```bash
 # 1. Start the server
-agentguard serve --policy configs/default.yaml --port 8080
+agentguard server --policy configs/default.yaml --port 8080
 
 # 2. Send a few test checks
 curl -s -X POST http://localhost:8080/v1/check \

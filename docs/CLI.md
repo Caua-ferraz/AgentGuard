@@ -1,47 +1,71 @@
 # CLI Reference
 
-Every `agentguard` (central server) subcommand, every flag, every env-var fallback. Source of truth: `cmd/agentguard/main.go`.
+Every `agentguard` (central server) subcommand, every flag, every env-var fallback. Source of truth: `cmd/agentguard/main.go` and `cmd/agentguard/cli.go`.
 
 > **Scope:** this page documents the `agentguard` binary — the central server that owns the policy engine, audit log, approval queue, and dashboard. For the v0.5 wire-level proxy binaries see [`MCP_GATEWAY.md`](MCP_GATEWAY.md) (`agentguard-mcp-gateway`) and [`LLM_API_PROXY.md`](LLM_API_PROXY.md) (`agentguard-llm-proxy`).
 
 ```
 agentguard <command> [flags]
 
-Commands:
-  serve       Start the AgentGuard central server
-  validate    Validate a policy file
-  check       Run a one-shot policy check against a local policy file
+Run the server:
+  server      Start AgentGuard: policy engine, approvals, audit log, dashboard
+
+Policies:
+  validate    Check that a policy file loads
+  check       Evaluate one action against a policy file (no server needed)
+  tenant      Manage per-tenant policies in the store (put|list|rm)
+
+Work with a running server:
+  status      Show server health and pending approvals
   approve     Approve a pending action by ID
   deny        Deny a pending action by ID
-  status      Show server health + pending approvals
   audit       Query the audit log
-  tenant      Manage per-tenant policies in the store (put|list|rm)   (v0.6)
-  migrate     Run on-disk schema migrations
-  version     Print version information
 
-Run 'agentguard <command> -h' for per-command flag help.
+Other:
+  migrate     Upgrade the audit log's format (the server does this at startup)
+  version     Print version information (also: --version)
+  help        Show help for a command
+
+Get started:
+  agentguard server --dashboard
+      Start the server, then open http://localhost:8080/dashboard
+  agentguard check --scope shell --command "rm -rf /"
+      Try the policy on one action, no server needed
+
+Also installed:
+  agentguard-mcp-gateway   Guards the tools of an MCP client (Claude Desktop,
+                           Cursor, …)
+  agentguard-llm-proxy     Guards tool calls in OpenAI / Anthropic SDK code
+
+Run 'agentguard help <command>' (or 'agentguard <command> -h') for its flags.
 ```
 
+Every command's help (`agentguard help <command>`) has examples and says what its exit codes mean; the full list also shows the environment variables and a link to this page for the installed version.
+
 Global conventions:
-- All subcommands use Go's stdlib `flag` package. Flags must precede positional args (`agentguard approve --api-key $K <id>`, **not** `agentguard approve <id> --api-key $K`).
-- `--api-key` on `serve` and on the client subcommands (`approve`, `deny`, `status`, `audit`) falls back to the `AGENTGUARD_API_KEY` env var.
-- Exit code `0` = success, `1` = failure, `2` = invalid flags (Go's `flag` package; `-h` exits `0`). `check` has its own codes — see below.
+- `agentguard serve` is the same command as `agentguard server` and keeps working for the whole 1.x line ([`COMPATIBILITY.md`](COMPATIBILITY.md#frozen-surface-4--cli-flags--subcommands)).
+- Flags can go before or after positional arguments: `agentguard approve <id> --url <url>` and `agentguard approve --url <url> <id>` are the same. A `--` ends the flags; everything after it is an argument.
+- `agentguard help`, `-h` and `--help` print help on stdout and exit `0`; so do `agentguard help <command>` and `agentguard <command> -h`. A mistyped command or flag gets a suggestion: `agentguard: unknown command "--serve". Did you mean 'agentguard server'?`
+- `--api-key` on `server` and on the client subcommands (`approve`, `deny`, `status`, `audit`) falls back to the `AGENTGUARD_API_KEY` env var; `--url` on the client subcommands falls back to `AGENTGUARD_URL`; `--policy` on `server`, `validate` and `check` is found automatically when not given (see [Policy file](#policy-file)).
+- Exit code `0` = success, `1` = failure, `2` = the command line was wrong (unknown command or flag, missing or extra argument). `check` has its own codes — see below.
 
 ---
 
-## `agentguard serve`
+## `agentguard server`
 
-Start the AgentGuard server. This is the only subcommand that runs a long-lived process.
+Start the AgentGuard server. This is the only subcommand that runs a long-lived process. `agentguard serve` is the same command.
+
+`agentguard server -h` prints the flags below grouped by topic (network, security, policy, audit log, storage, multi-node, notifications, debugging).
 
 | Flag | Default | Description |
 |---|---|---|
-| `--policy <path>` | `configs/default.yaml` | Path to policy YAML. Rejected at startup if missing or invalid. |
+| `--policy <path>` | found automatically | Path to policy YAML. When not given, see [Policy file](#policy-file). Rejected at startup if missing or invalid; the startup log names the file it loaded. |
 | `--port <int>` | `8080` | TCP port. See bind behavior below. |
 | `--bind <host>` | *(empty)* | **(v1.2)** Host or IP to listen on, e.g. `127.0.0.1` behind a same-host reverse proxy. Empty keeps the default bind behavior below. A non-loopback `--bind` without `--api-key` is refused at startup (exit 2). |
 | `--dashboard` | off | Serve `/dashboard` HTML + `/api/stream` SSE. Required for human approval UI. |
-| `--watch` | off | Log policy hot-reload activity. Hot-reload itself is always on (fsnotify events, with a 2 s mtime poll as fallback); no restart needed after policy edits. |
+| `--watch` | off | Log a line each time the policy file is reloaded. The reload itself always happens, with or without this flag (fsnotify events, with a 2 s mtime poll as fallback); no restart needed after policy edits. |
 | `--audit-log <path>` | `audit.jsonl` | Append-only JSON Lines file. Mode `0600`. Rotation is on by default; configurable via `--audit-max-size-mb`, `--audit-max-backups`, `--audit-max-age-days`, `--audit-compress`. Operators following older guidance should NOT also configure logrotate against `audit.jsonl` — the dual-rotator chain corrupts the rotation index. See [`OPERATIONS.md`](OPERATIONS.md#audit-log-rotation). |
-| `--api-key <key>` | *(empty)* | Bearer token for gated endpoints. **If empty, the server binds to `127.0.0.1` only** (localhost-only). |
+| `--api-key <key>` | `$AGENTGUARD_API_KEY` | Bearer token for gated endpoints. **If empty, the server binds to `127.0.0.1` only** (localhost-only). |
 | `--base-url <url>` | `http://localhost:<port>` | External URL used when constructing `approval_url` in check responses. Set this behind a reverse proxy. |
 | `--allowed-origin <url>` | *(empty)* | Exact CORS origin. Empty = permissive-localhost (accepts any `http://localhost:*` or `http://127.0.0.1:*`). Set to `https://app.example` for strict single-origin. |
 | `--tls-terminated-upstream` | off | Issue session cookies with `Secure` even when `r.TLS == nil`. Set when behind a TLS-terminating proxy that does not forward `X-Forwarded-Proto`. See [`DEPLOYMENT.md`](DEPLOYMENT.md). |
@@ -67,6 +91,16 @@ Start the AgentGuard server. This is the only subcommand that runs a long-lived 
 | `--reconcile-interval <dur>` | `2s` | **(v1.0)** Cadence of the background reconcile that merges other nodes' rate/cost consumption and approval state into this node's in-memory view (and publishes this node's). Postgres-only: forced off on the SQLite backend. Smaller ⇒ tighter rate-limit overshoot bound and fresher cross-node approvals, more store traffic. Never touches the `/v1/check` hot path. |
 | `--audit-backend <file\|store>` | `file` | **(v0.6)** Where the audit trail lives. `file` = JSONL (rotation + migration, the default). `store` = the durable store's indexed `audit_entries` table (one-file deployment, indexed `/v1/audit` queries). `store` requires `--persist` and always runs buffered (async) — a synchronous DB write per request would break the <3 ms budget, so buffering is forced. |
 
+### Policy file
+
+When `--policy` is not given, `server`, `validate` and `check` use the first of:
+
+1. `$AGENTGUARD_POLICY`.
+2. `configs/default.yaml` in the current folder (the flag's default, so running from a checkout works as before).
+3. The starter policy the [installer](SETUP.md#1-install) writes: `$XDG_CONFIG_HOME/agentguard/default.yaml` (else `~/.config/agentguard/default.yaml`, on macOS too), then `/etc/agentguard/default.yaml` (a root install, and the container image). On Windows, `%APPDATA%\agentguard\default.yaml`.
+
+If none exists, the command stops and lists where it looked. `validate` and `check` print `Using policy file <path> (…)` on stderr when the file wasn't named with `--policy`; the server's startup log always names it (`Loaded policy: <name> from <path> …`).
+
 ### Bind behavior
 
 - `--api-key` **set**: binds on `0.0.0.0:<port>` (all interfaces).
@@ -75,7 +109,7 @@ Start the AgentGuard server. This is the only subcommand that runs a long-lived 
 
 ### Persistence & multi-tenancy (v0.6)
 
-By default `serve` is now **stateful**: runtime state survives a restart. On a clean run `agentguard serve` creates `agentguard.db` in the working directory (override with `--data-dir`) and:
+By default `server` is **stateful**: runtime state survives a restart. On a clean run `agentguard server` creates `agentguard.db` in the working directory (override with `--data-dir`) and:
 
 - **hydrates** the in-memory approval queue, rate-limit buckets, and cost accumulators from the store on boot, then
 - **write-behind syncs** them back on a background ticker (≥ 1 s) and on graceful shutdown.
@@ -89,11 +123,14 @@ The store is a *cold-path* component — it is never read or written on the `/v1
 ### Examples
 
 ```bash
-# Local dev — localhost-only, dashboard on, hot-reload.
-agentguard serve --policy configs/default.yaml --dashboard --watch
+# Local dev — localhost-only, dashboard on, a log line per policy reload.
+agentguard server --policy configs/default.yaml --dashboard --watch
+
+# After the one-line installer: the starter policy is found automatically.
+agentguard server --dashboard
 
 # Production behind a reverse proxy.
-agentguard serve \
+agentguard server \
   --policy /etc/agentguard/policy.yaml \
   --audit-log /var/lib/agentguard/audit.jsonl \
   --api-key "$AGENTGUARD_API_KEY" \
@@ -105,7 +142,7 @@ agentguard serve \
 
 # Multi-node (v1.0) — every replica points at the same PostgreSQL and
 # carries its own --node-id (here: the pod name).
-agentguard serve \
+agentguard server \
   --policy /etc/agentguard/policy.yaml \
   --store-dsn "postgres://agentguard:$PGPASS@pg.internal:5432/agentguard" \
   --node-id "$POD_NAME" \
@@ -121,23 +158,23 @@ agentguard serve \
 
 ## `agentguard validate`
 
-Load a policy file and report rule count / scope count. Exits `1` on parse error, load-time validation failure (e.g., `..` in a filesystem path), or missing required fields (`version`, `name`).
+Load a policy file and report rule count / scope count. Give the file as an argument (`agentguard validate policy.yaml`) or with `--policy`; with neither, it validates the file the server would load (see [Policy file](#policy-file)). Exits `1` on parse error, load-time validation failure (e.g., `..` in a filesystem path), or missing required fields (`version`, `name`).
 
 Non-fatal warnings go to stderr as `WARN: …` lines and don't change the exit code unless you pass `--strict`: a scope that appears in more than one block (the blocks are merged), a scope name one or two edits away from a built-in one (`shel` → "did you mean `shell`?"), and a path pattern whose single `*` crosses `/`. See [POLICY_REFERENCE § Load-time validation](POLICY_REFERENCE.md#load-time-validation).
 
 | Flag | Default | Description |
 |---|---|---|
-| `--policy <path>` | `configs/default.yaml` | Policy file to validate. |
+| `--policy <path>` | found automatically | Policy file to validate. Same as giving it as an argument; passing both is an error. |
 | `--strict` | `false` | **(v1.2)** Exit `1` if the policy loads with any warning. |
 
 ```bash
-agentguard validate --policy configs/examples/trading-bot.yaml
+agentguard validate configs/examples/trading-bot.yaml
 # VALID: trading-bot-policy — 14 rules across 4 scopes
 
-agentguard validate --policy /tmp/broken.yaml
+agentguard validate /tmp/broken.yaml
 # INVALID: yaml: unmarshal errors: line 4: cannot unmarshal !!int into string
 
-agentguard validate --strict --policy /tmp/typo.yaml
+agentguard validate /tmp/typo.yaml --strict
 # WARN: policy: rules[1] scope "shel" is not a built-in scope — did you mean "shell"? …
 # INVALID (--strict): my-policy loads, but with 1 warning(s)
 ```
@@ -146,7 +183,7 @@ Use in CI:
 
 ```bash
 for f in configs/*.yaml configs/examples/*.yaml; do
-  agentguard validate --strict --policy "$f" || exit 1
+  agentguard validate --strict "$f" || exit 1
 done
 ```
 
@@ -178,7 +215,7 @@ Exactly one of these selects how requests enter the subcommand. Specifying more 
 
 | Flag | Default | Description |
 |---|---|---|
-| `--policy <path>` | *(required)* | Policy YAML to evaluate against. Validated at startup; missing or malformed → exit 3. |
+| `--policy <path>` | found automatically | Policy YAML to evaluate against. When not given, see [Policy file](#policy-file); nothing found → exit 3. Validated at startup; missing or malformed → exit 3. |
 | `--tenant-id <id>` | `local` | Tenant identifier. The offline `check` command evaluates against the supplied policy file only — an unknown tenant resolves to a synthetic `DENY` with `matched_rule="deny:tenant:not_found"`. |
 | `--request <json>` | *(empty)* | Single check from a JSON string. Mutually exclusive with `--stdin`/`--batch`. |
 | `--stdin` | off | Read a single JSON request object from stdin. |
@@ -205,7 +242,7 @@ The subcommand returns a structured exit code so shell pipelines can branch on t
 | `0` | ALLOW — single mode; or every entry ALLOW in batch mode. |
 | `1` | DENY — single mode; or any entry DENY in batch mode. |
 | `2` | REQUIRE_APPROVAL — single mode; or any approval and no deny in batch mode. |
-| `3` | Error — missing/invalid policy, malformed JSON, flag misuse, mutually exclusive modes. |
+| `3` | Error — missing/invalid policy, malformed JSON, flag misuse (including an unexpected argument), mutually exclusive modes. |
 
 Severity precedence in batch mode is **error > deny > approval > allow**, regardless of numeric exit-code ordering. (`exitDeny=1` numerically precedes `exitApproval=2`, but a deny still dominates because a deny is operationally more severe than an approval request.)
 
@@ -269,18 +306,19 @@ POST to `/v1/approve/{id}` or `/v1/deny/{id}`. Used by humans or scripts to reso
 
 | Flag | Default | Description |
 |---|---|---|
-| `--url <url>` | `http://localhost:8080` | Server URL. |
+| `--url <url>` | `$AGENTGUARD_URL`, else `http://localhost:8080` | Server URL. Must include the scheme (`http://` or `https://`). |
+| `--guard-url <url>` | | Same as `--url` (the name the MCP gateway and LLM proxy use). |
 | `--api-key <key>` | `$AGENTGUARD_API_KEY` | Bearer token. Required if the server was started with `--api-key`. |
 
 ```bash
 agentguard approve ap_1a2b3c4d5e6f7890abcdef1234567890
-# Action approve: approved
+# Approved ap_1a2b3c4d5e6f7890abcdef1234567890
 
 AGENTGUARD_API_KEY=$KEY agentguard deny ap_deadbeef… --url https://guardrails.example
-# Action deny: denied
+# Denied ap_deadbeef…
 ```
 
-Exit `1` on network error, non-2xx response, or invalid approval ID. Approval IDs are `ap_<32hex>` as returned by `/v1/check`.
+Exit `1` when the server can't be reached or answers with an error, each with a message that says what to do: `Cannot connect to AgentGuard at … (connection refused). Is 'agentguard server' running there?`, `the server requires an API key (HTTP 401)`, `no pending approval ap_… (…)`, `ap_… was already approved`. Exit `2` for a missing or extra argument. Approval IDs are `ap_<32hex>` as returned by `/v1/check`.
 
 ---
 
@@ -290,7 +328,8 @@ Quick human-readable health + pending list. Hits `/health` (unauthenticated) the
 
 | Flag | Default | Description |
 |---|---|---|
-| `--url <url>` | `http://localhost:8080` | Server URL. |
+| `--url <url>` | `$AGENTGUARD_URL`, else `http://localhost:8080` | Server URL. |
+| `--guard-url <url>` | | Same as `--url`. |
 | `--api-key <key>` | `$AGENTGUARD_API_KEY` | Bearer token. |
 
 ```bash
@@ -311,7 +350,8 @@ Query `/v1/audit` for recent decisions. All filters are optional and AND-combine
 
 | Flag | Default | Description |
 |---|---|---|
-| `--url <url>` | `http://localhost:8080` | Server URL. |
+| `--url <url>` | `$AGENTGUARD_URL`, else `http://localhost:8080` | Server URL. |
+| `--guard-url <url>` | | Same as `--url`. |
 | `--agent <id>` | *(none)* | Filter by exact `agent_id`. |
 | `--decision <D>` | *(none)* | `ALLOW`, `DENY`, or `REQUIRE_APPROVAL`. |
 | `--scope <name>` | *(none)* | `shell`, `filesystem`, `network`, `browser`, `cost`, `data`, `mcp_tool`. |
@@ -345,11 +385,11 @@ agentguard tenant rm  <tenant-id>                      [--store-dsn <dsn>] [--da
 
 | Subcommand | Description |
 |---|---|
-| `put <id> --policy <f>` | Validate `<f>` (same checks as `validate`) and register it as tenant `<id>`'s policy. Re-running replaces it. A malformed policy is rejected and never stored. |
+| `put <id> --policy <f>` | Validate `<f>` (same checks as `validate`) and register it as tenant `<id>`'s policy. Re-running replaces it. A malformed policy is rejected and never stored. The tenant ID can come before or after the flags. |
 | `list` | List every registered tenant id (the `local` tenant is served from `--policy`, not the store, so it is not listed). |
 | `rm <id>` | Remove a tenant's policy. Reports whether a row existed. |
 
-`--store-dsn` / `--data-dir` resolve the database exactly like [`serve`](#agentguard-serve) (empty DSN ⇒ `<data-dir>/agentguard.db`).
+`--store-dsn` / `--data-dir` resolve the database exactly like [`server`](#agentguard-server) (empty DSN ⇒ `<data-dir>/agentguard.db`).
 
 ```bash
 # Register a tenant, then check it via its tenant-aware route.
@@ -374,7 +414,7 @@ Run registered on-disk audit-schema migrations. Each migration has a `Detect()` 
 | Flag | Default | Description |
 |---|---|---|
 | `--audit-log <path>` | `audit.jsonl` | Audit log to migrate in place. |
-| `--checkpoint <path>` | `<audit-log>.replay-checkpoint` | The replay checkpoint `agentguard serve` reads at boot — `audit.CheckpointSuffix` appended to the audit log path, i.e. the very file the startup seeder writes. |
+| `--checkpoint <path>` | `<audit-log>.replay-checkpoint` | The replay checkpoint `agentguard server` reads at boot — `audit.CheckpointSuffix` appended to the audit log path, i.e. the very file the startup seeder writes. |
 | `--backup-dir <path>` | `<audit-dir>` | Where rollback copies are written. |
 | `--dry-run` | off | Log intended actions without writing. |
 | `--list` | off | Print registered migrations and exit. |
@@ -387,7 +427,7 @@ agentguard migrate --dry-run
 agentguard migrate --audit-log /var/lib/agentguard/audit.jsonl
 ```
 
-Startup migrations run automatically inside `agentguard serve` before the audit logger opens — the `migrate` subcommand is for operator-driven out-of-band runs.
+Startup migrations run automatically inside `agentguard server` before the audit logger opens — the `migrate` subcommand is for operator-driven out-of-band runs.
 
 ---
 
@@ -429,7 +469,7 @@ The command it names depends on how this copy was installed:
 
 Re-running the installer replaces the binaries and keeps your policy; it says whether it updated, downgraded (with a warning) or reinstalled the same version. See [`SETUP.md`](SETUP.md#update).
 
-`serve` never performs the check: the enforcement server opens no outbound connection the operator did not configure (see [`THREAT_MODEL.md`](THREAT_MODEL.md#outbound-connections)). The check is also skipped for development builds — a version string containing `dev`, or no `-ldflags` commit (`commit=dev`) *and* no tagged release version in the Go build info, as with `go build` on an untagged or modified checkout. `go install …@vX.Y.Z` and `@latest` builds record the release tag, so they do check. It is also skipped when `AGENTGUARD_NO_UPDATE_CHECK` is set to any value other than `0`, or when the HTTP request fails. Never touches stdout, never affects exit codes. Only the `agentguard` binary has the check; the MCP gateway and LLM proxy never had one.
+`server` never performs the check (nor does `serve`, the same command): the enforcement server opens no outbound connection the operator did not configure (see [`THREAT_MODEL.md`](THREAT_MODEL.md#outbound-connections)). The check is also skipped for development builds — a version string containing `dev`, or no `-ldflags` commit (`commit=dev`) *and* no tagged release version in the Go build info, as with `go build` on an untagged or modified checkout. `go install …@vX.Y.Z` and `@latest` builds record the release tag, so they do check. It is also skipped when `AGENTGUARD_NO_UPDATE_CHECK` is set to any value other than `0`, or when the HTTP request fails. It is not run for `agentguard help` or a mistyped command either. Never touches stdout, never affects exit codes. Only the `agentguard` binary has the check; the MCP gateway and LLM proxy never had one.
 
 ---
 
@@ -437,11 +477,12 @@ Re-running the installer replaces the binaries and keeps your policy; it says wh
 
 | Var | Consumed by | Default |
 |---|---|---|
-| `AGENTGUARD_API_KEY` | `serve`, `approve`, `deny`, `status`, `audit` (when `--api-key` unset) | empty |
-| `AGENTGUARD_URL` | SDKs (not the CLI) | `http://localhost:8080` |
-| `AGENTGUARD_NO_UPDATE_CHECK` | Every subcommand except `serve` (which never checks) — disables the GitHub Releases startup check when set to any value other than `0` | unset |
+| `AGENTGUARD_API_KEY` | `server`, `approve`, `deny`, `status`, `audit` (when `--api-key` unset); the MCP gateway and LLM proxy; the SDKs | empty |
+| `AGENTGUARD_URL` | `approve`, `deny`, `status`, `audit` (when `--url` unset); the MCP gateway and LLM proxy (when `--guard-url` unset); the SDKs | `http://localhost:8080` (CLI, SDKs), `http://127.0.0.1:8080` (gateway, proxy) |
+| `AGENTGUARD_POLICY` | `server`, `validate`, `check` (when `--policy` unset) — see [Policy file](#policy-file) | unset |
+| `AGENTGUARD_NO_UPDATE_CHECK` | Every subcommand except `server` (which never checks) — disables the GitHub Releases startup check when set to any value other than `0` | unset |
 
-The CLI does **not** read `AGENTGUARD_URL` — pass `--url` explicitly. Only the Python/TypeScript SDKs honor that env var.
+A flag always wins over its environment variable.
 
 ---
 

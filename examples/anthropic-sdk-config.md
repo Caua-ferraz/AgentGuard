@@ -60,7 +60,7 @@ with a synthetic `text` block (DENY / REQUIRE_APPROVAL). The
 2. **Start the central AgentGuard server** in one terminal:
 
    ```bash
-   agentguard serve \
+   agentguard server \
        --policy configs/default.yaml \
        --dashboard \
        --watch \

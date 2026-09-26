@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Caua-ferraz/AgentGuard/internal/clihelp"
 	"github.com/Caua-ferraz/AgentGuard/pkg/internal/gateclient"
 )
 
@@ -112,6 +113,16 @@ func ParseConfig(args []string) (*Config, error) {
 	return ParseConfigWithOutput(args, os.Stderr)
 }
 
+// gatewayFlagGroups is the layout of `agentguard-mcp-gateway -h`. Every
+// flag must be in one group (TestParseConfig_HelpGroupsEveryFlag).
+var gatewayFlagGroups = []clihelp.Group{
+	{Title: "MCP servers to guard", Names: []string{"upstream", "upstream-timeout", "reconnect-cap"}},
+	{Title: "AgentGuard server", Names: []string{"guard-url", "api-key", "tenant-id"}},
+	{Title: "Policy", Names: []string{"policy", "policy-mode"}},
+	{Title: "When the AgentGuard server is unreachable", Names: []string{"fail-mode", "fail-audit-log"}},
+	{Title: "Logging", Names: []string{"log-level"}},
+}
+
 // ParseConfigWithOutput is ParseConfig with the usage-output stream
 // pluggable for tests.
 func ParseConfigWithOutput(args []string, errOut io.Writer) (*Config, error) {
@@ -132,26 +143,33 @@ Example (as the "command" in an MCP client configuration):
       --guard-url http://127.0.0.1:8080 \
       --policy /etc/agentguard/policy.yaml
 
-Flags:
+Quote each --upstream command: an unquoted one is split into separate
+arguments, and the gateway refuses to start.
+
 `)
-		fs.PrintDefaults()
-		fmt.Fprintf(errOut, `  -version
-    	Print version and exit (checked before any other flag is parsed)
+		clihelp.WriteGroups(errOut, fs, gatewayFlagGroups, clihelp.Options{})
+		fmt.Fprint(errOut, `
+Other:
+  --version  Print the version and exit (checked before any other flag)
 
 Environment:
+  AGENTGUARD_URL       Used when --guard-url is not set.
   AGENTGUARD_API_KEY   Used when --api-key is not set.
 `)
 	}
 
 	var upstreams stringSliceFlag
-	fs.Var(&upstreams, "upstream", `Downstream MCP server. Format: "<ns>:<cmd>" or "<cmd>" (ns defaults to first command word). Repeatable.`)
+	fs.Var(&upstreams, "upstream", "MCP server to start and guard, as `\"<ns>:<cmd>\"` (or just the command; ns then defaults to its first word). Repeat for more servers.")
 	gate := gateclient.RegisterGateFlags(fs,
 		"Path to the same policy YAML the central AgentGuard server loads (required for --policy-mode strict; used to resolve tool_scope_map locally)")
-	policyMode := fs.String("policy-mode", "strict", `Policy mode: "strict" (dual-check) or "fast" (single-check)`)
-	upstreamTimeout := fs.Duration("upstream-timeout", 30*time.Second, "Per-frame upstream-response timeout")
-	reconnectCap := fs.Duration("reconnect-cap", 60*time.Second, "Upper bound on reconnect backoff")
+	policyMode := fs.String("policy-mode", "strict", "strict: check the tool, then the scope --policy maps it to (dual check). fast: check the tool only; --policy is then optional.")
+	upstreamTimeout := fs.Duration("upstream-timeout", 30*time.Second, "How long to wait for an MCP server's reply to one message")
+	reconnectCap := fs.Duration("reconnect-cap", 60*time.Second, "Longest wait between attempts to restart an MCP server that exited. The waits grow 1s, 2s, 5s, 30s, 60s, stopping at this.")
 
 	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
+	if err := gateclient.RejectArgs(fs.Args(), `put each --upstream command in quotes, e.g. --upstream "fs:npx -y @modelcontextprotocol/server-filesystem /tmp"`); err != nil {
 		return nil, err
 	}
 

@@ -115,7 +115,7 @@ into the container.
 4. **Start the central AgentGuard server:**
 
    ```bash
-   agentguard serve --policy /etc/agentguard/policy.yaml --dashboard --watch --api-key "$AGENTGUARD_API_KEY"
+   agentguard server --policy /etc/agentguard/policy.yaml --dashboard --watch --api-key "$AGENTGUARD_API_KEY"
    ```
 
 5. **Save the YAML / JSON.** Switch Continue into agent mode and try a

@@ -98,7 +98,7 @@ into the container.
 4. **Start the central AgentGuard server:**
 
    ```bash
-   agentguard serve \
+   agentguard server \
      --policy /etc/agentguard/policy.yaml \
      --dashboard \
      --watch \

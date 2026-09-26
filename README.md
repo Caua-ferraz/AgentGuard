@@ -180,7 +180,8 @@ Full schema (filesystem, cost, per-agent overrides, rate limits, conditional rul
 ### Start the server
 
 ```bash
-agentguard serve --policy configs/default.yaml --dashboard --watch
+# Uses the starter policy the installer wrote (or pass --policy <file>)
+agentguard server --dashboard
 ```
 
 CLI flags and subcommands: [`docs/CLI.md`](docs/CLI.md).

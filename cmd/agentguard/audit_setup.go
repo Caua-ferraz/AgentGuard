@@ -1,6 +1,6 @@
 package main
 
-// audit_setup.go assembles the audit trail for `agentguard serve`:
+// audit_setup.go assembles the audit trail for `agentguard server`:
 // backend selection (JSONL file vs durable store), startup migrations,
 // rotation, and the async buffering that keeps audit I/O off the
 // /v1/check hot path. Extracted from runServe so the construction rules
