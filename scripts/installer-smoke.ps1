@@ -43,7 +43,15 @@ function Install-AgentGuard {
 # Uninstall and the updated/downgraded/reinstalled messages arrived after the
 # v1.2.0 installer; they are checked only when the installer under test has
 # them (this checkout's always does; a published one from v1.2.0 does not).
-$source = if ($Mode -eq 'published') { (Invoke-WebRequest -UseBasicParsing $Url).Content } else { Get-Content -Raw "$PSScriptRoot\install.ps1" }
+# GitHub serves release assets as application/octet-stream, for which
+# Invoke-WebRequest's .Content is a byte[]: -match on it never matched, so the
+# published-mode run skipped every check gated on $newer (found on v1.3.0).
+$source = if ($Mode -eq 'published') {
+    $content = (Invoke-WebRequest -UseBasicParsing $Url).Content
+    if ($content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($content) } else { $content }
+} else {
+    Get-Content -Raw "$PSScriptRoot\install.ps1"
+}
 $newer = $source -match 'AGENTGUARD_UNINSTALL'
 
 # Runs the installer under test in uninstall mode, the way the docs say to.
@@ -73,7 +81,7 @@ $r = Install-AgentGuard
 $r.Out.Trim() -split "`n" | ForEach-Object { Write-Host "    | $($_.TrimEnd())" }
 if ($r.Code -ne 0) { Fail "installer exited $($r.Code)" }
 if ($r.Out -match 'Checksum verified') { Pass 'checksum verified' } else { Fail "no 'Checksum verified' line" }
-if ($r.Out -match "Installed AgentGuard $WantRe") { Pass "installed $Want" } else { Fail "no 'Installed AgentGuard $Want'" }
+if ($r.Out -cmatch "(?m)^\s*Installed AgentGuard $WantRe") { Pass "installed $Want" } else { Fail "no 'Installed AgentGuard $Want'" }
 
 # 2. All three binaries, runnable, at the expected version.
 $dir = if ($env:AGENTGUARD_INSTALL_DIR) { $env:AGENTGUARD_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\AgentGuard\bin' }
@@ -101,7 +109,7 @@ if ($LASTEXITCODE -eq 0) { Pass 'starter policy validates' } else { Fail 'starte
 Add-Content -Path $policy -Value '# operator edit'
 $r2 = Install-AgentGuard
 $againLine = if ($newer) { "Reinstalled AgentGuard $Want" } else { "Installed AgentGuard $Want" }
-if ($r2.Code -eq 0 -and $r2.Out -match [regex]::Escape($againLine)) { Pass "rerun: $againLine" } else { Write-Host $r2.Out; Fail "expected '$againLine' on rerun" }
+if ($r2.Code -eq 0 -and $r2.Out -cmatch "(?m)^\s*$([regex]::Escape($againLine))") { Pass "rerun: $againLine" } else { Write-Host $r2.Out; Fail "expected '$againLine' on rerun" }
 if ((Get-Content $policy -Tail 1) -eq '# operator edit') { Pass 'rerun kept the existing policy' } else { Fail 'rerun overwrote the policy' }
 
 # 6. A tampered archive is refused and nothing is installed. The mirror is
