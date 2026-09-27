@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-09-26
+
+> **Install AgentGuard with one command, set it up from a menu, and guard Claude Code.** Every release now ships prebuilt binaries for Linux, macOS and Windows, one-line installers that also update and uninstall, and a container image, so no Go toolchain is needed. `agentguard setup` sets AgentGuard up on a computer from a menu — a policy, an API key, a login service that starts the server — and later updates or removes it. Claude Code's shell commands, file edits, web fetches and MCP tool calls can be checked against your policy through a hook. And the command line got a pass for the mistakes people make: `server` is the command's name (`serve` still works), flags work after arguments, typos get suggestions, and help exits 0.
+>
+> **No field, route, flag, subcommand or schema version was removed or changed**, and policies decide as they did in 1.2.0. Some command lines behave differently: a flag after an argument now applies, and a stray argument is an error, also for the MCP gateway and LLM proxy. See *Compatibility* and [`docs/MIGRATION.md`](docs/MIGRATION.md#v12x--v130).
+
 ### Added
 
 - **Prebuilt binaries on every release.** Each GitHub release carries archives with `agentguard`, `agentguard-mcp-gateway` and `agentguard-llm-proxy` for Linux, macOS and Windows on amd64 and arm64, a `checksums.txt`, and signed build provenance (`gh attestation verify <file> --repo Caua-ferraz/AgentGuard`). Installing no longer needs a Go toolchain. `scripts/build-release.sh` (`make release-artifacts`) builds the same archives locally, and refuses a version that differs from the one in the sources.
@@ -45,6 +51,30 @@ All notable changes to this project will be documented in this file.
 - **The MCP gateway ignored `--reconnect-cap`.** It was parsed but never applied, so an upstream that kept exiting was always retried on the fixed 1s, 2s, 5s, 30s, 60s schedule. The schedule now stops at the flag's value.
 - **`agentguard tenant <typo>` created an empty `agentguard.db`** in the current folder before reporting the unknown subcommand.
 - **The PATH hint names the file your shell reads.** When the install folder is not on `PATH`, `install.sh` suggested adding it to `~/.profile`, which zsh — macOS's default shell — never reads, so `agentguard` vanished in the next terminal. It now names `~/.zshrc` for zsh, `~/.bash_profile` for bash on macOS, `~/.bashrc` for bash on Linux, `fish_add_path` for fish, and `~/.profile` otherwise. The installers attached to v1.2.0 still print `~/.profile`.
+
+### Compatibility
+
+- **Flags after an argument now apply.** `agentguard approve ap_1 --url https://guard.example` approved on `http://localhost:8080` in 1.2.0, because flag parsing stopped at `ap_1`; it now uses the URL given. The same holds for every command.
+- **A stray argument is an error** (exit 2), for every `agentguard` command and for `agentguard-mcp-gateway` and `agentguard-llm-proxy`. Check MCP client configs: an `--upstream` command split across several `args` entries started the MCP server without its arguments in 1.2.0; the gateway now refuses to start and says to quote it.
+- **`agentguard validate <file>` validates that file**; 1.2.0 validated `configs/default.yaml` instead.
+- **Exit status 2 for any command-line mistake**, including no command and `approve`/`deny` without an ID (1 before). Help prints to stdout and exits 0 (stderr and 1 before).
+- **Output wording changed:** `approve`/`deny` print `Approved <id>`/`Denied <id>`, errors say what to do, and the update notice names the update command. Scripts should rely on exit codes, which are unchanged otherwise.
+- **Fallbacks when a flag isn't given:** `AGENTGUARD_URL` now also sets the server for `approve`, `deny`, `status`, `audit` and the MCP gateway's and LLM proxy's `--guard-url`; `AGENTGUARD_POLICY` and the installer's starter policy are used when `--policy` isn't given and `configs/default.yaml` is missing; the key `agentguard setup` saves is used by the clients, the gateway and the proxy when no key is given. A flag always wins.
+- **`--reconnect-cap` is applied** by the MCP gateway. Its default, 60 s, is the old fixed maximum, so nothing changes unless it is set.
+- **The shipped `configs/default.yaml` ends with an `agents: claude-code:` block.** It applies only to requests from agent `claude-code`. Copies made earlier are unaffected.
+- **Dependencies:** `golang.org/x/term` v0.45.0 is new (the setup menu); `golang.org/x/sys` moves from 0.45 to 0.47. Go 1.25 still builds AgentGuard.
+- **Downgrading to 1.2.0 is safe on disk**: no format changed. Before downgrading, turn off *start at login* and *Disconnect Claude Code* in `agentguard setup`: the login service runs `agentguard server` and the hook runs `agentguard hook claude-code`, and 1.2.0 has neither command.
+
+### Verification
+
+- **Go** (1.26.7): `go build ./...`, `go vet ./...` and `gofmt -l .` are clean, `golangci-lint run ./...` at CI's version (v2.12.2) reports 0 issues, and `go test -race ./...` passes in all 23 packages. CI is green on `master` for Linux, macOS and Windows.
+- **The login service, for real:** a new CI job installs the systemd user service (Ubuntu), the LaunchAgent (macOS) and the Task Scheduler task (Windows) that `agentguard setup` writes, runs the server through it, checks `/health`, restarts it and removes it. It passes on all three, after catching a quoting bug in the systemd unit that was fixed before release.
+- **The setup menu in a real terminal**, with key presses sent one at a time: on Linux through a pseudo-terminal and on Windows through a Windows pseudo-console. Setting up, the connection details, an update from 1.2.0 to a locally served test release (checksum-verified) while setup itself was running, and uninstalling everything, which on Windows includes deleting its own running `.exe`, all work. These runs found two bugs, fixed before release: a zip written by Windows PowerShell wasn't extracted, and a failed policy write was reported as success.
+- **The Claude Code hook** against the real server on Windows, fed Claude Code's documented `PreToolUse` input: allowed, denied and unchecked tools, an approval granted with `agentguard approve` and one refused with `agentguard deny`, the audit trail (`transport=claude_code`), and the warning when the server is down.
+- **The CLI** against a live server: `approve`/`deny`/`status`/`audit` with flags after arguments, `AGENTGUARD_URL`, and the 401, 404 and non-AgentGuard answers; policy discovery from the installer's folder; every help page within 80 columns. The container image runs `server` by default, accepts `serve`, and `validate` finds `/etc/agentguard/default.yaml`.
+- **The installers:** the smoke-test workflow ran the pull requests' own installers on Linux x64 and arm64, Alpine, macOS on Apple silicon and Intel, and Windows PowerShell 5.1 and 7: install, rerun, a tampered archive refused, uninstall, purge, and the Updated/Downgraded/Reinstalled messages. ShellCheck and actionlint are clean.
+- **Policies:** `agentguard validate --strict` accepts all three shipped policy files, and the Claude Code block's decisions were checked with `agentguard check`.
+- **Not run for this release:** a Claude Code session with the hook (the hook was driven with Claude Code's documented input instead); the setup menu on macOS (the login service ran there in CI); logging out and back in to watch a login service start; the Python and TypeScript suites locally (CI ran them green). One pre-existing test, `TestReplayWithCheckpoint_FollowsRotationChain`, failed once on Windows CI and passed on a re-run; it is tracked as flaky.
 
 ## [1.2.0] — 2026-09-24
 
