@@ -599,3 +599,107 @@ Entries 1.2.0 wrote stay masked.
 ---
 
 _Migration guides for prior releases live in the git history of this file._
+
+---
+
+## v1.2.x → v1.3.0
+
+1.3.0 adds prebuilt releases with one-line installers, `agentguard setup`, and
+the Claude Code integration, and reworks the command line. Policies decide
+exactly as in 1.2.0. What can surprise you is the command line: some commands
+that ignored part of what you typed now act on it.
+
+### What happens automatically
+
+- No on-disk format changes. The store schema, the audit format, the replay
+  checkpoint and the policy schema are unchanged, and 1.3.0 reads everything
+  1.2.x wrote.
+- Nothing is set up for you: `agentguard setup` writes a policy, a key, a data
+  folder and a login service only when you run it and choose to.
+
+### Behavior changes worth knowing about
+
+**Command line**
+
+- **Flags after an argument now apply.** `agentguard approve ap_1 --url
+  https://guard.example` used to approve on `http://localhost:8080`, because
+  flag parsing stopped at `ap_1`. It now goes to the URL you gave, on every
+  command.
+- **A stray argument is an error** (exit 2) instead of being ignored, for every
+  command and for `agentguard-mcp-gateway` and `agentguard-llm-proxy`.
+  **Check your MCP client configs:** if an `--upstream` command was split
+  across several `args` entries (`"--upstream", "fs:npx", "/tmp"`), 1.2.x
+  started the MCP server without `/tmp`; 1.3.0's gateway refuses to start.
+  Put the whole command in one string.
+- **`agentguard validate <file>` validates that file.** 1.2.x ignored the
+  argument and validated `configs/default.yaml`.
+- **Exit status 2 for any command-line mistake**, including running
+  `agentguard` with no command and `approve`/`deny` without an ID (exit 1
+  before). `help`, `-h` and `--help` print to stdout and exit 0.
+- **Output wording changed:** `approve`/`deny` print `Approved <id>` /
+  `Denied <id>` (was `Action approve: approved`), errors say what to do, and
+  the update notice names the command that updates. Scripts should rely on
+  exit codes.
+- **`agentguard server` is the command's name.** `serve` runs the same code
+  for the whole 1.x line.
+
+**Settings you don't give**
+
+A flag always wins; these apply only when it is missing:
+
+- `AGENTGUARD_URL` sets the server for `approve`, `deny`, `status` and
+  `audit`, and `--guard-url` for the MCP gateway and the LLM proxy. If you set
+  it for the SDKs and run the gateway without `--guard-url`, the gateway now
+  uses that server instead of `http://127.0.0.1:8080`.
+- `--policy` for `server`, `validate` and `check`: `AGENTGUARD_POLICY`, then
+  `configs/default.yaml` (as before), then the installer's starter policy.
+  `check` no longer requires `--policy`.
+- The API key `agentguard setup` saves is used by `approve`, `deny`,
+  `status`, `audit`, the gateway and the proxy when neither `--api-key` nor
+  `AGENTGUARD_API_KEY` is set. The server never reads it by itself; use
+  `--api-key-file`.
+
+**MCP gateway**
+
+- `--reconnect-cap` is applied. It used to be ignored; its default (60 s) is
+  the old fixed maximum, so nothing changes unless you set it.
+
+**Starter policy**
+
+- The shipped `configs/default.yaml` ends with an `agents: claude-code:`
+  block ([`CLAUDE_CODE.md`](CLAUDE_CODE.md#the-policy)). It applies only to
+  requests from agent `claude-code`. A copy you already have is not changed;
+  `agentguard setup` offers to add the block when you connect Claude Code.
+
+### New surfaces
+
+- `agentguard setup` — set up, update and uninstall from a menu.
+- `agentguard help [<command>]`, and `agentguard hook claude-code` (run by
+  Claude Code, not by you).
+- `agentguard server --api-key-file <path>`; `--guard-url` as another name for
+  `--url` on `approve`, `deny`, `status` and `audit`.
+- Audit transport `claude_code`.
+
+See [`CLI.md`](CLI.md) and [`CLAUDE_CODE.md`](CLAUDE_CODE.md).
+
+### What you should do
+
+1. Look through scripts that call `agentguard` for flags after an argument,
+   extra words, or parsing of `approve`, `deny` or `help` output.
+2. Check MCP client configs that start `agentguard-mcp-gateway`: every
+   `--upstream` value must be one string.
+3. If `AGENTGUARD_URL` or `AGENTGUARD_POLICY` is set where the CLI, gateway or
+   proxy runs, make sure it points where you mean.
+4. Swap the binaries: rerun the one-line installer, or `go install
+   github.com/Caua-ferraz/AgentGuard/cmd/...@v1.3.0`. From 1.3.0 on,
+   `agentguard setup` → *Update* does it too.
+
+### Rollback to v1.2.x
+
+Nothing on disk changed format, so 1.2.x reads what 1.3.0 wrote. Two things
+`agentguard setup` may have set up don't work with 1.2.x: the login service
+runs `agentguard server`, and Claude Code's hook runs `agentguard hook
+claude-code`, and 1.2.x has neither command. Before rolling back, open
+`agentguard setup` and choose *Change settings* → start at login: *No*, and
+*Disconnect Claude Code*. Then install 1.2.x with `AGENTGUARD_VERSION=1.2.0`
+and the one-line installer.

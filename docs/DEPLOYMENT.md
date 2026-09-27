@@ -144,7 +144,7 @@ image yourself instead, replace `image:` with `build: .` at the repo root.
 ```yaml
 services:
   agentguard:
-    image: ghcr.io/caua-ferraz/agentguard:1.2.0
+    image: ghcr.io/caua-ferraz/agentguard:1.3.0
     restart: unless-stopped
     command: >
       serve
@@ -195,7 +195,7 @@ spec:
         - name: agentguard
           # Published per release; or build the Dockerfile and push it to a
           # registry your cluster can pull from.
-          image: ghcr.io/caua-ferraz/agentguard:1.2.0
+          image: ghcr.io/caua-ferraz/agentguard:1.3.0
           args:                   # replaces the image's CMD, so --policy must be repeated
             - serve
             - --policy=/etc/agentguard/default.yaml

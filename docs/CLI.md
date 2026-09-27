@@ -475,7 +475,7 @@ Startup migrations run automatically inside `agentguard server` before the audit
 
 ```bash
 agentguard version
-# agentguard 1.2.0 (abc1234)
+# agentguard 1.3.0 (abc1234)
 ```
 
 The version comes from the source; the part in parentheses identifies the build:
