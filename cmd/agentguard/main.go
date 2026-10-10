@@ -731,7 +731,8 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 	// gate. Make the exposure impossible to miss at startup. This is additive
 	// visibility only — the default (start unauthenticated) is unchanged, and no
 	// endpoint is gated differently. Full multi-key / RBAC auth is deferred
-	// post-v1 (see TODO.md).
+	// post-v1 (see "Post-v1, only if a concrete need arises" in
+	// docs/COMPATIBILITY.md).
 	if apiKey == "" {
 		fmt.Fprint(os.Stderr, "\n"+
 			"================================ SECURITY WARNING ================================\n"+

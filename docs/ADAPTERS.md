@@ -50,7 +50,7 @@ Since v1.0.0, the LangChain and CrewAI legs are required: a red leg fails CI (an
 
 Authors of adapter changes are still expected to drive the integration job to green locally before merging: from `plugins/python`, run `pytest -v -m integration tests/integration/test_real_<framework>.py` (the same invocation CI uses).
 
-All adapters share the same philosophy: **decide via policy first, call the wrapped callable only if `ALLOW`**. On `DENY` or `REQUIRE_APPROVAL` the adapter either returns a marker string (for LangChain/CrewAI, whose tools must return text to the LLM) or raises `PermissionError` (for browser-use, whose async page methods have no other return channel). The MCP adapter returns a JSON-RPC result with `isError: true`.
+All adapters share the same philosophy: **decide via policy first, call the wrapped callable only if `ALLOW`**. On `DENY` or `REQUIRE_APPROVAL` the LangChain, CrewAI and browser-use adapters raise `PermissionError` (CrewAI raises its subclasses `AgentGuardDenied` and `AgentGuardApprovalRequired`). The one exception is LangChain's legacy `run` / `arun` entry points, which return a marker string for callers that depend on it. The MCP adapter returns a JSON-RPC result with `isError: true`.
 
 ---
 
@@ -115,12 +115,17 @@ The runtime upgrade always wins over the static guess. A tool statically classif
 
 ### Approval / deny behavior
 
-LangChain tools must return a string to the LLM. The wrapper returns human-readable markers:
+The modern entry points (`invoke`, `ainvoke`, `_run`, `_arun`, `stream`, `astream`, `batch`, `abatch`) raise `PermissionError` on deny:
+
+- `DENY`: `"[AgentGuard] Tool '<name>' denied: <policy reason>"`
+- `REQUIRE_APPROVAL`: `"[AgentGuard] Tool '<name>' requires approval. Approve at: <url>\nReason: <reason>"`
+
+A `batch` fails as a whole on the first denied input. The legacy `run` / `arun` entry points keep their older behavior and **return** a marker string instead of raising:
 
 - `DENY`: `"[AgentGuard] Action denied.\nReason: <policy reason>"`
 - `REQUIRE_APPROVAL`: `"[AgentGuard] Action requires approval. Approve at: <url>\nReason: <reason>"`
 
-The LLM sees these strings and can reason about retry. The wrapper does **not** raise on deny — raising would surface as an agent error rather than a structured observation.
+A raised `PermissionError` propagates out of the agent run unless your code catches it. LangChain's `handle_tool_error` does not apply: it only handles `ToolException`.
 
 If you prefer to block until a human approves, call `guard.wait_for_approval(...)` in your own tool wrapper; the adapter does not do this automatically because it would turn every tool call into a potentially 5-minute blocking operation.
 
@@ -168,9 +173,9 @@ If we hooked only `run`, a CrewAI agent orchestrating tools would bypass the pol
 
 CrewAI scope inference is the same two-pass approach (input keys → keyword inference → configured default) but with one behavioral difference: **the `shell` keyword group does not include CrewAI's default `"shell"` term**, because CrewAI tools' names rarely contain that literal token. Explicitly construct `GuardedCrewTool(tool, scope="shell")` if you want to pin a scope.
 
-### Return values on deny / approval
+### Deny / approval behavior
 
-Same as LangChain — strings, not exceptions. CrewAI agents read the returned text and re-plan.
+Every entry point (`run`, `_run`, `invoke`, and their async counterparts) raises before the wrapped tool runs: `AgentGuardApprovalRequired` on `REQUIRE_APPROVAL` and `AgentGuardDenied` on `DENY`. Both subclass `PermissionError` and carry the `CheckResult` as `.result`. A denied call does not consume a CrewAI usage slot.
 
 ---
 

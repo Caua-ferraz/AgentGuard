@@ -123,7 +123,7 @@ Minimum example:
 | `require_prior` | string | A prior `ALLOW`ed action (matched by exact equality **or** glob) that must have been logged for this `agent_id` + `scope` within `time_window`. |
 | `time_window` | string | Go duration string (e.g., `"10m"`, `"1h"`). Interpreted relative to `now` at the time of the check. |
 
-**Backed by the audit log.** Conditions are evaluated via `HistoryQuerier.RecentActions(agentID, scope, since=now-time_window)`. The querier is the in-process adapter over `Logger.Query`.
+**Backed by an in-memory index of the audit log.** The server keeps a `PriorActionIndex` (`pkg/policy/history_index.go`) of the newest `ALLOW` per tenant, `agent_id`, scope and action or command. It is seeded from the audit log at startup and updated on every `ALLOW`, so a condition check is a map lookup, not a log scan. The index has a TTL and size caps; history older than the TTL, or dropped at a cap, cannot satisfy a condition. Embedders that only set a `HistoryQuerier` get the older log-scan path, with a one-time warning.
 
 ### Footgun: `time_window` without `require_prior`
 

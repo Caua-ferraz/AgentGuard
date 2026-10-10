@@ -691,7 +691,7 @@ network and give deterministic replies. They run in the blocking Go
   (the default case in `Bridge.dispatchFrame`). The `resources` and
   `prompts` capabilities are also **masked out** of the `initialize`
   response (`MergeCapabilities`, see § 3.3) so a host never offers them.
-  Deferred design: `#mcp-resources` (see `TODO.md`).
+  Deferred: `#mcp-resources` (tracked in the code at `pkg/mcpgw/bridge.go`).
 - **Server-initiated requests are not supported.** MCP lets a server
   open a request back to the client (`sampling/createMessage`,
   `roots/list`, `elicitation/create`). The gateway is a tools-only
@@ -707,8 +707,8 @@ network and give deterministic replies. They run in the blocking Go
   stdio-only host-facing and stdio-only upstream — `Upstream` has a
   single `StdioUpstream` implementation. The `2025-03-26` "streamable
   HTTP era" protocol *version* is negotiable (§ 3.1), but no HTTP
-  *transport* is wired. Deferred design: `#mcp-streamable-http` (see
-  `TODO.md`).
+  *transport* is wired. Deferred: `#mcp-streamable-http` (tracked in
+  the code at `pkg/mcpgw/config.go`).
 - Per-upstream rate limiting. The central server's rate limiter
   applies, but a misbehaving downstream that floods on `tools/list`
   will be felt.

@@ -279,18 +279,22 @@ Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS deta
 
 ## Roadmap
 
-### Where things stand (v1.0)
+### Where things stand (v1.3)
 
-Everything in the pitch above is shipped: the policy engine with all seven scopes, the three enforcement paths (MCP Gateway and LLM API Proxy since v0.5, SDKs + adapters throughout), audit logging with default-on rotation, the approval queue + dashboard, cost guardrails, rate limiting, persistent state and multi-tenant policies on a zero-config SQLite store (v0.6), cross-transport verdict consistency and outage durability (v0.7), the v0.9 surface stabilization with a CI-enforced p99 latency gate, and the v1.0 PostgreSQL multi-node backend — shared approvals / rate-limit / cost state across replicas via background reconcile, with the hardened approval lifecycle (write-once resolutions, one-shot time-boxed ALLOWs) enforced cluster-wide. The release-by-release detail lives in [`CHANGELOG.md`](CHANGELOG.md); the frozen surfaces and the v1.x additive-only promise are in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
+Everything in the pitch above is shipped: the policy engine with all seven scopes, the three enforcement paths (MCP Gateway and LLM API Proxy since v0.5, SDKs + adapters throughout), audit logging with default-on rotation and secret redaction, the approval queue + dashboard, cost guardrails, rate limiting, persistent state and multi-tenant policies on a zero-config SQLite store (v0.6), cross-transport verdict consistency and outage durability (v0.7), the v0.9 surface stabilization with a CI-enforced p99 latency gate, and the v1.0 PostgreSQL multi-node backend — shared approvals / rate-limit / cost state across replicas via background reconcile, with the hardened approval lifecycle (write-once resolutions, one-shot time-boxed ALLOWs) enforced cluster-wide. v1.2 checks compound shell commands one command at a time; v1.3 adds prebuilt binaries, one-line installers, `agentguard setup`, and the Claude Code hook. The release-by-release detail lives in [`CHANGELOG.md`](CHANGELOG.md); the frozen surfaces and the v1.x additive-only promise are in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
 
-### Planned
-- [ ] Policy-as-code (test policies in CI/CD)
+### Next (v1.4)
+- [ ] Policy-as-code: `agentguard test` runs a policy against test cases in CI/CD
+- [ ] Hooks for Cursor, Gemini CLI and Codex CLI, and a fail-closed option for all hooks
+- [ ] Tamper-evident audit log (hash chain, HMAC, anchoring) and `agentguard audit verify`
 - [ ] Multi-agent session correlation
 - [ ] Session replay in dashboard
-- [ ] Policy editor in dashboard
-- [ ] AutoGPT adapter
 - [ ] OpenAI Agents SDK adapter
 - [ ] SOC 2 / compliance report generation
+- [ ] Streamable HTTP upstreams for the MCP Gateway
+
+### Later
+- [ ] Policy editor in dashboard
 - [ ] VS Code extension for policy authoring
 
 ## Contributing

@@ -54,7 +54,7 @@ Each refusal is a synthetic refusal to the client, counted in `agentguard_llmpro
 
 ### The downstream MCP server — untrusted for framing and liveness
 
-Its frames are untrusted bytes: oversized frames are skipped per-frame with the reader resynchronised (`pkg/mcpgw/framing.go`), a wedged reader is killed and the supervisor respawns it, explicit `"id": null` is answered with an error, and server-initiated requests (`sampling/createMessage`, `roots/list`, `elicitation/create`) are dropped, never forwarded to the host. Its **tool results** are not inspected — data exfiltration through a result payload is a non-goal (see `#data-pii` in `TODO.md`).
+Its frames are untrusted bytes: oversized frames are skipped per-frame with the reader resynchronised (`pkg/mcpgw/framing.go`), a wedged reader is killed and the supervisor respawns it, explicit `"id": null` is answered with an error, and server-initiated requests (`sampling/createMessage`, `roots/list`, `elicitation/create`) are dropped, never forwarded to the host. Its **tool results** are not inspected — data exfiltration through a result payload is a non-goal (see `#data-pii` in `pkg/policy/engine.go`).
 
 ### The MCP host or client application — trusted for framing, untrusted for intent
 

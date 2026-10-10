@@ -42,7 +42,7 @@ docs/                        Documentation
 
 ## Priority Areas
 
-1. **Adapters** — Adding support for more agent frameworks (AutoGPT, OpenAI Agents SDK, etc.)
+1. **Adapters** — Adding support for more agent frameworks (OpenAI Agents SDK, etc.) and more coding agents' hooks
 2. **Policy rules** — New scope types, matching strategies, and contextual conditions
 3. **Dashboard** — Session replay, policy editor, richer analytics
 4. **Documentation** — Tutorials, integration guides, example policies
