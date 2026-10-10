@@ -174,11 +174,7 @@ func (l *FileLogger) rotateLocked() error {
 	l.file = f
 	l.enc = json.NewEncoder(f)
 
-	env := metaEnvelope{Meta: MetaRecord{
-		SchemaVersion: CurrentSchemaVersion,
-		CreatedAt:     time.Now().UTC(),
-		RotatedFrom:   filepath.Base(finalArchive),
-	}}
+	env := metaEnvelope{Meta: NewMetaRecord(filepath.Base(finalArchive))}
 	if err := l.enc.Encode(env); err != nil {
 		return fmt.Errorf("write post-rotate header: %w", err)
 	}

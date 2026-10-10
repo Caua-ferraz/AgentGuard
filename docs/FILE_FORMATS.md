@@ -21,7 +21,9 @@ Default path: `audit.jsonl` (CLI `--audit-log`). JSON-Lines, one record per line
 | schema_version | release | shape |
 |---|---|---|
 | 1 (headerless) | v0.3.x, v0.4.0 | First line is an `audit.Entry` record. No header. |
-| 2 | v0.4.1+ | First line is a meta-record: `{"_meta": {"schema_version": 2, "created_at": "...", "rotated_from": "<path or null>"}}`. Remaining lines are `audit.Entry` records, one per line. |
+| 2 | v0.4.1+ | First line is a meta-record: `{"_meta": {"schema_version": 2, "created_at": "...", "segment_id": "...", "rotated_from": "..."}}`. Remaining lines are `audit.Entry` records, one per line. |
+
+**Meta-record fields.** `created_at` is when the file was created (RFC 3339, UTC). `segment_id` (v1.4+, additive) is 32 random hex characters that identify this file; files written before v1.4 don't have it. `rotated_from` is the **base name** of the archive this file succeeded (for example `audit.jsonl.20261010T120000Z.gz`), and is omitted on a file that starts a chain.
 
 **Reader contract.** A v0.4.1+ reader peeks the first non-empty line:
 - If it contains `_meta.schema_version == 2`, read normally.
@@ -50,17 +52,17 @@ Default path: `<audit-log>.replay-checkpoint` — `audit.CheckpointSuffix` appen
 | release | shape |
 |---|---|
 | v0.4.1 – v1.0.0 | `{"offset": <bytes>, "audit_size": <bytes>}` |
-| v1.1.0+ | `{"offset": <bytes>, "audit_size": <bytes>, "file_id": "<live file's _meta.created_at>", "counts": {"total": N, "allow": N, "deny": N, "require_approval": N}}` |
+| v1.1.0+ | `{"offset": <bytes>, "audit_size": <bytes>, "file_id": "<live file's identity>", "counts": {"total": N, "allow": N, "deny": N, "require_approval": N}}` |
 
-`file_id` says which live file `offset` refers to (rotation stamps every new live file with a fresh `_meta.created_at`); it is absent for headerless legacy files. `counts` is the lifetime decision tally as of `offset`: the next boot seeds `agentguard_checks_total` and its siblings from it and replays only the entries written afterwards, which is how the counters survive restarts. A v1.0.0 checkpoint (no `counts`) is still accepted and triggers one full replay of the live file to establish the tally. The tally starts at the first boot that wrote a checkpoint; archives that already existed before that boot are not scanned.
+`file_id` says which live file `offset` refers to; it is absent for headerless legacy files. Since v1.4 it is the file's `_meta.segment_id`. For a file written before v1.4, which has no `segment_id`, it is the file's `_meta.created_at`, as in v1.1–v1.3, so checkpoints written before an upgrade keep matching. (`created_at` alone could repeat: on a coarse clock, two files created in quick succession could share it, and replay then resumed inside the wrong file. A v1.3 binary reading a v1.4 checkpoint finds no matching file and replays everything still reachable, carrying `counts` forward.) `counts` is the lifetime decision tally as of `offset`: the next boot seeds `agentguard_checks_total` and its siblings from it and replays only the entries written afterwards, which is how the counters survive restarts. A v1.0.0 checkpoint (no `counts`) is still accepted and triggers one full replay of the live file to establish the tally. The tally starts at the first boot that wrote a checkpoint; archives that already existed before that boot are not scanned.
 
 On boot: a matching `file_id` resumes at `offset`. A different one means the log rotated in between, and the seeder walks `_meta.rotated_from` back through the archives (gzip or plain) to the checkpointed segment, replaying it from `offset` and every newer segment from the start; if that segment was already pruned, everything still reachable is replayed and `counts` is carried forward. Because the logger rewrites the checkpoint at every rotation since v1.2.0, the checkpointed segment is always the current live file after a graceful shutdown, and at most one rotation old after a crash — pruning can no longer strand it. A missing, corrupt, or truncation-stale checkpoint never blocks startup — it triggers a full replay of the live file. Force that explicitly with `agentguard migrate --reset-checkpoint --audit-log <path>` or by deleting the file.
 
-### `<audit-dir>/audit-<timestamp>.jsonl[.gz]` — rotated audit files
+### `<audit-log>.<timestamp>[.gz]` — rotated audit files
 
 #### Rotated file headers
 
-Size-triggered rotation via the logger. Archives are named `<audit-log>.<timestamp>` using `20060102T150405Z`, so lexicographic order is chronological and pruning sorts names without parsing them. That format has one-second resolution, so a burst rotating more than once inside a second would compute the same name twice; the rotator advances to the next free second rather than renaming over an existing archive, which means a name can read up to a minute later than the instant it rotated. If no slot is free the rotation fails and the live file keeps growing — recoverable, unlike a destroyed archive. Each rotated file carries the same schema-2 header as the live file, with `_meta.rotated_from` set to the path of the file whose tail rolled into it. Compression is applied to rotated files only; the live file stays uncompressed to keep appends cheap. Startup replay walks the chain backwards via `_meta.rotated_from` until it reaches the segment identified by the replay checkpoint's `file_id`.
+Size-triggered rotation via the logger. Archives are named `<audit-log>.<timestamp>` using `20060102T150405Z`, so lexicographic order is chronological and pruning sorts names without parsing them. That format has one-second resolution, so a burst rotating more than once inside a second would compute the same name twice; the rotator advances to the next free second rather than renaming over an existing archive, which means a name can read up to a minute later than the instant it rotated. If no slot is free the rotation fails and the live file keeps growing — recoverable, unlike a destroyed archive. Every file carries a schema-2 header. When the logger rotates, it renames the live file to the archive name and starts a new live file whose `_meta.rotated_from` holds that archive's base name, so each file points back at the one before it. Compression is applied to rotated files only; the live file stays uncompressed to keep appends cheap. Startup replay walks the chain backwards via `_meta.rotated_from` until it reaches the segment identified by the replay checkpoint's `file_id`.
 
 ### `.v040-backup` — one-time rollback artifact
 
