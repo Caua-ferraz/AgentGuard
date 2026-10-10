@@ -61,3 +61,18 @@ func warnLegacyHistoryPath() {
 			"Wire a PriorActionQuerier (see policy.NewPriorActionIndex) to close both.")
 	})
 }
+
+// priorLookupWarnOnce ensures a failed require_prior lookup is announced once.
+var priorLookupWarnOnce sync.Once
+
+// warnPriorLookupFailed reports, once per process, that a require_prior
+// history lookup returned an error and the engine resolved the condition by
+// the rule's kind (a gated deny or require_approval rule fired, a gated allow
+// did not). It runs on the /v1/check path, so it must not log per call.
+func warnPriorLookupFailed() {
+	priorLookupWarnOnce.Do(func() {
+		log.Printf("WARNING: a require_prior history lookup failed. Conditions that cannot be " +
+			"evaluated are treated strictly: gated deny and require_approval rules fire, gated " +
+			"allow rules do not. Check the PriorActionQuerier or HistoryQuerier backend.")
+	})
+}
