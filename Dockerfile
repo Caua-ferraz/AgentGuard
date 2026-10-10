@@ -1,5 +1,5 @@
 # Build stage
-# Must stay >= the `toolchain` directive in go.mod (go1.26.7), which carries the
+# Must stay >= the `toolchain` directive in go.mod (go1.26.9), which carries the
 # stdlib fixes govulncheck gates on — see that file for the advisory list. A
 # builder older than the toolchain directive still works (Go downloads the
 # pinned toolchain) but silently adds a download to every image build, so keep
@@ -9,7 +9,7 @@
 # target (TARGETOS/TARGETARCH, set by BuildKit for each `--platform`). Every
 # dependency is pure Go, so CGO stays off and a multi-arch image needs no CPU
 # emulation. A plain `docker build` targets the host, as before.
-FROM --platform=$BUILDPLATFORM golang:1.26.7-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.9-alpine AS builder
 
 WORKDIR /app
 COPY go.mod go.sum* ./
