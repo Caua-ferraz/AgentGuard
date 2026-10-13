@@ -16,3 +16,17 @@ var Default []byte
 //
 //go:embed claude-code.yaml
 var ClaudeCode []byte
+
+// Cursor, GeminiCLI and Codex are the same rules as ClaudeCode for agents
+// "cursor", "gemini-cli" and "codex", in the same position. The starter
+// policy has only the Claude Code block; `agentguard setup` adds one of
+// these when that agent is connected, on request.
+//
+//go:embed cursor.yaml
+var Cursor []byte
+
+//go:embed gemini-cli.yaml
+var GeminiCLI []byte
+
+//go:embed codex.yaml
+var Codex []byte

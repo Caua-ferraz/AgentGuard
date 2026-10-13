@@ -373,7 +373,7 @@ func TestSetupConnectsAndUninstallDisconnects(t *testing.T) {
 	// A policy from before this release: no Claude Code block.
 	_ = os.WriteFile(m.policyPath(), []byte("version: \"1\"\nname: old\nrules:\n  - scope: shell\n    allow:\n      - pattern: \"ls *\"\n"), 0o644)
 
-	ui.choices = []int{0} // "Add AgentGuard's Claude Code rules"
+	ui.choices = []int{0, 0} // "Add AgentGuard's Claude Code rules"; server down: let calls through
 	s.connectClaude()
 	if has, _ := policyHasClaudeRules(m.policyPath()); !has {
 		t.Error("the Claude Code rules weren't added")
