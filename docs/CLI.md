@@ -52,7 +52,7 @@ Global conventions:
 - Flags can go before or after positional arguments: `agentguard approve <id> --url <url>` and `agentguard approve --url <url> <id>` are the same. A `--` ends the flags; everything after it is an argument.
 - `agentguard help`, `-h` and `--help` print help on stdout and exit `0`; so do `agentguard help <command>` and `agentguard <command> -h`. A mistyped command or flag gets a suggestion: `agentguard: unknown command "--serve". Did you mean 'agentguard server'?`
 - `--api-key` on `server` and on the client subcommands (`approve`, `deny`, `status`, `audit`) falls back to the `AGENTGUARD_API_KEY` env var; `--url` on the client subcommands falls back to `AGENTGUARD_URL`; `--policy` on `server`, `validate`, `check` and `test` is found automatically when not given (see [Policy file](#policy-file)).
-- Exit code `0` = success, `1` = failure, `2` = the command line was wrong (unknown command or flag, missing or extra argument). `check` and `test` have their own codes — see below.
+- Exit code `0` = success, `1` = failure, `2` = the command line was wrong (unknown command or flag, missing or extra argument). `check` and `test` have their own codes — see below; `audit verify` adds `3` for a file it can't read.
 
 ---
 
@@ -67,9 +67,10 @@ Set AgentGuard up on this computer, keep it current and remove it, from a menu: 
 | Starter policy (an existing one is kept) | `~/.config/agentguard/default.yaml` | `%APPDATA%\agentguard\default.yaml` |
 | Data folder: audit log, state database, server log | `~/.local/share/agentguard` | `%LOCALAPPDATA%\AgentGuard\data` |
 | API key, readable only by you | `~/.config/agentguard/api-key` | `%APPDATA%\agentguard\api-key` |
+| Audit seal key, readable only by you (v1.4, new setups) | `~/.local/share/agentguard/audit-seal.key` | `%LOCALAPPDATA%\AgentGuard\data\audit-seal.key` |
 | Start at login, without admin rights | systemd user service `agentguard.service` / LaunchAgent `com.lictorate.agentguard` | Task Scheduler task `AgentGuard`, at your logon |
 
-The service runs `agentguard server --policy … --data-dir … --audit-log … --port 8080 --bind 127.0.0.1 --dashboard --api-key-file …`, on the next free port when 8080 is taken. The key goes in as a file, so it never appears in the service definition or the process list. `XDG_CONFIG_HOME` and `XDG_DATA_HOME` move the Linux and macOS folders.
+The service runs `agentguard server --policy … --data-dir … --audit-log … --port 8080 --bind 127.0.0.1 --dashboard --api-key-file … --audit-seal --audit-seal-key-file …`, on the next free port when 8080 is taken. The keys go in as files, so they never appear in the service definition or the process list. Since v1.4 a new setup seals the audit log (see [`agentguard audit verify`](#agentguard-audit-verify)); a setup made by an earlier version keeps its command line when you run setup again. `XDG_CONFIG_HOME` and `XDG_DATA_HOME` move the Linux and macOS folders.
 
 **Later runs** show whether the server is running and offer: open the dashboard (the API key goes to the clipboard for its login), update, start or restart the server, connection details (the URL, where the key is, the lines for the SDKs, and a Claude Desktop block with no secret in it), open the policy file, change settings, and — last, under a divider — uninstall.
 
@@ -93,7 +94,7 @@ The command Claude Code runs before each shell command, file read or edit, web f
 
 Start the AgentGuard server. This is the only subcommand that runs a long-lived process. `agentguard serve` is the same command.
 
-`agentguard server -h` prints the flags below grouped by topic (network, security, policy, audit log, storage, multi-node, notifications, debugging).
+`agentguard server -h` prints the flags below grouped by topic (network, security, policy, audit log, audit sealing, storage, multi-node, notifications, debugging).
 
 | Flag | Default | Description |
 |---|---|---|
@@ -120,6 +121,9 @@ Start the AgentGuard server. This is the only subcommand that runs a long-lived 
 | `--audit-queue-size <int>` | `1024` | Bounded queue size for the buffered async logger. Ignored unless `--audit-buffered`. |
 | `--audit-workers <int>` | `4` | Worker goroutines draining the buffered audit queue. Ignored unless `--audit-buffered`. |
 | `--audit-overflow-path <path>` | `<audit-log>.overflow.jsonl` | Disk-overflow spill file used when the buffered queue saturates. Ignored unless `--audit-buffered`. |
+| `--audit-seal` | off | **(v1.4)** Seal the audit log into a hash chain that [`agentguard audit verify`](#agentguard-audit-verify) checks for edited, removed or reordered entries. File backend only: with `--audit-backend=store` the server refuses to start (exit 2). Not encryption. See [OPERATIONS § Sealing and anchoring](OPERATIONS.md#sealing-and-anchoring). |
+| `--audit-seal-key-file <path>` | *(empty)* | **(v1.4)** HMAC-SHA256 key for `--audit-seal`: the file's content, surrounding whitespace ignored. The server refuses to start when the file is missing, empty, or (on Unix) readable by every user. Without it the chain is plain SHA-256, which anyone who can write the file can recompute; the server warns at startup. Given without `--audit-seal`, it is a usage error. `agentguard setup` uses it. |
+| `--audit-anchor-interval <dur>` | `5m` | **(v1.4)** How often to log the head of the sealed chain (`audit anchor segment=… seq=… hash=…`) and set `agentguard_audit_seal_seq`, when something new was sealed. Anchors are also published at each rotation and at shutdown. `0` turns the periodic anchor off. Ignored unless `--audit-seal`. |
 | `--notify-spool <path>` | *(empty)* | *(v0.7)* JSONL spool file for notification events that overflow the dispatch queue — spooled events are redelivered by a recovery loop (including leftovers from a previous process) instead of dropped. Empty disables (drop-on-full). |
 | `--debug-pprof` | off | Expose Go pprof handlers on a **separate localhost-only** listener (`--debug-pprof-port`). Off by default; enable for performance investigations only. Tunnel via `kubectl port-forward` / `ssh -L` to access remotely — this listener never binds beyond `127.0.0.1`. |
 | `--debug-pprof-port <int>` | `6060` | Port for the localhost-only pprof listener. Ignored unless `--debug-pprof`. |
@@ -499,6 +503,40 @@ agentguard audit --decision DENY --scope shell --limit 20
 ```
 
 The CLI uses `/v1/audit?limit=N` directly — pagination (`?offset=`) is supported on the HTTP API but not exposed as a CLI flag yet; use `curl` for paginated exports.
+
+## `agentguard audit verify`
+
+**(v1.4)** Check a sealed audit log (`server --audit-seal`) for tampering. It reads files only, so the server does not need to run, and it works on a copy. It finds the live file, follows `_meta.rotated_from` back through the rotated archives (gzip or plain), and checks oldest to newest: each entry's hash, the `seq` and `prev_hash` links between entries, and the link between each file and the one before it.
+
+```
+agentguard audit verify [--audit-log <path>] [--key-file <file> ...] [--anchor <seq>:<hash> ...] [--output text|json]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--audit-log <path>` | `audit.jsonl` | The live audit log (the server's `--audit-log`). |
+| `--key-file <file>` | *(none)* | The HMAC key (the server's `--audit-seal-key-file`). Repeat it for a log sealed under more than one key. Needed for a log sealed with a key. |
+| `--anchor <seq>:<hash>` | *(none)* | A published anchor to check (from an `audit anchor` log line or `GET /v1/audit/head`). Repeatable. |
+| `--output <text\|json>` | `text` | `json` prints the report as JSON. |
+
+The report lists the files, the sealed `seq` range, where the chain starts when older files were pruned, how many entries were written before sealing began (not protected), the first broken `file:line` and what broke (hash mismatch, seq gap, prev_hash mismatch, segment link broken, incomplete line), and each anchor: matches, does not match, missing (the log ends before it: entries were removed), or not checkable (its `seq` is in the pruned part).
+
+```bash
+agentguard audit verify --audit-log /var/lib/agentguard/audit.jsonl \
+  --key-file /var/lib/agentguard/audit-seal.key --anchor 1200:3f9a…
+# Audit log: /var/lib/agentguard/audit.jsonl
+# Files:     3, oldest first
+#   audit.jsonl.20261012T080000Z.gz
+#   audit.jsonl.20261013T020000Z.gz
+#   audit.jsonl
+# Sealed:    1312 entries, seq 801 to 2112
+# Seal:      hmac-sha256 key 3eb1bd439947eb76
+# The chain starts at seq 801 (older files were pruned).
+# Anchor 1200:3f9a…: matches
+# OK: the chain is intact.
+```
+
+Exit status: `0` the chain is intact, `1` it is broken or an anchor does not match, `2` command-line mistake (also: the log is sealed with a key and no `--key-file` was given), `3` a file can't be read. What a passing `verify` does and does not prove: [OPERATIONS § Sealing and anchoring](OPERATIONS.md#sealing-and-anchoring).
 
 ---
 

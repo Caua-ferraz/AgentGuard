@@ -130,7 +130,9 @@ func TestSeal_DocumentedExample(t *testing.T) {
 	if wantLine := want + hex.EncodeToString(sum[:]) + "\"}\n"; string(line) != wantLine {
 		t.Fatalf("line = %s\nwant      %s", line, wantLine)
 	}
-	t.Logf("documented hash: %s", hex.EncodeToString(sum[:]))
+	if got := hex.EncodeToString(sum[:]); got != "278a4467f2999e6ef5146da29743b304f7f309fde7f36676b5a976c5ba434c8d" {
+		t.Fatalf("hash = %s; docs/FILE_FORMATS.md shows a different one", got)
+	}
 }
 
 func TestSeal_RoundTripVerifies(t *testing.T) {

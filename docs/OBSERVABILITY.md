@@ -35,6 +35,7 @@ curl -s http://127.0.0.1:8080/metrics
 | `agentguard_audit_buffered_dropped_to_overflow_total` | — | Audit entries spilled to the buffered logger's overflow file (durable, not lost). |
 | `agentguard_audit_buffered_drained_from_overflow_total` | — | Spilled audit entries re-enqueued by the recovery loop. |
 | `agentguard_audit_corrupt_lines_total` | — | Audit lines that failed JSON parse during `Query()` and were skipped. |
+| `agentguard_audit_seal_tail_mismatch_total` | — | **(v1.4)** Startups where the sealed audit log ended before the chain head the replay checkpoint recorded: entries may have been removed. Any increase deserves a look (`agentguard audit verify`). |
 | `agentguard_notify_spooled_to_disk_total` | — | Notification events spilled to the `--notify-spool` file on queue overflow (retried, not dropped). |
 | `agentguard_notify_despooled_total` | — | Spooled notification events re-enqueued for dispatch. |
 | `agentguard_deprecations_used_total` | `feature` | Times a deprecated feature was exercised. Keys match `docs/DEPRECATIONS.md`. |
@@ -49,6 +50,7 @@ curl -s http://127.0.0.1:8080/metrics
 | `agentguard_notify_queue_depth` | — | Length of the shared notify dispatch queue (sampled at last enqueue). |
 | `agentguard_audit_buffered_queue_depth` | — | Entries waiting in the buffered audit queue. |
 | `agentguard_audit_replay_duration_seconds` | — | Wall-clock duration of the most recent startup audit replay. |
+| `agentguard_audit_seal_seq` | — | **(v1.4)** `seq` of the newest published audit anchor: the sealed chain's head at the last anchor (every `--audit-anchor-interval`, at rotation, at startup and at shutdown). `0` when `--audit-seal` is off. It should only go up; see [OPERATIONS § Sealing and anchoring](OPERATIONS.md#sealing-and-anchoring). |
 | `agentguard_audit_migration_status` | `from`, `to`, `status` | 1 = current outcome of an audit-schema migration; 0 for non-current statuses of the same `(from, to)`. Status ∈ {`ran`,`skipped`,`failed`}. |
 
 ### Histograms

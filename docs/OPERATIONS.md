@@ -73,6 +73,32 @@ Since v1.2.0, `agentguard server` masks secrets in every request before it is st
 
 **Also note:** only the `--policy` file's `extra_patterns` are used (not tenant policies'); audit files written before 1.2.0 are not rewritten; notifications were already redacted and still are. `--audit-redact=false` restores verbatim audit content and logs `WARNING: --audit-redact=false: …` at startup.
 
+## Sealing and anchoring
+
+Since v1.4.0 the file audit log can be sealed into a hash chain: `agentguard server --audit-seal --audit-seal-key-file <key>`. Every entry gets `seq`, `prev_hash` and `hash`, and each rotated file's header names the last entry of the file before it. `agentguard audit verify` checks all of it offline. Sealing is off by default, works with the file backend only (`--audit-backend=store` with `--audit-seal` is refused at startup), and is not encryption. The format and the hashing rule are in [FILE_FORMATS](FILE_FORMATS.md#current-on-disk-artifacts). `agentguard setup` turns it on for new setups, with a key at `<data-dir>/audit-seal.key`.
+
+**The key.** Any random string works; `openssl rand -hex 32 > audit-seal.key && chmod 600 audit-seal.key` makes a good one. The server refuses a key file that is missing, empty or readable by every user. Keep a copy somewhere other than the audit host: `verify` needs it, and anyone who has it can forge a valid chain. To change keys, restart the server with the new key file; the entries after the restart are sealed with it, and `verify` needs both (`--key-file old --key-file new`). Without `--audit-seal-key-file` the chain is plain SHA-256 and the server warns at startup: it shows naive edits, but anyone who can write the file can recompute it.
+
+**Anchors.** An anchor is the head of the chain: the `seq` and `hash` of the newest sealed entry. The server publishes one every `--audit-anchor-interval` (default `5m`, `0` turns the periodic one off; skipped when nothing new was sealed), at each rotation and at shutdown:
+
+- a log line, `audit anchor segment=<segment_id> seq=<n> hash=<hex>`, on stderr, so it reaches journald, syslog or whatever collects the server's log;
+- the `agentguard_audit_seal_seq` gauge on `/metrics`;
+- `GET /v1/audit/head` (Bearer or session, like `GET /v1/audit`) returns the current head as JSON at any time. See [API](API.md#get-v1audithead--tenant-aware-mirror).
+
+Ship anchors off the box: forward the server log to a SIEM, scrape the gauge into Prometheus, or poll `/v1/audit/head` from another machine and keep what it returns. Later, `agentguard audit verify --anchor <seq>:<hash>` checks that the log still contains that entry with that hash.
+
+**What verify proves.** If `verify` passes with your key, no entry it read was changed, removed, inserted or reordered by someone without the key, and the files link up. With an anchor that matches, nothing up to the anchor's `seq` was rewritten, even by someone with the key.
+
+**What it does not prove.**
+- That the newest entries are all there. Cutting entries off the end leaves a shorter chain that still verifies. An anchor taken before the cut shows it (`MISSING: the log ends at seq …`); so does the startup check against the replay checkpoint (`WARNING audit: … possible truncation`, `agentguard_audit_seal_tail_mismatch_total`).
+- Anything about pruned files. When `--audit-max-backups` or `--audit-max-age-days` delete archives, `verify` says where the chain starts (`The chain starts at seq N (older files were pruned)`) and reports anchors in the pruned range as not checkable.
+- Anything about entries written before sealing was turned on. `verify` counts them and says they are not protected.
+- That an entry is true. The chain covers what the server wrote, after redaction.
+
+Turning sealing off and on again starts a new chain at `seq` 1 in the middle of the file; `verify` reports that as broken. A crash in the middle of a write leaves a cut line; the server ends it on restart and continues the chain, and `verify` reports the cut line.
+
+Exit status of `verify`: `0` intact, `1` broken or an anchor that doesn't match, `2` command-line mistake (or a keyed log without `--key-file`), `3` a file can't be read. `--output json` prints the report for scripts.
+
 ## Multi-instance deployments
 
 Since v1.0, replicas can share state through PostgreSQL. Which mode you are in
