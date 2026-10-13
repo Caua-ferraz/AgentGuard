@@ -11,6 +11,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -51,6 +52,23 @@ func TestServerArgs(t *testing.T) {
 	}
 	if args := strings.Join(serverArgs(m, &setupState{Port: 1, Policy: "/p", DataDir: "/d"}), " "); strings.Contains(args, "api-key") {
 		t.Errorf("no key chosen, but the args name one: %s", args)
+	}
+}
+
+// A setup made since v1.4 seals the audit log; one from before (no "seal" in
+// setup.json) keeps its command line.
+func TestServerArgs_AuditSeal(t *testing.T) {
+	m := machine{goos: "linux", configDir: "/c"}
+	args := strings.Join(serverArgs(m, &setupState{Port: 1, Policy: "/p", DataDir: "/d", Seal: true}), " ")
+	if want := "--audit-seal --audit-seal-key-file " + filepath.Join("/d", "audit-seal.key"); !strings.Contains(args, want) {
+		t.Errorf("server args lack %q: %s", want, args)
+	}
+	var old setupState
+	if err := json.Unmarshal([]byte(`{"port":1,"policy":"/p","data_dir":"/d","api_key":false,"login_start":true}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	if args := strings.Join(serverArgs(m, &old), " "); strings.Contains(args, "audit-seal") {
+		t.Errorf("an existing setup gained --audit-seal: %s", args)
 	}
 }
 
@@ -338,6 +356,17 @@ func TestSetupFlow(t *testing.T) {
 	if svc.spec.Exe != m.exe {
 		t.Errorf("service runs %q, want %q", svc.spec.Exe, m.exe)
 	}
+	// A new setup seals the audit log with a key of its own.
+	sealKey, err := os.ReadFile(sealKeyPath(state))
+	if err != nil || !regexp.MustCompile(`^[0-9a-f]{64}\n$`).Match(sealKey) || !state.Seal {
+		t.Fatalf("seal key file = %q, %v (seal %v); want 64 hex characters", sealKey, err, state.Seal)
+	}
+	if info, _ := os.Stat(sealKeyPath(state)); goos != "windows" && info.Mode().Perm() != 0o600 {
+		t.Errorf("seal key file mode = %v, want 0600", info.Mode().Perm())
+	}
+	if !strings.Contains(args, "--audit-seal --audit-seal-key-file "+sealKeyPath(state)) {
+		t.Errorf("the service must run with the seal key: %s", args)
+	}
 
 	// Running it again ("Change settings") keeps the policy and key, and
 	// turning login start off removes the service.
@@ -350,8 +379,36 @@ func TestSetupFlow(t *testing.T) {
 	if again, _ := os.ReadFile(m.keyPath()); !bytes.Equal(again, key) {
 		t.Error("setting up again replaced the API key")
 	}
+	if again, _ := os.ReadFile(sealKeyPath(state)); !bytes.Equal(again, sealKey) {
+		t.Error("setting up again replaced the audit seal key")
+	}
 	if svc.installed || svc.calls[len(svc.calls)-1] != "remove" {
 		t.Errorf("login start off should remove the service: %v", svc.calls)
+	}
+}
+
+// An install set up before v1.4 has no "seal" in setup.json. Running setup
+// again leaves its audit log unsealed: no key, no new flags.
+func TestSetupFlow_ExistingInstallKeepsAuditUnsealed(t *testing.T) {
+	serverUp(t)
+	m := testMachine(t)
+	_ = os.MkdirAll(m.configDir, 0o700)
+	old := `{"port":8080,"policy":"` + filepath.ToSlash(m.policyPath()) + `","data_dir":"` + filepath.ToSlash(m.dataDir) + `","api_key":false,"login_start":true}`
+	if err := os.WriteFile(m.statePath(), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state, err := loadState(m)
+	if err != nil || state == nil {
+		t.Fatalf("loadState: %+v, %v", state, err)
+	}
+	svc := &fakeService{}
+	s := &setup{m: m, ui: &scriptedUI{t: t, choices: []int{0, 1, 1}}, svc: svc, state: state}
+	s.doSetup()
+	if strings.Contains(strings.Join(svc.spec.Args, " "), "audit-seal") {
+		t.Errorf("an existing install gained --audit-seal: %v", svc.spec.Args)
+	}
+	if _, err := os.Stat(sealKeyPath(state)); !os.IsNotExist(err) {
+		t.Errorf("an existing install got a seal key file (stat err %v)", err)
 	}
 }
 

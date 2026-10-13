@@ -99,7 +99,15 @@ type setupState struct {
 	DataDir    string `json:"data_dir"`
 	APIKey     bool   `json:"api_key"`     // the server runs with --api-key-file
 	LoginStart bool   `json:"login_start"` // a login service runs it
+	// Seal: the server runs with --audit-seal and the key in sealKeyPath.
+	// Set for setups made since v1.4; an older setup.json has no field, so
+	// an existing install keeps the command line it had.
+	Seal bool `json:"seal,omitempty"`
 }
+
+// sealKeyPath is the audit seal key setup generates. It sits with the audit
+// log it seals, in the data folder.
+func sealKeyPath(s *setupState) string { return filepath.Join(s.DataDir, "audit-seal.key") }
 
 func loadState(m machine) (*setupState, error) {
 	b, err := os.ReadFile(m.statePath())
@@ -140,6 +148,9 @@ func serverArgs(m machine, s *setupState) []string {
 	}
 	if s.APIKey {
 		args = append(args, "--api-key-file", m.keyPath())
+	}
+	if s.Seal {
+		args = append(args, "--audit-seal", "--audit-seal-key-file", sealKeyPath(s))
 	}
 	return args
 }
