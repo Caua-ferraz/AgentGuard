@@ -195,7 +195,7 @@ Environment:
   AGENTGUARD_URL              Server URL when --url is not set
                               (approve, deny, status, audit)
   AGENTGUARD_POLICY           Policy file when --policy is not set
-                              (server, validate, check)
+                              (server, validate, check, test)
   AGENTGUARD_NO_UPDATE_CHECK  Any value other than "0" turns off the check
                               for newer releases
 

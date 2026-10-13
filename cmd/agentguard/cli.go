@@ -293,7 +293,7 @@ func installedPolicyPaths() []string {
 	return append(paths, systemPolicyPath)
 }
 
-// findPolicy picks the policy file for server, validate and check. An
+// findPolicy picks the policy file for server, validate, check and test. An
 // explicit --policy always wins. Otherwise: AGENTGUARD_POLICY, then
 // ./configs/default.yaml (the --policy default, so running from a checkout
 // behaves as it always has), then the installer's starter policy. note says

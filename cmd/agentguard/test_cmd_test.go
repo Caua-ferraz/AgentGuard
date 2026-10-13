@@ -461,6 +461,22 @@ tests:
 	}
 }
 
+// Only the local tenant has a policy offline, as with check --tenant-id.
+func TestTest_OtherTenantHasNoPolicy(t *testing.T) {
+	dir := fixtureDir(t, map[string]string{"t_test.yaml": `policy: policy.yaml
+tenant: acme
+tests:
+  - name: an unknown tenant is denied
+    request: {scope: shell, command: "ls -la"}
+    expect: DENY
+    expect_rule: "deny:tenant:not_found"
+`})
+	code, stdout, stderr := runTestHarness(t, &testCmdFlags{Paths: []string{dir}})
+	if code != testExitPassed {
+		t.Fatalf("exit = %d, want 0\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+}
+
 // The shipped fixtures pass against the shipped policies. CI runs the same
 // thing as 'agentguard test configs/tests'.
 func TestTest_ShippedFixturesPass(t *testing.T) {

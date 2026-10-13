@@ -14,6 +14,7 @@ Set up and run:
 Policies:
   validate    Check that a policy file loads
   check       Evaluate one action against a policy file (no server needed)
+  test        Run a policy against test cases in YAML files (for CI)
   tenant      Manage per-tenant policies in the store (put|list|rm)
 
 Work with a running server:
@@ -50,8 +51,8 @@ Global conventions:
 - `agentguard serve` is the same command as `agentguard server` and keeps working for the whole 1.x line ([`COMPATIBILITY.md`](COMPATIBILITY.md#frozen-surface-4--cli-flags--subcommands)).
 - Flags can go before or after positional arguments: `agentguard approve <id> --url <url>` and `agentguard approve --url <url> <id>` are the same. A `--` ends the flags; everything after it is an argument.
 - `agentguard help`, `-h` and `--help` print help on stdout and exit `0`; so do `agentguard help <command>` and `agentguard <command> -h`. A mistyped command or flag gets a suggestion: `agentguard: unknown command "--serve". Did you mean 'agentguard server'?`
-- `--api-key` on `server` and on the client subcommands (`approve`, `deny`, `status`, `audit`) falls back to the `AGENTGUARD_API_KEY` env var; `--url` on the client subcommands falls back to `AGENTGUARD_URL`; `--policy` on `server`, `validate` and `check` is found automatically when not given (see [Policy file](#policy-file)).
-- Exit code `0` = success, `1` = failure, `2` = the command line was wrong (unknown command or flag, missing or extra argument). `check` has its own codes — see below.
+- `--api-key` on `server` and on the client subcommands (`approve`, `deny`, `status`, `audit`) falls back to the `AGENTGUARD_API_KEY` env var; `--url` on the client subcommands falls back to `AGENTGUARD_URL`; `--policy` on `server`, `validate`, `check` and `test` is found automatically when not given (see [Policy file](#policy-file)).
+- Exit code `0` = success, `1` = failure, `2` = the command line was wrong (unknown command or flag, missing or extra argument). `check` and `test` have their own codes — see below.
 
 ---
 
@@ -131,13 +132,13 @@ Start the AgentGuard server. This is the only subcommand that runs a long-lived 
 
 ### Policy file
 
-When `--policy` is not given, `server`, `validate` and `check` use the first of:
+When `--policy` is not given, `server`, `validate`, `check` and `test` use the first of:
 
 1. `$AGENTGUARD_POLICY`.
 2. `configs/default.yaml` in the current folder (the flag's default, so running from a checkout works as before).
 3. The starter policy the [installer](SETUP.md#1-install) writes: `$XDG_CONFIG_HOME/agentguard/default.yaml` (else `~/.config/agentguard/default.yaml`, on macOS too), then `/etc/agentguard/default.yaml` (a root install, and the container image). On Windows, `%APPDATA%\agentguard\default.yaml`.
 
-If none exists, the command stops and lists where it looked. `validate` and `check` print `Using policy file <path> (…)` on stderr when the file wasn't named with `--policy`; the server's startup log always names it (`Loaded policy: <name> from <path> …`).
+If none exists, the command stops and lists where it looked. `validate`, `check` and `test` print `Using policy file <path> (…)` on stderr when the file wasn't named with `--policy`; the server's startup log always names it (`Loaded policy: <name> from <path> …`).
 
 ### Bind behavior
 
@@ -338,6 +339,96 @@ fi
 
 ---
 
+## `agentguard test`
+
+Run a policy against test cases and report which pass. Each case is an action and the verdict the policy must give it. Use it in CI so a policy change that allows or blocks the wrong thing fails the build. No server needed.
+
+### Synopsis
+
+```
+agentguard test [flags] <fixture.yaml | folder>...
+```
+
+Give fixture files, folders, or both. A folder is searched for `*_test.yaml` files; its subfolders are not searched.
+
+### Fixture files
+
+```yaml
+policy: ../default.yaml          # optional; relative to this file's folder
+tenant: ""                       # optional; see below
+tests:
+  - name: plain ls is allowed
+    request: {scope: shell, command: "ls -la", agent_id: dev}
+    expect: ALLOW                    # ALLOW, DENY or REQUIRE_APPROVAL
+    expect_rule: "allow:shell:*"     # optional
+    expect_reason_contains: "shell"  # optional
+  - name: deploy once the tests ran
+    prior: [{scope: shell, command: "make test", agent_id: dev}]
+    request: {scope: shell, command: "make deploy", agent_id: dev}
+    expect: ALLOW
+```
+
+| Key | Meaning |
+|---|---|
+| `policy` | Policy file for every case in this file, relative to the fixture's folder. Without it: `--policy`, else the file the server would load (see [Policy file](#policy-file)). |
+| `tenant` | Tenant to check as. Default `local`. Only the local tenant has a policy here, so any other tenant gets `DENY` with `matched_rule="deny:tenant:not_found"`, as with `check --tenant-id`. |
+| `tests[].name` | Required, and unique within the file. `--run` matches against it. |
+| `tests[].request` | The action, with the `/v1/check` request fields: `scope` (required), `action`, `command`, `path`, `domain`, `url`, `agent_id`, `session_id`, `est_cost`, `meta`. |
+| `tests[].expect` | Required. `ALLOW`, `DENY` or `REQUIRE_APPROVAL`. |
+| `tests[].expect_rule` | Optional. The `matched_rule` the verdict must have. `*` matches any run of characters and everything else is literal, so `allow:shell:ls *` matches only that rule. A default deny has no rule. |
+| `tests[].expect_reason_contains` | Optional. Text the verdict's reason must contain. |
+| `tests[].prior` | Optional. Actions recorded as allowed just now, before the check, for [`require_prior`](POLICY_REFERENCE.md#conditions) conditions. Same fields as `request`; each needs a `scope` and an `action` or a `command`. |
+
+Unknown keys are an error at every level, so a misspelled `expect_rul:` fails the load instead of passing a case that checks nothing.
+
+### Flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--policy <path>` | found automatically | Policy for fixtures without a `policy:` line. A fixture's own `policy:` wins. |
+| `--strict` | `false` | Treat policy load warnings as a load failure (exit `3`), as `validate --strict` does. Without it the warnings are printed as `WARN:` lines on stderr. |
+| `--run <regexp>` | *(all)* | Only run cases whose name matches this Go regular expression. |
+| `--output <fmt>` | `text` | `text`, `json` (one document with `passed`, `failed` and every case), or `junit` (JUnit XML, one `<testsuite>` per fixture file, for CI test-report viewers). |
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Every case passed. |
+| `1` | A case failed, or `--run` matched no case. |
+| `2` | Command-line mistake: no fixture given, unknown flag, bad `--output` or `--run`. |
+| `3` | A fixture or policy could not be loaded (missing file, unknown key, invalid policy, a warning with `--strict`). No case runs. |
+
+### Examples
+
+```bash
+agentguard test configs/tests
+# configs/tests/default_test.yaml (policy configs/default.yaml)
+#   PASS  plain ls is allowed
+#   ...
+# PASS: 73 case(s) passed
+
+agentguard test --run 'claude-code' configs/tests
+
+# A failed case shows what was expected and what the policy said.
+#   FAIL  deploy once the tests ran
+#         want ALLOW, got DENY
+#         rule:   (none: no rule matched)
+#         reason: "No matching allow rule (default deny)"
+# FAIL: 1 of 2 case(s) failed
+
+agentguard test --output junit configs/tests > policy-tests.xml
+```
+
+### Behavior notes
+
+- Every case runs on a fresh engine over the same loaded policy. Cost reserved for a `session_id` in one case does not count in the next, and a case sees no history except its own `prior:` entries.
+- Rate limits are not checked: the server applies them before the policy engine, and `test` only runs the engine. The same is true of `check`.
+- `REQUIRE_APPROVAL` has no `approval_id` here; there is no approval queue.
+- The cases for the policies in this repo are in `configs/tests/`, and CI runs them. See [POLICY_REFERENCE § Testing policies](POLICY_REFERENCE.md#testing-policies).
+
+---
+
 ## `agentguard approve <id>` / `agentguard deny <id>`
 
 POST to `/v1/approve/{id}` or `/v1/deny/{id}`. Used by humans or scripts to resolve `REQUIRE_APPROVAL` decisions.
@@ -516,7 +607,7 @@ Both replace the binaries and keep your policy, and say whether they updated or 
 |---|---|---|
 | `AGENTGUARD_API_KEY` | `server`, `approve`, `deny`, `status`, `audit` (when `--api-key` unset); the MCP gateway and LLM proxy; the SDKs | empty |
 | `AGENTGUARD_URL` | `approve`, `deny`, `status`, `audit` (when `--url` unset); the MCP gateway and LLM proxy (when `--guard-url` unset); the SDKs | `http://localhost:8080` (CLI, SDKs), `http://127.0.0.1:8080` (gateway, proxy) |
-| `AGENTGUARD_POLICY` | `server`, `validate`, `check` (when `--policy` unset) — see [Policy file](#policy-file) | unset |
+| `AGENTGUARD_POLICY` | `server`, `validate`, `check`, `test` (when `--policy` unset) — see [Policy file](#policy-file) | unset |
 | `AGENTGUARD_NO_UPDATE_CHECK` | Every subcommand except `server` (which never checks) — disables the GitHub Releases startup check when set to any value other than `0` | unset |
 
 A flag always wins over its environment variable. When no key is given at all, `approve`, `deny`, `status`, `audit`, the MCP gateway and the LLM proxy use the key [`agentguard setup`](#agentguard-setup) saved (`~/.config/agentguard/api-key`, `%APPDATA%\agentguard\api-key`). The server never picks that file up by itself — a key changes which interfaces it listens on — only through `--api-key-file`.
