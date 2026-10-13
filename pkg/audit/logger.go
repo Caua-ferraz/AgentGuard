@@ -110,6 +110,19 @@ const TransportMCPGateway = "mcp_gateway"
 // produced via the LLM API Proxy (cmd/agentguard-llm-proxy).
 const TransportLLMAPIProxy = "llm_api_proxy"
 
+// The coding-agent hooks (`agentguard hook <agent>`) stamp one transport
+// per agent, so the audit log and dashboard tell them apart.
+const (
+	// TransportClaudeCode: `agentguard hook claude-code`.
+	TransportClaudeCode = "claude_code"
+	// TransportCursor: `agentguard hook cursor`.
+	TransportCursor = "cursor"
+	// TransportGeminiCLI: `agentguard hook gemini-cli`.
+	TransportGeminiCLI = "gemini_cli"
+	// TransportCodexCLI: `agentguard hook codex`.
+	TransportCodexCLI = "codex_cli"
+)
+
 // EffectiveTransport returns e.Transport if set, otherwise the SDK
 // default. Use when reading audit entries that may have been written
 // by an older binary (no Transport field on disk).
