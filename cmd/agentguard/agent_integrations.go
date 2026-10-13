@@ -158,6 +158,13 @@ func geminiSettingsPath() string { return inDir(geminiConfigDir(), "settings.jso
 // connectGemini adds AgentGuard's BeforeTool entry to settings.json. A
 // settings file with comments isn't JSON to setup, so it is left alone.
 func connectGemini(path, exe string, failClosed bool) error {
+	command := hookCommand(exe, geminiAgentID, failClosed)
+	if goos == "windows" {
+		// Gemini CLI runs hooks with PowerShell on Windows, which reads a
+		// quoted path followed by arguments as a string, not a command,
+		// unless it is called with &.
+		command = "& " + command
+	}
 	entry := struct {
 		Matcher string `json:"matcher"`
 		Hooks   []any  `json:"hooks"`
@@ -169,7 +176,7 @@ func connectGemini(path, exe string, failClosed bool) error {
 			Name        string `json:"name"`
 			Timeout     int    `json:"timeout"`
 			Description string `json:"description"`
-		}{"command", hookCommand(exe, geminiAgentID, failClosed), "agentguard", geminiHookTimeoutMs, "Checks tool calls against your AgentGuard policy"}},
+		}{"command", command, "agentguard", geminiHookTimeoutMs, "Checks tool calls against your AgentGuard policy"}},
 	}
 	return connectHooks(path, geminiAgentID, []hookList{{geminiHookList, entry}}, nil)
 }

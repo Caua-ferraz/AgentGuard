@@ -363,3 +363,31 @@ func TestSetupConnectNotesFollowTheFailMode(t *testing.T) {
 		}
 	}
 }
+
+// Gemini CLI runs hooks with PowerShell on Windows, which needs & to run a
+// quoted path.
+func TestGeminiHookCommandOnWindows(t *testing.T) {
+	prev := goos
+	t.Cleanup(func() { goos = prev })
+	for _, c := range []struct{ goos, prefix string }{{"windows", `& "`}, {"linux", `"`}} {
+		goos = c.goos
+		path := filepath.Join(t.TempDir(), "settings.json")
+		if err := connectGemini(path, `C:\Users\Jo Doe\agentguard.exe`, false); err != nil {
+			t.Fatal(err)
+		}
+		root, _ := readJSONObject(path)
+		entries, _ := listAt(root, geminiHookList)
+		var e struct {
+			Hooks []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		}
+		_ = json.Unmarshal(entries[0], &e)
+		if got := e.Hooks[0].Command; !strings.HasPrefix(got, c.prefix) || !strings.HasSuffix(got, " hook gemini-cli") {
+			t.Errorf("%s: command = %q, want it to start with %q", c.goos, got, c.prefix)
+		}
+		if connected, _ := hooksConnected(path, geminiAgentID, [][]string{geminiHookList}); !connected {
+			t.Errorf("%s: not recognised as AgentGuard's hook", c.goos)
+		}
+	}
+}

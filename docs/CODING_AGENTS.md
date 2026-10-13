@@ -149,7 +149,7 @@ Cursor, in `~/.cursor/hooks.json` (with `"failClosed": true` on each entry to fa
 }
 ```
 
-Gemini CLI, in `~/.gemini/settings.json` (the timeout is in milliseconds):
+Gemini CLI, in `~/.gemini/settings.json` (the timeout is in milliseconds; on Windows, where Gemini CLI runs hooks with PowerShell, start the command with `& `):
 
 ```json
 {
