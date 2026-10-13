@@ -79,7 +79,7 @@ Since v1.4.0 the file audit log can be sealed into a hash chain: `agentguard ser
 
 **The key.** Any random string works; `openssl rand -hex 32 > audit-seal.key && chmod 600 audit-seal.key` makes a good one. The server refuses a key file that is missing, empty or readable by every user. Keep a copy somewhere other than the audit host: `verify` needs it, and anyone who has it can forge a valid chain. To change keys, restart the server with the new key file; the entries after the restart are sealed with it, and `verify` needs both (`--key-file old --key-file new`). Without `--audit-seal-key-file` the chain is plain SHA-256 and the server warns at startup: it shows naive edits, but anyone who can write the file can recompute it.
 
-**Anchors.** An anchor is the head of the chain: the `seq` and `hash` of the newest sealed entry. The server publishes one every `--audit-anchor-interval` (default `5m`, `0` turns the periodic one off; skipped when nothing new was sealed), at each rotation and at shutdown:
+**Anchors.** An anchor is the head of the chain: the `seq` and `hash` of the newest sealed entry. The server publishes one every `--audit-anchor-interval` (default `5m`, `0` turns the periodic one off; skipped when nothing new was sealed), at startup, at each rotation and at shutdown:
 
 - a log line, `audit anchor segment=<segment_id> seq=<n> hash=<hex>`, on stderr, so it reaches journald, syslog or whatever collects the server's log;
 - the `agentguard_audit_seal_seq` gauge on `/metrics`;

@@ -447,6 +447,18 @@ func TestSeal_RotationWithGzipAndPruning(t *testing.T) {
 			t.Fatalf("report = %+v break %+v", rep, rep.Break)
 		}
 	})
+	t.Run("a cut archive is caught, not an I/O error", func(t *testing.T) {
+		archive := filepath.Join(dir, rep.Segments[1])
+		orig, _ := os.ReadFile(archive)
+		defer func() { _ = os.WriteFile(archive, orig, 0o600) }()
+		if err := os.WriteFile(archive, orig[:len(orig)/2], 0o600); err != nil {
+			t.Fatal(err)
+		}
+		rep := verify(t, path, VerifyOptions{Keys: [][]byte{testSealKey}})
+		if rep.OK || rep.Break == nil || !strings.Contains(rep.Break.Reason, "can't decompress") {
+			t.Fatalf("report = %+v break %+v", rep, rep.Break)
+		}
+	})
 	t.Run("a broken link between files is caught", func(t *testing.T) {
 		lines := readLines(t, path)
 		var env metaEnvelope

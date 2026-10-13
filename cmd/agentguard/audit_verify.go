@@ -161,8 +161,10 @@ func writeVerifyReport(w io.Writer, path string, rep *audit.VerifyReport) {
 		fmt.Fprintf(w, "Anchor %d:%s: %s\n", a.Seq, shortHash(a.Hash), anchorText(a, rep))
 	}
 	switch {
-	case rep.Break != nil && rep.Break.File != "":
+	case rep.Break != nil && rep.Break.Line > 0:
 		fmt.Fprintf(w, "BROKEN at %s:%d: %s\n", rep.Break.File, rep.Break.Line, rep.Break.Reason)
+	case rep.Break != nil && rep.Break.File != "":
+		fmt.Fprintf(w, "BROKEN in %s: %s\n", rep.Break.File, rep.Break.Reason)
 	case rep.Break != nil:
 		fmt.Fprintf(w, "BROKEN: %s\n", rep.Break.Reason)
 	case !rep.OK:

@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
 	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
@@ -72,6 +73,17 @@ func TestAuditSealFromFlags(t *testing.T) {
 	}
 }
 
+func waitForCond(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met within 5s")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // The full server pipeline (redaction, buffered workers, rotation) writes a
 // chain that verifies.
 func TestBuildAuditPipeline_Sealed(t *testing.T) {
@@ -90,6 +102,13 @@ func TestBuildAuditPipeline_Sealed(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		_ = p.Logger.Log(audit.Entry{AgentID: "bot", Request: policy.ActionRequest{Scope: "shell", Command: "echo secret"}})
 	}
+	// The head is reachable through the buffered and redacting wrappers,
+	// which is how GET /v1/audit/head finds it.
+	h, ok := p.Logger.(audit.SealHeader)
+	if !ok {
+		t.Fatal("the pipeline logger does not report a seal head")
+	}
+	waitForCond(t, func() bool { a, ok := h.SealHead(); return ok && a.Seq == 50 })
 	p.Close()
 
 	rep, err := audit.VerifyChain(auditPath, audit.VerifyOptions{Keys: [][]byte{[]byte("k")}})
