@@ -86,11 +86,18 @@ func (c DecisionCounts) Other() uint64 {
 //
 // Both new fields are additive and omitted when empty, so an older binary
 // reading a newer checkpoint sees exactly the shape it always did.
+//
+// LastSeq and LastHash (v1.4, sealed logs only) are the head of the seal
+// chain when the checkpoint was written. At startup the FileLogger compares
+// them with the end of the live file: a file that ends before them lost
+// entries. Also additive and omitted when empty.
 type Checkpoint struct {
 	Offset    int64           `json:"offset"`
 	AuditSize int64           `json:"audit_size"`
 	FileID    string          `json:"file_id,omitempty"`
 	Counts    *DecisionCounts `json:"counts,omitempty"`
+	LastSeq   uint64          `json:"last_seq,omitempty"`
+	LastHash  string          `json:"last_hash,omitempty"`
 }
 
 // CheckpointPath returns the companion checkpoint file path for an audit
@@ -260,6 +267,12 @@ func ReplayWithCheckpoint(auditPath string, cp *Checkpoint, fn func(Entry)) (Che
 		AuditSize: info.Size(),
 		FileID:    fileIDOf(liveMeta),
 		Counts:    &counts,
+	}
+	if cp != nil {
+		// Replay does not read the seal chain; carry the recorded head
+		// forward so the startup checkpoint write does not erase it. The
+		// FileLogger rewrites it with the current head on rotation and Close.
+		next.LastSeq, next.LastHash = cp.LastSeq, cp.LastHash
 	}
 	return next, firstErr
 }

@@ -97,6 +97,12 @@ func AddAuditReplayEntries(n uint64)  { Default.AddAuditReplayEntries(n) }
 func IncAuditRotation()               { Default.IncAuditRotation() }
 func AuditReplayEntriesTotal() uint64 { return Default.AuditReplayEntriesTotal() }
 func AuditRotationsTotal() uint64     { return Default.AuditRotationsTotal() }
+func SetAuditSealSeq(seq uint64)      { Default.SetAuditSealSeq(seq) }
+func AuditSealSeq() uint64            { return Default.AuditSealSeq() }
+func IncAuditSealTailMismatch()       { Default.IncAuditSealTailMismatch() }
+func AuditSealTailMismatchTotal() uint64 {
+	return Default.AuditSealTailMismatchTotal()
+}
 func IncAuditBufferedDroppedToOverflow() {
 	Default.IncAuditBufferedDroppedToOverflow()
 }

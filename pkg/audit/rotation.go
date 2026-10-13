@@ -52,14 +52,7 @@ type RotationConfig struct {
 // configuration is captured at construction; mutating it after the fact has
 // no effect.
 func NewFileLoggerWithRotation(path string, cfg RotationConfig) (*FileLogger, error) {
-	l, err := NewFileLogger(path)
-	if err != nil {
-		return nil, err
-	}
-	l.mu.Lock()
-	l.rotCfg = cfg
-	l.mu.Unlock()
-	return l, nil
+	return NewFileLoggerWithOptions(path, FileLoggerOptions{Rotation: cfg})
 }
 
 // rotateLocked closes the live file, renames it to a timestamped archive,
@@ -175,9 +168,16 @@ func (l *FileLogger) rotateLocked() error {
 	l.enc = json.NewEncoder(f)
 
 	env := metaEnvelope{Meta: NewMetaRecord(filepath.Base(finalArchive))}
+	if l.seal != nil {
+		// chain_prev/chain_seq link the new file to the last entry of the
+		// archive; seq carries on from there.
+		l.seal.meta(&env.Meta)
+	}
 	if err := l.enc.Encode(env); err != nil {
 		return fmt.Errorf("write post-rotate header: %w", err)
 	}
+	l.segID = env.Meta.SegmentID
+	l.publishAnchorLocked()
 
 	// Point the checkpoint at the new live file BEFORE pruning: a checkpoint
 	// that still named a file prune is about to delete would make the next

@@ -37,11 +37,24 @@ var metaLinePrefix = []byte(`{"_meta"`)
 // rotations in a row) can share a timestamp, and replay then resumed in the
 // wrong file. Files written before v1.4 have no SegmentID; fileIDOf falls
 // back to CreatedAt for them, so existing checkpoints keep matching.
+//
+// The seal fields (since v1.4) are set only when the server runs with
+// --audit-seal (see seal.go). Seal says how the entries after this line are
+// sealed; ChainPrev and ChainSeq are the hash and seq of the last sealed
+// entry before this line (in the previous file, for a header written at
+// rotation), which is what links the files of a chain together; NodeID is
+// the writing server's --node-id. A `_meta` line with these fields can also
+// appear in the middle of a file: the server writes one when it starts
+// sealing an existing file. All four are omitted when sealing is off.
 type MetaRecord struct {
 	SchemaVersion int       `json:"schema_version"`
 	CreatedAt     time.Time `json:"created_at"`
 	SegmentID     string    `json:"segment_id,omitempty"`
 	RotatedFrom   string    `json:"rotated_from,omitempty"`
+	Seal          *SealInfo `json:"seal,omitempty"`
+	ChainPrev     string    `json:"chain_prev,omitempty"`
+	ChainSeq      uint64    `json:"chain_seq,omitempty"`
+	NodeID        string    `json:"node_id,omitempty"`
 }
 
 // NewMetaRecord returns the header for a new audit file: the current schema
@@ -95,6 +108,14 @@ type Entry struct {
 	Result     policy.CheckResult   `json:"result"`
 	DurationMs int64                `json:"duration_ms"`
 	Transport  string               `json:"transport,omitempty"`
+	// Seq, PrevHash and Hash are the tamper-evident seal (v1.4, written only
+	// with --audit-seal; see seal.go). The FileLogger sets them; whatever a
+	// caller puts here is overwritten, or cleared when sealing is off. Hash
+	// must stay the last field: it is computed over the line without it.
+	// Additive and omitted when empty; schema_version stays 2.
+	Seq      uint64 `json:"seq,omitempty"`
+	PrevHash string `json:"prev_hash,omitempty"`
+	Hash     string `json:"hash,omitempty"`
 }
 
 // TransportSDK is the canonical transport string for SDK callers
@@ -190,6 +211,19 @@ type FileLogger struct {
 	cpEnabled bool
 	cpCounts  DecisionCounts
 	cpFileID  string
+
+	// segID is the live file's _meta.segment_id ("" for a headerless
+	// legacy file). seal is the hash-chain state, nil when sealing is off.
+	segID string
+	seal  *sealer
+}
+
+// FileLoggerOptions configures NewFileLoggerWithOptions. The zero value is
+// NewFileLogger: no rotation, no sealing.
+type FileLoggerOptions struct {
+	Rotation RotationConfig
+	// Seal, when set, seals every entry into a hash chain (see seal.go).
+	Seal *SealConfig
 }
 
 // NewFileLogger creates a new file-based audit logger.
@@ -200,6 +234,17 @@ type FileLogger struct {
 // pkg/migrate/v040_to_v041 package rewrites legacy (headerless, v1) files.
 // Query() tolerates both cases transparently.
 func NewFileLogger(path string) (*FileLogger, error) {
+	return NewFileLoggerWithOptions(path, FileLoggerOptions{})
+}
+
+// NewFileLoggerWithOptions is NewFileLogger with rotation and sealing.
+//
+// With opts.Seal set, a new file's header carries the seal fields. An
+// existing file continues the chain its last sealed entry left off (or
+// starts one, when it has none): the logger reads the file's end, warns if
+// it ends before the seq the replay checkpoint recorded, and appends a
+// `_meta` line saying how the entries after it are sealed.
+func NewFileLoggerWithOptions(path string, opts FileLoggerOptions) (*FileLogger, error) {
 	// Determine if the file pre-exists and has content BEFORE opening in
 	// append mode. os.Stat returns ENOENT for missing files, which is fine.
 	needsHeader := false
@@ -217,17 +262,33 @@ func NewFileLogger(path string) (*FileLogger, error) {
 	}
 
 	l := &FileLogger{
-		file: f,
-		enc:  json.NewEncoder(f),
+		file:   f,
+		enc:    json.NewEncoder(f),
+		rotCfg: opts.Rotation,
+	}
+	if opts.Seal != nil {
+		l.seal = newSealer(*opts.Seal)
 	}
 
 	if needsHeader {
 		env := metaEnvelope{Meta: NewMetaRecord("")}
+		if l.seal != nil {
+			l.seal.meta(&env.Meta)
+		}
 		// Write the meta line directly (not through l.enc) so a failure here
 		// surfaces immediately rather than being buffered.
 		if err := l.enc.Encode(env); err != nil {
 			_ = f.Close()
 			return nil, fmt.Errorf("write schema header: %w", err)
+		}
+		l.segID = env.Meta.SegmentID
+	} else if l.seal != nil {
+		if m, err := ReadMeta(path); err == nil && m != nil {
+			l.segID = m.SegmentID
+		}
+		if err := l.resumeSeal(path); err != nil {
+			_ = f.Close()
+			return nil, err
 		}
 	}
 
@@ -250,8 +311,29 @@ func (l *FileLogger) Log(entry Entry) error {
 		entry.Timestamp = time.Now().UTC()
 	}
 
-	if err := l.enc.Encode(entry); err != nil {
-		return err
+	if l.seal != nil {
+		line, seq, sum, err := l.seal.line(entry)
+		if err != nil {
+			return err
+		}
+		// One write per line, so O_APPEND keeps the line whole. A short
+		// write leaves a cut line; end it so the next entry starts clean
+		// (verify reports the cut line, and the chain skips it because it
+		// only advances on success).
+		if n, err := l.file.Write(line); err != nil {
+			if n > 0 {
+				_, _ = l.file.Write([]byte{'\n'})
+			}
+			return err
+		}
+		l.seal.advance(seq, sum, l.segID)
+	} else {
+		// The seal fields belong to the logger; with sealing off they stay
+		// off the line, so the output is what it was before sealing existed.
+		entry.Seq, entry.PrevHash, entry.Hash = 0, "", ""
+		if err := l.enc.Encode(entry); err != nil {
+			return err
+		}
 	}
 	if l.cpEnabled {
 		l.cpCounts.add(entry.Result.Decision)
@@ -419,6 +501,7 @@ func matchesFilter(entry Entry, filter QueryFilter) bool {
 func (l *FileLogger) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.publishAnchorLocked()
 	if l.cpEnabled {
 		l.writeCheckpointLocked()
 	}

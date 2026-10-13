@@ -52,6 +52,9 @@ func (l *FileLogger) writeCheckpointLocked() {
 	}
 	counts := l.cpCounts
 	cp := Checkpoint{Offset: info.Size(), AuditSize: info.Size(), FileID: l.cpFileID, Counts: &counts}
+	if l.seal != nil {
+		cp.LastSeq, cp.LastHash = l.seal.seq, l.seal.last
+	}
 	if err := WriteCheckpoint(l.file.Name(), cp); err != nil {
 		log.Printf("WARN audit: replay checkpoint not written: %v", err)
 	}
