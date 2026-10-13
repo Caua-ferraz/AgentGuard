@@ -29,7 +29,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
 	"github.com/Caua-ferraz/AgentGuard/pkg/migrate"
@@ -247,10 +246,7 @@ func writeRewritten(src, dst string) error {
 	metaLine := struct {
 		Meta audit.MetaRecord `json:"_meta"`
 	}{
-		Meta: audit.MetaRecord{
-			SchemaVersion: audit.CurrentSchemaVersion,
-			CreatedAt:     time.Now().UTC(),
-		},
+		Meta: audit.NewMetaRecord(""),
 	}
 	b, err := json.Marshal(metaLine)
 	if err != nil {

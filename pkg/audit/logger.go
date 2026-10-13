@@ -3,6 +3,8 @@ package audit
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,10 +30,37 @@ var metaLinePrefix = []byte(`{"_meta"`)
 // MetaRecord is the shape of the first line of a schema-v2 audit file.
 // Optional RotatedFrom is set when the file is the successor in a rotation
 // chain — the replay walker follows it to stitch history back together.
+//
+// SegmentID (since v1.4) is a random identifier for this file, used as the
+// checkpoint's FileID. CreatedAt alone is not unique: on a coarse clock two
+// files created in quick succession (a rotation right after startup, or two
+// rotations in a row) can share a timestamp, and replay then resumed in the
+// wrong file. Files written before v1.4 have no SegmentID; fileIDOf falls
+// back to CreatedAt for them, so existing checkpoints keep matching.
 type MetaRecord struct {
 	SchemaVersion int       `json:"schema_version"`
 	CreatedAt     time.Time `json:"created_at"`
+	SegmentID     string    `json:"segment_id,omitempty"`
 	RotatedFrom   string    `json:"rotated_from,omitempty"`
+}
+
+// NewMetaRecord returns the header for a new audit file: the current schema
+// version, the creation time, a fresh SegmentID, and rotatedFrom (the
+// predecessor's base name, or "" for a file that starts a chain).
+func NewMetaRecord(rotatedFrom string) MetaRecord {
+	return MetaRecord{
+		SchemaVersion: CurrentSchemaVersion,
+		CreatedAt:     time.Now().UTC(),
+		SegmentID:     newSegmentID(),
+		RotatedFrom:   rotatedFrom,
+	}
+}
+
+// newSegmentID returns 16 random bytes, hex-encoded.
+func newSegmentID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:]) // crypto/rand.Read does not return an error since Go 1.24
+	return hex.EncodeToString(b[:])
 }
 
 // metaEnvelope is the on-disk wrapper: the v2 meta line is literally
@@ -193,10 +222,7 @@ func NewFileLogger(path string) (*FileLogger, error) {
 	}
 
 	if needsHeader {
-		env := metaEnvelope{Meta: MetaRecord{
-			SchemaVersion: CurrentSchemaVersion,
-			CreatedAt:     time.Now().UTC(),
-		}}
+		env := metaEnvelope{Meta: NewMetaRecord("")}
 		// Write the meta line directly (not through l.enc) so a failure here
 		// surfaces immediately rather than being buffered.
 		if err := l.enc.Encode(env); err != nil {

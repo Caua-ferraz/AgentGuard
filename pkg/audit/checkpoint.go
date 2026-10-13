@@ -71,8 +71,9 @@ func (c DecisionCounts) Other() uint64 {
 //
 // Offset and AuditSize describe the live audit file at the time the
 // checkpoint was written. FileID identifies WHICH file they describe: it is
-// the live file's schema-v2 `_meta.created_at`, which rotation rewrites for
-// every new live file. A boot whose live file carries a different FileID
+// the live file's schema-v2 `_meta.segment_id` (or, for a file written before
+// v1.4, its `_meta.created_at`), which rotation rewrites for every new live
+// file. A boot whose live file carries a different FileID
 // knows the log rotated in between and follows the `_meta.rotated_from`
 // chain back to the checkpointed segment rather than trusting a byte offset
 // into an unrelated file. FileID is empty for legacy headerless files, in
@@ -197,8 +198,9 @@ func ReplayFrom(auditPath string, cp *Checkpoint, fn func(Entry)) (int64, error)
 //  1. cp nil, or cp without Counts (legacy checkpoint): full replay of the
 //     live file from byte 0. The one-time cost re-establishes the lifetime
 //     tally; every later boot resumes.
-//  2. cp.FileID set and equal to the live file's `_meta.created_at`: same
-//     file, resume at cp.Offset.
+//  2. cp.FileID set and equal to the live file's identity (`_meta.segment_id`,
+//     or `_meta.created_at` before v1.4; see fileIDOf): same file, resume at
+//     cp.Offset.
 //  3. cp.FileID set but different: the log rotated since the checkpoint.
 //     Walk `_meta.rotated_from` from the live file back through the
 //     archives (gzip or plain). The archive whose header matches cp.FileID
@@ -331,10 +333,17 @@ func reverseSegments(s []replaySegment) {
 	}
 }
 
-// fileIDOf derives the checkpoint identity of a segment from its header.
+// fileIDOf derives the checkpoint identity of a segment from its header: its
+// SegmentID, or for a file written before v1.4, its CreatedAt timestamp.
 // Empty for headerless (legacy) files.
 func fileIDOf(m *MetaRecord) string {
-	if m == nil || m.CreatedAt.IsZero() {
+	if m == nil {
+		return ""
+	}
+	if m.SegmentID != "" {
+		return m.SegmentID
+	}
+	if m.CreatedAt.IsZero() {
 		return ""
 	}
 	return m.CreatedAt.UTC().Format(time.RFC3339Nano)
