@@ -532,6 +532,12 @@ a health check), 2 command-line mistake.
 // ── audit ────────────────────────────────────────────────────────────────
 
 func runAuditCmd(args []string) int {
+	// `audit verify` works on files, not on a server, and has flags of its
+	// own; it is told apart before the query flags are parsed (which would
+	// reject "verify" as an unexpected argument).
+	if len(args) > 0 && args[0] == "verify" {
+		return runAuditVerifyCmd(args[1:])
+	}
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
 	serverFlag := addServerURLFlags(fs)
 	var q auditQuery
@@ -544,9 +550,13 @@ func runAuditCmd(args []string) int {
 	key := fs.String("api-key", "", "Bearer token. Env: AGENTGUARD_API_KEY, then the key agentguard setup saved")
 	usage := func(w io.Writer) {
 		fmt.Fprint(w, `Usage: agentguard audit [flags]
+       agentguard audit verify [flags]
 
 Query the audit log of a running AgentGuard server (newest first),
 optionally filtered by agent, decision, scope, or transport.
+
+'agentguard audit verify' checks a sealed audit log (server --audit-seal)
+for tampering, offline; see 'agentguard audit verify -h'.
 
 `)
 		clihelp.WriteFlags(w, fs, urlAlias)
@@ -554,6 +564,7 @@ optionally filtered by agent, decision, scope, or transport.
 Examples:
   agentguard audit --decision DENY --limit 20
   agentguard audit --agent my-bot --scope shell --order asc
+  agentguard audit verify --audit-log audit.jsonl --key-file seal.key
 
 Exit status: 0 success (also when nothing matches), 1 the server refused or
 couldn't be reached, 2 command-line mistake.
