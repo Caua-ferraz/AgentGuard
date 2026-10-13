@@ -1,0 +1,70 @@
+# Test cases for configs/examples/trading-bot.yaml. Run them with:
+#
+#   agentguard test configs/tests
+
+policy: ../examples/trading-bot.yaml
+
+tests:
+  # --- Network ---
+  # The policy's `domain: "*"` deny runs before its allow list, so every
+  # request that carries a domain is denied, the listed APIs included. The
+  # policy's header comment explains this; these cases pin it down.
+  - name: the catch-all deny also blocks a listed API
+    request: {scope: network, domain: api.alpaca.markets, agent_id: bot}
+    expect: DENY
+    expect_rule: "deny:network:*"
+
+  - name: an unlisted host is denied
+    request: {scope: network, domain: api.example.com, agent_id: bot}
+    expect: DENY
+    expect_reason_contains: "whitelisted financial APIs"
+
+  # --- Shell ---
+  - name: a market data script is allowed
+    request: {scope: shell, command: "python scripts/fetch_prices.py", agent_id: bot}
+    expect: ALLOW
+
+  - name: placing a trade needs approval
+    request: {scope: shell, command: "python scripts/execute_trade.py --buy AAPL 10", agent_id: bot}
+    expect: REQUIRE_APPROVAL
+
+  - name: raw curl is denied
+    request: {scope: shell, command: "curl https://api.binance.com/api/v3/order", agent_id: bot}
+    expect: DENY
+    expect_reason_contains: "sanctioned scripts"
+
+  - name: installing packages is denied
+    request: {scope: shell, command: "pip install ccxt", agent_id: bot}
+    expect: DENY
+
+  - name: any other script is denied
+    request: {scope: shell, command: "python scripts/withdraw.py", agent_id: bot}
+    expect: DENY
+
+  # --- Cost ---
+  - name: a small trade is allowed
+    request: {scope: cost, est_cost: 100, session_id: day1, agent_id: bot}
+    expect: ALLOW
+
+  - name: a trade over the per-action limit is denied
+    request: {scope: cost, est_cost: 750, session_id: day1, agent_id: bot}
+    expect: DENY
+    expect_rule: "deny:cost:max_per_action"
+
+  # --- Filesystem ---
+  - name: reading market data is allowed
+    request: {scope: filesystem, action: read, path: "./data/prices.csv", agent_id: bot}
+    expect: ALLOW
+
+  - name: writing logs is allowed
+    request: {scope: filesystem, action: write, path: "./logs/today.log", agent_id: bot}
+    expect: ALLOW
+
+  - name: the bot cannot change its own configuration
+    request: {scope: filesystem, action: write, path: "./config/limits.yaml", agent_id: bot}
+    expect: DENY
+    expect_reason_contains: "own configuration"
+
+  - name: deleting is denied
+    request: {scope: filesystem, action: delete, path: "./logs/today.log", agent_id: bot}
+    expect: DENY

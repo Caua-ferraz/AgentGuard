@@ -1,0 +1,200 @@
+# Test cases for configs/default.yaml. Run them with:
+#
+#   agentguard test configs/tests
+#
+# Each case is an action and the verdict the policy must give it. When you
+# change the policy, change or add a case here too, so CI catches the
+# change you did not mean to make. See docs/POLICY_REFERENCE.md § Testing
+# policies.
+
+policy: ../default.yaml
+
+tests:
+  # --- Shell: the sandbox rules ---
+  - name: plain ls is allowed
+    request: {scope: shell, command: "ls -la", agent_id: dev}
+    expect: ALLOW
+    expect_rule: "allow:shell:ls *"
+
+  - name: git is allowed
+    request: {scope: shell, command: "git status", agent_id: dev}
+    expect: ALLOW
+    expect_rule: "allow:shell:git *"
+
+  - name: go test is allowed
+    request: {scope: shell, command: "go test ./...", agent_id: dev}
+    expect: ALLOW
+
+  - name: rm -rf needs approval
+    request: {scope: shell, command: "rm -rf ./build", agent_id: dev}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:shell:rm -rf *"
+
+  - name: sudo needs approval
+    request: {scope: shell, command: "sudo apt install jq", agent_id: dev}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:shell:sudo *"
+
+  - name: inline python needs approval
+    request: {scope: shell, command: "python -c 'import os'", agent_id: dev}
+    expect: REQUIRE_APPROVAL
+
+  - name: raw disk reads are denied
+    request: {scope: shell, command: "dd if=/dev/sda of=disk.img", agent_id: dev}
+    expect: DENY
+    expect_rule: "deny:shell:dd if=/dev/*"
+    expect_reason_contains: "Raw disk operations are blocked"
+
+  - name: a command with no allow rule is denied
+    request: {scope: shell, command: "curl https://example.com", agent_id: dev}
+    expect: DENY
+    expect_reason_contains: "default deny"
+
+  # --- Shell: compound commands are checked one command at a time ---
+  - name: an allowed command cannot smuggle rm -rf after a semicolon
+    request: {scope: shell, command: "ls /tmp; rm -rf /", agent_id: dev}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:shell:rm -rf *"
+
+  - name: ls; rm -rf / is denied because a bare ls has no allow rule
+    # "ls *" needs an argument after ls, so the first command already fails.
+    request: {scope: shell, command: "ls; rm -rf /", agent_id: dev}
+    expect: DENY
+    expect_reason_contains: 'command 1 of 2: "ls"'
+
+  - name: a pipe between two allowed commands is allowed
+    request: {scope: shell, command: "ls /tmp | grep x", agent_id: dev}
+    expect: ALLOW
+
+  - name: an allowed command chained to an unknown one is denied
+    request: {scope: shell, command: "echo ok && curl https://example.com", agent_id: dev}
+    expect: DENY
+
+  - name: a redirection into /etc is checked as a filesystem write
+    request: {scope: shell, command: "echo hi > /etc/hosts", agent_id: dev}
+    expect: DENY
+    expect_rule: "deny:filesystem:write"
+
+  - name: a redirection into /tmp is allowed
+    request: {scope: shell, command: "echo hi > /tmp/out.txt", agent_id: dev}
+    expect: ALLOW
+
+  # --- Filesystem ---
+  - name: reading the workspace is allowed
+    request: {scope: filesystem, action: read, path: "./workspace/notes.md", agent_id: dev}
+    expect: ALLOW
+
+  - name: deleting any file is denied
+    request: {scope: filesystem, action: delete, path: "./workspace/notes.md", agent_id: dev}
+    expect: DENY
+    expect_reason_contains: "File deletion is not permitted"
+
+  - name: writing to a system folder is denied
+    request: {scope: filesystem, action: write, path: "/etc/hosts", agent_id: dev}
+    expect: DENY
+    expect_reason_contains: "system directories"
+
+  - name: writing to ssh keys is denied
+    request: {scope: filesystem, action: write, path: "/home/alice/.ssh/authorized_keys", agent_id: dev}
+    expect: DENY
+    expect_reason_contains: "credential directories"
+
+  - name: reading outside the workspace is denied
+    request: {scope: filesystem, action: read, path: "/home/alice/notes.md", agent_id: dev}
+    expect: DENY
+
+  - name: a path that climbs out with .. is denied
+    request: {scope: filesystem, action: read, path: "./workspace/../../etc/passwd", agent_id: dev}
+    expect: DENY
+    expect_rule: "deny:filesystem:path_traversal"
+
+  # --- Network ---
+  - name: the OpenAI API is allowed
+    request: {scope: network, domain: api.openai.com, agent_id: dev}
+    expect: ALLOW
+
+  - name: a googleapis subdomain is allowed
+    request: {scope: network, domain: storage.googleapis.com, agent_id: dev}
+    expect: ALLOW
+
+  - name: the googleapis apex is not covered by the wildcard
+    request: {scope: network, domain: googleapis.com, agent_id: dev}
+    expect: DENY
+
+  - name: production hosts are denied
+    request: {scope: network, domain: db.production.internal, agent_id: dev}
+    expect: DENY
+    expect_reason_contains: "Production access"
+
+  - name: an unknown domain is denied
+    request: {scope: network, domain: example.com, agent_id: dev}
+    expect: DENY
+
+  # --- Browser ---
+  - name: wikipedia is allowed in the browser
+    request: {scope: browser, domain: en.wikipedia.org, agent_id: dev}
+    expect: ALLOW
+
+  - name: banking sites are denied in the browser
+    request: {scope: browser, domain: www.bank.com, agent_id: dev}
+    expect: DENY
+    expect_reason_contains: "Banking sites"
+
+  # --- MCP tools ---
+  - name: an MCP read tool is allowed
+    request: {scope: mcp_tool, command: "fs:read_text_file", agent_id: dev}
+    expect: ALLOW
+
+  - name: an MCP write tool is denied
+    request: {scope: mcp_tool, command: "fs:write_file", agent_id: dev}
+    expect: DENY
+    expect_rule: "deny:mcp_tool:*:write_file"
+
+  - name: a GitHub MCP tool needs approval
+    request: {scope: mcp_tool, command: "github:list_issues", agent_id: dev}
+    expect: REQUIRE_APPROVAL
+
+  - name: an execute_ MCP tool is denied in any namespace
+    request: {scope: mcp_tool, command: "db:execute_sql", agent_id: dev}
+    expect: DENY
+
+  # --- The claude-code agent block replaces the sandbox rules ---
+  - name: claude-code may run any everyday command
+    request: {scope: shell, command: "python -m pytest -q", agent_id: claude-code}
+    expect: ALLOW
+    expect_rule: "allow:shell:*"
+
+  - name: claude-code needs approval to force-push
+    request: {scope: shell, command: "git push --force origin main", agent_id: claude-code}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:shell:git push --force*"
+
+  - name: claude-code needs approval for rm -rf hidden after a semicolon
+    request: {scope: shell, command: "npm test; rm -rf ~", agent_id: claude-code}
+    expect: REQUIRE_APPROVAL
+
+  - name: claude-code may write project files
+    request: {scope: filesystem, action: write, path: "/home/alice/project/main.go", agent_id: claude-code}
+    expect: ALLOW
+
+  - name: claude-code may not read ssh keys
+    request: {scope: filesystem, action: read, path: "/home/alice/.ssh/id_ed25519", agent_id: claude-code}
+    expect: DENY
+    expect_reason_contains: "off-limits to Claude Code"
+
+  - name: claude-code needs approval to read a .env file
+    request: {scope: filesystem, action: read, path: "/home/alice/project/.env", agent_id: claude-code}
+    expect: REQUIRE_APPROVAL
+
+  - name: claude-code may reach any domain
+    request: {scope: network, domain: example.com, agent_id: claude-code}
+    expect: ALLOW
+
+  - name: claude-code may not reach the cloud metadata endpoint
+    request: {scope: network, domain: 169.254.169.254, agent_id: claude-code}
+    expect: DENY
+    expect_reason_contains: "metadata"
+
+  - name: claude-code keeps the base MCP rules
+    request: {scope: mcp_tool, command: "fs:write_file", agent_id: claude-code}
+    expect: DENY

@@ -152,6 +152,10 @@ policy_suite() {
   if [ "$any" -eq 0 ]; then
     echo "  no policy files found under configs/ — nothing to validate" >&2
   fi
+  if [ -d configs/tests ]; then
+    echo "  test configs/tests"
+    "$AGENTGUARD_BIN" test configs/tests
+  fi
 }
 
 python_suite() {
