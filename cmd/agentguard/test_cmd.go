@@ -387,17 +387,15 @@ func runCase(fx loadedFixture, c fixtureCase) caseResult {
 		// than a pass.
 		res = policy.CheckResult{Decision: "ERROR", Reason: err.Error()}
 	} else {
-		if len(c.Prior) > 0 {
-			// The server records each ALLOW into this index after the
-			// verdict; seeding it is what makes require_prior testable
-			// offline.
-			idx := policy.NewPriorActionIndex(0)
-			now := time.Now()
-			for _, p := range c.Prior {
-				idx.Record(tenant, p.AgentID, p.Scope, p.Action, p.Command, now)
-			}
-			engine.SetPriorActionQuerier(idx)
+		// The server records each ALLOW into an index like this one and
+		// answers require_prior from it. Here it holds only the case's
+		// prior: actions, so the history a case sees is the one it states.
+		idx := policy.NewPriorActionIndex(0)
+		now := time.Now()
+		for _, p := range c.Prior {
+			idx.Record(tenant, p.AgentID, p.Scope, p.Action, p.Command, now)
 		}
+		engine.SetPriorActionQuerier(idx)
 		res = engine.Check(req, tenant)
 		_ = engine.Close()
 	}
