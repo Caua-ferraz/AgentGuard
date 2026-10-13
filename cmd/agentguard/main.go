@@ -79,6 +79,8 @@ func run(args []string) int {
 		// 3, not 2. Stdin/stdout/stderr are passed explicitly so the
 		// function is unit-testable from check_cmd_test.go.
 		return runCheck(rest, os.Stdin, os.Stdout, os.Stderr)
+	case "test":
+		return runTestCmd(rest)
 	case "approve", "deny":
 		return runResolveCmd(name, rest)
 	case "status":

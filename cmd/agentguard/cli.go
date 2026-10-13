@@ -44,6 +44,7 @@ var commands = []command{
 	{Name: "server", Aliases: []string{"serve"}, Group: "Set up and run", Summary: "Start AgentGuard: policy engine, approvals, audit log, dashboard"},
 	{Name: "validate", Group: "Policies", Summary: "Check that a policy file loads"},
 	{Name: "check", Group: "Policies", Summary: "Evaluate one action against a policy file (no server needed)"},
+	{Name: "test", Group: "Policies", Summary: "Run a policy against test cases in YAML files (for CI)"},
 	{Name: "tenant", Group: "Policies", Summary: "Manage per-tenant policies in the store (put|list|rm)"},
 	{Name: "status", Group: "Work with a running server", Summary: "Show server health and pending approvals"},
 	{Name: "approve", Group: "Work with a running server", Summary: "Approve a pending action by ID"},
