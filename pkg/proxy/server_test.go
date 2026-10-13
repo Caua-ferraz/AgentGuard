@@ -2192,6 +2192,26 @@ func TestDashboard_RenderTransportChip(t *testing.T) {
 	}
 }
 
+// Every transport AgentGuard's own binaries stamp gets its own chip, a
+// legend entry and a place in the whitelist, so none renders as
+// "unknown".
+func TestDashboard_EveryKnownTransportHasAChip(t *testing.T) {
+	for _, tr := range []string{
+		audit.TransportSDK, audit.TransportMCPGateway, audit.TransportLLMAPIProxy,
+		audit.TransportClaudeCode, audit.TransportCursor, audit.TransportGeminiCLI, audit.TransportCodexCLI,
+	} {
+		for _, marker := range []string{
+			".transport-chip." + tr + " {",
+			`<span class="transport-chip ` + tr + `">` + tr + `</span>`,
+			"'" + tr + "'",
+		} {
+			if !strings.Contains(dashboardHTML, marker) {
+				t.Errorf("transport %q: dashboardHTML lacks %q", tr, marker)
+			}
+		}
+	}
+}
+
 // TestHandleCheck_TransportPassesThroughUnknownValues confirms a
 // caller stamping a value the server doesn't recognise (e.g. a
 // future "azure_ai_proxy") is preserved verbatim on the entry.

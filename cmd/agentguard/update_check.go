@@ -100,7 +100,7 @@ func waitForUpdateCheck(done <-chan struct{}, timeout time.Duration) {
 //     server makes no outbound connection of its own.
 //   - Help, no command at all, or a mistyped command: nothing ran that the
 //     notice could accompany, and help should print without a network wait.
-//   - `hook`: it runs before every Claude Code tool call, so it must answer
+//   - `hook`: it runs before every coding agent tool call, so it must answer
 //     in milliseconds, and nobody reads its stderr.
 //   - Dev builds: an untagged version string ("dev" anywhere in it), or the
 //     "dev" commit placeholder on a binary whose Go build info carries no

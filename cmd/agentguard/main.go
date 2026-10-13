@@ -519,7 +519,7 @@ func runAuditCmd(args []string) int {
 	fs.StringVar(&q.Agent, "agent", "", "Filter by agent ID")
 	fs.StringVar(&q.Decision, "decision", "", "Filter by decision (ALLOW, DENY, REQUIRE_APPROVAL)")
 	fs.StringVar(&q.Scope, "scope", "", "Filter by scope (shell, filesystem, network, browser, data, cost, mcp_tool)")
-	fs.StringVar(&q.Transport, "transport", "", "Filter by integration path (sdk|mcp_gateway|llm_api_proxy)")
+	fs.StringVar(&q.Transport, "transport", "", "Filter by integration path (sdk|mcp_gateway|llm_api_proxy, or a coding-agent hook: claude_code|cursor|gemini_cli|codex_cli)")
 	fs.IntVar(&q.Limit, "limit", 50, "Max entries to return")
 	fs.StringVar(&q.Order, "order", "desc", "Entry order: desc (newest first) or asc (oldest first)")
 	key := fs.String("api-key", "", "Bearer token. Env: AGENTGUARD_API_KEY, then the key agentguard setup saved")

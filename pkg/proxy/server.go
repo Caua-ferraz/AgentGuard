@@ -261,7 +261,8 @@ type PendingAction struct {
 // AuditEvent is sent over SSE to dashboard clients for any check result.
 //
 // Transport identifies the integration path that produced the event
-// ("sdk", "mcp_gateway", "llm_api_proxy"). Defaults to "sdk" on the wire
+// ("sdk", "mcp_gateway", "llm_api_proxy", or a coding-agent hook's
+// "claude_code", "cursor", "gemini_cli", "codex_cli"). Defaults to "sdk" on the wire
 // when unset so dashboard JS does not need a fallback. Older SSE
 // consumers see the field as an extra (ignored) JSON key.
 //
@@ -2277,6 +2278,10 @@ var dashboardHTML = `<!DOCTYPE html>
     .transport-chip.sdk { background: #6c757d; }
     .transport-chip.mcp_gateway { background: #0ea5e9; }
     .transport-chip.llm_api_proxy { background: #a855f7; }
+    .transport-chip.claude_code { background: #c2410c; }
+    .transport-chip.cursor { background: #0f766e; }
+    .transport-chip.gemini_cli { background: #2563eb; }
+    .transport-chip.codex_cli { background: #db2777; }
     .transport-chip.unknown { background: #94a3b8; }
     .transport-legend { font-size: 11px; color: #666; display: flex; gap: 8px; align-items: center; }
     .transport-legend .transport-chip { font-size: 10px; padding: 1px 6px; }
@@ -2298,6 +2303,10 @@ var dashboardHTML = `<!DOCTYPE html>
       <span class="transport-chip sdk">sdk</span>
       <span class="transport-chip mcp_gateway">mcp_gateway</span>
       <span class="transport-chip llm_api_proxy">llm_api_proxy</span>
+      <span class="transport-chip claude_code">claude_code</span>
+      <span class="transport-chip cursor">cursor</span>
+      <span class="transport-chip gemini_cli">gemini_cli</span>
+      <span class="transport-chip codex_cli">codex_cli</span>
     </span>
   </div>
   <div class="stats">
@@ -2338,7 +2347,7 @@ var dashboardHTML = `<!DOCTYPE html>
     // Whitelist of known transport tags. Any other value renders with
     // a neutral 'unknown' chip class so an unexpected gateway can't
     // inject CSS class names through the SSE / audit-query path.
-    const KNOWN_TRANSPORTS = ['sdk', 'mcp_gateway', 'llm_api_proxy'];
+    const KNOWN_TRANSPORTS = ['sdk', 'mcp_gateway', 'llm_api_proxy', 'claude_code', 'cursor', 'gemini_cli', 'codex_cli'];
     function transportClass(t) {
       return KNOWN_TRANSPORTS.indexOf(t) >= 0 ? t : 'unknown';
     }
