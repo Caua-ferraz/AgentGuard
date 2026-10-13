@@ -1288,7 +1288,7 @@ func (e *Engine) evalScope(rules []RuleSet, req ActionRequest, tenantID string, 
 		// 1. Check deny rules first
 		if kinds&ruleKindDeny != 0 {
 			for _, rule := range rs.Deny {
-				if matchRule(rule, req) && e.matchConditions(rule, req, tenantID) {
+				if matchRule(rule, req) && e.matchConditions(rule, req, tenantID, ruleKindDeny) {
 					msg := rule.Message
 					if msg == "" {
 						msg = fmt.Sprintf("Action denied by %s deny rule", rs.Scope)
@@ -1305,7 +1305,7 @@ func (e *Engine) evalScope(rules []RuleSet, req ActionRequest, tenantID string, 
 		// 2. Check require_approval rules
 		if kinds&ruleKindApproval != 0 {
 			for _, rule := range rs.RequireApproval {
-				if matchRule(rule, req) && e.matchConditions(rule, req, tenantID) {
+				if matchRule(rule, req) && e.matchConditions(rule, req, tenantID, ruleKindApproval) {
 					return CheckResult{
 						Decision: RequireApproval,
 						Reason:   fmt.Sprintf("Matches approval rule in %s scope", rs.Scope),
@@ -1318,7 +1318,7 @@ func (e *Engine) evalScope(rules []RuleSet, req ActionRequest, tenantID string, 
 		// 3. Check allow rules
 		if kinds&ruleKindAllow != 0 {
 			for _, rule := range rs.Allow {
-				if matchRule(rule, req) && e.matchConditions(rule, req, tenantID) {
+				if matchRule(rule, req) && e.matchConditions(rule, req, tenantID, ruleKindAllow) {
 					return CheckResult{
 						Decision: Allow,
 						Reason:   fmt.Sprintf("Allowed by %s rule", rs.Scope),
@@ -1451,7 +1451,7 @@ func (e *Engine) matchCompoundAllow(rules []RuleSet, req ActionRequest, segments
 					break
 				}
 			}
-			if matched && e.matchConditions(rule, req, tenantID) {
+			if matched && e.matchConditions(rule, req, tenantID, ruleKindAllow) {
 				return CheckResult{
 					Decision: Allow,
 					Reason:   fmt.Sprintf("Allowed by %s rule", rs.Scope),
@@ -2052,22 +2052,47 @@ func wildcardMatch(pattern, value string) bool {
 // this path is only reachable for in-process policies that bypass loading
 // (tests, embedders constructing Policy literals). We keep the no-op pass-
 // through to stay tolerant rather than fail-closed in those cases.
-func (e *Engine) matchConditions(rule Rule, req ActionRequest, tenantID string) bool {
+//
+// kind is the list the rule sits in. It decides what a condition that could
+// not be evaluated (a history lookup error) means: the stricter reading wins,
+// so a gated deny or require_approval rule fires and a gated allow does not.
+// A condition that is definitely not met still makes the rule miss.
+func (e *Engine) matchConditions(rule Rule, req ActionRequest, tenantID string, kind ruleKinds) bool {
 	if len(rule.Conditions) == 0 {
 		return true
 	}
 
+	unknown := false
 	for _, cond := range rule.Conditions {
 		if cond.RequirePrior == "" {
 			// TimeWindow-only (or empty Condition): nothing to verify.
 			continue
 		}
-		if !e.checkRequirePrior(cond, req, tenantID) {
+		switch e.checkRequirePrior(cond, req, tenantID) {
+		case conditionNotMet:
 			return false
+		case conditionUnknown:
+			unknown = true
 		}
+	}
+	if unknown {
+		warnPriorLookupFailed()
+		return kind != ruleKindAllow
 	}
 	return true
 }
+
+// conditionResult is the outcome of evaluating one require_prior condition.
+type conditionResult uint8
+
+const (
+	conditionMet conditionResult = iota
+	conditionNotMet
+	// conditionUnknown: the history lookup failed, so the engine cannot tell
+	// whether the prior action happened. matchConditions resolves it by the
+	// rule's kind.
+	conditionUnknown
+)
 
 // checkRequirePrior verifies that a prior action matching the condition was
 // recently allowed, scoped to tenantID.
@@ -2082,10 +2107,12 @@ func (e *Engine) matchConditions(rule Rule, req ActionRequest, tenantID string) 
 //     tenant, so it is announced once at WARNING level rather than silently
 //     answering a tenant-scoped question with cross-tenant data.
 //
-// Returns false (condition not met) when neither is configured.
-func (e *Engine) checkRequirePrior(cond Condition, req ActionRequest, tenantID string) bool {
+// Returns conditionNotMet when neither is configured: with no history source
+// there is no prior action (this is what offline `agentguard check` sees).
+// Returns conditionUnknown when the configured source returns an error.
+func (e *Engine) checkRequirePrior(cond Condition, req ActionRequest, tenantID string) conditionResult {
 	if e.priorQuerier == nil && e.history == nil {
-		return false
+		return conditionNotMet
 	}
 
 	window := 1 * time.Hour // default lookback
@@ -2099,32 +2126,28 @@ func (e *Engine) checkRequirePrior(cond Condition, req ActionRequest, tenantID s
 	if e.priorQuerier != nil {
 		ok, err := e.priorQuerier.HasPriorAllow(tenantID, req.AgentID, req.Scope, cond.RequirePrior, since)
 		if err != nil {
-			// TODO: a querier error is currently swallowed into
-			// "condition not met", which is fail-open for a require_prior-gated
-			// DENY and fail-closed for a gated ALLOW. The fix is polarity-aware
-			// (fail closed in BOTH directions by treating the condition as met
-			// for a deny rule), which needs the rule's polarity threaded in.
-			// Deliberately out of scope here so B27/B1 ship as one reviewable
-			// change; behavior is unchanged from the legacy path.
-			return false
+			return conditionUnknown
 		}
-		return ok
+		if ok {
+			return conditionMet
+		}
+		return conditionNotMet
 	}
 
 	warnLegacyHistoryPath()
 	entries, err := e.history.RecentActions(req.AgentID, req.Scope, since)
 	if err != nil {
-		return false
+		return conditionUnknown
 	}
 
 	for _, entry := range entries {
 		prior := cond.RequirePrior
 		if entry.Decision == Allow && (entry.Action == prior || entry.Command == prior ||
 			globMatch(prior, entry.Action) || globMatch(prior, entry.Command)) {
-			return true
+			return conditionMet
 		}
 	}
-	return false
+	return conditionNotMet
 }
 
 func formatRule(decision, scope string, rule Rule) string {

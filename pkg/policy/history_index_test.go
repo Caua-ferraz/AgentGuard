@@ -10,6 +10,7 @@ package policy
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -325,16 +326,134 @@ func (e erroringQuerier) HasPriorAllow(_, _, _, _ string, _ time.Time) (bool, er
 	return false, e.err
 }
 
-// TestCheck_PriorQuerierErrorDoesNotAllow: a querier error must not satisfy a
-// gated ALLOW. (The full polarity-aware posture is audit B2, deliberately out
-// of scope here; this pins the half that is a security property.)
-func TestCheck_PriorQuerierErrorDoesNotAllow(t *testing.T) {
-	eng := NewEngineFromPolicy(priorPolicy(t, "read *"))
-	eng.SetPriorActionQuerier(erroringQuerier{err: errors.New("backend down")})
+// erroringHistory drives the legacy HistoryQuerier error path.
+type erroringHistory struct{ err error }
+
+func (e erroringHistory) RecentActions(string, string, time.Time) ([]HistoryEntry, error) {
+	return nil, e.err
+}
+
+// patternQuerier answers per require_prior pattern; an absent pattern errors.
+type patternQuerier map[string]bool
+
+func (q patternQuerier) HasPriorAllow(_, _, _, pattern string, _ time.Time) (bool, error) {
+	ok, found := q[pattern]
+	if !found {
+		return false, errors.New("backend down")
+	}
+	return ok, nil
+}
+
+// kindGatedPolicy gates one rule of the given kind on a prior "read *". A
+// catch-all allow follows the gated deny and require_approval rules, so a
+// gated rule that does not fire shows up as ALLOW.
+func kindGatedPolicy(kind string) *Policy {
+	gated := Rule{
+		Pattern:    "write *",
+		Conditions: []Condition{{RequirePrior: "read *", TimeWindow: "1h"}},
+	}
+	rs := RuleSet{Scope: "shell"}
+	switch kind {
+	case "deny":
+		rs.Deny = []Rule{gated}
+		rs.Allow = []Rule{{Pattern: "*"}}
+	case "require_approval":
+		rs.RequireApproval = []Rule{gated}
+		rs.Allow = []Rule{{Pattern: "*"}}
+	case "allow":
+		rs.Allow = []Rule{gated}
+	}
+	return &Policy{Version: "1", Name: "kind-gated", Rules: []RuleSet{rs}}
+}
+
+// TestCheck_PriorLookupErrorIsStrictForEveryRuleKind: when the history lookup
+// fails, the engine cannot tell whether the prior action happened, so it takes
+// the stricter reading for the rule's kind. Before v1.4 an error read as "not
+// met" everywhere, so a gated deny rule silently stopped firing (fail open).
+func TestCheck_PriorLookupErrorIsStrictForEveryRuleKind(t *testing.T) {
+	backends := map[string]func(*Engine){
+		"PriorActionQuerier": func(e *Engine) { e.SetPriorActionQuerier(erroringQuerier{err: errors.New("backend down")}) },
+		"legacy HistoryQuerier": func(e *Engine) {
+			e.SetHistoryQuerier(erroringHistory{err: errors.New("audit log unreadable")})
+		},
+	}
+	want := map[string]Decision{
+		"deny":             Deny,
+		"require_approval": RequireApproval,
+		"allow":            Deny, // the gated allow does not fire; default deny
+	}
+	req := ActionRequest{Scope: "shell", Command: "write b.txt", AgentID: "agent-1"}
+	for backend, wire := range backends {
+		for kind, decision := range want {
+			t.Run(backend+"/"+kind, func(t *testing.T) {
+				eng := NewEngineFromPolicy(kindGatedPolicy(kind))
+				wire(eng)
+				got := eng.Check(req, "local")
+				if got.Decision != decision {
+					t.Errorf("got %s (rule=%q), want %s", got.Decision, got.Rule, decision)
+				}
+				if kind != "allow" && got.Rule != "" && !strings.HasPrefix(got.Rule, kind+":") {
+					t.Errorf("decision came from rule %q, want the gated %s rule", got.Rule, kind)
+				}
+			})
+		}
+	}
+}
+
+// TestCheck_PriorLookupWithoutErrorIsUnchanged pins the met / not-met cases
+// for every rule kind, so the error handling cannot leak into them.
+func TestCheck_PriorLookupWithoutErrorIsUnchanged(t *testing.T) {
+	cases := []struct {
+		kind  string
+		prior bool
+		want  Decision
+	}{
+		{"deny", true, Deny},
+		{"deny", false, Allow},
+		{"require_approval", true, RequireApproval},
+		{"require_approval", false, Allow},
+		{"allow", true, Allow},
+		{"allow", false, Deny},
+	}
+	req := ActionRequest{Scope: "shell", Command: "write b.txt", AgentID: "agent-1"}
+	for _, c := range cases {
+		eng := NewEngineFromPolicy(kindGatedPolicy(c.kind))
+		eng.SetPriorActionQuerier(patternQuerier{"read *": c.prior})
+		if got := eng.Check(req, "local"); got.Decision != c.want {
+			t.Errorf("%s gated rule, prior=%v: got %s (rule=%q), want %s",
+				c.kind, c.prior, got.Decision, got.Rule, c.want)
+		}
+	}
+}
+
+// TestCheck_UnmetConditionWinsOverUnknown: conditions are ANDed, so one that
+// is definitely not met makes the rule miss even when another errored.
+func TestCheck_UnmetConditionWinsOverUnknown(t *testing.T) {
+	p := kindGatedPolicy("deny")
+	p.Rules[0].Deny[0].Conditions = []Condition{
+		{RequirePrior: "read *", TimeWindow: "1h"},     // errors
+		{RequirePrior: "checkout *", TimeWindow: "1h"}, // definitely not met
+	}
+	eng := NewEngineFromPolicy(p)
+	eng.SetPriorActionQuerier(patternQuerier{"checkout *": false})
 
 	req := ActionRequest{Scope: "shell", Command: "write b.txt", AgentID: "agent-1"}
-	if got := eng.Check(req, "local"); got.Decision == Allow {
-		t.Error("a require_prior-gated ALLOW fired despite the querier erroring")
+	if got := eng.Check(req, "local"); got.Decision != Allow {
+		t.Errorf("got %s (rule=%q), want ALLOW from the catch-all: the deny rule has an unmet condition",
+			got.Decision, got.Rule)
+	}
+}
+
+// TestCheck_NoHistorySourceMeansNoPriorAction: with no querier wired (offline
+// `agentguard check`), there is no history, so a gated deny rule does not fire
+// and a gated allow does not either. Only a lookup error is "unknown".
+func TestCheck_NoHistorySourceMeansNoPriorAction(t *testing.T) {
+	req := ActionRequest{Scope: "shell", Command: "write b.txt", AgentID: "agent-1"}
+	for kind, want := range map[string]Decision{"deny": Allow, "require_approval": Allow, "allow": Deny} {
+		eng := NewEngineFromPolicy(kindGatedPolicy(kind))
+		if got := eng.Check(req, "local"); got.Decision != want {
+			t.Errorf("%s gated rule with no history source: got %s, want %s", kind, got.Decision, want)
+		}
 	}
 }
 
