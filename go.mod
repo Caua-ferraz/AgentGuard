@@ -19,8 +19,13 @@ go 1.26.0
 //   GO-2026-5942  net          panic parsing an invalid SVCB/HTTPS RR
 //   GO-2026-6091  html/template JS regexp context tracking
 // The first six were reachable from AgentGuard's own call graph on go1.26.5;
-// all eight are fixed as of go1.26.6, and 1.26.7 is the current patch.
-toolchain go1.26.7
+// all eight are fixed as of go1.26.6.
+//
+// go1.26.9 adds the fix for GO-2026-6617 (net/http: HTTP/2 server crash from
+// an HPACK encoder race). govulncheck finds the affected code reachable; the
+// server itself serves plaintext HTTP/1.1 (TLS ends at a reverse proxy), so
+// it does not run Go's HTTP/2 server, but the gate is on reachability.
+toolchain go1.26.9
 
 require (
 	github.com/fsnotify/fsnotify v1.10.1
@@ -42,8 +47,8 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rogpeppe/go-internal v1.15.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/text v0.39.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	modernc.org/libc v1.75.7 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect

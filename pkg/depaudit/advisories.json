@@ -32,6 +32,15 @@
       "summary": "Denial of service: unmarshalling crafted YAML panics on a nil dereference.",
       "reference": "https://pkg.go.dev/vuln/GO-2022-0433",
       "affected": [{ "introduced": "0", "fixed": "v3.0.0" }]
+    },
+    {
+      "id": "GO-2026-6629",
+      "ecosystem": "go",
+      "package": "golang.org/x/text",
+      "kind": "security",
+      "summary": "Panic parsing crafted input in x/text/secure/precis, reachable through the PostgreSQL driver's connection setup.",
+      "reference": "https://pkg.go.dev/vuln/GO-2026-6629",
+      "affected": [{ "introduced": "0", "fixed": "v0.41.0" }]
     }
   ]
 }
