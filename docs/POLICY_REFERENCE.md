@@ -378,7 +378,7 @@ The proxy binary ships with a built-in mapping for common tool names so operator
 | `data` | (no defaults) — operators map `fill_form` / `submit_form` here for PII gating |
 | `cost` | (no defaults) — model-cost gating uses SDK `est_cost`, not tool-name mapping |
 
-Tool names are matched case-sensitively, which is why Claude Code's capitalised names have entries of their own. (Claude Code is better guarded by its hook, which needs no proxy: see [`CLAUDE_CODE.md`](CLAUDE_CODE.md).)
+Tool names are matched case-sensitively, which is why Claude Code's capitalised names have entries of their own. (Claude Code is better guarded by its hook, which needs no proxy: see [`CODING_AGENTS.md`](CODING_AGENTS.md).)
 
 Wildcard patterns (`playwright_*`, etc.) match the family conventions used by Anthropic's computer-use models and the popular browser-use / Playwright agents.
 

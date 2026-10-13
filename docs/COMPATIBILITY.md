@@ -123,8 +123,9 @@ subcommand is removed. The same applies to the `agentguard-mcp-gateway` and
 `serve` stays for the whole 1.x line. Additions since 1.2.0 are all of the
 kind this surface allows: the `server`, `help`, `setup`, `hook` and `test`
 subcommands (`hook claude-code` sits in users' Claude Code settings, so it
-stays), the audit
-`transport` value `claude_code`, the
+stays; so do `hook cursor`, `hook gemini-cli` and `hook codex`, which sit in
+those agents' settings), `hook`'s `--fail-closed` flag, the audit `transport`
+values `claude_code`, `cursor`, `gemini_cli` and `codex_cli`, the
 server's `--api-key-file` flag, the `--guard-url` alias of `--url` on the client
 subcommands, and fallbacks for flags left unset (`AGENTGUARD_URL`,
 `AGENTGUARD_POLICY`, and the API key `agentguard setup` saves, which the client

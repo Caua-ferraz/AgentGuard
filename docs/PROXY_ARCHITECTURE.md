@@ -158,13 +158,18 @@ proxy's stable contract.
 ## 3. Audit transport tag
 
 Every audit entry is chipped by **how the agent talked to the
-firewall**. Three values:
+firewall**. Three values for the proxies and the SDKs, and one per
+coding-agent hook ([`CODING_AGENTS.md`](CODING_AGENTS.md)):
 
 | transport         | source                                         |
 |-------------------|------------------------------------------------|
 | `mcp_gateway`     | `agentguard-mcp-gateway`                       |
 | `llm_api_proxy`   | `agentguard-llm-proxy`                         |
 | `sdk`             | direct `/v1/check` callers (Python/TS SDKs, hand-rolled HTTP clients, framework adapters) |
+| `claude_code`     | `agentguard hook claude-code`                  |
+| `cursor`          | `agentguard hook cursor`                       |
+| `gemini_cli`      | `agentguard hook gemini-cli`                   |
+| `codex_cli`       | `agentguard hook codex`                        |
 
 ### 3.1 Where the field lives
 
