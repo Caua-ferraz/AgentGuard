@@ -90,7 +90,7 @@ type hookCall struct {
 
 // hookAgents is every agent `agentguard hook` knows, in the order the help
 // lists them.
-var hookAgents = []hookAgent{claudeHookAgent}
+var hookAgents = []hookAgent{claudeHookAgent, cursorHookAgent, geminiHookAgent, codexHookAgent}
 
 func hookAgentNames() []string {
 	names := make([]string, len(hookAgents))

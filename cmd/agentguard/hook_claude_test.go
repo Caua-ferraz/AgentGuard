@@ -100,6 +100,11 @@ func newFakeGuard(t *testing.T) *fakeGuard {
 				res = policy.CheckResult{Decision: policy.Deny, Reason: "evil is blocked", Rule: "deny:shell:evil"}
 			case req.Command == "rm -rf x" && req.ApprovalID == "":
 				res = policy.CheckResult{Decision: policy.RequireApproval, Reason: "rm needs approval", ApprovalID: "ap_1"}
+			// Files, for the agents whose one call can be several checks.
+			case strings.HasSuffix(req.Path, "secret"):
+				res = policy.CheckResult{Decision: policy.Deny, Reason: "secrets are blocked", Rule: "deny:filesystem:write"}
+			case strings.HasSuffix(req.Path, "approve-me") && req.ApprovalID == "":
+				res = policy.CheckResult{Decision: policy.RequireApproval, Reason: "this file needs approval", ApprovalID: "ap_1"}
 			}
 			_ = json.NewEncoder(w).Encode(res)
 		case "/v1/status/ap_1":

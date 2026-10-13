@@ -46,12 +46,21 @@ type cliResult struct {
 // environment (no update check, no AGENTGUARD_* leaking in from the host).
 func agentguard(t *testing.T, dir string, env []string, args ...string) cliResult {
 	t.Helper()
+	return agentguardStdin(t, dir, env, "", args...)
+}
+
+// agentguardStdin is agentguard with stdin, for commands that read it.
+func agentguardStdin(t *testing.T, dir string, env []string, stdin string, args ...string) cliResult {
+	t.Helper()
 	raw, err := json.Marshal(args)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(os.Args[0])
 	cmd.Dir = dir
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
 	for _, kv := range os.Environ() {
 		if !strings.HasPrefix(kv, "AGENTGUARD_") {
 			cmd.Env = append(cmd.Env, kv)
@@ -235,7 +244,7 @@ func TestCLI_ArgumentMistakes(t *testing.T) {
 	agentguard(t, dir, nil, "audit", "--url", "localhost:8080").expect(t, 2, "", "include the scheme")
 	agentguard(t, dir, nil, "check", "extra").expect(t, 3, "", `unexpected argument "extra"`)
 	agentguard(t, dir, nil, "hook").expect(t, 2, "", "missing the agent")
-	agentguard(t, dir, nil, "hook", "cursor").expect(t, 2, "", `unknown agent "cursor"`)
+	agentguard(t, dir, nil, "hook", "windsurf").expect(t, 2, "", `unknown agent "windsurf"`)
 
 	// A mistyped tenant subcommand is caught before the store is opened, so
 	// it no longer leaves an empty agentguard.db behind.
