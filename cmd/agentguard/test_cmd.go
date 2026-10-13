@@ -107,7 +107,7 @@ func (r fixtureRequest) actionRequest() policy.ActionRequest {
 // caseRequest returns the action a case checks.
 func caseRequest(c fixtureCase) (policy.ActionRequest, error) {
 	if c.Request == nil {
-		return policy.ActionRequest{}, errors.New("needs a request:")
+		return policy.ActionRequest{}, errors.New("needs a request")
 	}
 	if c.Request.Scope == "" {
 		return policy.ActionRequest{}, errors.New("its request needs a scope")
@@ -133,7 +133,7 @@ func parseFixture(data []byte) (*fixtureFile, error) {
 		return nil, errors.New(unknownKey.ReplaceAllString(msg, `unknown key "$1"`))
 	}
 	if len(f.Tests) == 0 {
-		return nil, errors.New("no test cases; add them under tests:")
+		return nil, errors.New("no test cases; add a tests: list")
 	}
 	seen := map[string]bool{}
 	for i, c := range f.Tests {
@@ -288,6 +288,7 @@ func loadFixtures(f *testCmdFlags, stderr io.Writer) ([]loadedFixture, bool) {
 	}
 	policies := map[string]loadedPolicy{}
 	defaultPolicy := f.PolicyPath
+	var defaultErr error // findPolicy's error, reported once
 	var fixtures []loadedFixture
 	for _, p := range paths {
 		data, err := os.ReadFile(p)
@@ -306,9 +307,13 @@ func loadFixtures(f *testCmdFlags, stderr io.Writer) ([]loadedFixture, bool) {
 			policyPath = filepath.Join(filepath.Dir(p), policyPath)
 		case policyPath == "":
 			if defaultPolicy == "" {
+				if defaultErr != nil {
+					continue
+				}
 				found, note, err := findPolicy("", false)
 				if err != nil {
-					fail("%s names no policy and %v", p, err)
+					defaultErr = err
+					fail("%s has no policy: line, and %v", p, err)
 					continue
 				}
 				fmt.Fprintf(stderr, "Using policy file %s (%s) for fixtures with no policy: line.\n", found, note)
@@ -381,7 +386,7 @@ func runCase(fx loadedFixture, c fixtureCase) caseResult {
 	// case, and every case sees the same policy even if the file changes
 	// mid-run.
 	engine, err := policy.NewEngine(policy.NewStaticPolicyProvider(fx.pol))
-	res := policy.CheckResult{}
+	var res policy.CheckResult
 	if err != nil {
 		// Unreachable with a non-nil policy; reported as a failure rather
 		// than a pass.
