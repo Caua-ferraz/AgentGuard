@@ -433,6 +433,10 @@ func NewServer(cfg Config) *Server {
 	// GET to handleAuditQuery with no conflict.
 	mux.HandleFunc("POST /v1/audit", requireAuthOrSession(cfg.APIKey, s.sessions, true, s.handleAuditRecord))
 
+	// Head of the sealed audit chain (v1.4, --audit-seal): what an external
+	// poller copies off the box as an anchor. Same auth as GET /v1/audit.
+	mux.HandleFunc("GET /v1/audit/head", requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleAuditHead))
+
 	// -----------------------------------------------------------------
 	// Tenant-aware mirrors of every operational route.
 	//
@@ -461,6 +465,8 @@ func NewServer(cfg Config) *Server {
 		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleAuditQuery)))
 	mux.HandleFunc("POST /v1/t/{tenant}/audit",
 		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, true, s.handleAuditRecord)))
+	mux.HandleFunc("GET /v1/t/{tenant}/audit/head",
+		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleAuditHead)))
 
 	// Auth endpoints for dashboard login/logout.
 	mux.HandleFunc("/auth/login", s.handleLogin)
@@ -1225,6 +1231,31 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(entries)
+}
+
+// handleAuditHead returns the head of the sealed audit chain: the segment,
+// seq and hash of the last sealed entry, and the time it was read. 404 when
+// sealing is off (no --audit-seal, or the store backend).
+//
+// The chain covers the whole audit file, every tenant included, so the
+// tenant mirror returns the same head. It reveals an entry count and a hash,
+// nothing from the entries themselves.
+//
+// The head is read from the file logger under its lock (an in-memory read);
+// with the buffered pipeline, entries still queued are not in it yet.
+func (s *Server) handleAuditHead(w http.ResponseWriter, r *http.Request) {
+	var head audit.Anchor
+	ok := false
+	if h, sealed := s.cfg.Logger.(audit.SealHeader); sealed {
+		head, ok = h.SealHead()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "audit sealing is off; start the server with --audit-seal (file audit backend only)"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(head)
 }
 
 // handleAuditRecord appends a pre-decided fail-closed refusal to the audit
