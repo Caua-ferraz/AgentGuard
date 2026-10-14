@@ -164,6 +164,31 @@ func (b *Bridge) SetUpstream(up Upstream) {
 	b.upstreams[up.Namespace()] = up
 }
 
+// newUpstream builds the Upstream for spec's transport. This is the one
+// place the bridge constructs upstreams; both kinds share the reconnect
+// schedule and forward notifications to the host the same way.
+func (b *Bridge) newUpstream(spec UpstreamSpec) (Upstream, error) {
+	ns := spec.Namespace
+	onNote := func(method string) { b.onUpstreamNotification(ns, method) }
+	switch spec.Transport {
+	case "", TransportStdio:
+		return NewStdioUpstreamWithOptions(spec, StdioUpstreamOptions{
+			Backoff:        BackoffSchedule(b.cfg.ReconnectCap),
+			Logger:         b.logger,
+			OnNotification: onNote,
+		}), nil
+	case TransportHTTP:
+		return NewHTTPUpstream(spec, HTTPUpstreamOptions{
+			Headers:        b.cfg.UpstreamHeaders[ns],
+			Backoff:        BackoffSchedule(b.cfg.ReconnectCap),
+			Logger:         b.logger,
+			OnNotification: onNote,
+		}), nil
+	default:
+		return nil, fmt.Errorf("unknown transport %q (want %q or %q)", spec.Transport, TransportStdio, TransportHTTP)
+	}
+}
+
 // Run is the bridge's main loop. Reads JSON-RPC frames from `in`,
 // dispatches per method, writes responses to `out`. Returns when:
 //   - ctx is cancelled (graceful shutdown);
@@ -192,14 +217,17 @@ func (b *Bridge) Run(ctx context.Context, in io.Reader, out io.Writer, errLog io
 			// Test injection already wired this namespace.
 			continue
 		}
-		ns := spec.Namespace
-		up := NewStdioUpstreamWithOptions(spec, StdioUpstreamOptions{
-			Backoff:        BackoffSchedule(b.cfg.ReconnectCap),
-			Logger:         b.logger,
-			OnNotification: func(method string) { b.onUpstreamNotification(ns, method) },
-		})
-		if err := up.Start(ctx); err != nil {
-			b.logger.Infof("startup: upstream %q failed to spawn: %v", spec.Namespace, err)
+		up, err := b.newUpstream(spec)
+		if err != nil {
+			b.logger.Infof("startup: upstream %q: %v", spec.Namespace, err)
+			continue
+		}
+		// Only stdio upstreams have a process to start; an HTTP upstream
+		// first talks to its server in Initialize.
+		if s, ok := up.(interface{ Start(context.Context) error }); ok {
+			if err := s.Start(ctx); err != nil {
+				b.logger.Infof("startup: upstream %q failed to spawn: %v", spec.Namespace, err)
+			}
 		}
 		b.upstreams[spec.Namespace] = up
 	}
@@ -291,9 +319,17 @@ func (b *Bridge) dispatchFrame(ctx context.Context, line []byte, wg *sync.WaitGr
 		return
 	}
 
-	// Notification: no id field present at all.
+	// Notification: no id field present at all. Only notification
+	// methods are forwarded: a request method sent without an id (an
+	// id-less tools/call) would otherwise reach every upstream without
+	// a policy check, and a server that dispatches on method alone
+	// would run it.
 	if len(probe.ID) == 0 {
-		b.handleNotification(ctx, probe.Method, probe.Params)
+		if !strings.HasPrefix(probe.Method, "notifications/") {
+			b.logger.Infof("dropping %q sent without an id: only notifications/* may omit it", probe.Method)
+			return
+		}
+		b.handleNotification(ctx, probe.Method, probe.Params, wg)
 		return
 	}
 
@@ -358,22 +394,25 @@ func (b *Bridge) dispatchFrame(ctx context.Context, line []byte, wg *sync.WaitGr
 // gateway can translate requestId on the way out; that is deferred
 // pending a design (do not build it as a drive-by). Documented as a
 // known limitation in docs/MCP_GATEWAY.md § 8.4.
-func (b *Bridge) handleNotification(ctx context.Context, method string, params json.RawMessage) {
-	n := &Notification{
-		JSONRPC: JSONRPCVersion,
-		Method:  method,
-		Params:  params,
-	}
+//
+// The fan-out runs off the frame loop, one goroutine per upstream: for
+// an HTTP upstream Notify is a network round trip (or a whole session
+// renewal), and the frames behind the notification must not wait on it.
+func (b *Bridge) handleNotification(ctx context.Context, method string, params json.RawMessage, wg *sync.WaitGroup) {
 	for _, up := range b.upstreams {
 		if up.Status() != StatusOK {
 			continue
 		}
-		// Best effort, fire-and-forget. We use a short context
-		// derived from the bridge ctx so a sluggish upstream doesn't
-		// stall the whole notification fanout.
-		nctx, cancel := context.WithTimeout(ctx, 1*time.Second)
-		_ = up.Notify(nctx, n)
-		cancel()
+		wg.Add(1)
+		go func(up Upstream) {
+			defer wg.Done()
+			// Best effort, fire-and-forget, with a short context
+			// derived from the bridge ctx. Each upstream gets its own
+			// Notification: Notify sets fields on it.
+			nctx, cancel := context.WithTimeout(ctx, 1*time.Second)
+			defer cancel()
+			_ = up.Notify(nctx, &Notification{JSONRPC: JSONRPCVersion, Method: method, Params: params})
+		}(up)
 	}
 }
 

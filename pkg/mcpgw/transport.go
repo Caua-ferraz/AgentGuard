@@ -59,9 +59,12 @@ func BackoffSchedule(maxWait time.Duration) []time.Duration {
 const MaxStdoutLineBytes = 4 * 1024 * 1024
 
 // Upstream is the gateway-side handle to one downstream MCP server.
-// Implementations own the subprocess lifetime, manage reconnect, and
-// offer a request/notification API to the bridge. Only stdio is
-// wired today; HTTP transport is future work.
+// Implementations own the connection (a subprocess for StdioUpstream,
+// an HTTP session for HTTPUpstream), manage reconnect, and offer a
+// request/notification API to the bridge. An implementation with a
+// process to launch also has a Start(ctx) error method, which the
+// bridge calls before Initialize; it is not part of this interface so
+// existing implementations keep satisfying it.
 type Upstream interface {
 	// Namespace returns the namespace label this upstream answers to
 	// (e.g. "fs", "github").
@@ -92,7 +95,7 @@ type Upstream interface {
 	Close() error
 }
 
-// StdioUpstream is the production Upstream impl: spawns the configured
+// StdioUpstream is the Upstream for --upstream: spawns the configured
 // command, talks newline-delimited JSON-RPC over stdin/stdout, logs
 // stderr to the gateway's logger, and reconnects on subprocess exit.
 type StdioUpstream struct {

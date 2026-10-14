@@ -354,6 +354,7 @@ func (c *ContentBlock) UnmarshalJSON(data []byte) error {
 // Sourced from docs/MCP_GATEWAY.md § 3.1.
 var DefaultSupportedProtocolVersions = []string{
 	"2025-11-25", // current spec, default
+	"2025-06-18", // adds the MCP-Protocol-Version HTTP header
 	"2025-03-26", // streamable HTTP era
 	"2024-11-05", // legacy stdio (still common in the field)
 }
