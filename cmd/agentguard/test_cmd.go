@@ -35,8 +35,8 @@ const (
 	testExitNoLoad = 3
 )
 
-// fixtureSuffix names the files a folder argument is searched for.
-const fixtureSuffix = "_test.yaml"
+// fixtureSuffixes name the files a folder argument is searched for.
+var fixtureSuffixes = []string{"_test.yaml", "_test.yml"}
 
 const (
 	testOutputText  = "text"
@@ -119,6 +119,50 @@ func caseRequest(c fixtureCase) (policy.ActionRequest, error) {
 // into words that don't name Go types.
 var unknownKey = regexp.MustCompile(`field (\S+) not found in type \S+`)
 
+// wrongShape rewrites yaml.v3's "cannot unmarshal !!str `x` into
+// main.fixtureCase" the same way.
+var wrongShape = regexp.MustCompile("cannot unmarshal (!!\\w+)(?: `[^`]*`)? into (\\S+)")
+
+// yamlKinds and fixtureShapes name YAML tags and fixture types in words.
+var (
+	yamlKinds = map[string]string{
+		"!!str": "text", "!!seq": "a list", "!!map": "a mapping",
+		"!!int": "a number", "!!float": "a number", "!!bool": "true/false", "!!null": "nothing",
+	}
+	fixtureShapes = map[string]string{
+		"main.fixtureFile":      "a mapping with a tests: list",
+		"[]main.fixtureCase":    "a list of test cases",
+		"main.fixtureCase":      "a test case (a mapping with name:, request: and expect:)",
+		"*main.fixtureRequest":  "a request (a mapping with scope: and the action's fields)",
+		"main.fixtureRequest":   "an action (a mapping with scope: and the action's fields)",
+		"[]main.fixtureRequest": "a list of actions",
+		"map[string]string":     "a mapping of text values",
+		"string":                "text",
+		"float64":               "a number",
+	}
+)
+
+// fixtureError turns a yaml.v3 decode error into a message about the file,
+// not about Go types.
+func fixtureError(err error) error {
+	msg := strings.TrimPrefix(err.Error(), "yaml: unmarshal errors:\n  ")
+	msg = strings.ReplaceAll(msg, "\n  ", "; ")
+	msg = unknownKey.ReplaceAllString(msg, `unknown key "$1"`)
+	msg = wrongShape.ReplaceAllStringFunc(msg, func(m string) string {
+		sub := wrongShape.FindStringSubmatch(m)
+		got, ok := yamlKinds[sub[1]]
+		if !ok {
+			got = sub[1]
+		}
+		want, ok := fixtureShapes[sub[2]]
+		if !ok {
+			want = "something else"
+		}
+		return fmt.Sprintf("expected %s, got %s", want, got)
+	})
+	return errors.New(msg)
+}
+
 // parseFixture decodes and checks one fixture file's contents.
 func parseFixture(data []byte) (*fixtureFile, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
@@ -128,9 +172,15 @@ func parseFixture(data []byte) (*fixtureFile, error) {
 		if errors.Is(err, io.EOF) {
 			return nil, errors.New("the file is empty; it needs a tests: list")
 		}
-		msg := strings.TrimPrefix(err.Error(), "yaml: unmarshal errors:\n  ")
-		msg = strings.ReplaceAll(msg, "\n  ", "; ")
-		return nil, errors.New(unknownKey.ReplaceAllString(msg, `unknown key "$1"`))
+		return nil, fixtureError(err)
+	}
+	// One document per file. A second one after `---` would otherwise never
+	// be read, and its cases would look like they passed.
+	var extra yaml.Node
+	if err := dec.Decode(&extra); err == nil {
+		return nil, fmt.Errorf("line %d: a second YAML document (after ---); a test file holds one document, so put these cases in the first one or in another file", extra.Line)
+	} else if !errors.Is(err, io.EOF) {
+		return nil, fixtureError(err)
 	}
 	if len(f.Tests) == 0 {
 		return nil, errors.New("no test cases; add a tests: list")
@@ -277,7 +327,7 @@ func loadFixtures(f *testCmdFlags, stderr io.Writer) ([]loadedFixture, bool) {
 		case err != nil:
 			fail("%v", err)
 		case len(found) == 0:
-			fail("%s has no *%s files (subfolders are not searched)", arg, fixtureSuffix)
+			fail("%s has no *_test.yaml or *_test.yml files (subfolders are not searched)", arg)
 		}
 		paths = append(paths, found...)
 	}
@@ -337,9 +387,9 @@ func loadFixtures(f *testCmdFlags, stderr io.Writer) ([]loadedFixture, bool) {
 	return fixtures, ok
 }
 
-// fixturesIn lists dir's *_test.yaml files, sorted. Subfolders are not
-// searched, so a folder of work-in-progress fixtures can sit next to the
-// real ones.
+// fixturesIn lists dir's *_test.yaml and *_test.yml files, sorted.
+// Subfolders are not searched, so a folder of work-in-progress fixtures can
+// sit next to the real ones.
 func fixturesIn(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -347,12 +397,21 @@ func fixturesIn(dir string) ([]string, error) {
 	}
 	var out []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), fixtureSuffix) {
+		if !e.IsDir() && isFixtureName(e.Name()) {
 			out = append(out, filepath.Join(dir, e.Name()))
 		}
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func isFixtureName(name string) bool {
+	for _, suffix := range fixtureSuffixes {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // loadTestPolicy loads a policy the way `agentguard validate` does: load
@@ -382,10 +441,11 @@ func runCase(fx loadedFixture, c fixtureCase) caseResult {
 	}
 	req, _ := caseRequest(c) // parseFixture already rejected a case without one
 
-	// A static provider over the already-loaded policy: no file watcher per
-	// case, and every case sees the same policy even if the file changes
-	// mid-run.
-	engine, err := policy.NewEngine(policy.NewStaticPolicyProvider(fx.pol))
+	// A provider over the already-loaded policy: no file watcher per case,
+	// and every case sees the same policy even if the file changes mid-run.
+	// It serves the policy to the fixture's tenant, so `tenant:` checks the
+	// policy as that tenant instead of finding no policy for it.
+	engine, err := policy.NewEngine(fixtureProvider{policy.NewStaticPolicyProvider(fx.pol), tenant})
 	var res policy.CheckResult
 	if err != nil {
 		// Unreachable with a non-nil policy; reported as a failure rather
@@ -419,7 +479,7 @@ func runCase(fx loadedFixture, c fixtureCase) caseResult {
 	if string(res.Decision) != c.Expect {
 		r.Failures = append(r.Failures, fmt.Sprintf("decision: want %s, got %s", c.Expect, res.Decision))
 	}
-	if c.ExpectRule != "" && !ruleMatches(c.ExpectRule, res.Rule) {
+	if c.ExpectRule != "" && c.ExpectRule != res.Rule {
 		r.Failures = append(r.Failures, fmt.Sprintf("rule: want %q, got %q", c.ExpectRule, res.Rule))
 	}
 	if c.ExpectReasonContains != "" && !strings.Contains(res.Reason, c.ExpectReasonContains) {
@@ -429,29 +489,25 @@ func runCase(fx loadedFixture, c fixtureCase) caseResult {
 	return r
 }
 
-// ruleMatches reports whether rule matches the expect_rule pattern, where
-// `*` matches any run of characters (slashes included) and everything else
-// is literal. Rule names hold policy patterns such as "allow:shell:ls *" or
-// "deny:data:*[0-9]*", so treating [ ] or ? as glob syntax would make them
-// hard to write exactly.
-func ruleMatches(pattern, rule string) bool {
-	parts := strings.Split(pattern, "*")
-	if len(parts) == 1 {
-		return pattern == rule
+// fixtureProvider serves one loaded policy to one tenant. The static
+// provider it wraps only knows the local tenant.
+type fixtureProvider struct {
+	*policy.StaticPolicyProvider
+	tenant string
+}
+
+func (p fixtureProvider) Get(tenantID string) (*policy.Policy, error) {
+	if tenantID == p.tenant {
+		tenantID = policy.LocalTenantID
 	}
-	if !strings.HasPrefix(rule, parts[0]) {
-		return false
+	return p.StaticPolicyProvider.Get(tenantID)
+}
+
+func (p fixtureProvider) Watch(tenantID string, cb func(*policy.Policy)) (func(), error) {
+	if tenantID == p.tenant {
+		tenantID = policy.LocalTenantID
 	}
-	rule = rule[len(parts[0]):]
-	last := parts[len(parts)-1]
-	for _, p := range parts[1 : len(parts)-1] {
-		i := strings.Index(rule, p)
-		if i < 0 {
-			return false
-		}
-		rule = rule[i+len(p):]
-	}
-	return strings.HasSuffix(rule, last)
+	return p.StaticPolicyProvider.Watch(tenantID, cb)
 }
 
 // ── Output ───────────────────────────────────────────────────────────────
@@ -593,15 +649,15 @@ Run a policy against test cases, each an action and the verdict it must
 get, and report which pass. Use it in CI so a policy change that allows or
 blocks the wrong thing fails the build. No server needed.
 
-A folder is searched for *_test.yaml files (not its subfolders). A fixture
-file looks like this:
+A folder is searched for *_test.yaml and *_test.yml files (not its
+subfolders). A fixture file holds one YAML document and looks like this:
 
   policy: ../default.yaml    # optional, relative to this file
   tests:
     - name: plain ls is allowed
       request: {scope: shell, command: "ls -la", agent_id: dev}
       expect: ALLOW            # ALLOW, DENY or REQUIRE_APPROVAL
-      expect_rule: "allow:shell:*"         # optional; * matches anything
+      expect_rule: "allow:shell:ls *"      # optional; the exact rule
       expect_reason_contains: "shell"      # optional
     - name: deploy once the tests ran
       prior: [{scope: shell, command: "make test", agent_id: dev}]

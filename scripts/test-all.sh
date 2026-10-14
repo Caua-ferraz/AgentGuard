@@ -124,10 +124,10 @@ run_suite() {
 
 # ---- suite runners ----------------------------------------------------
 
+# Always rebuild: a binary left over from an older checkout may lack commands
+# the suites run (such as `test`). Go's build cache keeps this cheap.
 ensure_agentguard_built() {
-  if [ ! -x "$AGENTGUARD_BIN" ]; then
-    go build -o "$AGENTGUARD_BIN" ./cmd/agentguard
-  fi
+  go build -o "$AGENTGUARD_BIN" ./cmd/agentguard
 }
 
 go_suite() {

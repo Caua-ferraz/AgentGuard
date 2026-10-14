@@ -120,6 +120,14 @@ func TestParseFixture(t *testing.T) {
 		{"a request needs a scope", "tests:\n  - {name: x, request: {command: ls}, expect: ALLOW}\n", "needs a scope"},
 		{"a case needs an expectation", "tests:\n  - {name: x, request: {scope: shell, command: ls}}\n", "needs expect"},
 		{"expect must be a decision", "tests:\n  - {name: x, request: {scope: shell, command: ls}, expect: allow}\n", `expect is "allow"`},
+		{"a second YAML document is rejected, not skipped", `tests:
+  - {name: a, request: {scope: shell, command: ls}, expect: ALLOW}
+---
+tests:
+  - {name: b, request: {scope: shell, command: "rm -rf /"}, expect: ALLOW}
+`, "line 3: a second YAML document"},
+		{"a case that is not a mapping names the shape, not a Go type", "tests:\n  - \"just a string\"\n", "expected a test case"},
+		{"tests that are not a list names the shape, not a Go type", "tests: {a: 1}\n", "expected a list of test cases"},
 		{"a prior entry needs an action or a command", `tests:
   - name: x
     prior: [{scope: shell}]
@@ -145,28 +153,63 @@ func TestParseFixture(t *testing.T) {
 	}
 }
 
-func TestRuleMatches(t *testing.T) {
+// TestTest_ExpectRuleIsExact: rule names hold policy patterns with `*` in
+// them, so expect_rule compares the whole name. A wildcard reading would let
+// "allow:shell:*" pass a case that matched a different, broader rule.
+func TestTest_ExpectRuleIsExact(t *testing.T) {
 	cases := []struct {
-		pattern, rule string
-		want          bool
+		rule string
+		want int
 	}{
-		{"allow:shell:ls *", "allow:shell:ls *", true},
-		{"allow:shell:*", "allow:shell:ls *", true},
-		{"allow:*", "allow:filesystem:read", true},
-		{"*:shell:*", "deny:shell:rm -rf *", true},
-		{"deny:*:write", "deny:filesystem:write", true},
-		{"deny:network:*.production.internal", "deny:network:*.production.internal", true},
-		{"deny:data:*[0-9]*", "deny:data:*[0-9][0-9]*", true}, // [ ] are literal
-		{"*", "", true},
-		{"allow:shell:*", "deny:shell:ls *", false},
-		{"allow:shell:ls", "allow:shell:ls *", false},
-		{"allow:*:read", "allow:filesystem:write", false},
-		{"deny:*", "", false},
+		{"allow:shell:ls *", testExitPassed},
+		{"allow:shell:*", testExitFailed},
+		{"allow:shell:ls", testExitFailed},
 	}
 	for _, tc := range cases {
-		if got := ruleMatches(tc.pattern, tc.rule); got != tc.want {
-			t.Errorf("ruleMatches(%q, %q) = %v, want %v", tc.pattern, tc.rule, got, tc.want)
+		dir := fixtureDir(t, map[string]string{"rule_test.yaml": `policy: policy.yaml
+tests:
+  - name: ls
+    request: {scope: shell, command: "ls -la"}
+    expect: ALLOW
+    expect_rule: "` + tc.rule + `"
+`})
+		if code, stdout, _ := runTestHarness(t, &testCmdFlags{Paths: []string{dir}}); code != tc.want {
+			t.Errorf("expect_rule %q: exit %d, want %d\n%s", tc.rule, code, tc.want, stdout)
 		}
+	}
+}
+
+// TestTest_TenantChecksThePolicyAsThatTenant: `tenant:` runs the policy as
+// that tenant. It used to find no policy for any tenant but local, so every
+// case got deny:tenant:not_found and DENY expectations passed untested.
+func TestTest_TenantChecksThePolicyAsThatTenant(t *testing.T) {
+	dir := fixtureDir(t, map[string]string{"tenant_test.yaml": `policy: policy.yaml
+tenant: acme
+tests:
+  - name: ls is allowed for acme
+    request: {scope: shell, command: "ls -la"}
+    expect: ALLOW
+  - name: rm -rf is denied by the policy, not by a missing tenant
+    request: {scope: shell, command: "rm -rf /"}
+    expect: DENY
+    expect_rule: "deny:shell:rm -rf *"
+`})
+	code, stdout, stderr := runTestHarness(t, &testCmdFlags{Paths: []string{dir}})
+	if code != testExitPassed {
+		t.Fatalf("exit %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+}
+
+// TestTest_FolderFindsYmlFixtures: a folder scan picks up *_test.yml as well
+// as *_test.yaml, so a .yml file's cases cannot be skipped without a word.
+func TestTest_FolderFindsYmlFixtures(t *testing.T) {
+	dir := fixtureDir(t, map[string]string{
+		"a_test.yaml": passingFixture,
+		"b_test.yml":  failingFixture,
+	})
+	code, stdout, _ := runTestHarness(t, &testCmdFlags{Paths: []string{dir}})
+	if code != testExitFailed || !strings.Contains(stdout, "b_test.yml") {
+		t.Fatalf("exit %d, want 1 with b_test.yml's failing case reported\n%s", code, stdout)
 	}
 }
 
@@ -246,7 +289,7 @@ func TestTest_LoadErrorsExit3AndRunNothing(t *testing.T) {
 			name:     "a folder with no fixtures",
 			fixtures: map[string]string{"a_test.yaml": passingFixture, "empty/README": "x"},
 			args:     func(dir string) []string { return []string{dir, filepath.Join(dir, "empty")} },
-			wantErr:  "has no *_test.yaml files",
+			wantErr:  "has no *_test.yaml or *_test.yml files",
 		},
 	}
 	for _, tc := range cases {
@@ -461,24 +504,6 @@ tests:
 	}
 }
 
-// Only the local tenant has a policy offline, as with check --tenant-id.
-func TestTest_OtherTenantHasNoPolicy(t *testing.T) {
-	dir := fixtureDir(t, map[string]string{"t_test.yaml": `policy: policy.yaml
-tenant: acme
-tests:
-  - name: an unknown tenant is denied
-    request: {scope: shell, command: "ls -la"}
-    expect: DENY
-    expect_rule: "deny:tenant:not_found"
-`})
-	code, stdout, stderr := runTestHarness(t, &testCmdFlags{Paths: []string{dir}})
-	if code != testExitPassed {
-		t.Fatalf("exit = %d, want 0\nstdout: %s\nstderr: %s", code, stdout, stderr)
-	}
-}
-
-// The shipped fixtures pass against the shipped policies. CI runs the same
-// thing as 'agentguard test configs/tests'.
 func TestTest_ShippedFixturesPass(t *testing.T) {
 	dir := filepath.Join(repoRootForDocs(t), "configs", "tests")
 	code, stdout, stderr := runTestHarness(t, &testCmdFlags{Paths: []string{dir}, Strict: true})

@@ -349,7 +349,7 @@ Run a policy against test cases and report which pass. Each case is an action an
 agentguard test [flags] <fixture.yaml | folder>...
 ```
 
-Give fixture files, folders, or both. A folder is searched for `*_test.yaml` files; its subfolders are not searched.
+Give fixture files, folders, or both. A folder is searched for `*_test.yaml` and `*_test.yml` files; its subfolders are not searched. A file holds one YAML document: a second one after `---` is a load error, not something to skip.
 
 ### Fixture files
 
@@ -360,7 +360,7 @@ tests:
   - name: plain ls is allowed
     request: {scope: shell, command: "ls -la", agent_id: dev}
     expect: ALLOW                    # ALLOW, DENY or REQUIRE_APPROVAL
-    expect_rule: "allow:shell:*"     # optional
+    expect_rule: "allow:shell:ls *"  # optional: the exact rule
     expect_reason_contains: "shell"  # optional
   - name: deploy once the tests ran
     prior: [{scope: shell, command: "make test", agent_id: dev}]
@@ -371,11 +371,11 @@ tests:
 | Key | Meaning |
 |---|---|
 | `policy` | Policy file for every case in this file, relative to the fixture's folder. Without it: `--policy`, else the file the server would load (see [Policy file](#policy-file)). |
-| `tenant` | Tenant to check as. Default `local`. Only the local tenant has a policy here, so any other tenant gets `DENY` with `matched_rule="deny:tenant:not_found"`, as with `check --tenant-id`. |
+| `tenant` | Tenant to check as. Default `local`. The fixture's policy is served to this tenant, so its cases test that policy as the tenant would get it (history and cost are kept per tenant). |
 | `tests[].name` | Required, and unique within the file. `--run` matches against it. |
 | `tests[].request` | The action, with the `/v1/check` request fields: `scope` (required), `action`, `command`, `path`, `domain`, `url`, `agent_id`, `session_id`, `est_cost`, `meta`. |
 | `tests[].expect` | Required. `ALLOW`, `DENY` or `REQUIRE_APPROVAL`. |
-| `tests[].expect_rule` | Optional. The `matched_rule` the verdict must have. `*` matches any run of characters and everything else is literal, so `allow:shell:ls *` matches only that rule. A default deny has no rule. |
+| `tests[].expect_rule` | Optional. The exact `matched_rule` the verdict must have, such as `allow:shell:ls *`. It is compared as written: the `*` there is part of the rule's name, not a wildcard, so a case can't pass on a different, broader rule. A default deny has no rule; check its reason instead. |
 | `tests[].expect_reason_contains` | Optional. Text the verdict's reason must contain. |
 | `tests[].prior` | Optional. Actions recorded as allowed just now, before the check, for [`require_prior`](POLICY_REFERENCE.md#conditions) conditions. Same fields as `request`; each needs a `scope` and an `action` or a `command`. |
 

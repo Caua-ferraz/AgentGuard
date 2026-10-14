@@ -689,7 +689,32 @@ There is **no** schema validation beyond the above — typos in field names are 
 
 `validate` tells you a policy loads. It does not tell you the policy still blocks `rm -rf /` after someone widened an allow rule. For that, write test cases: example actions and the verdict each one must get. `agentguard test` runs them against the policy, with no server.
 
-Put the cases in a file whose name ends in `_test.yaml`, next to the policy or in a folder of their own:
+Put the cases in a file whose name ends in `_test.yaml` (or `_test.yml`), next to the policy or in a folder of their own. For this policy:
+
+```yaml
+# policy.yaml
+version: "1"
+name: "example"
+rules:
+  - scope: shell
+    require_approval:
+      - pattern: "rm -rf *"
+    allow:
+      - pattern: "ls *"
+      - pattern: "make test"
+      - pattern: "make deploy"
+        conditions:
+          - require_prior: "make test"
+            time_window: 1h
+  - scope: network
+    deny:
+      - domain: "*.production.internal"
+        message: "Production access needs a change ticket"
+    allow:
+      - domain: "api.github.com"
+```
+
+the cases could be:
 
 ```yaml
 # policy-tests/shell_test.yaml
@@ -713,6 +738,10 @@ tests:
     prior: [{scope: shell, command: "make test", agent_id: dev}]
     request: {scope: shell, command: "make deploy", agent_id: dev}
     expect: ALLOW
+
+  - name: deploy without a test run is not allowed
+    request: {scope: shell, command: "make deploy", agent_id: dev}
+    expect: DENY
 ```
 
 ```bash
@@ -722,7 +751,7 @@ agentguard test policy-tests/
 What a case can check:
 
 - `expect`: the decision, `ALLOW`, `DENY` or `REQUIRE_APPROVAL`. Required.
-- `expect_rule`: the `matched_rule` of the verdict. `*` matches any run of characters. A default deny has no rule; check its reason instead.
+- `expect_rule`: the exact `matched_rule` of the verdict, such as `require_approval:shell:rm -rf *`. The `*` is part of the rule's name, not a wildcard. A default deny has no rule; check its reason instead.
 - `expect_reason_contains`: text the reason must contain, such as a rule's `message`.
 
 `prior:` lists actions that count as allowed just now, so a [`require_prior`](#conditions) condition can be met. They are recorded for the agent and scope they name.
