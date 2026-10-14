@@ -256,6 +256,40 @@ func TestPolicyBlocksMirrorTheClaudeCodeBlock(t *testing.T) {
 	}
 }
 
+// TestAddEveryAgentsRulesToOneCRLFPolicy adds the blocks of all the agents,
+// one after another, to a policy with Windows line endings. Each insert
+// must land under the one agents: key; Windows CI caught the second insert
+// adding a duplicate agents: key that made the policy fail to load.
+func TestAddEveryAgentsRulesToOneCRLFPolicy(t *testing.T) {
+	for _, nl := range []string{"\n", "\r\n"} {
+		policyText := strings.ReplaceAll("version: \"1\"\nname: t\nrules:\n  - scope: shell\n    allow:\n      - pattern: \"ls *\"\nagents:\n  research-bot:\n    override:\n      - scope: network\n        allow:\n          - domain: \"arxiv.org\"\n", "\n", nl)
+		path := filepath.Join(t.TempDir(), "p.yaml")
+		if err := os.WriteFile(path, []byte(policyText), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range agentIntegrations {
+			if err := addAgentRules(path, a.agentID, a.name, a.block); err != nil {
+				t.Fatalf("line ending %q: adding %s: %v", nl, a.name, err)
+			}
+		}
+		for _, a := range agentIntegrations {
+			if has, err := policyHasAgentRules(path, a.agentID); err != nil || !has {
+				t.Errorf("line ending %q: %s rules = %v, %v", nl, a.name, has, err)
+			}
+		}
+		b, _ := os.ReadFile(path)
+		if n := strings.Count(string(b), nl+"agents:"); n != 1 {
+			t.Errorf("line ending %q: %d agents: keys, want 1", nl, n)
+		}
+		if nl == "\n" && strings.Contains(string(b), "\r") {
+			t.Errorf("an LF policy got CR characters")
+		}
+		if nl == "\r\n" && strings.Contains(strings.ReplaceAll(string(b), "\r\n", ""), "\r") {
+			t.Errorf("a CRLF policy got a stray CR")
+		}
+	}
+}
+
 func TestAddAgentRulesToOlderPolicies(t *testing.T) {
 	base := "version: \"1\"\nname: t\nrules:\n  - scope: shell\n    allow:\n      - pattern: \"ls *\"\n"
 	for _, a := range agentIntegrations[1:] {
