@@ -301,8 +301,12 @@ func (f *fakeService) LogHint() string { return "the log" }
 func testMachine(t *testing.T) machine {
 	t.Helper()
 	root := t.TempDir()
-	// Claude Code's settings too: the flows read and edit them.
+	// The coding agents' settings too: the flows read and edit them, and
+	// must never touch the real ones.
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	t.Setenv("CURSOR_CONFIG_DIR", filepath.Join(root, "cursor"))
+	t.Setenv("GEMINI_CLI_HOME", filepath.Join(root, "gemini-home"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	m := machine{
 		goos: goos, goarch: "amd64", channel: channelRelease,
 		binDir:    filepath.Join(root, "bin"),

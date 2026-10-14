@@ -39,6 +39,10 @@ Default path: `audit.jsonl` (CLI `--audit-log`). JSON-Lines, one record per line
 | `"sdk"` | direct `/v1/check` callers — Python SDK, TypeScript SDK, framework adapters, hand-rolled HTTP clients |
 | `"mcp_gateway"` | `agentguard-mcp-gateway` binary |
 | `"llm_api_proxy"` | `agentguard-llm-proxy` binary |
+| `"claude_code"` | `agentguard hook claude-code`, Claude Code's hook (v1.3+) |
+| `"cursor"` | `agentguard hook cursor`, Cursor's hooks |
+| `"gemini_cli"` | `agentguard hook gemini-cli`, Gemini CLI's hook |
+| `"codex_cli"` | `agentguard hook codex`, Codex CLI's hook |
 | (omitted / empty string) | pre-v0.5 entries, or v0.5+ entries written before the writer was upgraded — readers should treat as `"sdk"` for filtering purposes |
 
 The field is purely additive: schema_version remains `2`. Pre-v0.5 readers ignore unknown top-level keys without error. v0.5+ writers MUST set `Transport` on every new entry; the central server's `/v1/check` handler stamps it from `meta["transport"]` on the inbound request, defaulting to `"sdk"` when the field is absent. External audit consumers implementing against this format MUST tolerate the field's absence on legacy data and SHOULD preserve it round-trip when re-serialising entries.

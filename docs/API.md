@@ -248,7 +248,7 @@ Query the audit log.
 | `limit` | int | `auditDefaultLimit` (default 100) | Silently clamped at `auditMaxLimit` (default 1000). `<1` or non-integer → `400`. |
 | `offset` | int | `0` | Skip N matching entries. Must be ≥ 0. With `order=desc` it counts from the newest entry. |
 | `order` | string | `asc` | **(v1.2)** `asc` returns the oldest matches first (the original behaviour); `desc` returns the newest first. Anything else → `400`. |
-| `transport` | string | — | Filter on the `Entry.Transport` audit field. Recognised values: `sdk`, `mcp_gateway`, `llm_api_proxy`. Pre-v0.5 entries have no transport tag and are excluded when this filter is set. |
+| `transport` | string | — | Filter on the `Entry.Transport` audit field. Recognised values: `sdk`, `mcp_gateway`, `llm_api_proxy`, and the coding-agent hooks' `claude_code`, `cursor`, `gemini_cli`, `codex_cli`. Pre-v0.5 entries have no transport tag and are excluded when this filter is set. |
 
 ### Response
 
@@ -528,7 +528,7 @@ data: {"type":"check","timestamp":"2026-04-19T12:03:44Z","request":{…},"result
 | `check` | Every response from `/v1/check` (any decision, including rate-limit denies) and every `POST /v1/audit` record. `REQUIRE_APPROVAL` and `DENY` decisions arrive as `check` events — read `result.decision`. |
 | `resolved` | The first `approve` / `deny` of a pending approval. `result.decision` is `ALLOW` or `DENY`, `result.reason` is `manually allow` / `manually deny`. Repeating the same resolution does not send it again. |
 
-Events are unnamed SSE messages (no `event:` field), so an `EventSource` receives them through `onmessage`. Each carries `transport` (`sdk`, `mcp_gateway`, `llm_api_proxy`) and, for tenants other than `local`, `tenant`, alongside `request` and `result`. `approval_required` and `denied` are **notifier** event types (webhook / Slack / console), not stream events — see [`APPROVAL_WORKFLOW.md`](APPROVAL_WORKFLOW.md#2-notification-fan-out).
+Events are unnamed SSE messages (no `event:` field), so an `EventSource` receives them through `onmessage`. Each carries `transport` (`sdk`, `mcp_gateway`, `llm_api_proxy`, or a coding-agent hook's `claude_code`, `cursor`, `gemini_cli`, `codex_cli`) and, for tenants other than `local`, `tenant`, alongside `request` and `result`. `approval_required` and `denied` are **notifier** event types (webhook / Slack / console), not stream events — see [`APPROVAL_WORKFLOW.md`](APPROVAL_WORKFLOW.md#2-notification-fan-out).
 
 Subscriber channel buffer is `64` (`SSEChannelBufferSize`). Slow consumers drop events — counted in `agentguard_sse_events_dropped_total{reason="slow_consumer"}`.
 

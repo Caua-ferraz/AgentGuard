@@ -200,11 +200,14 @@ func (s *setup) menu() []menuItem {
 			add("Run the server in this terminal", "Ctrl-C stops it", s.runHere)
 		}
 		add("Connection details", "URL, API key, SDK and Claude Desktop settings", s.printDetails)
-		switch {
-		case claudeConnected(claudeSettingsPath()):
-			add("Disconnect Claude Code", "stop checking its tool calls", s.disconnectClaude)
-		case claudeCodeDetected():
-			add("Connect Claude Code", "check its tool calls against your policy", s.connectClaude)
+		for _, a := range agentIntegrations {
+			connected, _ := a.connected()
+			switch {
+			case connected:
+				add("Disconnect "+a.name, "stop checking its tool calls", func() (bool, int) { return s.disconnectAgent(a) })
+			case a.detected():
+				add("Connect "+a.name, "check its tool calls against your policy", func() (bool, int) { return s.connectAgent(a) })
+			}
 		}
 		add("Open the policy file", s.state.Policy, s.openPolicy)
 		add("Change settings", "start at login, API key", s.doSetup)
@@ -248,8 +251,13 @@ func (s *setup) printStatus() {
 		}
 		row("Server", strings.Join(parts, " · "))
 		row("Policy", s.state.Policy)
-		if claudeConnected(claudeSettingsPath()) {
-			row("Claude", "Claude Code is connected: its tool calls are checked")
+		for _, a := range agentIntegrations {
+			switch connected, failClosed := a.connected(); {
+			case connected && failClosed:
+				row(a.short, a.name+" is connected: its tool calls are checked (blocked while the server is down)")
+			case connected:
+				row(a.short, a.name+" is connected: its tool calls are checked")
+			}
 		}
 	}
 	switch {
@@ -511,17 +519,25 @@ func (s *setup) openPolicy() (bool, int) {
 	return back()
 }
 
-// ── Claude Code ─────────────────────────────────────────────────────────
+// ── Coding agents ───────────────────────────────────────────────────────
 
+// connectClaude is Connect Claude Code.
 func (s *setup) connectClaude() (bool, int) {
-	has, err := policyHasClaudeRules(s.state.Policy)
+	return s.connectAgent(agentIntegrations[0])
+}
+
+// connectAgent offers to add the agent's rules to the policy, asks what
+// happens while the server is down, and writes the hook into the agent's
+// settings.
+func (s *setup) connectAgent(a agentIntegration) (bool, int) {
+	has, err := policyHasAgentRules(s.state.Policy, a.agentID)
 	if err != nil {
 		s.fail("Policy", err.Error())
 		return back()
 	}
 	if !has {
-		i, err := s.ui.Select("Your policy has no rules for Claude Code", []tui.Option{
-			{Label: "Add AgentGuard's Claude Code rules", Hint: "recommended: read and edit your projects; risky commands need approval"},
+		i, err := s.ui.Select("Your policy has no rules for "+a.name, []tui.Option{
+			{Label: "Add AgentGuard's " + a.name + " rules", Hint: "recommended: read and edit your projects; risky commands need approval"},
 			{Label: "Connect without them", Hint: "the sandbox rules apply, which block most of its work"},
 			{Label: "Cancel"},
 		}, 0)
@@ -529,36 +545,57 @@ func (s *setup) connectClaude() (bool, int) {
 			return back()
 		}
 		if i == 0 {
-			if err := addClaudeRules(s.state.Policy); err != nil {
+			if err := addAgentRules(s.state.Policy, a.agentID, a.name, a.block); err != nil {
 				s.fail("Policy", err.Error())
-				s.note("Add the Claude Code block by hand: https://github.com/Caua-ferraz/AgentGuard/blob/v" + version + "/docs/CLAUDE_CODE.md")
+				s.note("Add the " + a.name + " block by hand: https://github.com/Caua-ferraz/AgentGuard/blob/v" + version + "/docs/CODING_AGENTS.md")
 				return back()
 			}
-			s.ok("Policy", "added the Claude Code rules to "+s.state.Policy+" (the old file is kept as .agentguard-backup)")
+			s.ok("Policy", "added the "+a.name+" rules to "+s.state.Policy+" (the old file is kept as .agentguard-backup)")
 		}
 	}
-	path := claudeSettingsPath()
-	if err := connectClaudeCode(path, s.m.exe); err != nil {
-		s.fail("Claude Code", err.Error())
+	def := 0
+	if connected, failClosed := a.connected(); connected && failClosed {
+		def = 1
+	}
+	i, err := s.ui.Select("If AgentGuard isn't running", []tui.Option{
+		{Label: "Let calls through with a warning", Hint: "default: " + a.name + " keeps working, unchecked"},
+		{Label: "Block them", Hint: "nothing runs unchecked; " + a.name + " can't use its tools until the server is back"},
+	}, def)
+	if err != nil || i == tui.Back {
 		return back()
 	}
-	s.ok("Claude Code", "connected in "+path+" (the old file is kept as .agentguard-backup)")
-	s.note("New Claude Code sessions check Bash, file reads and edits, web fetches and MCP tools.")
+	failClosed := i == 1
+
+	path := a.settingsPath()
+	if err := a.connect(path, s.m.exe, failClosed); err != nil {
+		s.fail(a.name, err.Error())
+		return back()
+	}
+	s.ok(a.name, "connected in "+path+" (the old file is kept as .agentguard-backup)")
+	s.note("New " + a.name + " sessions check " + a.checks + ".")
 	s.note("A call that needs approval waits up to 5 minutes: approve it at " + baseURL(s.state.Port) + "/dashboard or with 'agentguard approve <id>'.")
-	if serverHealth(s.state.Port) == "" {
-		s.note("The server isn't running: until it is, Claude Code's calls go ahead with a warning.")
+	switch running := serverHealth(s.state.Port) != ""; {
+	case !running && failClosed:
+		s.note("The server isn't running: until it is, " + a.name + "'s calls are blocked.")
+	case !running:
+		s.note("The server isn't running: until it is, " + a.name + "'s calls go ahead with a warning.")
+	case failClosed:
+		s.note("If the server stops, " + a.name + "'s calls are blocked until it's back.")
+	}
+	if a.note != "" {
+		s.note(a.note)
 	}
 	return back()
 }
 
-func (s *setup) disconnectClaude() (bool, int) {
-	path := claudeSettingsPath()
-	if _, err := disconnectClaudeCode(path); err != nil {
-		s.fail("Claude Code", err.Error())
+func (s *setup) disconnectAgent(a agentIntegration) (bool, int) {
+	path := a.settingsPath()
+	if _, err := a.disconnect(); err != nil {
+		s.fail(a.name, err.Error())
 		return back()
 	}
-	s.ok("Claude Code", "disconnected: removed AgentGuard's hook from "+path)
-	s.note("Your policy keeps its Claude Code rules; they do nothing while Claude Code isn't connected.")
+	s.ok(a.name, "disconnected: removed AgentGuard's hook from "+path)
+	s.note("Your policy keeps its " + a.name + " rules; they do nothing while " + a.name + " isn't connected.")
 	return back()
 }
 
@@ -704,19 +741,27 @@ func (s *setup) doUninstall() (bool, int) {
 			s.state.LoginStart = false
 			_ = saveState(s.m, s.state)
 		}
-		if claudeConnected(claudeSettingsPath()) {
-			s.note("Claude Code stays connected: while the server is stopped, its tool calls go ahead with a warning.")
+		for _, a := range agentIntegrations {
+			switch connected, failClosed := a.connected(); {
+			case connected && failClosed:
+				s.note(a.name + " stays connected: while the server is stopped, its tool calls are blocked.")
+			case connected:
+				s.note(a.name + " stays connected: while the server is stopped, its tool calls go ahead with a warning.")
+			}
 		}
 		return back()
 	}
 
 	// Before the binaries go: a hook pointing at a deleted program would
-	// show an error on every Claude Code tool call.
-	if removed, err := disconnectClaudeCode(claudeSettingsPath()); err != nil {
-		s.fail("Claude Code", err.Error())
-		return back()
-	} else if removed {
-		s.ok("Claude Code", "disconnected (removed AgentGuard's hook from "+claudeSettingsPath()+")")
+	// show an error on every tool call of the agent (or, failing closed,
+	// block them all).
+	for _, a := range agentIntegrations {
+		if removed, err := a.disconnect(); err != nil {
+			s.fail(a.name, err.Error())
+			return back()
+		} else if removed {
+			s.ok(a.name, "disconnected (removed AgentGuard's hook from "+a.settingsPath()+")")
+		}
 	}
 
 	if !writable(s.m.binDir) {

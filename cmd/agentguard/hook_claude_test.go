@@ -77,6 +77,10 @@ type fakeGuard struct {
 	requests []policy.ActionRequest
 	auth     []string
 	status   int // non-zero: every /v1/check answers this code
+	// pollStatus, when non-zero, is what /v1/status answers.
+	pollStatus int
+	// withdrawn lists the approval ids the hook denied through /v1/deny.
+	withdrawn []string
 }
 
 func newFakeGuard(t *testing.T) *fakeGuard {
@@ -100,9 +104,21 @@ func newFakeGuard(t *testing.T) *fakeGuard {
 				res = policy.CheckResult{Decision: policy.Deny, Reason: "evil is blocked", Rule: "deny:shell:evil"}
 			case req.Command == "rm -rf x" && req.ApprovalID == "":
 				res = policy.CheckResult{Decision: policy.RequireApproval, Reason: "rm needs approval", ApprovalID: "ap_1"}
+			// Files, for the agents whose one call can be several checks.
+			case strings.HasSuffix(req.Path, "secret"):
+				res = policy.CheckResult{Decision: policy.Deny, Reason: "secrets are blocked", Rule: "deny:filesystem:write"}
+			case strings.HasSuffix(req.Path, "approve-me") && req.ApprovalID == "":
+				res = policy.CheckResult{Decision: policy.RequireApproval, Reason: "this file needs approval", ApprovalID: "ap_1"}
 			}
 			_ = json.NewEncoder(w).Encode(res)
+		case "/v1/deny/ap_1":
+			g.withdrawn = append(g.withdrawn, "ap_1")
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "denied"})
 		case "/v1/status/ap_1":
+			if g.pollStatus != 0 {
+				w.WriteHeader(g.pollStatus)
+				return
+			}
 			switch g.approval {
 			case "gone":
 				http.NotFound(w, r)
@@ -368,7 +384,7 @@ func TestSetupConnectsAndUninstallDisconnects(t *testing.T) {
 	// A policy from before this release: no Claude Code block.
 	_ = os.WriteFile(m.policyPath(), []byte("version: \"1\"\nname: old\nrules:\n  - scope: shell\n    allow:\n      - pattern: \"ls *\"\n"), 0o644)
 
-	ui.choices = []int{0} // "Add AgentGuard's Claude Code rules"
+	ui.choices = []int{0, 0} // "Add AgentGuard's Claude Code rules"; server down: let calls through
 	s.connectClaude()
 	if has, _ := policyHasClaudeRules(m.policyPath()); !has {
 		t.Error("the Claude Code rules weren't added")

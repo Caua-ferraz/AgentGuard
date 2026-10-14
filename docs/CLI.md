@@ -24,7 +24,7 @@ Work with a running server:
   audit       Query the audit log
 
 Other:
-  hook        Checks Claude Code's tool calls (its hook; setup connects it)
+  hook        Checks a coding agent's tool calls (its hook; setup connects it)
   migrate     Upgrade the audit log's format (the server does this at startup)
   version     Print version information (also: --version)
   help        Show help for a command
@@ -76,17 +76,32 @@ The service runs `agentguard server --policy … --data-dir … --audit-log … 
 
 **Update** installs the newest release (or `AGENTGUARD_VERSION`) for this OS and CPU, from GitHub or from `AGENTGUARD_DOWNLOAD_URL`, like the installers. It checks the archive against the release's `checksums.txt`, swaps the three binaries in place — a running server keeps going until it restarts — and restarts the service. A `go install` copy gets the `go install` command instead; a source build and the container image don't update themselves.
 
-**Connect Claude Code** (shown when Claude Code is installed) adds AgentGuard's hook to Claude Code's settings so its tool calls are checked, and offers to add the Claude Code rules to an older policy; **Disconnect Claude Code** takes the hook out again. See [`CLAUDE_CODE.md`](CLAUDE_CODE.md).
+**Connect Claude Code**, **Connect Cursor**, **Connect Gemini CLI** and **Connect Codex CLI** (each shown when that agent is installed) add AgentGuard's hook to the agent's settings so its tool calls are checked. Each offers to add the agent's rules to a policy that has none, and asks what happens while AgentGuard isn't running: let calls through with a warning (the default) or block them (`--fail-closed`). **Disconnect** takes the hook out again. See [`CODING_AGENTS.md`](CODING_AGENTS.md).
 
-**Uninstall** offers, in this order: stop the server and don't start it at login; uninstall and keep the policy, key and data; uninstall everything; cancel. It removes the login service, AgentGuard's hook from Claude Code's settings, and the three binaries — on Windows also the installer's PATH entry, and the running `.exe` right after setup exits — works offline, and prints a link for feedback. Nothing is sent.
+**Uninstall** offers, in this order: stop the server and don't start it at login; uninstall and keep the policy, key and data; uninstall everything; cancel. It removes the login service, AgentGuard's hooks from the coding agents' settings, and the three binaries — on Windows also the installer's PATH entry, and the running `.exe` right after setup exits — works offline, and prints a link for feedback. Nothing is sent.
 
 Opening the menu checks GitHub for a newer release unless `AGENTGUARD_NO_UPDATE_CHECK` is set; the menu then offers "Check for updates". setup refuses to run as root (it sets AgentGuard up for your own user; for a system-wide server see [`DEPLOYMENT.md`](DEPLOYMENT.md)) and inside the container image.
 
 ---
 
-## `agentguard hook claude-code`
+## `agentguard hook <agent>`
 
-The command Claude Code runs before each shell command, file read or edit, web fetch and MCP tool call, once `agentguard setup` has connected it. It reads the call as JSON on stdin, checks it on the running server as agent `claude-code` (transport `claude_code` in the audit log), and answers Claude Code: nothing when the policy allows it, a block with the reason when it denies it; a call that needs approval waits up to 5 minutes for one. When the server can't be reached, the call goes ahead with a warning. It finds the server through `AGENTGUARD_URL`, else the one setup runs, and the key through `AGENTGUARD_API_KEY`, else the saved one. You don't run it yourself; see [`CLAUDE_CODE.md`](CLAUDE_CODE.md).
+```
+agentguard hook claude-code|cursor|gemini-cli|codex [--fail-closed]
+```
+
+The command a coding agent runs before each shell command, file read or edit, web fetch and MCP tool call, once `agentguard setup` has connected it. It reads the call as JSON on stdin, in the agent's own format, checks it on the running server as that agent, and answers in the agent's own format: go ahead when the policy allows it, a block with the reason when it denies it; a call that needs approval waits up to 5 minutes for one. It finds the server through `AGENTGUARD_URL`, else the one setup runs, and the key through `AGENTGUARD_API_KEY`, else the saved one. You don't run it yourself; see [`CODING_AGENTS.md`](CODING_AGENTS.md).
+
+| Agent | Checked as agent | Audit transport |
+|---|---|---|
+| `claude-code` | `claude-code` | `claude_code` |
+| `cursor` | `cursor` | `cursor` |
+| `gemini-cli` | `gemini-cli` | `gemini_cli` |
+| `codex` | `codex` | `codex_cli` |
+
+| Flag | Default | Description |
+|---|---|---|
+| `--fail-closed` | `false` | Block calls AgentGuard can't check (server down, API key refused, unreadable input), with rule `deny:hook:fail_closed`, instead of letting them through with a warning. Goes before or after the agent. |
 
 ---
 
@@ -488,7 +503,7 @@ Query `/v1/audit` for recent decisions. All filters are optional and AND-combine
 | `--agent <id>` | *(none)* | Filter by exact `agent_id`. |
 | `--decision <D>` | *(none)* | `ALLOW`, `DENY`, or `REQUIRE_APPROVAL`. |
 | `--scope <name>` | *(none)* | `shell`, `filesystem`, `network`, `browser`, `cost`, `data`, `mcp_tool`. |
-| `--transport <name>` | *(none)* | Filter by audit `transport` tag. One of `sdk`, `mcp_gateway`, `llm_api_proxy`. Pre-v0.5 entries are excluded when set. |
+| `--transport <name>` | *(none)* | Filter by audit `transport` tag: `sdk`, `mcp_gateway`, `llm_api_proxy`, or a coding-agent hook's `claude_code`, `cursor`, `gemini_cli`, `codex_cli`. Pre-v0.5 entries are excluded when set. |
 | `--limit <int>` | `50` | Max entries. Server clamps silently above configured ceiling (default 1000). |
 | `--order <desc\|asc>` | `desc` | **(v1.2)** `desc` shows the newest entries first; `asc`, the oldest (the order before v1.2, when `--limit` returned the first entries in the log rather than the latest). |
 | `--api-key <key>` | `$AGENTGUARD_API_KEY` | Bearer token. |
