@@ -34,7 +34,7 @@ pkg/ratelimit/               Token-bucket rate limiter
 pkg/metrics/                 In-process metrics with Prometheus text output
 pkg/depaudit/                Dependency safety auditor
 pkg/deprecation/             Warnings for features scheduled for removal
-plugins/python/              Python SDK + framework adapters (LangChain, CrewAI, browser-use, MCP)
+plugins/python/              Python SDK + framework adapters (LangChain, CrewAI, browser-use, MCP, OpenAI Agents SDK)
 plugins/typescript/          TypeScript SDK
 configs/                     Policy files and examples
 docs/                        Documentation
@@ -42,7 +42,7 @@ docs/                        Documentation
 
 ## Priority Areas
 
-1. **Adapters** — Adding support for more agent frameworks (OpenAI Agents SDK, etc.) and more coding agents' hooks
+1. **Adapters** — Adding support for more agent frameworks and more coding agents' hooks
 2. **Policy rules** — New scope types, matching strategies, and contextual conditions
 3. **Dashboard** — Session replay, policy editor, richer analytics
 4. **Documentation** — Tutorials, integration guides, example policies
