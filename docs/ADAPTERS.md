@@ -232,6 +232,8 @@ On `DENY` the adapter raises `AgentGuardDenied`, and on `REQUIRE_APPROVAL` it ra
 
 What the model sees: nothing. The gate sits outside the tool's own error handling, so the SDK's `failure_error_function` never turns a deny into a tool output. That matters because the SDK's default handler answers the model with a generic "An error occurred while running the tool. Please try again." (from 0.23; earlier releases append the error text), which invites a retry. Instead the run ends and `Runner.run` (or the `stream_events()` loop of `Runner.run_streamed`) raises the exception to your code. The raised object also subclasses the SDK's `AgentsException`, which the runner re-raises as-is rather than wrapping it in `UserError`, so `except AgentGuardDenied` and `except PermissionError` both work.
 
+Nested agents are the exception. If the guarded tools belong to an inner agent that an outer agent calls through `inner.as_tool()`, the deny still ends the inner run, but it is raised inside the outer agent's tool, and that tool's default `failure_error_function` turns it into a tool error. The outer run continues, and the outer model sees the SDK's generic error message (from 0.23 without the AgentGuard reason; earlier releases append it). To end the outer run too, build the inner tool with `inner.as_tool(..., failure_error_function=None)` (on releases whose `as_tool` takes that argument); `Runner.run` on the outer agent then raises `AgentGuardDenied`. Either way the denied tool never runs.
+
 If the model should see the reason and continue, add the tool input guardrail:
 
 ```python

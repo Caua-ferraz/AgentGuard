@@ -37,6 +37,16 @@ Two entry points
     PermissionError``) around ``Runner.run`` catches it. The model sees
     nothing: the run is over.
 
+    Nested agents are the exception. When the guarded tools belong to
+    an inner agent exposed with ``inner.as_tool()``, the deny ends the
+    inner run, but it is raised inside the outer agent's tool, whose
+    default ``failure_error_function`` turns it into a tool error: the
+    outer run continues and the outer model sees the SDK's generic
+    error message. Pass ``inner.as_tool(..., failure_error_function=None)``
+    (releases whose ``as_tool`` takes that argument) to propagate the
+    deny out of ``Runner.run`` instead. Either way the denied tool never
+    runs.
+
 ``agentguard_tool_guardrail`` (the model-visible option)
     Returns an SDK tool input guardrail. On DENY / REQUIRE_APPROVAL it
     rejects the call with ``ToolGuardrailFunctionOutput.reject_content``:

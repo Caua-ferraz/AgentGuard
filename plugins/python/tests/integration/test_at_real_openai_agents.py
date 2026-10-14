@@ -13,6 +13,7 @@ the SDK does not try to export spans to OpenAI.
 
 from __future__ import annotations
 
+import inspect
 import json
 from typing import Any, List
 
@@ -355,6 +356,71 @@ class TestArgumentSmuggling:
         assert _check_bodies(integration_mock) == [
             {"scope": "shell", "agent_id": "oa", "command": "rm -rf /"}
         ]
+
+
+class TestNestedAgentAsTool:
+    """Guarded tools inside an agent that another agent calls via as_tool()."""
+
+    def _agents(self, integration_mock, ran: List[str], **as_tool_kwargs: Any):
+        inner_model = _ScriptedModel([
+            [_tool_call("run_shell", {"command": "rm -rf /"}, "i1")],
+            [_message("inner should not get here")],
+        ])
+        inner = Agent(
+            name="inner",
+            model=inner_model,
+            tools=guard_tools(_tools(ran), Guard(integration_mock.base_url)),
+        )
+        outer_model = _ScriptedModel([
+            [_tool_call("ask_inner", {"input": "wipe"}, "o1")],
+            [_message("outer carried on")],
+        ])
+        outer = Agent(
+            name="outer",
+            model=outer_model,
+            tools=[
+                inner.as_tool(
+                    tool_name="ask_inner",
+                    tool_description="Ask the inner agent",
+                    **as_tool_kwargs,
+                )
+            ],
+        )
+        return outer, outer_model
+
+    @pytest.mark.asyncio
+    async def test_default_as_tool_turns_the_deny_into_a_tool_error(self, integration_mock):
+        # The outer as_tool's default failure_error_function catches the
+        # deny: the outer run continues and its model sees the SDK's
+        # generic tool error (older releases append the AgentGuard text,
+        # 0.23 does not). The denied tool still never runs.
+        integration_mock.set_default_check(deny(reason="rule:no-rm"))
+        ran: List[str] = []
+        outer, outer_model = self._agents(integration_mock, ran)
+
+        result = await Runner.run(outer, "go", run_config=_RUN_CONFIG)
+
+        assert ran == []
+        assert result.final_output == "outer carried on"
+        outputs = _tool_outputs(outer_model)
+        assert len(outputs) == 1
+        assert "error occurred" in outputs[0].lower()
+
+    @pytest.mark.asyncio
+    async def test_failure_error_function_none_propagates_the_deny(self, integration_mock):
+        if "failure_error_function" not in inspect.signature(Agent.as_tool).parameters:
+            pytest.skip("Agent.as_tool has no failure_error_function on this release")
+        integration_mock.set_default_check(deny(reason="rule:no-rm"))
+        ran: List[str] = []
+        outer, outer_model = self._agents(
+            integration_mock, ran, failure_error_function=None
+        )
+
+        with pytest.raises(AgentGuardDenied, match="rule:no-rm"):
+            await Runner.run(outer, "go", run_config=_RUN_CONFIG)
+
+        assert ran == []
+        assert len(outer_model.inputs) == 1
 
 
 class TestInvokerContextType:
