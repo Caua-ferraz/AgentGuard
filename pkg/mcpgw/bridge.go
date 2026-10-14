@@ -164,6 +164,31 @@ func (b *Bridge) SetUpstream(up Upstream) {
 	b.upstreams[up.Namespace()] = up
 }
 
+// newUpstream builds the Upstream for spec's transport. This is the one
+// place the bridge constructs upstreams; both kinds share the reconnect
+// schedule and forward notifications to the host the same way.
+func (b *Bridge) newUpstream(spec UpstreamSpec) (Upstream, error) {
+	ns := spec.Namespace
+	onNote := func(method string) { b.onUpstreamNotification(ns, method) }
+	switch spec.Transport {
+	case "", TransportStdio:
+		return NewStdioUpstreamWithOptions(spec, StdioUpstreamOptions{
+			Backoff:        BackoffSchedule(b.cfg.ReconnectCap),
+			Logger:         b.logger,
+			OnNotification: onNote,
+		}), nil
+	case TransportHTTP:
+		return NewHTTPUpstream(spec, HTTPUpstreamOptions{
+			Headers:        b.cfg.UpstreamHeaders[ns],
+			Backoff:        BackoffSchedule(b.cfg.ReconnectCap),
+			Logger:         b.logger,
+			OnNotification: onNote,
+		}), nil
+	default:
+		return nil, fmt.Errorf("unknown transport %q (want %q or %q)", spec.Transport, TransportStdio, TransportHTTP)
+	}
+}
+
 // Run is the bridge's main loop. Reads JSON-RPC frames from `in`,
 // dispatches per method, writes responses to `out`. Returns when:
 //   - ctx is cancelled (graceful shutdown);
@@ -192,14 +217,17 @@ func (b *Bridge) Run(ctx context.Context, in io.Reader, out io.Writer, errLog io
 			// Test injection already wired this namespace.
 			continue
 		}
-		ns := spec.Namespace
-		up := NewStdioUpstreamWithOptions(spec, StdioUpstreamOptions{
-			Backoff:        BackoffSchedule(b.cfg.ReconnectCap),
-			Logger:         b.logger,
-			OnNotification: func(method string) { b.onUpstreamNotification(ns, method) },
-		})
-		if err := up.Start(ctx); err != nil {
-			b.logger.Infof("startup: upstream %q failed to spawn: %v", spec.Namespace, err)
+		up, err := b.newUpstream(spec)
+		if err != nil {
+			b.logger.Infof("startup: upstream %q: %v", spec.Namespace, err)
+			continue
+		}
+		// Only stdio upstreams have a process to start; an HTTP upstream
+		// first talks to its server in Initialize.
+		if s, ok := up.(interface{ Start(context.Context) error }); ok {
+			if err := s.Start(ctx); err != nil {
+				b.logger.Infof("startup: upstream %q failed to spawn: %v", spec.Namespace, err)
+			}
 		}
 		b.upstreams[spec.Namespace] = up
 	}
