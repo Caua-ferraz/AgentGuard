@@ -70,6 +70,14 @@ session_id, est_cost). Arguments that are not valid JSON are gated as a
 raw command string; the original string still goes to the tool, whose
 own validation rejects it.
 
+``guard_tool`` first projects the arguments onto the properties the
+tool's ``params_json_schema`` declares (unless the schema allows
+additional properties): the SDK's params model drops undeclared keys,
+so the check sees exactly what the tool receives. Two alias keys for
+one parameter with different values (``{"command": "ls", "cmd": "rm -rf
+/"}``) are denied outright, without a server call, in both entry
+points: the adapter cannot know which one the tool reads.
+
 Scope is fixed when ``scope=`` is passed. Otherwise it is inferred, in
 order: a url/domain argument means ``network``, a path/file_path
 argument means ``filesystem``, then keywords in the tool name and
@@ -89,7 +97,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-from typing import Any, Iterable, List, Optional, Tuple
+from typing import Any, FrozenSet, Iterable, List, Optional, Tuple
 
 from agentguard import (
     AgentGuardApprovalRequired,
@@ -97,7 +105,12 @@ from agentguard import (
     CheckResult,
     Guard,
 )
-from agentguard.adapters._common import extract_check_params
+from agentguard.adapters._common import (
+    ConflictingToolInput,
+    check_alias_conflicts,
+    conflict_denial,
+    extract_check_params,
+)
 
 
 # openai-agents 0.3.3 is the first release with tool input guardrails
@@ -267,21 +280,52 @@ def _approval_message(result: CheckResult) -> str:
     )
 
 
+def _schema_keys(schema: Any) -> Optional[FrozenSet[str]]:
+    """The argument names a tool's JSON schema declares, or None.
+
+    None means "do not project": the schema has no ``properties`` map,
+    or it explicitly allows additional properties, so the tool may read
+    keys the schema does not list.
+    """
+    if not isinstance(schema, dict):
+        return None
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return None
+    extra = schema.get("additionalProperties")
+    if extra is True or isinstance(extra, dict):
+        return None
+    return frozenset(k for k in properties if isinstance(k, str))
+
+
 async def _check(
     guard: Guard,
     scope: Optional[str],
     name: str,
     description: str,
     input_json: Any,
+    schema_keys: Optional[FrozenSet[str]] = None,
 ) -> CheckResult:
     """Run Guard.check for one tool call without blocking the event loop.
 
     Guard.check is a blocking urllib call; running it on the loop thread
     would stall every other task in the run (parallel tool calls,
     streaming) for the length of the round-trip.
+
+    With ``schema_keys``, a dict input is first projected onto those
+    keys: the SDK validates the arguments against the tool's params
+    model, which drops undeclared keys, so the check must see exactly
+    what the tool receives. Alias conflicts (command/cmd,
+    path/file_path) are looked for BEFORE the projection and deny.
     """
     tool_input = _parse_tool_input(input_json)
-    params = extract_check_params(tool_input, name)
+    try:
+        check_alias_conflicts(tool_input)
+        if schema_keys is not None and isinstance(tool_input, dict):
+            tool_input = {k: v for k, v in tool_input.items() if k in schema_keys}
+        params = extract_check_params(tool_input, name)
+    except ConflictingToolInput as e:
+        return conflict_denial(e)
     resolved_scope = scope or _infer_scope(tool_input, name, description)
     return await asyncio.to_thread(guard.check, resolved_scope, **params)
 
@@ -311,16 +355,23 @@ class _GatedInvoker:
         scope: Optional[str],
         name: str,
         description: str,
+        schema_keys: Optional[FrozenSet[str]] = None,
     ) -> None:
         self._inner = inner
         self._guard = guard
         self._scope = scope
         self._name = name
         self._description = description
+        self._schema_keys = schema_keys
 
     async def __call__(self, ctx: Any, input_json: str) -> Any:
         result = await _check(
-            self._guard, self._scope, self._name, self._description, input_json
+            self._guard,
+            self._scope,
+            self._name,
+            self._description,
+            input_json,
+            self._schema_keys,
         )
         _raise_if_blocked(result)
         return await self._inner(ctx, input_json)
@@ -382,6 +433,7 @@ def guard_tool(tool: Any, guard: Guard, scope: Optional[str] = None) -> Any:
         scope,
         tool.name,
         description if isinstance(description, str) else "",
+        _schema_keys(tool.params_json_schema),
     )
     return guarded
 

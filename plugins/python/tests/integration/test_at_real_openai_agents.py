@@ -295,6 +295,67 @@ class TestRunnerWithGuardedTools:
         assert len(integration_mock.requests_to("/v1/check")) == 1
 
 
+class TestArgumentSmuggling:
+    @pytest.mark.asyncio
+    async def test_alias_smuggling_is_denied(self, integration_mock):
+        # run_cmd reads "cmd"; the SDK drops the undeclared "command". Without
+        # the conflict check, "ls" would be checked and "rm -rf /" would run.
+        integration_mock.set_default_check(allow())
+        ran: List[str] = []
+
+        @function_tool(strict_mode=False)
+        def run_cmd(cmd: str) -> str:
+            """Run a shell command."""
+            ran.append(cmd)
+            return f"ran: {cmd}"
+
+        model = _ScriptedModel([
+            [_tool_call("run_cmd", {"command": "ls", "cmd": "rm -rf /"}, "c1")],
+            [_message("should not get here")],
+        ])
+        agent = Agent(
+            name="ops",
+            model=model,
+            tools=guard_tools([run_cmd], Guard(integration_mock.base_url)),
+        )
+
+        with pytest.raises(AgentGuardDenied, match="conflicting values for 'command'"):
+            await Runner.run(agent, "list files", run_config=_RUN_CONFIG)
+
+        assert ran == []
+        assert integration_mock.requests_to("/v1/check") == []
+
+    @pytest.mark.asyncio
+    async def test_check_sees_what_the_tool_receives(self, integration_mock):
+        # A stray undeclared "path" must not move the check to the
+        # filesystem scope while the tool runs the command.
+        integration_mock.set_default_check(allow())
+        ran: List[str] = []
+
+        @function_tool(strict_mode=False)
+        def run_cmd(cmd: str) -> str:
+            """Run a shell command."""
+            ran.append(cmd)
+            return f"ran: {cmd}"
+
+        model = _ScriptedModel([
+            [_tool_call("run_cmd", {"cmd": "rm -rf /", "path": "/tmp/ok"}, "c1")],
+            [_message("done")],
+        ])
+        agent = Agent(
+            name="ops",
+            model=model,
+            tools=guard_tools([run_cmd], Guard(integration_mock.base_url, agent_id="oa")),
+        )
+
+        await Runner.run(agent, "go", run_config=_RUN_CONFIG)
+
+        assert ran == ["rm -rf /"]
+        assert _check_bodies(integration_mock) == [
+            {"scope": "shell", "agent_id": "oa", "command": "rm -rf /"}
+        ]
+
+
 # ---------------------------------------------------------------------------
 # agentguard_tool_guardrail inside Runner.run
 # ---------------------------------------------------------------------------

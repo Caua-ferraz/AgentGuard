@@ -61,7 +61,11 @@ import time
 from typing import Any, AsyncIterator, Iterator, List, Optional
 
 from agentguard import Guard, CheckResult, DEFAULT_BASE_URL
-from agentguard.adapters._common import extract_check_params
+from agentguard.adapters._common import (
+    ConflictingToolInput,
+    conflict_denial,
+    extract_check_params,
+)
 
 # How often a live stream re-validates its policy decision. Streams gate
 # at open; without re-validation a long-lived stream would ride to
@@ -198,7 +202,10 @@ def _build_guarded_tool_class() -> type:
             return self._scope
 
         def _gate(self, tool_input: Any) -> CheckResult:
-            params = self._infer_check_params(tool_input)
+            try:
+                params = self._infer_check_params(tool_input)
+            except ConflictingToolInput as e:
+                return conflict_denial(e)
             scope = self._infer_scope(params)
             return self._guard.check(scope, **params)
 
