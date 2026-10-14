@@ -22,7 +22,8 @@
 //
 // The host (Claude Desktop, Cursor, etc.) spawns this binary as a
 // subprocess via its `command` configuration; the gateway in turn
-// spawns the downstream MCP servers listed in --upstream.
+// spawns the downstream MCP servers listed in --upstream and connects
+// to the remote ones listed in --upstream-http (Streamable HTTP).
 //
 // See docs/MCP_GATEWAY.md for the wire-format design and
 // docs/PROXY_ARCHITECTURE.md for cross-cutting decisions.
