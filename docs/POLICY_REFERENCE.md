@@ -25,6 +25,7 @@ Source of truth: `pkg/policy/engine.go` (types) and `pkg/policy/engine.go:Engine
 - [Compound shell commands](#compound-shell-commands)
 - [Pattern matching semantics (read this)](#pattern-matching-semantics-read-this)
 - [Load-time validation](#load-time-validation)
+- [Testing policies](#testing-policies)
 
 ---
 
@@ -134,6 +135,8 @@ rules[0]("…").conditions[0]: time_window without require_prior is rejected; pa
 ```
 
 In v0.4.x this was a silent no-op that only logged a WARNING; it **became a hard policy-load error in v0.5.0** (see [`DEPRECATIONS.md`](DEPRECATIONS.md)). Either remove the orphan `time_window` or add a `require_prior` clause.
+
+To test a `require_prior` rule without a server, give the case `prior:` actions; see [Testing policies](#testing-policies).
 
 ### Footgun: no audit history → condition fails
 
@@ -679,3 +682,107 @@ Every policy load — the `--policy` file, a hot reload, a tenant policy from th
 - (v1.0) a rule path pattern that contains `/` but no `**` (e.g. `/workspace/*`) — its single `*` crosses `/` and matches recursively (`/workspace/a/b/secret.env`), usually broader than intended. Switch to `**` (segment-aware) if you meant one level. See [Single-star `*` crosses `/`](#single-star--crosses-).
 
 There is **no** schema validation beyond the above — typos in field names are silently ignored by the YAML decoder. Always run `agentguard validate --policy <file>` after edits; wire `agentguard validate --strict` into CI against every policy file you ship, so warnings fail the build.
+
+---
+
+## Testing policies
+
+`validate` tells you a policy loads. It does not tell you the policy still blocks `rm -rf /` after someone widened an allow rule. For that, write test cases: example actions and the verdict each one must get. `agentguard test` runs them against the policy, with no server.
+
+Put the cases in a file whose name ends in `_test.yaml` (or `_test.yml`), next to the policy or in a folder of their own. For this policy:
+
+```yaml
+# policy.yaml
+version: "1"
+name: "example"
+rules:
+  - scope: shell
+    require_approval:
+      - pattern: "rm -rf *"
+    allow:
+      - pattern: "ls *"
+      - pattern: "make test"
+      - pattern: "make deploy"
+        conditions:
+          - require_prior: "make test"
+            time_window: 1h
+  - scope: network
+    deny:
+      - domain: "*.production.internal"
+        message: "Production access needs a change ticket"
+    allow:
+      - domain: "api.github.com"
+```
+
+the cases could be:
+
+```yaml
+# policy-tests/shell_test.yaml
+policy: ../policy.yaml           # relative to this file
+tests:
+  - name: listing files is allowed
+    request: {scope: shell, command: "ls -la", agent_id: dev}
+    expect: ALLOW
+
+  - name: rm -rf hidden after a semicolon still needs approval
+    request: {scope: shell, command: "ls /tmp; rm -rf /", agent_id: dev}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:shell:rm -rf *"
+
+  - name: production hosts are blocked
+    request: {scope: network, domain: db.production.internal, agent_id: dev}
+    expect: DENY
+    expect_reason_contains: "Production access"
+
+  - name: deploy is allowed once the tests ran
+    prior: [{scope: shell, command: "make test", agent_id: dev}]
+    request: {scope: shell, command: "make deploy", agent_id: dev}
+    expect: ALLOW
+
+  - name: deploy without a test run is not allowed
+    request: {scope: shell, command: "make deploy", agent_id: dev}
+    expect: DENY
+```
+
+```bash
+agentguard test policy-tests/
+```
+
+What a case can check:
+
+- `expect`: the decision, `ALLOW`, `DENY` or `REQUIRE_APPROVAL`. Required.
+- `expect_rule`: the exact `matched_rule` of the verdict, such as `require_approval:shell:rm -rf *`. The `*` is part of the rule's name, not a wildcard. A default deny has no rule; check its reason instead.
+- `expect_reason_contains`: text the reason must contain, such as a rule's `message`.
+
+`prior:` lists actions that count as allowed just now, so a [`require_prior`](#conditions) condition can be met. They are recorded for the agent and scope they name.
+
+Each case runs on a fresh engine: cost spent under a `session_id` in one case does not count in the next. Rate limits are not tested, because the server applies them, not the policy engine. A misspelled key in a test file is an error, not a case that silently checks nothing.
+
+Per-agent overrides are tested by setting `agent_id` to the agent's name. The cases for the policies in this repo are in [`configs/tests/`](../configs/tests/); they cover the starter policy's sandbox rules, compound shell commands and the `claude-code` agent block. Full flag and output reference: [`CLI.md` § `agentguard test`](CLI.md#agentguard-test).
+
+### In CI
+
+`agentguard test` exits `0` when every case passes, `1` when one fails, and `3` when a test file or policy does not load, so a CI step fails on its own. With `--output junit` it writes JUnit XML for CI test-report viewers.
+
+A GitHub Actions job:
+
+```yaml
+# .github/workflows/policy.yml
+name: Policy
+on: [push, pull_request]
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Install agentguard
+        run: go install github.com/Caua-ferraz/AgentGuard/cmd/agentguard@latest
+      - name: Validate the policy
+        run: agentguard validate --strict policy.yaml
+      - name: Test the policy
+        run: agentguard test --strict policy-tests/
+```

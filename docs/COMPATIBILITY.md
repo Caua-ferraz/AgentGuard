@@ -121,8 +121,9 @@ subcommand is removed. The same applies to the `agentguard-mcp-gateway` and
 
 `server` is the documented name for `serve`; both run the same command, and
 `serve` stays for the whole 1.x line. Additions since 1.2.0 are all of the
-kind this surface allows: the `server`, `help`, `setup` and `hook` subcommands
-(`hook claude-code` sits in users' Claude Code settings, so it stays), the audit
+kind this surface allows: the `server`, `help`, `setup`, `hook` and `test`
+subcommands (`hook claude-code` sits in users' Claude Code settings, so it
+stays), the audit
 `transport` value `claude_code`, the
 server's `--api-key-file` flag, the `--guard-url` alias of `--url` on the client
 subcommands, and fallbacks for flags left unset (`AGENTGUARD_URL`,

@@ -79,6 +79,8 @@ func run(args []string) int {
 		// 3, not 2. Stdin/stdout/stderr are passed explicitly so the
 		// function is unit-testable from check_cmd_test.go.
 		return runCheck(rest, os.Stdin, os.Stdout, os.Stderr)
+	case "test":
+		return runTestCmd(rest)
 	case "approve", "deny":
 		return runResolveCmd(name, rest)
 	case "status":
@@ -193,7 +195,7 @@ Environment:
   AGENTGUARD_URL              Server URL when --url is not set
                               (approve, deny, status, audit)
   AGENTGUARD_POLICY           Policy file when --policy is not set
-                              (server, validate, check)
+                              (server, validate, check, test)
   AGENTGUARD_NO_UPDATE_CHECK  Any value other than "0" turns off the check
                               for newer releases
 

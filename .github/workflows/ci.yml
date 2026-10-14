@@ -78,6 +78,12 @@ jobs:
             go run ./cmd/agentguard validate --strict --policy "$f"
           done
 
+      # The shipped policies' fixture cases (configs/tests/*_test.yaml): a
+      # policy edit that changes a verdict fails here, with the case named.
+      - name: Test shipped policies
+        shell: bash
+        run: go run ./cmd/agentguard test configs/tests
+
   setup-service:
     # `agentguard setup` starts the server at login with the OS's own
     # service manager: a systemd user service, a LaunchAgent, a Task
