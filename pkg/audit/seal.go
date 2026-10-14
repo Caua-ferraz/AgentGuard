@@ -162,9 +162,9 @@ func (s *sealer) line(e Entry) ([]byte, uint64, string, error) {
 		return nil, 0, "", err
 	}
 	h := s.sum(b)
-	out := make([]byte, 0, len(b)+len(hashFieldPrefix)+len(h)+3)
-	out = append(out, b[:len(b)-1]...) // drop the closing brace
-	out = append(out, hashFieldPrefix...)
+	// b is ours (fresh from Marshal): replace its closing brace with the
+	// hash field in place, growing it as append needs.
+	out := append(b[:len(b)-1], hashFieldPrefix...)
 	out = append(out, h...)
 	out = append(out, '"', '}', '\n')
 	return out, e.Seq, h, nil
