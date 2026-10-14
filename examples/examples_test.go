@@ -29,6 +29,8 @@ import (
 // pkg/mcpgw.ParseConfig.
 var expectedFlags = []string{
 	"--upstream",
+	"--upstream-http",
+	"--upstream-header",
 	"--guard-url",
 	"--api-key",
 	"--policy",
@@ -113,17 +115,17 @@ func TestExamples_ClientConfigsParseAsJSON(t *testing.T) {
 				}
 			}
 
-			// Sanity: at least --upstream must be present (the gateway
-			// requires at least one).
+			// Sanity: at least one upstream must be present (the gateway
+			// requires --upstream or --upstream-http).
 			hasUpstream := false
 			for _, arg := range args {
-				if arg == "--upstream" {
+				if arg == "--upstream" || arg == "--upstream-http" {
 					hasUpstream = true
 					break
 				}
 			}
 			if !hasUpstream {
-				t.Errorf("config %s does not declare any --upstream", path)
+				t.Errorf("config %s does not declare any --upstream or --upstream-http", path)
 			}
 		})
 	}

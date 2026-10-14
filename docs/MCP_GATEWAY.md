@@ -47,10 +47,11 @@ remains as a fallback for environments that cannot run a Go binary.
 ```
 
 The gateway is **a single Go process** with one stdio in (the MCP host)
-and N stdio out subprocesses (downstream MCP servers). It does **not**
-embed an HTTP server for client-facing traffic — the MCP host always
-talks stdio. It does open an HTTP client to call the central
-AgentGuard server's `/v1/check`.
+and N stdio out subprocesses (downstream MCP servers). Remote servers
+can also be reached over Streamable HTTP with `--upstream-http`
+(§ 8.5). It does **not** embed an HTTP server for client-facing
+traffic — the MCP host always talks stdio. It does open an HTTP client
+to call the central AgentGuard server's `/v1/check`.
 
 ### 1.1 Why Go (not Python)
 
@@ -81,6 +82,8 @@ agentguard-mcp-gateway \
 | flag                | repeatable | meaning                                         |
 |---------------------|------------|-------------------------------------------------|
 | `--upstream "<ns>:<cmd>"` | yes  | Downstream MCP server. `ns` is the namespace prefix; `cmd` is tokenized by the gateway's own `SplitCommandLine` (double quotes and `\` escapes only — no single quotes, `$VAR` expansion, or pipes). If `ns:` is omitted, the namespace defaults to the first whitespace-delimited token of `cmd`. |
+| `--upstream-http "<ns>:<url>"` | yes | Remote MCP server reached over Streamable HTTP (§ 8.5). `ns` is required and follows the `--upstream` rules; namespaces are unique across both flags. The URL must be `https`, or `http` to `localhost`, `127.0.0.1` or `[::1]`. Credentials in the URL are refused; use `--upstream-header`. |
+| `--upstream-header "<ns>:<Name>=<Value>"` | yes | Extra HTTP header sent on every request to the `--upstream-http` server `ns`. `${VAR}` in the value is read from the gateway's environment, so a token can live in the client config's `env` block instead of `args`. An unset variable, an unknown or stdio namespace, and headers the transport sets itself (`Accept`, `Content-Type`, `Mcp-Session-Id`, `MCP-Protocol-Version`, ...) are errors. Header values are never logged. |
 | `--guard-url`       | no         | central server URL. Falls back to `AGENTGUARD_URL` env, then `http://127.0.0.1:8080`. Must be an `http`/`https` URL with a host. |
 | `--api-key`         | no         | bearer for `/v1/check`. Falls back to `AGENTGUARD_API_KEY` env, then to the key `agentguard setup` saved — so an MCP client config needs no secret in it. |
 | `--tenant-id`       | no         | default `local`. Must be non-empty.             |
@@ -90,7 +93,7 @@ agentguard-mcp-gateway \
 | `--policy-mode`     | no         | `strict` (default) or `fast`. `strict` requires `--policy` and fails closed if the file is missing/invalid; `fast` runs only the `mcp_tool` check and never consults `tool_scope_map` (`--policy` is optional). |
 | `--log-level`       | no         | stderr verbosity. Default `info`.               |
 | `--upstream-timeout`| no         | per-frame upstream-response timeout. Default `30s`. |
-| `--reconnect-cap`   | no         | longest wait between attempts to restart an upstream that exited. The waits grow 1s, 2s, 5s, 30s, 60s and stop at this value. Default `60s`. |
+| `--reconnect-cap`   | no         | longest wait between attempts to restart an upstream that exited, or to reach an unreachable `--upstream-http` server again. The waits grow 1s, 2s, 5s, 30s, 60s and stop at this value. Default `60s`. |
 | `--version`         | no         | print version and exit. Checked before any other flag is parsed, so it works without `--upstream`. |
 
 The gateway takes flags only. A stray word is an error (exit 2) instead of
@@ -98,6 +101,20 @@ being ignored: `agentguard-mcp-gateway version` answers `did you mean
 --version?`, and an unquoted `--upstream fs:npx … /tmp` reports the lost
 `/tmp` rather than launching the server without it. Quote each `--upstream`
 command.
+
+A remote MCP server joins the same way, with its token taken from the
+environment:
+
+```
+DOCS_TOKEN=... agentguard-mcp-gateway \
+  --upstream "fs:npx -y @modelcontextprotocol/server-filesystem /tmp" \
+  --upstream-http "docs:https://mcp.example.com/mcp" \
+  --upstream-header 'docs:Authorization=Bearer ${DOCS_TOKEN}' \
+  --policy /etc/agentguard/policy.yaml
+```
+
+The host still talks to the gateway over stdio. Its tools appear as
+`docs:<tool>` and are gated like any other namespace.
 
 Stdout is reserved for JSON-RPC. All logging goes to stderr — the MCP
 spec explicitly permits this (the host MAY capture or ignore it).
@@ -111,6 +128,7 @@ spec explicitly permits this (the host MAY capture or ignore it).
 ```go
 var SupportedProtocolVersions = []string{
     "2025-11-25", // current spec, default
+    "2025-06-18", // adds the MCP-Protocol-Version HTTP header
     "2025-03-26", // streamable HTTP era
     "2024-11-05", // legacy stdio (still common in the field)
 }
@@ -148,7 +166,7 @@ Sequence:
      "error": {
        "code": -32602,
        "message": "Unsupported protocol version",
-       "data": { "supported": ["2024-11-05","2025-03-26","2025-11-25"], "requested": "1999-01-01" }
+       "data": { "supported": ["2025-11-25","2025-06-18","2025-03-26","2024-11-05"], "requested": "1999-01-01" }
      }
    }
    ```
@@ -583,6 +601,15 @@ The reconnect loop has a hard ceiling of 60s between attempts — a
 permanently-broken upstream stays degraded indefinitely without
 hammering the system.
 
+An `--upstream-http` server has no process to watch. It is degraded when
+it cannot be reached: a connection failure or HTTP 502/503/504. A slow
+reply that hits `--upstream-timeout`, or any other HTTP error, fails
+only that call. While degraded, the same backoff schedule replays the
+cached `initialize` until the server answers; this also covers a server
+that is down when the host connects. On recovery the gateway sends the
+host `notifications/tools/list_changed` so it re-pulls the namespace's
+tools.
+
 ---
 
 ## 8. Wire format details
@@ -656,6 +683,36 @@ Real cancellation requires threading a host↔upstream request-id map
 through the transport so the gateway can translate `requestId` on the
 way out. That is deferred — see `Bridge.handleNotification`.
 
+### 8.5 Streamable HTTP upstreams
+
+`--upstream-http` servers use the MCP Streamable HTTP transport
+(protocol revision `2025-06-18`, `basic/transports`). `HTTPUpstream` in
+`pkg/mcpgw/http_upstream.go`:
+
+- POSTs every JSON-RPC message to the one MCP endpoint, with
+  `Content-Type: application/json` and
+  `Accept: application/json, text/event-stream`, plus the
+  `--upstream-header` headers.
+- Reads a request's reply as either one JSON object or an SSE stream.
+  On the stream, notifications and server-initiated requests may come
+  before the response; they are handled as on stdio (only
+  `notifications/tools/list_changed` reaches the host, server requests
+  are dropped). Lines and events are capped at 4 MiB; an oversized
+  event is dropped and the stream keeps going.
+- Keeps the `Mcp-Session-Id` from the `initialize` response and sends it,
+  with `MCP-Protocol-Version: <negotiated version>`, on every later
+  request. Notifications expect `202 Accepted`.
+- Treats HTTP 404 to a request that carried a session id as an expired
+  session: it starts a new session from the cached `initialize` and
+  retries the request once. A 404 means the server did not process the
+  message, so the retry cannot run a tool call twice. If the new session
+  cannot be started, the upstream is degraded (§ 7).
+- Opens the optional GET stream for notifications sent outside any
+  request; a `405` turns it off.
+- Sends `DELETE` with the session id when the gateway shuts down.
+- Does not follow redirects (net/http would forward custom headers, and
+  so tokens, to another host) and never logs header values or the URL.
+
 ---
 
 ## 9. Test strategy
@@ -697,18 +754,21 @@ network and give deterministic replies. They run in the blocking Go
   `roots/list`, `elicitation/create`). The gateway is a tools-only
   firewall: such a frame from an upstream carries an `id` + `method`,
   matches no pending response, and is dropped (logged at Info in
-  `StdioUpstream.readLoop`). The host never sees it, so a downstream that
+  `StdioUpstream.readLoop`, or `HTTPUpstream.route` for an HTTP
+  upstream). The host never sees it, so a downstream that
   depends on server-initiated flows will appear to hang on that feature
   while its tools keep working normally.
 - **`notifications/cancelled` is a best-effort no-op** — the gateway
   cannot map the host-space `requestId` onto the in-flight upstream
   request. See § 8.4.
-- **Streamable HTTP transport** on either side. The gateway is
-  stdio-only host-facing and stdio-only upstream — `Upstream` has a
-  single `StdioUpstream` implementation. The `2025-03-26` "streamable
-  HTTP era" protocol *version* is negotiable (§ 3.1), but no HTTP
-  *transport* is wired. Deferred: `#mcp-streamable-http` (tracked in
-  the code at `pkg/mcpgw/config.go`).
+- **Streamable HTTP on the host side.** The host always talks to the
+  gateway over stdio. Upstreams can be stdio (`--upstream`) or
+  Streamable HTTP (`--upstream-http`, § 8.5).
+- **Resuming a broken HTTP event stream.** The gateway ignores SSE event
+  ids and never sends `Last-Event-ID`. If a server drops a POST's event
+  stream before the response, that call fails; the host can retry it.
+- **The older HTTP+SSE transport** (protocol `2024-11-05`, separate SSE
+  and POST endpoints). `--upstream-http` speaks Streamable HTTP only.
 - Per-upstream rate limiting. The central server's rate limiter
   applies, but a misbehaving downstream that floods on `tools/list`
   will be felt.

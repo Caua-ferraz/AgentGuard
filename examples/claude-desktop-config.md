@@ -154,6 +154,32 @@ doesn't know answers `404`, which the gateway
 treats like an unreachable server: `--fail-mode` decides, so with `deny`
 every call is refused.
 
+## Remote MCP servers over HTTP
+
+A server that runs elsewhere and speaks MCP Streamable HTTP joins with
+`--upstream-http` instead of `--upstream`. Put its token in the `env`
+block and reference it from `--upstream-header`; the gateway expands
+`${VAR}` itself, so the token never appears in `args`:
+
+```json
+"args": [
+  "--upstream", "fs:npx -y @modelcontextprotocol/server-filesystem /tmp",
+  "--upstream-http", "docs:https://mcp.example.com/mcp",
+  "--upstream-header", "docs:Authorization=Bearer ${DOCS_TOKEN}",
+  "--guard-url", "http://127.0.0.1:8080",
+  "--policy", "/etc/agentguard/policy.yaml"
+],
+"env": {
+  "AGENTGUARD_API_KEY": "set-from-shell-or-secret-store",
+  "DOCS_TOKEN": "set-from-shell-or-secret-store"
+}
+```
+
+The URL must be `https`, or `http` to `localhost`. Its tools appear as
+`docs:<tool>` and are gated like the others. If the server is down the
+`docs` namespace is unavailable and the gateway keeps retrying; see
+[`MCP_GATEWAY.md` § 8.5](../docs/MCP_GATEWAY.md#85-streamable-http-upstreams).
+
 ## Trimming the example
 
 The bundled config wires `fs`, `fetch`, and `github` upstreams. Remove any

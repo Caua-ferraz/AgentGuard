@@ -140,8 +140,10 @@ every call is refused.
 ## Notes
 
 - Zed also supports remote / HTTP context servers via a `url`+`headers`
-  shape. The AgentGuard gateway is stdio-only; Streamable HTTP isn't
-  implemented (see [`MCP_GATEWAY.md` § 10](../docs/MCP_GATEWAY.md#10-currently-out-of-scope)).
+  shape. Zed talks to the AgentGuard gateway over stdio; to guard a
+  remote server, give the gateway `--upstream-http "<ns>:<url>"` instead
+  of pointing Zed at the URL (see
+  [`MCP_GATEWAY.md` § 8.5](../docs/MCP_GATEWAY.md#85-streamable-http-upstreams)).
 - Zed does not support an `${env:VAR}` interpolation syntax (unlike
   Cursor); the `env` block on a context-server entry is the only way to
   feed secrets to the subprocess. Don't paste raw keys — wire them in
