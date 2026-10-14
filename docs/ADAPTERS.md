@@ -226,6 +226,10 @@ The SDK passes the model's arguments to `on_invoke_tool` as a JSON string. The a
 
 If the arguments are not valid JSON, the raw string is checked as a `command`. The original string still goes to the tool, so the SDK's own validation rejects it after an `ALLOW`.
 
+`guard_tool` projects the arguments onto the properties the tool's `params_json_schema` declares before extracting them (unless the schema allows additional properties). The SDK's params model drops undeclared keys, so the check sees exactly what the tool receives: a stray `path` cannot move a shell call to the `filesystem` scope.
+
+If two names for one parameter are both present with different values (`{"command": "ls", "cmd": "rm -rf /"}`, or `path` and `file_path`), the call is denied without a server round-trip, since the adapter cannot know which one the tool reads. This applies to every adapter that uses the shared extraction (LangChain, CrewAI, MCP and both OpenAI Agents entry points).
+
 ### Approval / deny behavior
 
 On `DENY` the adapter raises `AgentGuardDenied`, and on `REQUIRE_APPROVAL` it raises `AgentGuardApprovalRequired` (with `.approval_id` and `.approval_url`). Both are raised before the tool body runs. An unknown decision is treated as a deny.
