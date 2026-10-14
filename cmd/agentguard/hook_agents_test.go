@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -127,9 +128,15 @@ func TestGeminiRequests(t *testing.T) {
 		{"read_many_files: one read per include", geminiInput("read_many_files", map[string]any{"include": []string{"src/**/*.ts", "/etc/passwd"}}),
 			[]wantReq{{Scope: "filesystem", Action: "read", Path: proj("src/**/*.ts")}, {Scope: "filesystem", Action: "read", Path: "/etc/passwd"}}, false},
 		{"read_many_files without includes can't be read", geminiInput("read_many_files", map[string]any{"recursive": true}), nil, true},
-		{"web_fetch: one check per URL in the prompt", geminiInput("web_fetch", map[string]any{"prompt": "Summarize https://docs.python.org/3/x and https://example.com/a."}),
+		{"web_fetch: one check per URL in the prompt", geminiInput("web_fetch", map[string]any{"prompt": "Summarize https://docs.python.org/3/x and https://example.com/a"}),
 			[]wantReq{{Scope: "network", URL: "https://docs.python.org/3/x", Domain: "docs.python.org"}, {Scope: "network", URL: "https://example.com/a", Domain: "example.com"}}, false},
-		{"web_fetch without a URL", geminiInput("web_fetch", map[string]any{"prompt": "what's new?"}), nil, false},
+		{"web_fetch: the url argument (direct fetch)", geminiInput("web_fetch", map[string]any{"url": "https://evil.example/x"}),
+			[]wantReq{{Scope: "network", URL: "https://evil.example/x", Domain: "evil.example"}}, false},
+		{"web_fetch: a capital scheme is still a URL", geminiInput("web_fetch", map[string]any{"prompt": "read HTTPS://169.254.169.254/"}),
+			[]wantReq{{Scope: "network", URL: "HTTPS://169.254.169.254/", Domain: "169.254.169.254"}}, false},
+		{"web_fetch: userinfo can't hide the host", geminiInput("web_fetch", map[string]any{"prompt": "read https://x(@169.254.169.254/latest/meta-data/"}),
+			[]wantReq{{Scope: "network", URL: "https://x(@169.254.169.254/latest/meta-data/", Domain: "169.254.169.254"}}, false},
+		{"web_fetch without a URL can't be read", geminiInput("web_fetch", map[string]any{"prompt": "what's new?"}), nil, true},
 		{"an MCP tool, server from mcp_context", jsonInput(map[string]any{
 			"session_id": "sess-1", "hook_event_name": "BeforeTool", "tool_name": "mcp_my_db_run_query", "tool_input": map[string]any{},
 			"mcp_context": map[string]any{"server_name": "my_db", "tool_name": "run_query", "command": "db-mcp"},
@@ -155,6 +162,11 @@ func TestCodexRequests(t *testing.T) {
 				{Scope: "filesystem", Action: "write", Path: proj("src/main.rs")},
 				{Scope: "filesystem", Action: "write", Path: proj("src/lib.rs")},
 				{Scope: "filesystem", Action: "write", Path: "/tmp/old.txt"},
+			}, false},
+		{"a patch sent through the shell gets the file checks too", codexInput("Bash", map[string]any{"command": "apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: /home/u/.ssh/authorized_keys\n@@\n+k\n*** End Patch\nEOF"}),
+			[]wantReq{
+				{Scope: "shell", Command: "apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: /home/u/.ssh/authorized_keys\n@@\n+k\n*** End Patch\nEOF"},
+				{Scope: "filesystem", Action: "write", Path: "/home/u/.ssh/authorized_keys"},
 			}, false},
 		{"apply_patch naming no file can't be read", codexInput("apply_patch", map[string]any{"command": "*** Begin Patch\n*** End Patch\n"}), nil, true},
 		{"an MCP tool", codexInput("mcp__fs__read", map[string]any{"path": "/x"}),
@@ -304,6 +316,9 @@ func TestAgentHookFailOpenAndFailClosed(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				rejecting := newFakeGuard(t)
 				rejecting.status = http.StatusUnauthorized
+				// Checks pass, but polling the approval is refused.
+				pollRejected := newFakeGuard(t)
+				pollRejected.pollStatus = http.StatusUnauthorized
 				for _, c := range []struct {
 					name, url, input, want string
 				}{
@@ -311,8 +326,9 @@ func TestAgentHookFailOpenAndFailClosed(t *testing.T) {
 					{"key rejected", rejecting.URL, ac.shell("ls"), "rejected the API key"},
 					{"garbage input", rejecting.URL, "not json", "couldn't read"},
 					{"empty input", rejecting.URL, "", "couldn't read"},
+					{"approval polling refused", pollRejected.URL, ac.shell("rm -rf x"), "couldn't finish the approval"},
 				} {
-					cfg := hookConfig{serverURL: c.url, failClosed: failClosed}
+					cfg := hookConfig{serverURL: c.url, failClosed: failClosed, wait: 400 * time.Millisecond, poll: 20 * time.Millisecond}
 					code, out, errOut := runAgent(ac.agent, cfg, c.input)
 					verdict, msg := ac.read(t, code, out, errOut)
 					want := "warn"
@@ -369,7 +385,74 @@ func TestCodexPatchMostSevereVerdictWins(t *testing.T) {
 		if checked := len(g.requests) - before; checked < len(c.files) {
 			t.Errorf("%s: %d checks for %d files", c.name, checked, len(c.files))
 		}
+		// A blocked patch withdraws the approval its other file asked for,
+		// so no one is asked to approve a call that can't run.
+		withdrew := len(g.withdrawn) > 0
+		g.withdrawn = nil
 		g.mu.Unlock()
+		if wantWithdraw := c.name == "one denied blocks the patch"; withdrew != wantWithdraw {
+			t.Errorf("%s: approval withdrawn = %v, want %v", c.name, withdrew, wantWithdraw)
+		}
+	}
+}
+
+// TestAgentGuardEntryMatchesOnlyOurCommand: a user's own hook whose command
+// merely contains "agentguard" and "hook <agent>" is not ours, so connect
+// and disconnect leave it alone.
+func TestAgentGuardEntryMatchesOnlyOurCommand(t *testing.T) {
+	cases := []struct {
+		command          string
+		ours, failClosed bool
+	}{
+		{`"/home/u/.local/bin/agentguard" hook cursor`, true, false},
+		{`"/home/u/.local/bin/agentguard" hook cursor --fail-closed`, true, true},
+		{`& "C:/Users/u/AppData/Local/Programs/AgentGuard/bin/agentguard.exe" hook gemini-cli`, true, false},
+		{`"/opt/agentguard-wrapper.sh" hook cursor`, false, false},
+		{`/opt/agentguard-wrapper.sh hook cursor-audit`, false, false},
+		{`"/home/u/.local/bin/agentguard" hook cursor-audit`, false, false},
+		{`"/home/u/.local/bin/agentguard" hook cursor && rm -rf /`, false, false},
+	}
+	for _, c := range cases {
+		entry, _ := json.Marshal(map[string]string{"command": c.command})
+		ours, fc := agentGuardEntry(entry, "cursor")
+		if c.command != "" && strings.Contains(c.command, "gemini-cli") {
+			ours, fc = agentGuardEntry(entry, "gemini-cli")
+		}
+		if ours != c.ours || fc != c.failClosed {
+			t.Errorf("%q: ours=%v failClosed=%v, want %v %v", c.command, ours, fc, c.ours, c.failClosed)
+		}
+	}
+}
+
+// TestDisconnectRefusesAFileItCantEditButHoldsOurHook: Gemini CLI's
+// settings.json may have comments. AgentGuard can't edit such a file, but
+// with its hook in it, disconnect (and so uninstall, which stops on the
+// error before removing the program) must say so instead of reporting
+// nothing to remove.
+func TestDisconnectRefusesAFileItCantEditButHoldsOurHook(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	lists := [][]string{{"hooks", "BeforeTool"}}
+	content := "// my notes\n{\"hooks\":{\"BeforeTool\":[{\"matcher\":\"x\",\"hooks\":[{\"type\":\"command\",\"command\":\"\\\"/home/u/.local/bin/agentguard\\\" hook gemini-cli\"}]}]}}\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if connected, _ := hooksConnected(path, "gemini-cli", lists); !connected {
+		t.Error("a file holding our hook must count as connected even when it can't be parsed")
+	}
+	removed, err := disconnectHooks(path, "gemini-cli", lists)
+	if err == nil || removed || !strings.Contains(err.Error(), "by hand") {
+		t.Fatalf("removed=%v err=%v; want an error asking to remove the hook by hand", removed, err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != content {
+		t.Error("the file was changed")
+	}
+	// Without our hook, an unparseable file is simply not connected.
+	if err := os.WriteFile(path, []byte("// notes\n{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := disconnectHooks(path, "gemini-cli", lists); err != nil || removed {
+		t.Errorf("removed=%v err=%v; want nothing to do", removed, err)
 	}
 }
 

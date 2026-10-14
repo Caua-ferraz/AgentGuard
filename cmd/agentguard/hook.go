@@ -189,7 +189,10 @@ func runAgentHook(a hookAgent, stdin io.Reader, stdout, stderr io.Writer, cfg ho
 		return a.warn(stdout, stderr, call, open)
 	}
 
-	raw, err := io.ReadAll(io.LimitReader(stdin, 16<<20))
+	// The first JSON value is the call, as on master: an agent that writes
+	// it and keeps stdin open must not leave the hook waiting for EOF.
+	var raw json.RawMessage
+	err := json.NewDecoder(io.LimitReader(stdin, 16<<20)).Decode(&raw)
 	checked := false
 	if err == nil {
 		call, checked, err = a.parse(raw)
@@ -215,8 +218,10 @@ func runAgentHook(a hookAgent, stdin io.Reader, stdout, stderr io.Writer, cfg ho
 	}
 	// The most severe verdict wins: a deny (or a decision this version
 	// doesn't know) blocks before anyone is asked to approve the rest.
+	// Every request was still checked, so the audit trail has each one.
 	for _, res := range results {
 		if res.Decision != policy.Allow && res.Decision != policy.RequireApproval {
+			withdrawApprovals(cfg, results)
 			return a.deny(stdout, stderr, call, denyText(res))
 		}
 	}
@@ -238,6 +243,27 @@ func runAgentHook(a hookAgent, stdin io.Reader, stdout, stderr io.Writer, cfg ho
 		}
 	}
 	return a.allow(stdout, call)
+}
+
+// withdrawApprovals denies the approval requests a blocked call created for
+// its other requests (a patch whose other files need approval), so no one
+// is asked, in the dashboard or by a notifier, to approve a call that can no
+// longer run. Best effort: a request left pending expires on its own.
+func withdrawApprovals(cfg hookConfig, results []policy.CheckResult) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, res := range results {
+		if res.Decision != policy.RequireApproval || res.ApprovalID == "" {
+			continue
+		}
+		req, err := http.NewRequest(http.MethodPost, cfg.serverURL+"/v1/deny/"+url.PathEscape(res.ApprovalID), nil)
+		if err != nil {
+			continue
+		}
+		attachAuth(req, cfg.apiKey)
+		if resp, err := client.Do(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}
 }
 
 // decodeHookInput reads the first JSON value of raw into v, as a decoder

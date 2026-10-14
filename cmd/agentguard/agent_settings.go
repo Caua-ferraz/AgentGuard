@@ -55,12 +55,40 @@ func agentGuardEntry(entry json.RawMessage, agent string) (ours, failClosed bool
 		commands = append(commands, h.Command)
 	}
 	for _, c := range commands {
-		if strings.Contains(c, "agentguard") && strings.Contains(c, "hook "+agent) {
+		if m := ourHookCommand.FindStringSubmatch(c); m != nil && m[3] == agent && isAgentGuardExe(m[2]) {
 			ours = true
-			failClosed = failClosed || strings.Contains(c, "--fail-closed")
+			failClosed = failClosed || m[4] != ""
 		}
 	}
 	return ours, failClosed
+}
+
+// ourHookCommand matches the commands hookCommand writes (and that 1.3
+// wrote for Claude Code): an optional "& " (PowerShell), the quoted path of
+// the agentguard program, "hook <agent>", and optionally --fail-closed.
+// Matching the whole command keeps a user's own hook — say
+// "/opt/agentguard-wrapper.sh hook cursor-audit" — from being taken for
+// ours and removed.
+var ourHookCommand = regexp.MustCompile(`^(& )?"([^"]+)" hook (\S+)( --fail-closed)?$`)
+
+func isAgentGuardExe(path string) bool {
+	base := strings.ToLower(path[strings.LastIndexAny(path, `/\`)+1:])
+	return base == "agentguard" || base == "agentguard.exe"
+}
+
+// mentionsOurHook reports whether a settings file's raw text holds the
+// command of AgentGuard's hook for agent. It is for files that can't be
+// parsed (Gemini CLI's settings.json may have comments), where AgentGuard
+// can't edit the entry but must not act as if there were none.
+func mentionsOurHook(path, agent string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	// In the JSON text the quotes around the program's path are escaped
+	// (\"), and the command ends at a space or the closing quote.
+	re := regexp.MustCompile(`agentguard(\.exe)?\\?" hook ` + regexp.QuoteMeta(agent) + `(?:[ "\\]|$)`)
+	return re.Match(b)
 }
 
 // hookList is a list in an agent's settings file that AgentGuard adds a
@@ -72,11 +100,14 @@ type hookList struct {
 
 // hooksConnected reports whether the settings file at path has
 // AgentGuard's entry for agent in any of lists, and whether it fails
-// closed. A file that can't be read isn't connected.
+// closed. A file that can't be parsed is connected only when its text
+// holds our hook's command.
 func hooksConnected(path, agent string, lists [][]string) (connected, failClosed bool) {
 	root, err := readJSONObject(path)
 	if err != nil {
-		return false, false
+		// Can't be parsed, but if our hook is in it, it is connected: the
+		// menu should offer Disconnect, which then says what to do by hand.
+		return mentionsOurHook(path, agent), false
 	}
 	for _, keys := range lists {
 		entries, _ := listAt(root, keys)
@@ -115,6 +146,9 @@ func connectHooks(path, agent string, lists []hookList, prepare func(root *order
 // disconnectHooks removes AgentGuard's entries for agent; it reports
 // whether there were any.
 func disconnectHooks(path, agent string, lists [][]string) (bool, error) {
+	if _, err := readJSONObject(path); err != nil && mentionsOurHook(path, agent) {
+		return false, fmt.Errorf("can't edit %s (%v); remove the entry that runs 'agentguard hook %s' from it by hand", path, err, agent)
+	}
 	if connected, _ := hooksConnected(path, agent, lists); !connected {
 		return false, nil
 	}

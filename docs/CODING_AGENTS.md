@@ -86,7 +86,7 @@ Cursor's deletes through its `Delete` tool aren't checked (its input isn't docum
 | `write_file`, `replace` | `filesystem`, action `write`: the file |
 | `read_file` | `filesystem`, action `read`: the file |
 | `read_many_files` | `filesystem`, action `read`: each `include` entry (a path or a glob) |
-| `web_fetch` | `network`: each `http(s)` URL in the prompt (the tool has no URL argument) |
+| `web_fetch` | `network`: the `url` argument when Gemini CLI fetches directly, and each word of the prompt that contains `://`, the way Gemini CLI reads them. The host is read as Gemini's URL parser reads it, so a capitalized scheme, a user name before `@`, or an IP written as `0xa9fea9fe` can't hide the host it reaches. A `web_fetch` with no URL the hook can read gets no verdict: it goes ahead with a warning, or is blocked with `--fail-closed`. |
 | `mcp_<server>_<tool>` | `mcp_tool`: `<server>:<tool>`, with the names from `mcp_context` when Gemini CLI sends it |
 
 `google_web_search` and the other tools aren't sent to AgentGuard.
@@ -95,7 +95,7 @@ Cursor's deletes through its `Delete` tool aren't checked (its input isn't docum
 
 | Codex tool | Checked as |
 |---|---|
-| `Bash` (shell commands and unified exec) | `shell`: the command |
+| `Bash` (shell commands and unified exec) | `shell`: the command. A command that carries a patch (`*** Begin Patch`, such as `apply_patch <<'EOF' …`) is also checked like `apply_patch`, one write per file. |
 | `apply_patch` | `filesystem`, action `write`: every file the patch adds, updates, deletes or moves to |
 | `mcp__<server>__<tool>` | `mcp_tool`: `<server>:<tool>` |
 
@@ -189,6 +189,9 @@ The hook finds the server through `AGENTGUARD_URL`, else the one `agentguard set
 
 - **MCP tools are checked by name only**, like the gateway's `fast` mode: the policy sees `github:create_issue`, not its arguments.
 - **Web searches aren't checked**: they have a query, not a site.
-- **Gemini CLI's settings may have comments**; setup only edits plain JSON. With comments in the file, setup leaves it alone and says so: add the entry by hand.
+- **Gemini CLI's settings may have comments**; setup only edits plain JSON. With comments in the file, setup leaves it alone and says so: add the entry by hand. If AgentGuard's hook is already in a file with comments, *Disconnect* and uninstall stop and ask you to remove the entry by hand, rather than delete the program the hook runs.
+- **Setup only touches its own entries.** An entry counts as AgentGuard's when its command is exactly what setup writes (`"<path to agentguard>" hook <agent>`, optionally `--fail-closed`). Your own hooks stay, even if their names mention AgentGuard.
+- **A blocked call doesn't leave approvals waiting.** When one file of a patch is denied, the approval requests its other files raised are withdrawn (denied), so no one is asked to approve a call that can't run. Every file is still checked and audited.
+- **Cursor also runs Claude Code's hooks.** With *Include Third-Party Plugins, Skills, and Other Configs* on (Cursor's default), Cursor loads the hooks in `~/.claude/settings.json` too, so with Claude Code connected, `agentguard hook claude-code` can also run for Cursor's calls and audit them as agent `claude-code`. To keep Cursor's calls under its own agent and rules, connect Cursor and turn that setting off (Cursor Settings → Agents → Third-Party Imports). See [Cursor's third-party hooks](https://cursor.com/docs/reference/third-party-hooks).
 - **Hooks are a guardrail, not a sandbox.** Each agent decides which calls go through its hooks; Codex's docs say as much. A command the agent runs some other way isn't seen.
 - **The LLM API proxy** also knows Claude Code's tool names, if you route Claude Code through it with `ANTHROPIC_BASE_URL` instead: see [`LLM_API_PROXY.md`](LLM_API_PROXY.md). The hooks are the simpler route: nothing sits between the agent and its model.

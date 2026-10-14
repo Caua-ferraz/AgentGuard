@@ -86,9 +86,21 @@ func codexRequests(in codexHookInput) ([]policy.ActionRequest, bool, error) {
 	}
 	switch in.ToolName {
 	case "Bash":
+		cmd := codexCommand(in.ToolInput)
 		req := base
-		req.Scope, req.Command = "shell", codexCommand(in.ToolInput)
-		return []policy.ActionRequest{req}, true, nil
+		req.Scope, req.Command = "shell", cmd
+		reqs := []policy.ActionRequest{req}
+		// A patch can also arrive through the shell ("apply_patch <<'EOF'
+		// *** Begin Patch ..."): the files it writes get the same filesystem
+		// checks as the apply_patch tool, not only the shell rule.
+		if strings.Contains(cmd, "*** Begin Patch") {
+			for _, p := range patchPaths(cmd) {
+				w := base
+				w.Scope, w.Action, w.Path = "filesystem", "write", hookAbs(in.Cwd, p)
+				reqs = append(reqs, w)
+			}
+		}
+		return reqs, true, nil
 	case "apply_patch":
 		paths := patchPaths(codexCommand(in.ToolInput))
 		if len(paths) == 0 {

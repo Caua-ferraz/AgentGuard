@@ -77,6 +77,10 @@ type fakeGuard struct {
 	requests []policy.ActionRequest
 	auth     []string
 	status   int // non-zero: every /v1/check answers this code
+	// pollStatus, when non-zero, is what /v1/status answers.
+	pollStatus int
+	// withdrawn lists the approval ids the hook denied through /v1/deny.
+	withdrawn []string
 }
 
 func newFakeGuard(t *testing.T) *fakeGuard {
@@ -107,7 +111,14 @@ func newFakeGuard(t *testing.T) *fakeGuard {
 				res = policy.CheckResult{Decision: policy.RequireApproval, Reason: "this file needs approval", ApprovalID: "ap_1"}
 			}
 			_ = json.NewEncoder(w).Encode(res)
+		case "/v1/deny/ap_1":
+			g.withdrawn = append(g.withdrawn, "ap_1")
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "denied"})
 		case "/v1/status/ap_1":
+			if g.pollStatus != 0 {
+				w.WriteHeader(g.pollStatus)
+				return
+			}
 			switch g.approval {
 			case "gone":
 				http.NotFound(w, r)
