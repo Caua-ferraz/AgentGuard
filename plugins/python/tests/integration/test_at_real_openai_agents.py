@@ -280,12 +280,16 @@ class TestRunnerWithGuardedTools:
 
 
 def _guardrailed_shell(ran: List[str], guardrail: Any):
-    @function_tool(tool_input_guardrails=[guardrail])
+    # Set the FunctionTool field rather than passing
+    # @function_tool(tool_input_guardrails=...): the decorator only takes
+    # that keyword from openai-agents 0.7.0, the field exists from 0.3.3.
+    @function_tool
     def run_shell(command: str) -> str:
         """Run a shell command."""
         ran.append(command)
         return f"ran: {command}"
 
+    run_shell.tool_input_guardrails = [guardrail]
     return run_shell
 
 

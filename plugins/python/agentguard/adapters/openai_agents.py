@@ -405,8 +405,9 @@ def agentguard_tool_guardrail(
 ) -> Any:
     """Build an SDK tool input guardrail that checks each call with AgentGuard.
 
-    Attach it with ``@function_tool(tool_input_guardrails=[...])`` or by
-    appending to ``FunctionTool.tool_input_guardrails``. On DENY /
+    Attach it with ``@function_tool(tool_input_guardrails=[...])``
+    (openai-agents 0.7.0+) or by setting ``FunctionTool.tool_input_guardrails``
+    (every supported release). On DENY /
     REQUIRE_APPROVAL the tool does not run and, by default, the model gets
     the AgentGuard message as the tool result and the run continues. With
     ``raise_on_block=True`` the guardrail trips and ``Runner.run`` raises
