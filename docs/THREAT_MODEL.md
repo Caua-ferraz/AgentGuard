@@ -112,7 +112,7 @@ These are documented decisions, not gaps:
 
 - **OS sandboxing or syscall interception.** Use containers, seccomp, AppArmor, egress rules.
 - **Semantic understanding of commands.** Matching is glob on strings; a single `*` crosses `/` (see `POLICY_REFERENCE.md`).
-- **Cryptographic audit sealing.** The audit log is append-only JSONL; tamper-evidence comes from forwarding it to WORM storage (v0.9 decision).
+- **Tamper-proof audit storage.** The audit log is append-only JSONL. `--audit-seal` (v1.4, file backend, off by default) makes changes *detectable*: an HMAC-SHA256 hash chain that `agentguard audit verify` checks, plus anchors (`seq` and `hash` of the head) logged and served on `GET /v1/audit/head`. It does not stop a writer who holds the key, or without a key anyone who can write the file, from rewriting the chain, and it cannot by itself show that the newest entries were cut off. Anchors copied off the box, or WORM storage, cover that. Signed seals and Merkle proofs are not planned.
 - **RBAC or multi-key auth.** One bearer key; capability-scoped keys are post-v1.
 - **PII or secret detection in data flows.** Deferred (`#data-pii`) — a weak classifier would create false confidence.
 - **MCP resources, prompts, sampling, elicitation, cancellation.** Masked out of the handshake or dropped; tools only.

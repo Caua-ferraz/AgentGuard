@@ -112,7 +112,7 @@ func TestCLI_HelpPages(t *testing.T) {
 	dir := t.TempDir()
 	pages := [][]string{
 		{"setup", "-h"}, {"hook", "-h"}, {"server", "-h"}, {"validate", "-h"}, {"check", "-h"}, {"test", "-h"}, {"approve", "-h"}, {"deny", "-h"},
-		{"status", "-h"}, {"audit", "-h"}, {"tenant", "-h"}, {"tenant", "put", "-h"},
+		{"status", "-h"}, {"audit", "-h"}, {"audit", "verify", "-h"}, {"tenant", "-h"}, {"tenant", "put", "-h"},
 		{"tenant", "list", "-h"}, {"tenant", "rm", "-h"}, {"migrate", "-h"}, {"help", "help"},
 	}
 	for _, args := range pages {

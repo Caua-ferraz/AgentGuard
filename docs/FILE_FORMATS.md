@@ -43,6 +43,43 @@ Default path: `audit.jsonl` (CLI `--audit-log`). JSON-Lines, one record per line
 
 The field is purely additive: schema_version remains `2`. Pre-v0.5 readers ignore unknown top-level keys without error. v0.5+ writers MUST set `Transport` on every new entry; the central server's `/v1/check` handler stamps it from `meta["transport"]` on the inbound request, defaulting to `"sdk"` when the field is absent. External audit consumers implementing against this format MUST tolerate the field's absence on legacy data and SHOULD preserve it round-trip when re-serialising entries.
 
+**Sealed logs (v1.4+, additive — schema_version stays at 2).** With `agentguard server --audit-seal`, the log is a hash chain that `agentguard audit verify` can check. Sealing is not encryption: entries stay readable. With sealing off none of the fields below are written, and the files are byte-identical to those of earlier releases.
+
+Each sealed entry ends with three fields, always last and in this order:
+
+| field | meaning |
+|---|---|
+| `seq` | `1` for the first sealed entry, then one more per entry. It keeps counting across rotations and restarts. |
+| `prev_hash` | The `hash` of the entry before it. Omitted on the first entry of a chain (`seq` 1). |
+| `hash` | 64 lowercase hex characters, computed as below. |
+
+`_meta` lines get four fields:
+
+| field | meaning |
+|---|---|
+| `seal` | How the entries after this line are sealed: `{"alg":"hmac-sha256","key_id":"<16 hex>"}` with `--audit-seal-key-file`, `{"alg":"sha256"}` without. `key_id` is the hex of the first 8 bytes of SHA-256(key). It names the key without revealing it. |
+| `chain_prev` | The `hash` of the last sealed entry before this line. In a header written at rotation, that is the last entry of the archive, which is what links the files. Omitted when there is none. |
+| `chain_seq` | That entry's `seq`. |
+| `node_id` | The writing server's `--node-id`. |
+
+A `_meta` line can also appear in the middle of a file. The server appends one when it starts with sealing on and the live file already exists; it says how the entries after it are sealed. Readers skip `_meta` lines wherever they are. Entries already in the file when sealing is first turned on stay unsealed, and the chain starts at `seq` 1 after them. Turning sealing off and on again starts a new chain, which `verify` reports as broken.
+
+**Hashing rule.** Take an entry line as written, without its newline. Remove the trailing `,"hash":"<64 hex>"}` and append `}`. The result is the body. `hash` is the hex of HMAC-SHA256(key, body), or of SHA-256(body) without a key. The key is the key file's content with surrounding whitespace removed. Nothing is re-encoded, so any language can check a line byte for byte.
+
+Worked example, without a key. The line
+
+```
+{"timestamp":"2026-10-01T12:00:00Z","session_id":"s1","agent_id":"bot","request":{"scope":"shell","command":"ls"},"result":{"decision":"ALLOW","reason":"ok"},"duration_ms":1,"seq":1,"hash":"278a4467f2999e6ef5146da29743b304f7f309fde7f36676b5a976c5ba434c8d"}
+```
+
+has the body
+
+```
+{"timestamp":"2026-10-01T12:00:00Z","session_id":"s1","agent_id":"bot","request":{"scope":"shell","command":"ls"},"result":{"decision":"ALLOW","reason":"ok"},"duration_ms":1,"seq":1}
+```
+
+and `printf '%s' "$body" | sha256sum` prints `278a4467f2999e6ef5146da29743b304f7f309fde7f36676b5a976c5ba434c8d`. With a key, use `openssl dgst -sha256 -hmac "$(cat audit-seal.key)"` instead. The next entry carries `"seq":2,"prev_hash":"278a4467f2999e6ef5146da29743b304f7f309fde7f36676b5a976c5ba434c8d"`.
+
 **Redacted values (v1.2+).** With `serve --audit-redact` (the default), secret-shaped substrings in request fields and the reason are replaced with `[REDACTED]` before an entry is written — see [OPERATIONS § Audit redaction](OPERATIONS.md#audit-redaction). The entry shape and `schema_version` don't change; files written before 1.2.0 are not rewritten.
 
 ### `<audit-log>.replay-checkpoint` — audit replay checkpoint
@@ -53,6 +90,9 @@ Default path: `<audit-log>.replay-checkpoint` — `audit.CheckpointSuffix` appen
 |---|---|
 | v0.4.1 – v1.0.0 | `{"offset": <bytes>, "audit_size": <bytes>}` |
 | v1.1.0+ | `{"offset": <bytes>, "audit_size": <bytes>, "file_id": "<live file's identity>", "counts": {"total": N, "allow": N, "deny": N, "require_approval": N}}` |
+| v1.4.0+, sealed logs | the v1.1.0 shape plus `"last_seq": N, "last_hash": "<hex>"` |
+
+`last_seq` and `last_hash` (sealed logs only, omitted otherwise) are the head of the seal chain when the checkpoint was written. At startup the logger compares them with the end of the live file. A file that ends before them logs a `WARNING` (possible truncation) and increments `agentguard_audit_seal_tail_mismatch_total`; the server still starts.
 
 `file_id` says which live file `offset` refers to; it is absent for headerless legacy files. Since v1.4 it is the file's `_meta.segment_id`. For a file written before v1.4, which has no `segment_id`, it is the file's `_meta.created_at`, as in v1.1–v1.3, so checkpoints written before an upgrade keep matching. (`created_at` alone could repeat: on a coarse clock, two files created in quick succession could share it, and replay then resumed inside the wrong file. A v1.3 binary reading a v1.4 checkpoint finds no matching file and replays everything still reachable, carrying `counts` forward.) `counts` is the lifetime decision tally as of `offset`: the next boot seeds `agentguard_checks_total` and its siblings from it and replays only the entries written afterwards, which is how the counters survive restarts. A v1.0.0 checkpoint (no `counts`) is still accepted and triggers one full replay of the live file to establish the tally. The tally starts at the first boot that wrote a checkpoint; archives that already existed before that boot are not scanned.
 
@@ -62,7 +102,7 @@ On boot: a matching `file_id` resumes at `offset`. A different one means the log
 
 #### Rotated file headers
 
-Size-triggered rotation via the logger. Archives are named `<audit-log>.<timestamp>` using `20060102T150405Z`, so lexicographic order is chronological and pruning sorts names without parsing them. That format has one-second resolution, so a burst rotating more than once inside a second would compute the same name twice; the rotator advances to the next free second rather than renaming over an existing archive, which means a name can read up to a minute later than the instant it rotated. If no slot is free the rotation fails and the live file keeps growing — recoverable, unlike a destroyed archive. Every file carries a schema-2 header. When the logger rotates, it renames the live file to the archive name and starts a new live file whose `_meta.rotated_from` holds that archive's base name, so each file points back at the one before it. Compression is applied to rotated files only; the live file stays uncompressed to keep appends cheap. Startup replay walks the chain backwards via `_meta.rotated_from` until it reaches the segment identified by the replay checkpoint's `file_id`.
+Size-triggered rotation via the logger. Archives are named `<audit-log>.<timestamp>` using `20060102T150405Z`, so lexicographic order is chronological and pruning sorts names without parsing them. That format has one-second resolution, so a burst rotating more than once inside a second would compute the same name twice. Since v1.4 the rotator picks a name one second after the newest archive on disk whenever the clock reads that or earlier, so a name can read a little later than the instant it rotated, never lands on an existing archive, and never reuses a name pruning freed: name order is always write order, which `audit verify` relies on. (Before v1.4 a burst after pruning could reuse a freed, older name, and the next prune then deleted that newest archive.) Every file carries a schema-2 header. When the logger rotates, it renames the live file to the archive name and starts a new live file whose `_meta.rotated_from` holds that archive's base name, so each file points back at the one before it. Compression is applied to rotated files only; the live file stays uncompressed to keep appends cheap. Startup replay walks the chain backwards via `_meta.rotated_from` until it reaches the segment identified by the replay checkpoint's `file_id`. On a sealed log, the new header's `chain_prev` and `chain_seq` name the archive's last entry; `agentguard audit verify` follows `rotated_from` the same way and checks that each link holds. When pruning has removed the oldest files, the oldest file left still names the last pruned entry, and `verify` reports that the chain starts after it.
 
 ### `.v040-backup` — one-time rollback artifact
 

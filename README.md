@@ -41,7 +41,7 @@ AgentGuard is the wire-level checkpoint that sits between your agent and everyth
 
 - **Policy-gated tool calls.** Every shell command, file write, network call, browser action, or model spend evaluated against a YAML policy before it runs.
 - **Human-in-the-loop approvals.** Risky actions pause, ping Slack/webhooks, surface on a live dashboard, and resume only after a human says yes.
-- **Append-only audit trail.** JSON-Lines log of every decision with agent ID, scope, command, timestamp, and reasoning — queryable by CLI, dashboard, or Prometheus metrics. Secrets in requests (API keys, tokens, passwords) are masked before they're stored or shown (since v1.2.0; `serve --audit-redact`). For tamper-evidence, forward it to append-only / WORM storage (S3 Object Lock, a SIEM, or syslog) — AgentGuard does not cryptographically seal the log itself.
+- **Append-only audit trail.** JSON-Lines log of every decision with agent ID, scope, command, timestamp, and reasoning — queryable by CLI, dashboard, or Prometheus metrics. Secrets in requests (API keys, tokens, passwords) are masked before they're stored or shown (since v1.2.0; `serve --audit-redact`). Optionally sealed into a hash chain (`serve --audit-seal`, since v1.4.0) that `agentguard audit verify` checks for edited, removed or reordered entries; ship the published anchors or the log to WORM storage (S3 Object Lock, a SIEM, or syslog) so the newest entries can't be cut off unnoticed.
 - **Per-agent, per-environment, per-tool scoping.** One policy file, finely overridable for each agent identity.
 
 ## Quickstart

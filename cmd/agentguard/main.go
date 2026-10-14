@@ -217,6 +217,9 @@ type serverFlags struct {
 	auditCompress, auditBuffered, auditRedact                           *bool
 	auditQueueSize, auditWorkers                                        *int
 	auditOverflowPath                                                   *string
+	auditSeal                                                           *bool
+	auditSealKeyFile                                                    *string
+	auditAnchorInterval                                                 *time.Duration
 	debugPprof                                                          *bool
 	debugPprofPort                                                      *int
 	persist                                                             *bool
@@ -260,6 +263,13 @@ func newServerFlags() (*flag.FlagSet, *serverFlags) {
 	f.auditWorkers = fs.Int("audit-workers", 4, "Worker goroutines draining the buffered audit queue. Ignored unless --audit-buffered is set.")
 	f.auditRedact = fs.Bool("audit-redact", true, "Mask secrets (API keys, tokens, passwords, private keys) in commands, paths, URLs and meta before they reach the audit log, GET /v1/audit, the SSE stream and the pending-approvals list. The policy's notifications.redaction.extra_patterns apply too. Set false to store requests verbatim.")
 	f.auditOverflowPath = fs.String("audit-overflow-path", "", "Path to the disk-overflow spill file used when the buffered queue saturates. Defaults to <audit-log>.overflow.jsonl. Ignored unless --audit-buffered is set.")
+	// Tamper-evident audit log (v1.4). Off by default so the file format and
+	// the cost of a write stay what they were. File backend only: the store
+	// keeps a subset of the entry's fields, so there is nothing to chain.
+	// See pkg/audit/seal.go.
+	f.auditSeal = fs.Bool("audit-seal", false, "Seal the audit log into a hash chain so 'agentguard audit verify' can detect edited, removed or reordered entries. File backend only. Not encryption.")
+	f.auditSealKeyFile = fs.String("audit-seal-key-file", "", "HMAC-SHA256 key for --audit-seal (the file's content, surrounding whitespace ignored). Without it the chain is plain SHA-256, which anyone who can write the file can recompute. The server won't start if the file is missing, empty or readable by every user.")
+	f.auditAnchorInterval = fs.Duration("audit-anchor-interval", 5*time.Minute, "How often to log the head of the sealed chain ('audit anchor segment=... seq=... hash=...') so it can be shipped off this machine. Anchors are also logged at each rotation and at shutdown. 0 disables the periodic anchor. Ignored unless --audit-seal.")
 	// Debug pprof. Off by default; when on, the runtime profiler endpoints
 	// register under http.DefaultServeMux via the blank import above and we
 	// expose them on a second listener bound to 127.0.0.1 only. Operators
@@ -304,6 +314,7 @@ var serverFlagGroups = []clihelp.Group{
 	{Title: "Security", Names: []string{"api-key", "api-key-file", "allowed-origin", "tls-terminated-upstream"}},
 	{Title: "Policy", Names: []string{"policy", "watch", "approval-validity", "session-cost-ttl", "session-cost-sweep-interval", "tenant-policy-refresh-interval"}},
 	{Title: "Audit log", Names: []string{"audit-log", "audit-redact", "audit-backend", "audit-max-size-mb", "audit-max-backups", "audit-max-age-days", "audit-compress", "audit-buffered", "audit-queue-size", "audit-workers", "audit-overflow-path"}},
+	{Title: "Audit sealing", Names: []string{"audit-seal", "audit-seal-key-file", "audit-anchor-interval"}},
 	{Title: "Storage", Names: []string{"persist", "store-dsn", "data-dir"}},
 	{Title: "Multi-node (PostgreSQL store)", Names: []string{"node-id", "reconcile-interval"}},
 	{Title: "Notifications", Names: []string{"notify-spool"}},
@@ -355,6 +366,14 @@ func runServerCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "agentguard server: %v\n", err)
 		return 1
 	}
+	sealOpts, code, err := auditSealFromFlags(f)
+	if err != nil {
+		if code == exitUsage {
+			return usageError("server", "%v", err)
+		}
+		fmt.Fprintf(os.Stderr, "agentguard server: %v\n", err)
+		return code
+	}
 	// Applied by main with os.Exit, after runServe returns: os.Exit skips
 	// defers, and every teardown in runServe has already run by then.
 	return runServe(policyPath, *f.port, *f.dashboard, *f.watch, *f.auditPath, apiKey, *f.baseURL, *f.allowedOrigin, *f.tlsTerminated, *f.sessionCostTTL, *f.sessionCostSweep, *f.approvalValidity, auditRotationOpts{
@@ -367,7 +386,7 @@ func runServerCmd(args []string) int {
 		QueueSize:    *f.auditQueueSize,
 		Workers:      *f.auditWorkers,
 		OverflowPath: *f.auditOverflowPath,
-	}, pprofOpts{
+	}, sealOpts, pprofOpts{
 		Enabled: *f.debugPprof,
 		Port:    *f.debugPprofPort,
 	}, persistOpts{
@@ -513,6 +532,12 @@ a health check), 2 command-line mistake.
 // ── audit ────────────────────────────────────────────────────────────────
 
 func runAuditCmd(args []string) int {
+	// `audit verify` works on files, not on a server, and has flags of its
+	// own; it is told apart before the query flags are parsed (which would
+	// reject "verify" as an unexpected argument).
+	if len(args) > 0 && args[0] == "verify" {
+		return runAuditVerifyCmd(args[1:])
+	}
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
 	serverFlag := addServerURLFlags(fs)
 	var q auditQuery
@@ -525,9 +550,13 @@ func runAuditCmd(args []string) int {
 	key := fs.String("api-key", "", "Bearer token. Env: AGENTGUARD_API_KEY, then the key agentguard setup saved")
 	usage := func(w io.Writer) {
 		fmt.Fprint(w, `Usage: agentguard audit [flags]
+       agentguard audit verify [flags]
 
 Query the audit log of a running AgentGuard server (newest first),
 optionally filtered by agent, decision, scope, or transport.
+
+'agentguard audit verify' checks a sealed audit log (server --audit-seal)
+for tampering, offline; see 'agentguard audit verify -h'.
 
 `)
 		clihelp.WriteFlags(w, fs, urlAlias)
@@ -535,6 +564,7 @@ optionally filtered by agent, decision, scope, or transport.
 Examples:
   agentguard audit --decision DENY --limit 20
   agentguard audit --agent my-bot --scope shell --order asc
+  agentguard audit verify --audit-log audit.jsonl --key-file seal.key
 
 Exit status: 0 success (also when nothing matches), 1 the server refused or
 couldn't be reached, 2 command-line mistake.
@@ -617,6 +647,41 @@ type auditBufferedOpts struct {
 	QueueSize    int
 	Workers      int
 	OverflowPath string
+}
+
+// auditSealOpts mirrors the --audit-seal* flags, with the key already read.
+// Key is empty for a plain SHA-256 chain. NodeID is the server's --node-id,
+// recorded in each audit file header.
+type auditSealOpts struct {
+	Enabled        bool
+	Key            []byte
+	NodeID         string
+	AnchorInterval time.Duration
+}
+
+// auditSealFromFlags checks the --audit-seal flags and reads the key. A
+// combination that can't work is a usage mistake (exitUsage); a key file
+// that can't be used is a startup error (1), like --api-key-file.
+func auditSealFromFlags(f *serverFlags) (auditSealOpts, int, error) {
+	o := auditSealOpts{Enabled: *f.auditSeal, NodeID: *f.nodeID, AnchorInterval: *f.auditAnchorInterval}
+	switch {
+	case !o.Enabled && *f.auditSealKeyFile != "":
+		return o, exitUsage, errors.New("--audit-seal-key-file needs --audit-seal")
+	case !o.Enabled:
+		return o, 0, nil
+	case *f.auditBackend == "store":
+		return o, exitUsage, errors.New("--audit-seal works with the file audit backend only; drop --audit-backend=store or --audit-seal")
+	case o.AnchorInterval < 0:
+		return o, exitUsage, errors.New("--audit-anchor-interval can't be negative (0 turns the periodic anchor off)")
+	}
+	if *f.auditSealKeyFile != "" {
+		key, err := audit.LoadSealKey(*f.auditSealKeyFile, true)
+		if err != nil {
+			return o, 1, err
+		}
+		o.Key = key
+	}
+	return o, 0, nil
 }
 
 // pprofOpts mirrors the --debug-pprof* CLI flags. Held in a struct so
@@ -715,7 +780,7 @@ func openStore(cfg persistOpts) (persistentStore, string, error) {
 // 1 when the listener failed. The caller applies it with os.Exit AFTER this
 // function returns, so every deferred teardown here (persist flush, audit
 // drain, store close) has already run — os.Exit skips defers.
-func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, approvalValidity time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, pprofCfg pprofOpts, persistCfg persistOpts, notifySpoolPath string, auditRedact bool, bindHost string) int {
+func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, auditPath string, apiKey string, baseURL string, allowedOrigin string, tlsTerminatedUpstream bool, sessionCostTTL time.Duration, sessionCostSweep time.Duration, approvalValidity time.Duration, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, sealOpts auditSealOpts, pprofCfg pprofOpts, persistCfg persistOpts, notifySpoolPath string, auditRedact bool, bindHost string) int {
 	if err := validateBind(bindHost, apiKey); err != nil {
 		log.Printf("ERROR: %v", err)
 		return 2
@@ -741,7 +806,8 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 			"  No API key is set (--api-key empty and AGENTGUARD_API_KEY empty).\n"+
 			"  The control and audit endpoints are UNAUTHENTICATED:\n"+
 			"      POST /v1/approve   POST /v1/deny   GET /v1/status\n"+
-			"      GET  /v1/audit     POST /v1/audit  /api/* (dashboard, when --dashboard)\n"+
+			"      GET  /v1/audit     POST /v1/audit  GET /v1/audit/head\n"+
+			"      /api/* (dashboard, when --dashboard)\n"+
 			"  Anyone who can reach this server can approve or deny pending actions and\n"+
 			"  read or write the audit trail. The server binds to 127.0.0.1 only in this\n"+
 			"  mode; if you place it behind a reverse proxy or TLS terminator, set\n"+
@@ -833,7 +899,7 @@ func runServe(policyFile string, port int, dashboardEnabled bool, watch bool, au
 	// /v1/check hot path off the audit write — it only enqueues. See
 	// buildAuditPipeline (audit_setup.go) for the construction + forced-
 	// buffering rules.
-	pipeline, err := buildAuditPipeline(auditPath, storeAudit, st, rotOpts, bufOpts, auditTransform)
+	pipeline, err := buildAuditPipeline(auditPath, storeAudit, st, rotOpts, bufOpts, sealOpts, auditTransform)
 	if err != nil {
 		log.Fatalf("Failed to initialize audit pipeline: %v", err)
 	}

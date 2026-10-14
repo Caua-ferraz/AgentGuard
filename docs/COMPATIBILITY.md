@@ -79,7 +79,9 @@ frozen, including its `/v1/t/{tenant}/...` tenant-aware mirrors:
 Supporting endpoints frozen alongside them: `GET /health`, `GET /metrics`,
 `POST /auth/login`, `POST /auth/logout`, `GET /api/pending`, `GET /api/stats`,
 `GET /api/stream`, `GET /dashboard` (and their `/v1/t/{tenant}/api/...`
-mirrors).
+mirrors). `GET /v1/audit/head` and `GET /v1/t/{tenant}/audit/head` (1.4.0,
+the head of a sealed audit log) are an addition of the kind this surface
+allows.
 
 The wire freeze rules — never remove a field, never change a field's type or
 JSON name, decision enum stays the closed set `{ALLOW, DENY, REQUIRE_APPROVAL}`,
@@ -106,10 +108,17 @@ per decision).
   ignore unknown keys). A format change that is *not* backward-readable would
   bump to `schema_version: 3` with a migration, which is a v2.x-class event.
 
-The audit log is **append-only**, not cryptographically sealed. For
-tamper-evidence, forward it to append-only / WORM storage (S3 Object Lock, a
-SIEM, or syslog); AgentGuard does not hash-chain or sign the log itself. Format
-history and the `schema_version` convention: [`FILE_FORMATS.md`](FILE_FORMATS.md).
+The audit log is **append-only**. Since v1.4 the file backend can also seal
+it into a hash chain (`agentguard server --audit-seal`, off by default): each
+entry gets `seq`, `prev_hash` and `hash`, and `agentguard audit verify` detects
+edited, removed or reordered entries. These fields are additive and omitted
+when sealing is off; `schema_version` stays 2. Sealing shows tampering, it does
+not prevent it: someone with the key (or, without a key, anyone who can write
+the file) can rewrite the chain, and the newest entries can be cut off. Ship
+the published anchors, or the log itself, to append-only / WORM storage (S3
+Object Lock, a SIEM, or syslog) to cover that. The store backend is not
+sealed. Format history and the `schema_version` convention:
+[`FILE_FORMATS.md`](FILE_FORMATS.md).
 
 ## Frozen surface 4 — CLI flags & subcommands
 
@@ -132,8 +141,10 @@ subcommands, the MCP gateway and the LLM proxy use when no key is given). When `
 given and `configs/default.yaml` is missing, `server`, `validate` and `check`
 look for the installer's starter policy instead of failing. Flags may now follow
 positional arguments; before, a flag after one was ignored without a word. A
-stray positional argument is now an error instead of being ignored. See
-[`CLI.md`](CLI.md).
+stray positional argument is now an error instead of being ignored. 1.4.0 adds
+the `audit verify` subcommand and the server's `--audit-seal`,
+`--audit-seal-key-file` and `--audit-anchor-interval` flags; sealing is off
+unless asked for. See [`CLI.md`](CLI.md).
 
 Full reference: [`CLI.md`](CLI.md) · [`MCP_GATEWAY.md`](MCP_GATEWAY.md) ·
 [`LLM_API_PROXY.md`](LLM_API_PROXY.md).
@@ -183,7 +194,7 @@ the surfaces above.
 
 ## Post-v1, only if a concrete need arises
 
-Out of scope and deliberately not on the stabilization: in-process
-cryptographic audit sealing (hash-chaining / Merkle checkpoints — use external
-WORM instead) and RBAC / multi-key auth. (Audit secret-redaction, once on this
-list, shipped in 1.2.0.)
+Out of scope and deliberately not on the stabilization: RBAC / multi-key
+auth, signed (asymmetric) audit seals and Merkle checkpoints. (Audit
+secret-redaction, once on this list, shipped in 1.2.0; an HMAC hash chain over
+the file audit log shipped in 1.4.0 as `--audit-seal`.)

@@ -50,7 +50,13 @@ func (p *auditPipeline) Close() {
 // path — so the store backend forces async buffering even if the
 // operator passed --audit-buffered=false (fine for the cheap file
 // append; a DB write per request would blow the <3ms budget).
-func buildAuditPipeline(auditPath string, storeAudit bool, st store.Store, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, transform audit.EntryTransform) (*auditPipeline, error) {
+//
+// Sealing (--audit-seal) is file-backend only; the CLI refuses it with the
+// store backend before it gets here, and so does this function.
+func buildAuditPipeline(auditPath string, storeAudit bool, st store.Store, rotOpts auditRotationOpts, bufOpts auditBufferedOpts, sealOpts auditSealOpts, transform audit.EntryTransform) (*auditPipeline, error) {
+	if storeAudit && sealOpts.Enabled {
+		return nil, fmt.Errorf("--audit-seal works with the file audit backend only")
+	}
 	if storeAudit && !bufOpts.Enabled {
 		log.Printf("WARNING: --audit-backend=store requires async buffering to keep DB writes off the /v1/check hot path; forcing --audit-buffered=true.")
 		bufOpts.Enabled = true
@@ -88,18 +94,25 @@ func buildAuditPipeline(auditPath string, storeAudit bool, st store.Store, rotOp
 			rotCfg.MaxAge = time.Duration(rotOpts.MaxAgeDays) * 24 * time.Hour
 		}
 
-		var fileLogger *audit.FileLogger
-		var err error
-		if rotCfg.MaxSize > 0 || rotCfg.MaxFiles > 0 || rotCfg.MaxAge > 0 {
-			fileLogger, err = audit.NewFileLoggerWithRotation(auditPath, rotCfg)
-		} else {
-			fileLogger, err = audit.NewFileLogger(auditPath)
+		opts := audit.FileLoggerOptions{Rotation: rotCfg}
+		if sealOpts.Enabled {
+			// The seal is computed in FileLogger.Log, after redaction and the
+			// buffered workers, so what is hashed is exactly what is written.
+			opts.Seal = &audit.SealConfig{Key: sealOpts.Key, NodeID: sealOpts.NodeID}
+			if len(sealOpts.Key) == 0 {
+				log.Printf("WARNING: --audit-seal without --audit-seal-key-file: the audit chain is plain SHA-256. It only detects naive edits; anyone who can write the audit file can recompute it. Give a key file for an HMAC chain.")
+			} else {
+				log.Printf("Audit seal: hmac-sha256 (key id %s)", audit.SealKeyID(sealOpts.Key))
+			}
 		}
+		fileLogger, err := audit.NewFileLoggerWithOptions(auditPath, opts)
 		if err != nil {
 			return nil, fmt.Errorf("audit log: %w", err)
 		}
 		p.Logger = fileLogger
-		p.cleanups = append(p.cleanups, fileLogger.Close)
+		// Anchors stop before the file closes; Close publishes the last one.
+		stopAnchors := fileLogger.StartAnchoring(sealOpts.AnchorInterval)
+		p.cleanups = append(p.cleanups, func() error { stopAnchors(); return nil }, fileLogger.Close)
 	}
 
 	// Redaction (or any transform) wraps the base logger, so with buffering it

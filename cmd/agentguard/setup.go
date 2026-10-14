@@ -339,9 +339,10 @@ func (s *setup) doSetup() (bool, int) {
 	useKey := i == 0
 	s.ui.Printf("\n")
 
-	st := &setupState{Port: 8080, Policy: s.m.policyPath(), DataDir: s.m.dataDir, APIKey: useKey, LoginStart: loginStart}
+	// A new setup seals the audit log; an existing one keeps what it had.
+	st := &setupState{Port: 8080, Policy: s.m.policyPath(), DataDir: s.m.dataDir, APIKey: useKey, LoginStart: loginStart, Seal: true}
 	if s.state != nil {
-		st.Port, st.Policy, st.DataDir = s.state.Port, s.state.Policy, s.state.DataDir
+		st.Port, st.Policy, st.DataDir, st.Seal = s.state.Port, s.state.Policy, s.state.DataDir, s.state.Seal
 	}
 
 	// Policy: keep one that's there, write the starter policy otherwise.
@@ -364,6 +365,16 @@ func (s *setup) doSetup() (bool, int) {
 		return back()
 	}
 	s.ok("Data folder", st.DataDir+" (audit log and database)")
+
+	if st.Seal {
+		if !fileExists(sealKeyPath(st)) {
+			if err := writeNewKey(sealKeyPath(st)); err != nil {
+				s.fail("Audit seal key", err.Error())
+				return back()
+			}
+		}
+		s.ok("Audit seal key", sealKeyPath(st)+" (only you can read it)")
+	}
 
 	if useKey {
 		if !fileExists(s.m.keyPath()) {

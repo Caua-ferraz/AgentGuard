@@ -216,22 +216,30 @@ func TestNextFreeArchivePath(t *testing.T) {
 	}
 }
 
-// TestNextFreeArchivePath_ExhaustedRefusesRatherThanOverwrite: when every slot
-// in the probe window is taken, rotation must fail. Failing leaves an
-// over-large live file, which an operator can recover; renaming over an
-// archive destroys data that no one can.
-func TestNextFreeArchivePath_ExhaustedRefusesRatherThanOverwrite(t *testing.T) {
+// TestNextFreeArchivePath_NeverReusesAnOlderName: the new name sorts after
+// every archive on disk, even when the clock reads earlier (several
+// rotations in one second, after pruning freed an older name). It can never
+// land on an existing archive, and name order stays write order.
+func TestNextFreeArchivePath_NeverReusesAnOlderName(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "audit.jsonl")
 	at := time.Date(2026, 9, 11, 15, 30, 0, 0, time.UTC)
 
 	for i := 0; i < maxArchiveProbe; i++ {
+		if i == 3 {
+			continue // a pruned name, free again
+		}
 		name := base + "." + at.Add(time.Duration(i)*time.Second).Format(ArchiveTimestampFormat)
 		if err := os.WriteFile(name, []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if got, err := nextFreeArchivePath(base, at); err == nil {
-		t.Fatalf("expected an error when every slot is taken, got %q", got)
+	got, err := nextFreeArchivePath(base, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := base + "." + at.Add(time.Duration(maxArchiveProbe)*time.Second).Format(ArchiveTimestampFormat)
+	if got != want {
+		t.Fatalf("archive name = %q, want %q (after the newest archive, not the freed older slot)", filepath.Base(got), filepath.Base(want))
 	}
 }

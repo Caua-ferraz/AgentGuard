@@ -52,14 +52,7 @@ type RotationConfig struct {
 // configuration is captured at construction; mutating it after the fact has
 // no effect.
 func NewFileLoggerWithRotation(path string, cfg RotationConfig) (*FileLogger, error) {
-	l, err := NewFileLogger(path)
-	if err != nil {
-		return nil, err
-	}
-	l.mu.Lock()
-	l.rotCfg = cfg
-	l.mu.Unlock()
-	return l, nil
+	return NewFileLoggerWithOptions(path, FileLoggerOptions{Rotation: cfg})
 }
 
 // rotateLocked closes the live file, renames it to a timestamped archive,
@@ -102,7 +95,20 @@ const maxArchiveProbe = 60
 //
 // A name is taken if either the plain or the .gz form exists, because
 // compression writes alongside the rename.
+//
+// The name also sorts after every archive already on disk. Pruning deletes
+// the oldest names, and a burst of rotations inside one second would
+// otherwise take a pruned name again: the next prune would then delete that
+// newest archive, and name order would stop matching write order, which
+// `audit verify` relies on to tell pruning from a removed archive.
 func nextFreeArchivePath(basePath string, ts time.Time) (string, error) {
+	ts = ts.UTC().Truncate(time.Second)
+	if names, err := listArchives(basePath); err == nil && len(names) > 0 {
+		newest, err := time.Parse(ArchiveTimestampFormat, archiveStamp(names[len(names)-1], filepath.Base(basePath)))
+		if err == nil && !ts.After(newest) {
+			ts = newest.Add(time.Second)
+		}
+	}
 	for i := 0; i < maxArchiveProbe; i++ {
 		candidate := fmt.Sprintf("%s.%s", basePath, ts.Format(ArchiveTimestampFormat))
 		if !archiveNameTaken(candidate) {
@@ -111,6 +117,34 @@ func nextFreeArchivePath(basePath string, ts time.Time) (string, error) {
 		ts = ts.Add(time.Second)
 	}
 	return "", fmt.Errorf("no free archive name for %s within %ds", basePath, maxArchiveProbe)
+}
+
+// listArchives lists the base names of basePath's rotated archives, plain or
+// gzip, oldest first: ArchiveTimestampFormat sorts chronologically.
+func listArchives(basePath string) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Dir(basePath))
+	if err != nil {
+		return nil, err
+	}
+	base := filepath.Base(basePath)
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), base+".") {
+			continue
+		}
+		if len(archiveStamp(e.Name(), base)) == len(ArchiveTimestampFormat) {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Slice(names, func(i, j int) bool {
+		return archiveStamp(names[i], base) < archiveStamp(names[j], base)
+	})
+	return names, nil
+}
+
+// archiveStamp returns the timestamp part of an archive's base name.
+func archiveStamp(name, base string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(name, base+"."), ".gz")
 }
 
 // archiveNameTaken reports whether an archive already occupies this path in
@@ -175,9 +209,16 @@ func (l *FileLogger) rotateLocked() error {
 	l.enc = json.NewEncoder(f)
 
 	env := metaEnvelope{Meta: NewMetaRecord(filepath.Base(finalArchive))}
+	if l.seal != nil {
+		// chain_prev/chain_seq link the new file to the last entry of the
+		// archive; seq carries on from there.
+		l.seal.meta(&env.Meta)
+	}
 	if err := l.enc.Encode(env); err != nil {
 		return fmt.Errorf("write post-rotate header: %w", err)
 	}
+	l.segID = env.Meta.SegmentID
+	l.publishAnchorLocked()
 
 	// Point the checkpoint at the new live file BEFORE pruning: a checkpoint
 	// that still named a file prune is about to delete would make the next

@@ -108,6 +108,8 @@ type Registry struct {
 	notifySpooledTotal           uint64
 	notifyDespooledTotal         uint64
 	llmProxyStreamsRejectedTotal uint64
+	auditSealSeq                 uint64 // seq of the last published audit anchor
+	auditSealTailMismatchTotal   uint64
 	auditReplayDurationNanos     int64
 	auditBufferedQueueDepth      int64
 	llmProxyStreamsActive        int64
@@ -200,6 +202,8 @@ func (r *Registry) Reset() {
 	atomic.StoreUint64(&r.notifySpooledTotal, 0)
 	atomic.StoreUint64(&r.notifyDespooledTotal, 0)
 	atomic.StoreUint64(&r.llmProxyStreamsRejectedTotal, 0)
+	atomic.StoreUint64(&r.auditSealSeq, 0)
+	atomic.StoreUint64(&r.auditSealTailMismatchTotal, 0)
 	atomic.StoreInt64(&r.auditReplayDurationNanos, 0)
 	atomic.StoreInt64(&r.auditBufferedQueueDepth, 0)
 	atomic.StoreInt64(&r.llmProxyStreamsActive, 0)
@@ -658,6 +662,27 @@ func (r *Registry) AuditRotationsTotal() uint64 {
 	return atomic.LoadUint64(&r.auditRotationsTotal)
 }
 
+// SetAuditSealSeq records the seq of the newest published audit anchor
+// (agentguard_audit_seal_seq). Set by the FileLogger when it publishes an
+// anchor (every --audit-anchor-interval, at rotation and at shutdown), not
+// per entry, so a scrape sees the same head the anchor log line shows.
+func (r *Registry) SetAuditSealSeq(seq uint64) { atomic.StoreUint64(&r.auditSealSeq, seq) }
+
+// AuditSealSeq returns the anchored seq (for tests).
+func (r *Registry) AuditSealSeq() uint64 { return atomic.LoadUint64(&r.auditSealSeq) }
+
+// IncAuditSealTailMismatch counts startups where the sealed audit log ended
+// before the chain head the replay checkpoint recorded: entries may have
+// been removed from the end of the file.
+func (r *Registry) IncAuditSealTailMismatch() {
+	atomic.AddUint64(&r.auditSealTailMismatchTotal, 1)
+}
+
+// AuditSealTailMismatchTotal returns the tail-mismatch counter (for tests).
+func (r *Registry) AuditSealTailMismatchTotal() uint64 {
+	return atomic.LoadUint64(&r.auditSealTailMismatchTotal)
+}
+
 // IncAuditBufferedDroppedToOverflow counts an audit entry spilled to the
 // BufferedAsyncLogger's overflow file (queue saturated, shutdown race,
 // or underlying-logger failure). The entry is durable on disk, not lost;
@@ -960,6 +985,13 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeGauge(w, "agentguard_audit_replay_duration_seconds",
 		"Wall-clock duration of the most recent startup audit replay.",
 		time.Duration(atomic.LoadInt64(&r.auditReplayDurationNanos)).Seconds())
+
+	writeGauge(w, "agentguard_audit_seal_seq",
+		"Seq of the newest published audit anchor (the sealed chain's head at the last anchor). 0 when --audit-seal is off or nothing is sealed yet.",
+		float64(atomic.LoadUint64(&r.auditSealSeq)))
+	writeCounter(w, "agentguard_audit_seal_tail_mismatch_total",
+		"Startups where the sealed audit log ended before the chain head recorded in the replay checkpoint (entries may have been removed).",
+		atomic.LoadUint64(&r.auditSealTailMismatchTotal))
 
 	writeCounter(w, "agentguard_audit_buffered_dropped_to_overflow_total",
 		"Audit entries spilled to the buffered logger's overflow file (queue saturated or underlying write failed); durable on disk, not lost.",

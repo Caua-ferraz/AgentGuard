@@ -252,7 +252,7 @@ Query the audit log.
 
 ### Response
 
-Array of entries (JSON Lines rows as JSON objects):
+Array of entries (JSON Lines rows as JSON objects). On a sealed log the entries also carry `seq`, `prev_hash` and `hash` ([FILE_FORMATS](FILE_FORMATS.md#current-on-disk-artifacts)):
 
 ```json
 [
@@ -278,6 +278,26 @@ curl -s -H "Authorization: Bearer $K" "http://localhost:8080/v1/audit?limit=100&
 ```
 
 For large exports, prefer `curl` over the CLI subcommand — the CLI doesn't expose `offset`. With `order=desc`, pages shift as new entries arrive; use the default order for exports.
+
+---
+
+## `GET /v1/audit/head` · tenant-aware mirror
+
+Tenant-aware mirror: `GET /v1/t/{tenant}/audit/head`. **(v1.4)** Same auth as `GET /v1/audit`: Bearer or session.
+
+Returns the head of the sealed audit log (`agentguard server --audit-seal`): the newest sealed entry's `seq` and `hash`, the `segment_id` of the file that holds it, and when the head was read. Copy it somewhere the audit host can't rewrite; `agentguard audit verify --anchor <seq>:<hash>` checks it later. See [OPERATIONS § Sealing and anchoring](OPERATIONS.md#sealing-and-anchoring).
+
+```json
+{"segment_id":"5f3d3bd62a0c92261d2c7de09991f4c0","seq":1200,"hash":"3f9a…","at":"2026-10-13T17:20:00Z"}
+```
+
+`seq` is `0` and `hash` empty until the first entry is sealed. With the buffered audit logger (the default), entries still in its queue are not in the head yet. The chain covers the whole audit file, every tenant included, so the tenant mirror returns the same head.
+
+| Code | Meaning |
+|---|---|
+| `200` | The head. |
+| `401` | Missing/invalid Bearer token or session. |
+| `404` | Sealing is off (`{"error":"audit sealing is off; …"}`), or a tenant-aware route with an unregistered tenant. |
 
 ---
 
