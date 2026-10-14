@@ -256,14 +256,15 @@ jobs:
       - name: Install Python dependencies
         working-directory: plugins/python
         # Adapter unit tests (test_adapters.py, test_crewai.py, test_mcp*.py,
-        # etc.) import the real langchain_core, crewai, and mcp packages —
-        # the adapter modules raise ImportError at collection time when
-        # they're missing. Installing the extras here keeps the suite from
-        # silently skipping or hard-failing on import.
+        # test_openai_agents.py, etc.) import the real langchain_core, crewai,
+        # mcp and openai-agents packages — the adapter modules raise
+        # ImportError at collection time when they're missing. Installing the
+        # extras here keeps the suite from silently skipping or hard-failing
+        # on import.
         #
         # `browser-use` is intentionally excluded: pulls Playwright + ~200MB
         # of Chromium and is exercised by the integration-tests matrix.
-        run: pip install -e ".[dev,langchain,crewai,mcp]"
+        run: pip install -e ".[dev,langchain,crewai,mcp,openai-agents]"
 
       - name: Run Python tests
         working-directory: plugins/python
@@ -324,7 +325,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        framework: [langchain, crewai, browser-use, mcp]
+        framework: [langchain, crewai, browser-use, mcp, openai-agents]
         include:
           - framework: langchain
             allow_failure: false
@@ -335,6 +336,10 @@ jobs:
           # The Python MCP gateway adapter against a real stdio MCP server
           # (tests/integration/_mcp_stub_server.py).
           - framework: mcp
+            allow_failure: false
+          # A real Agent + Runner loop driven by an offline fake Model: no
+          # network, no API key.
+          - framework: openai-agents
             allow_failure: false
     steps:
       - uses: actions/checkout@v4
@@ -390,6 +395,7 @@ jobs:
             crewai)      files="$d/test_real_crewai.py $d/test_at_real_crewai.py" ;;
             browser-use) files="$d/test_real_browseruse.py $d/test_at_real_browseruse.py" ;;
             mcp)         files="$d/test_at_mcp_gateway.py" ;;
+            openai-agents) files="$d/test_real_openai_agents.py $d/test_at_real_openai_agents.py" ;;
           esac
           pytest -v -rs -m integration $files
 
@@ -423,7 +429,7 @@ jobs:
           pip install --upgrade pip
           pip install -e ".[all,dev]"
           pip check
-          pip list | grep -i -E '^(crewai|browser-use|langchain|langchain-core|mcp|pydantic) '
+          pip list | grep -i -E '^(crewai|browser-use|langchain|langchain-core|mcp|openai-agents|pydantic) '
 
       - name: Install Playwright Chromium
         working-directory: plugins/python
