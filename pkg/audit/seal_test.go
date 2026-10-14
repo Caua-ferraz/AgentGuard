@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -729,6 +730,9 @@ func TestLoadSealKey(t *testing.T) {
 }
 
 func BenchmarkFileLoggerLog(b *testing.B) {
+	// Close logs an anchor line; keep it out of the benchmark output.
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
 	for _, bc := range []struct {
 		name string
 		seal *SealConfig
