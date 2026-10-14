@@ -166,10 +166,12 @@ func (u *HTTPUpstream) Initialize(ctx context.Context, protocolVersion string, c
 	defer u.handshakeMu.Unlock()
 	u.initVer, u.initCaps, u.initInfo, u.initCached = protocolVersion, clientCaps, clientInfo, true
 	result, err := u.handshakeLocked(ctx)
-	if err != nil && isUnavailable(err) {
+	if err != nil && !errors.Is(err, errUpstreamClosed) {
 		// Cached above, so the reconnect loop can finish the handshake
-		// once the server is up: a server that is down when the host
-		// connects still joins the session later.
+		// once the server is up. Any failure counts, not only an
+		// unreachable server: one that is cold-starting past the
+		// timeout or answers 500/429 at first must still join the
+		// session later, as renewSession does.
 		u.degrade(err)
 	}
 	return result, err
@@ -754,8 +756,10 @@ type sseEvent struct {
 // capped at max bytes; an oversized event is reported once and skipped,
 // and the reader stays usable, like readFrame on the stdio side.
 type sseReader struct {
-	r   *bufio.Reader
-	max int
+	r       *bufio.Reader
+	max     int
+	started bool // a line has been read (a leading BOM is stripped once)
+	skipLF  bool // the last line ended in CR: a following LF belongs to it
 }
 
 func newSSEReader(r io.Reader, max int) *sseReader {
@@ -771,7 +775,7 @@ func (s *sseReader) next() (sseEvent, error) {
 	var haveData, over bool
 	eventType := ""
 	for {
-		line, _, err := readFrame(s.r, s.max)
+		line, err := s.readLine()
 		if errors.Is(err, errFrameTooLong) {
 			over = true
 			continue
@@ -816,5 +820,52 @@ func (s *sseReader) next() (sseEvent, error) {
 		case "event":
 			eventType = string(value)
 		}
+	}
+}
+
+// readLine returns the next line without its terminator. Lines end in
+// CRLF, LF or a lone CR, as the event-stream format allows, and a UTF-8
+// BOM at the start of the stream is dropped. A line longer than max is
+// discarded as it streams and reported as errFrameTooLong. A line cut
+// off by the end of the stream is dropped: it cannot end an event.
+func (s *sseReader) readLine() ([]byte, error) {
+	var line []byte
+	var over bool
+	for {
+		if s.skipLF {
+			if b, err := s.r.Peek(1); err == nil && b[0] == '\n' {
+				_, _ = s.r.Discard(1)
+			}
+			s.skipLF = false
+		}
+		if _, err := s.r.Peek(1); err != nil {
+			return nil, err
+		}
+		chunk, _ := s.r.Peek(s.r.Buffered())
+		i := bytes.IndexAny(chunk, "\r\n")
+		end := len(chunk)
+		if i >= 0 {
+			end = i
+		}
+		if !over {
+			line = append(line, chunk[:end]...)
+			if len(line) > s.max {
+				over, line = true, nil
+			}
+		}
+		if i < 0 {
+			_, _ = s.r.Discard(len(chunk))
+			continue
+		}
+		s.skipLF = chunk[i] == '\r'
+		_, _ = s.r.Discard(i + 1)
+		if !s.started {
+			s.started = true
+			line = bytes.TrimPrefix(line, []byte("\ufeff"))
+		}
+		if over {
+			return nil, errFrameTooLong
+		}
+		return line, nil
 	}
 }

@@ -319,9 +319,17 @@ func (b *Bridge) dispatchFrame(ctx context.Context, line []byte, wg *sync.WaitGr
 		return
 	}
 
-	// Notification: no id field present at all.
+	// Notification: no id field present at all. Only notification
+	// methods are forwarded: a request method sent without an id (an
+	// id-less tools/call) would otherwise reach every upstream without
+	// a policy check, and a server that dispatches on method alone
+	// would run it.
 	if len(probe.ID) == 0 {
-		b.handleNotification(ctx, probe.Method, probe.Params)
+		if !strings.HasPrefix(probe.Method, "notifications/") {
+			b.logger.Infof("dropping %q sent without an id: only notifications/* may omit it", probe.Method)
+			return
+		}
+		b.handleNotification(ctx, probe.Method, probe.Params, wg)
 		return
 	}
 
@@ -386,22 +394,25 @@ func (b *Bridge) dispatchFrame(ctx context.Context, line []byte, wg *sync.WaitGr
 // gateway can translate requestId on the way out; that is deferred
 // pending a design (do not build it as a drive-by). Documented as a
 // known limitation in docs/MCP_GATEWAY.md § 8.4.
-func (b *Bridge) handleNotification(ctx context.Context, method string, params json.RawMessage) {
-	n := &Notification{
-		JSONRPC: JSONRPCVersion,
-		Method:  method,
-		Params:  params,
-	}
+//
+// The fan-out runs off the frame loop, one goroutine per upstream: for
+// an HTTP upstream Notify is a network round trip (or a whole session
+// renewal), and the frames behind the notification must not wait on it.
+func (b *Bridge) handleNotification(ctx context.Context, method string, params json.RawMessage, wg *sync.WaitGroup) {
 	for _, up := range b.upstreams {
 		if up.Status() != StatusOK {
 			continue
 		}
-		// Best effort, fire-and-forget. We use a short context
-		// derived from the bridge ctx so a sluggish upstream doesn't
-		// stall the whole notification fanout.
-		nctx, cancel := context.WithTimeout(ctx, 1*time.Second)
-		_ = up.Notify(nctx, n)
-		cancel()
+		wg.Add(1)
+		go func(up Upstream) {
+			defer wg.Done()
+			// Best effort, fire-and-forget, with a short context
+			// derived from the bridge ctx. Each upstream gets its own
+			// Notification: Notify sets fields on it.
+			nctx, cancel := context.WithTimeout(ctx, 1*time.Second)
+			defer cancel()
+			_ = up.Notify(nctx, &Notification{JSONRPC: JSONRPCVersion, Method: method, Params: params})
+		}(up)
 	}
 }
 

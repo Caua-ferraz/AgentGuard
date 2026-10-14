@@ -193,6 +193,12 @@ Sequence:
 5. Host sends the `notifications/initialized` notification (no id, no
    response). The gateway forwards this to every upstream.
 
+   Only `notifications/*` methods may be sent without an id. Any other
+   id-less frame (an id-less `tools/call`, say) is dropped and logged:
+   forwarded, it would reach the upstreams without a policy check.
+   Notifications go to the upstreams in the background, so a slow
+   upstream does not hold up the host's next request.
+
 ### 3.3 Capability merging
 
 The gateway's `capabilities` returned to the host is the **union** of
@@ -605,8 +611,10 @@ An `--upstream-http` server has no process to watch. It is degraded when
 it cannot be reached: a connection failure or HTTP 502/503/504. A slow
 reply that hits `--upstream-timeout`, or any other HTTP error, fails
 only that call. While degraded, the same backoff schedule replays the
-cached `initialize` until the server answers; this also covers a server
-that is down when the host connects. On recovery the gateway sends the
+cached `initialize` until the server answers. The first `initialize`
+counts in full: a server that is down, times out while it cold-starts,
+or answers it with any HTTP error when the host connects is degraded
+and joins the session once it answers. On recovery the gateway sends the
 host `notifications/tools/list_changed` so it re-pulls the namespace's
 tools.
 
@@ -697,8 +705,9 @@ way out. That is deferred — see `Bridge.handleNotification`.
   On the stream, notifications and server-initiated requests may come
   before the response; they are handled as on stdio (only
   `notifications/tools/list_changed` reaches the host, server requests
-  are dropped). Lines and events are capped at 4 MiB; an oversized
-  event is dropped and the stream keeps going.
+  are dropped). Lines may end in CRLF, LF or a lone CR, and a leading
+  byte-order mark is skipped. Lines and events are capped at 4 MiB; an
+  oversized event is dropped and the stream keeps going.
 - Keeps the `Mcp-Session-Id` from the `initialize` response and sends it,
   with `MCP-Protocol-Version: <negotiated version>`, on every later
   request. Notifications expect `202 Accepted`.

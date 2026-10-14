@@ -462,6 +462,10 @@ func parseUpstreamHeaders(raw []string, specs []UpstreamSpec, lookup func(string
 		ns := strings.TrimSpace(entry[:idx])
 		rest := entry[idx+1:]
 		switch t, ok := transport[ns]; {
+		case !ok && strings.ContainsAny(ns, "= \t"):
+			// No "<ns>:" prefix at all: what precedes the first ':' is
+			// part of the header itself, possibly of a literal token.
+			return nil, errors.New(`an --upstream-header has no "<ns>:" prefix; write "<ns>:<Name>=<Value>"`)
 		case !ok:
 			return nil, fmt.Errorf("--upstream-header for namespace %q, but no --upstream-http declares it", ns)
 		case t != TransportHTTP:
@@ -483,8 +487,8 @@ func parseUpstreamHeaders(raw []string, specs []UpstreamSpec, lookup func(string
 		if err != nil {
 			return nil, fmt.Errorf("--upstream-header %s for %q: %w", canon, ns, err)
 		}
-		if strings.ContainsAny(value, "\r\n\x00") {
-			return nil, fmt.Errorf("--upstream-header %s for %q: the value contains a line break or NUL byte", canon, ns)
+		if !validHeaderValue(value) {
+			return nil, fmt.Errorf("--upstream-header %s for %q: the value contains a control character (check the variables it uses)", canon, ns)
 		}
 		if out[ns] == nil {
 			out[ns] = http.Header{}
@@ -520,6 +524,18 @@ func expandEnvRefs(v string, lookup func(string) (string, bool)) (string, error)
 }
 
 // validHeaderName reports whether name is an RFC 9110 token.
+// validHeaderValue reports whether net/http will send v as a header
+// value: no control characters other than horizontal tab. Anything else
+// makes every request fail, which would look like an unreachable server.
+func validHeaderValue(v string) bool {
+	for i := 0; i < len(v); i++ {
+		if c := v[i]; (c < 0x20 && c != '\t') || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 func validHeaderName(name string) bool {
 	if name == "" {
 		return false

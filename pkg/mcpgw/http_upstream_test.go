@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -29,6 +30,14 @@ type mcpStub struct {
 
 	// down makes every POST answer 503.
 	down atomic.Bool
+
+	// failInits answers that many initialize POSTs with HTTP 500;
+	// slowInits makes that many wait 300ms first.
+	failInits atomic.Int32
+	slowInits atomic.Int32
+
+	// slowNotes makes every notification wait 900ms before its 202.
+	slowNotes atomic.Bool
 
 	// onGet serves the GET stream; nil answers 405.
 	onGet func(w http.ResponseWriter, r *http.Request)
@@ -125,6 +134,16 @@ func (s *mcpStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if msg.Method == MethodInitialize {
+		if s.slowInits.Add(-1) >= 0 {
+			time.Sleep(300 * time.Millisecond)
+		}
+		if s.failInits.Add(-1) >= 0 {
+			http.Error(w, "warming up", http.StatusInternalServerError)
+			return
+		}
+	}
+
 	s.mu.Lock()
 	s.posts = append(s.posts, stubPost{method: msg.Method, header: r.Header.Clone()})
 	sid := r.Header.Get("Mcp-Session-Id")
@@ -151,6 +170,9 @@ func (s *mcpStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(msg.ID) == 0 { // notification
+		if s.slowNotes.Load() {
+			time.Sleep(900 * time.Millisecond)
+		}
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
@@ -396,6 +418,40 @@ func TestHTTPUpstream_UnreachableServerDegradesThenRecovers(t *testing.T) {
 	}
 }
 
+// A server that fails the first initialize in a way that does not look
+// like an outage (a timeout while it cold-starts, an HTTP 500) still
+// joins the session once it answers: the reconnect loop retries it.
+func TestHTTPUpstream_FailedFirstInitializeRecovers(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(*mcpStub)
+	}{
+		{"HTTP 500", func(s *mcpStub) { s.failInits.Store(1) }},
+		{"timeout", func(s *mcpStub) { s.slowInits.Store(1) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newMCPStub(t)
+			tc.setup(stub)
+			notes := &noteRecorder{}
+			up := newTestHTTPUpstream(t, stub.url(), HTTPUpstreamOptions{OnNotification: notes.record})
+
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			if _, err := up.Initialize(ctx, "2025-11-25", nil, ClientInfo{}); err == nil {
+				t.Fatal("the first Initialize succeeded")
+			}
+			if up.Status() != StatusDegraded {
+				t.Fatalf("status = %q, want degraded", up.Status())
+			}
+			notes.waitFor(t, NotificationToolsListChanged)
+			if _, err := sendToolsList(t, up); err != nil {
+				t.Fatalf("Send after recovery: %v", err)
+			}
+		})
+	}
+}
+
 // A redirect is refused rather than followed: net/http would forward
 // custom headers (tokens) to the redirect target.
 func TestHTTPUpstream_DoesNotFollowRedirects(t *testing.T) {
@@ -551,33 +607,52 @@ func TestSSEReader(t *testing.T) {
 		{"comments and id lines are ignored", ": ping\nid: 4\ndata: x\n\n", []string{"x"}},
 		{"named event types other than message are skipped", "event: other\ndata: x\n\nevent: message\ndata: y\n\n", []string{"y"}},
 		{"CRLF line endings", "data: x\r\n\r\n", []string{"x"}},
+		{"CR-only line endings", "data: a\rdata: b\r\rdata: c\r\r", []string{"a\nb", "c"}},
+		{"mixed line endings", "data: a\r\ndata: b\n\r", []string{"a\nb"}},
+		{"a leading BOM is dropped", "\ufeffdata: x\n\n", []string{"x"}},
+		{"a BOM later in the stream is data", "data: x\n\n\ufeffdata: y\n\n", []string{"x"}},
 		{"blank lines without data dispatch nothing", "\n\n\ndata: x\n\n", []string{"x"}},
 		{"an event cut off by EOF is dropped", "data: x\n\ndata: partial\n", []string{"x"}},
 		{"an oversized event is skipped and the next one read", "data: " + big + "\n\ndata: ok\n\n", []string{"!", "ok"}},
 		{"oversized across lines", "data: " + big[:20] + "\ndata: " + big[:20] + "\n\ndata: ok\n\n", []string{"!", "ok"}},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			sr := newSSEReader(strings.NewReader(tc.stream), 32)
-			var got []string
-			for {
-				ev, err := sr.next()
-				if errors.Is(err, io.EOF) {
-					break
-				}
-				if err != nil {
-					t.Fatalf("next: %v", err)
-				}
-				if ev.tooLarge {
-					got = append(got, "!")
-				} else {
-					got = append(got, string(ev.data))
-				}
+		for _, oneByte := range []bool{false, true} {
+			name := tc.name
+			var r io.Reader = strings.NewReader(tc.stream)
+			if oneByte {
+				// One byte per read: a CRLF split across reads is still
+				// one line ending.
+				name += " (one byte per read)"
+				r = iotest.OneByteReader(r)
 			}
-			if strings.Join(got, "|") != strings.Join(tc.want, "|") {
-				t.Errorf("events = %q, want %q", got, tc.want)
-			}
-		})
+			t.Run(name, func(t *testing.T) {
+				testSSEStream(t, r, tc.want)
+			})
+		}
+	}
+}
+
+func testSSEStream(t *testing.T, r io.Reader, want []string) {
+	t.Helper()
+	sr := newSSEReader(r, 32)
+	var got []string
+	for {
+		ev, err := sr.next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("next: %v", err)
+		}
+		if ev.tooLarge {
+			got = append(got, "!")
+		} else {
+			got = append(got, string(ev.data))
+		}
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("events = %q, want %q", got, want)
 	}
 }
 
@@ -598,4 +673,59 @@ func (s *syncWriter) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.w.String()
+}
+
+// A host frame without an id is forwarded only if it is a notification:
+// an id-less tools/call must not reach the server ungated. Notifications
+// are sent off the frame loop, so a slow server does not hold up the
+// frames behind one.
+func TestBridge_IDlessRequestDroppedAndNotificationsDoNotBlock(t *testing.T) {
+	stub := newMCPStub(t)
+	cfg, err := ParseConfig([]string{
+		"--upstream-http", "docs:" + stub.url(),
+		"--policy-mode", "fast",
+		"--upstream-timeout", "2s",
+	})
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	b := NewBridge(cfg, io.Discard, "test")
+	var checks atomic.Int32
+	b.PolicyCheck = func(context.Context, *ToolsCallRequest) (Decision, error) {
+		checks.Add(1)
+		return Decision{Allow: false, Rule: "deny:test", Reason: "no"}, nil
+	}
+	h := newBridgeHarness(t, b)
+	h.send(map[string]interface{}{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": map[string]interface{}{
+		"protocolVersion": "2025-06-18", "capabilities": map[string]interface{}{}, "clientInfo": map[string]interface{}{"name": "host"},
+	}})
+	if resp := h.readResponse(); resp.Error != nil {
+		t.Fatalf("initialize: %+v", resp.Error)
+	}
+
+	stub.slowNotes.Store(true)
+	h.send(map[string]interface{}{"jsonrpc": "2.0", "method": "tools/call", "params": map[string]interface{}{"name": "danger"}})
+	h.send(map[string]interface{}{"jsonrpc": "2.0", "method": "notifications/cancelled", "params": map[string]interface{}{"requestId": 9}})
+	start := time.Now()
+	h.send(map[string]interface{}{"jsonrpc": "2.0", "id": 2, "method": "ping"})
+	if resp := h.readResponse(); resp.Error != nil {
+		t.Fatalf("ping: %+v", resp.Error)
+	}
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Errorf("ping answered after %v: the notification blocked the frame loop", d)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for stub.lastPost(NotificationCancelled).method == "" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if stub.lastPost(NotificationCancelled).method == "" {
+		t.Error("notifications/cancelled never reached the server")
+	}
+	if stub.lastPost(MethodToolsCall).method != "" {
+		t.Error("an id-less tools/call reached the server")
+	}
+	if n := checks.Load(); n != 0 {
+		t.Errorf("policy checks = %d, want 0 (the frame is dropped, not gated)", n)
+	}
 }

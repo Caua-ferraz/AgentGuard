@@ -10,6 +10,7 @@ import (
 func TestParseConfig_HTTPUpstreams(t *testing.T) {
 	t.Setenv("AGENTGUARD_URL", "")
 	t.Setenv("MCPGW_TEST_TOKEN", "s3cret-token")
+	t.Setenv("MCPGW_TEST_CTRL", "s3cret-token\x7f")
 	base := []string{"--policy-mode", "fast"}
 
 	cases := []struct {
@@ -176,6 +177,34 @@ func TestParseConfig_HTTPUpstreams(t *testing.T) {
 			wantErr: "<ns>:<Name>=<Value>",
 		},
 		{
+			name: "a value with a control character is refused without naming it",
+			args: []string{
+				"--upstream-http", "docs:https://mcp.example.com/mcp",
+				"--upstream-header", "docs:X-Key=${MCPGW_TEST_CTRL}",
+			},
+			wantErr: "X-Key for \"docs\": the value contains a control character",
+		},
+		{
+			name: "a tab in a value is allowed",
+			args: []string{
+				"--upstream-http", "docs:https://mcp.example.com/mcp",
+				"--upstream-header", "docs:X-Key=a\tb",
+			},
+			check: func(t *testing.T, c *Config) {
+				if got := c.UpstreamHeaders["docs"].Get("X-Key"); got != "a\tb" {
+					t.Errorf("X-Key = %q", got)
+				}
+			},
+		},
+		{
+			name: "a header without a namespace does not echo the value",
+			args: []string{
+				"--upstream-http", "docs:https://mcp.example.com/mcp",
+				"--upstream-header", "Authorization=Basic user:s3cret-token",
+			},
+			wantErr: `has no "<ns>:" prefix`,
+		},
+		{
 			name: "an invalid header name is refused",
 			args: []string{
 				"--upstream-http", "docs:https://mcp.example.com/mcp",
@@ -195,7 +224,7 @@ func TestParseConfig_HTTPUpstreams(t *testing.T) {
 				if !strings.Contains(err.Error(), tc.wantErr) {
 					t.Errorf("err = %q, want it to contain %q", err, tc.wantErr)
 				}
-				if strings.Contains(err.Error(), "s3cret-token") {
+				if strings.Contains(err.Error(), "s3cret-token") || strings.Contains(err.Error(), "user") {
 					t.Errorf("error leaks a header value: %q", err)
 				}
 				return
