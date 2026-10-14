@@ -273,6 +273,27 @@ class TestRunnerWithGuardedTools:
 
         assert ran == []
 
+    @pytest.mark.asyncio
+    async def test_agent_as_tool_is_gated(self, integration_mock):
+        # Agent.as_tool() returns a FunctionTool whose invoker runs a nested
+        # agent; a deny must stop the nested run from starting at all.
+        integration_mock.set_default_check(deny())
+        helper_model = _ScriptedModel([[_message("helper answer")]])
+        helper = Agent(name="helper", model=helper_model)
+        helper_tool = helper.as_tool(tool_name="ask_helper", tool_description="Ask the helper")
+        model = _ScriptedModel([[_tool_call("ask_helper", {"input": "hi"}, "c1")]])
+        agent = Agent(
+            name="ops",
+            model=model,
+            tools=guard_tools([helper_tool], Guard(integration_mock.base_url)),
+        )
+
+        with pytest.raises(AgentGuardDenied):
+            await Runner.run(agent, "ask", run_config=_RUN_CONFIG)
+
+        assert helper_model.inputs == []
+        assert len(integration_mock.requests_to("/v1/check")) == 1
+
 
 # ---------------------------------------------------------------------------
 # agentguard_tool_guardrail inside Runner.run
