@@ -96,6 +96,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import json
 from typing import Any, FrozenSet, Iterable, List, Optional, Tuple
 
@@ -363,6 +364,15 @@ class _GatedInvoker:
         self._name = name
         self._description = description
         self._schema_keys = schema_keys
+        # The SDK picks the context object it passes from the invoker's
+        # first-parameter annotation (ToolContext, or a plain
+        # RunContextWrapper fork for invokers annotated that way). Mirror
+        # the original invoker's signature so the gate does not change
+        # what the wrapped invoker receives.
+        try:
+            self.__signature__ = inspect.signature(inner)
+        except (TypeError, ValueError):
+            pass
 
     async def __call__(self, ctx: Any, input_json: str) -> Any:
         result = await _check(

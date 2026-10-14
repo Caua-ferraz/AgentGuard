@@ -343,6 +343,19 @@ class TestWrapping:
         assert guarded.description == tool.description
         assert guarded.params_json_schema == tool.params_json_schema
 
+    def test_gated_invoker_mirrors_the_original_signature(self):
+        # The SDK chooses ToolContext vs a plain RunContextWrapper from the
+        # invoker's first-parameter annotation; the gate must expose the
+        # original's, not its own ``ctx: Any``.
+        import inspect
+
+        tool = _FakeFunctionTool()
+        guarded = guard_tool(tool, _RecordingGuard())
+
+        assert inspect.signature(guarded.on_invoke_tool) == inspect.signature(
+            tool.on_invoke_tool
+        )
+
     def test_calling_the_original_tool_is_not_gated(self):
         guard = _RecordingGuard(decision="DENY")
         tool = _FakeFunctionTool()

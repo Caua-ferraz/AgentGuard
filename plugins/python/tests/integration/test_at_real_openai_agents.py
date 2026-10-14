@@ -53,6 +53,7 @@ from agentguard import (  # noqa: E402
 )
 from agentguard.adapters.openai_agents import (  # noqa: E402
     agentguard_tool_guardrail,
+    guard_tool,
     guard_tools,
 )
 
@@ -354,6 +355,49 @@ class TestArgumentSmuggling:
         assert _check_bodies(integration_mock) == [
             {"scope": "shell", "agent_id": "oa", "command": "rm -rf /"}
         ]
+
+
+class TestInvokerContextType:
+    @pytest.mark.asyncio
+    async def test_guarding_keeps_the_context_type_the_invoker_declares(
+        self, integration_mock
+    ):
+        # The SDK passes a plain RunContextWrapper (not the ToolContext) to
+        # an invoker whose first parameter is annotated RunContextWrapper.
+        # The gate must not change which one the original invoker receives.
+        from agents import FunctionTool, RunContextWrapper  # type: ignore[attr-defined]
+
+        integration_mock.set_default_check(allow())
+
+        def make_tool(seen: List[str]):
+            async def invoke(ctx: RunContextWrapper[Any], input_json: str) -> str:
+                seen.append(type(ctx).__name__)
+                return "ok"
+
+            return FunctionTool(
+                name="probe",
+                description="Probe the context type",
+                params_json_schema={
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                on_invoke_tool=invoke,
+            )
+
+        async def run(tool: Any) -> None:
+            model = _ScriptedModel([[_tool_call("probe", {}, "c1")], [_message("done")]])
+            await Runner.run(
+                Agent(name="ops", model=model, tools=[tool]), "go", run_config=_RUN_CONFIG
+            )
+
+        unguarded: List[str] = []
+        guarded: List[str] = []
+        await run(make_tool(unguarded))
+        await run(guard_tool(make_tool(guarded), Guard(integration_mock.base_url)))
+
+        assert len(unguarded) == 1
+        assert guarded == unguarded
 
 
 # ---------------------------------------------------------------------------
