@@ -394,9 +394,26 @@ func TestSeal_ResumeAfterCutLastLine(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &last); err != nil {
 		t.Fatalf("the entry after the cut line is not whole: %v", err)
 	}
+	// The logger ends the cut line and writes a _meta line that resumes the
+	// chain at the last whole entry, so verify reports the cut line as a
+	// warning and keeps checking everything written after the crash.
 	rep := verify(t, path, VerifyOptions{})
-	if rep.OK || rep.Break == nil || rep.Break.Line != 4 || !strings.Contains(rep.Break.Reason, "not valid JSON") {
+	if !rep.OK || rep.LastSeq != 4 || len(rep.Warnings) != 1 || !strings.Contains(rep.Warnings[0], "audit.jsonl:4") {
 		t.Fatalf("report = %+v break %+v", rep, rep.Break)
+	}
+
+	// An entry changed after the crash is still caught.
+	lines = readLines(t, path)
+	tampered := strings.Replace(lines[len(lines)-1], `"agent_id":"`, `"agent_id":"x`, 1)
+	if tampered == lines[len(lines)-1] {
+		t.Fatal("test setup: the last entry has no agent_id to change")
+	}
+	lines[len(lines)-1] = tampered
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if rep := verify(t, path, VerifyOptions{}); rep.OK || rep.Break == nil || !strings.Contains(rep.Break.Reason, "hash mismatch") {
+		t.Fatalf("a tampered entry after the cut line passed: %+v break %+v", rep, rep.Break)
 	}
 }
 

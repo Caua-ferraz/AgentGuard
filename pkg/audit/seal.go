@@ -350,7 +350,14 @@ func readSealTail(path, liveSeg string) (sealTail, error) {
 	if buf[len(buf)-1] != '\n' {
 		t.partial = true
 		i := bytes.LastIndexByte(buf, '\n')
-		buf = buf[:i+1] // i == -1 leaves nothing
+		// A write cut exactly before its newline left a whole sealed entry;
+		// resumeSeal's newline completes it, so the chain continues from it.
+		// Anything else on the cut line is lost.
+		if frag := bytes.TrimSpace(buf[i+1:]); !isWholeSealedEntry(frag) {
+			buf = buf[:i+1] // i == -1 leaves nothing
+		} else {
+			buf = append(buf, '\n')
+		}
 	}
 	lines := bytes.Split(bytes.TrimSuffix(buf, []byte{'\n'}), []byte{'\n'})
 	if !whole && len(lines) > 0 {
@@ -459,4 +466,14 @@ func (l *FileLogger) resumeSeal(path string) error {
 func sameSealState(a, b *MetaRecord) bool {
 	return a.Seal != nil && b.Seal != nil && *a.Seal == *b.Seal &&
 		a.ChainPrev == b.ChainPrev && a.ChainSeq == b.ChainSeq && a.NodeID == b.NodeID
+}
+
+// isWholeSealedEntry reports whether line is a complete sealed entry: valid
+// JSON with a hash as its last field.
+func isWholeSealedEntry(line []byte) bool {
+	if !json.Valid(line) || bytes.HasPrefix(line, metaLinePrefix) {
+		return false
+	}
+	_, _, ok := splitSealedLine(line)
+	return ok
 }

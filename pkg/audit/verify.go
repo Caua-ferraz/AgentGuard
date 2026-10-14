@@ -106,7 +106,7 @@ func VerifyChain(livePath string, opts VerifyOptions) (*VerifyReport, error) {
 	if _, err := os.Stat(livePath); err != nil {
 		return nil, err
 	}
-	files, warnings := chainFiles(livePath)
+	files, warnings, linkBreak := chainFiles(livePath)
 
 	v := &verifier{
 		keys:    map[string][]byte{},
@@ -136,6 +136,15 @@ func VerifyChain(livePath string, opts VerifyOptions) (*VerifyReport, error) {
 	}
 
 	rep := v.rep
+	if v.pendingCut != nil && rep.Break == nil {
+		rep.Break = v.pendingCut
+	}
+	if rep.Break == nil && linkBreak != nil {
+		rep.Break = linkBreak
+	}
+	if rep.Break == nil && len(opts.Keys) > 0 && len(rep.Seals) == 0 {
+		rep.Break = &VerifyBreak{Reason: "the log is not sealed: no _meta line declares a seal, so nothing in it is tied to your key"}
+	}
 	if rep.Break == nil && len(opts.Keys) > 0 && !v.sawHMAC && rep.Entries > 0 {
 		rep.Break = &VerifyBreak{Reason: "no entry is sealed with a key: the log uses plain SHA-256, which anyone who can write the file can recompute"}
 	}
@@ -170,17 +179,31 @@ func VerifyChain(livePath string, opts VerifyOptions) (*VerifyReport, error) {
 }
 
 // chainFiles walks _meta.rotated_from back from the live file and returns
-// the files oldest first. A link to a file that is gone ends the walk: that
-// is what pruning leaves. Archives in the directory that the walk did not
-// reach are returned as warnings.
-func chainFiles(livePath string) ([]string, []string) {
+// the files oldest first.
+//
+// A link to a file that is gone ends the walk: that is what pruning leaves.
+// But pruning deletes the oldest archives first, and archive names sort in
+// write order, so an archive left on disk that is older than the missing
+// one, or any unlinked archive behind a missing link, means a file was
+// removed or a header's rotated_from was rewritten. Both are returned as
+// a break: otherwise every archive behind the gap would go unverified.
+// Older archives with no link to them from a file that starts a chain (no
+// rotated_from, no chain_prev) are only a warning: a log started over.
+func chainFiles(livePath string) ([]string, []string, *VerifyBreak) {
 	files := []string{livePath}
 	seen := map[string]bool{livePath: true}
 	dir := filepath.Dir(livePath)
+	base := filepath.Base(livePath)
 	cur := livePath
+	missing := ""      // base name of a rotated_from target that is gone
+	linksBack := false // the oldest file continues a chain (it names a predecessor or has chain_prev)
 	for depth := 0; depth < maxRotationChainDepth; depth++ {
 		m, err := readMetaAny(cur)
-		if err != nil || m == nil || m.RotatedFrom == "" {
+		if err != nil || m == nil {
+			break
+		}
+		linksBack = m.RotatedFrom != "" || m.ChainSeq > 0 || m.ChainPrev != ""
+		if m.RotatedFrom == "" {
 			break
 		}
 		p := filepath.Join(dir, filepath.Base(m.RotatedFrom))
@@ -188,6 +211,7 @@ func chainFiles(livePath string) ([]string, []string) {
 			break
 		}
 		if _, err := os.Stat(p); err != nil {
+			missing = filepath.Base(m.RotatedFrom)
 			break
 		}
 		seen[p] = true
@@ -198,31 +222,41 @@ func chainFiles(livePath string) ([]string, []string) {
 		files[i], files[j] = files[j], files[i]
 	}
 
-	var warnings []string
-	entries, err := os.ReadDir(dir)
+	names, err := listArchives(livePath)
 	if err != nil {
-		return files, nil
+		return files, nil, nil
 	}
-	prefix := filepath.Base(livePath) + "."
-	var stray []string
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasPrefix(name, prefix) {
+	// oldest is the stamp of the oldest linked archive; "" when the walk
+	// reached no archive, so every archive on disk is older than it.
+	oldest := ""
+	if files[0] != livePath {
+		oldest = archiveStamp(filepath.Base(files[0]), base)
+	}
+	var warnings []string
+	for _, name := range names {
+		if seen[filepath.Join(dir, name)] {
 			continue
 		}
-		suffix := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".gz")
-		if len(suffix) != len(ArchiveTimestampFormat) {
-			continue
-		}
-		if !seen[filepath.Join(dir, name)] {
-			stray = append(stray, name)
+		stamp := archiveStamp(name, base)
+		switch {
+		case oldest != "" && stamp > oldest:
+			return files, warnings, &VerifyBreak{File: name,
+				Reason: "segment link broken: this archive is newer than the oldest linked file but no file links to it (a header's rotated_from was rewritten to skip it)"}
+		case missing != "":
+			// Pruning removes the oldest archives first, so the missing file
+			// would be the newest pruned one and nothing unlinked could be
+			// left: an archive still on disk means a file was removed or
+			// rotated_from rewritten.
+			return files, warnings, &VerifyBreak{File: filepath.Base(files[0]), Line: 1,
+				Reason: fmt.Sprintf("segment link broken: the file before this one, %s, is missing, but the archive %s is still there and nothing links to it; pruning removes the oldest archives first, so a file was removed or rotated_from rewritten", missing, name)}
+		case missing == "" && linksBack && stamp != oldest:
+			return files, warnings, &VerifyBreak{File: filepath.Base(files[0]), Line: 1,
+				Reason: fmt.Sprintf("segment link broken: this file continues a chain but names no file before it, while the archive %s is still there", name)}
+		default:
+			warnings = append(warnings, fmt.Sprintf("archive %s is not linked from the files after it; it was not verified", name))
 		}
 	}
-	sort.Strings(stray)
-	for _, name := range stray {
-		warnings = append(warnings, fmt.Sprintf("archive %s is not linked from the files after it; it was not verified", name))
-	}
-	return files, warnings
+	return files, warnings, nil
 }
 
 // verifier is VerifyChain's state while it walks the files.
@@ -240,7 +274,18 @@ type verifier struct {
 	started  bool // the chain has begun: every entry from here must be sealed
 	nextSeq  uint64
 	lastHash string
+
+	// pendingCut is a line that is not valid JSON after sealing began. It is
+	// a break unless the next line is the _meta line the logger writes after
+	// an interrupted write, resuming the chain exactly where it stopped.
+	pendingCut *VerifyBreak
 }
+
+// sealing reports whether entries from here on must be sealed: the chain has
+// begun, or a _meta line has declared a seal. The logger writes that line
+// before the first sealed entry, so an unsealed entry after it was inserted
+// (or sealing was turned off, which also leaves the log unprotected).
+func (v *verifier) sealing() bool { return v.started || v.seal != nil }
 
 func (v *verifier) fail(file string, line int, format string, args ...any) {
 	v.rep.Break = &VerifyBreak{File: filepath.Base(file), Line: line, Reason: fmt.Sprintf(format, args...)}
@@ -278,7 +323,7 @@ func (v *verifier) file(path string, first bool) error {
 		line := bytes.TrimRight(raw, "\r\n")
 		if len(bytes.TrimSpace(line)) > 0 {
 			if !complete {
-				if v.started || bytes.Contains(line, []byte(hashFieldPrefix)) {
+				if v.sealing() || bytes.Contains(line, []byte(hashFieldPrefix)) {
 					v.fail(path, lineNo, "the line is incomplete: the file was cut mid-line (a crash during a write, or truncation)")
 					return nil
 				}
@@ -291,6 +336,9 @@ func (v *verifier) file(path string, first bool) error {
 			}
 		}
 		if errors.Is(err, io.EOF) {
+			if v.pendingCut != nil && v.rep.Break == nil {
+				v.rep.Break, v.pendingCut = v.pendingCut, nil
+			}
 			return nil
 		}
 	}
@@ -309,10 +357,23 @@ func (v *verifier) line(path string, lineNo int, line []byte, first bool) bool {
 	if bytes.HasPrefix(bytes.TrimLeft(line, " \t"), metaLinePrefix) {
 		var env metaEnvelope
 		if err := json.Unmarshal(line, &env); err != nil {
-			if v.started {
+			if v.sealing() {
 				v.fail(path, lineNo, "the _meta line is not valid JSON")
 			}
 			return true
+		}
+		if cut := v.pendingCut; cut != nil {
+			v.pendingCut = nil
+			m := env.Meta
+			wantSeq, wantPrev := uint64(0), ""
+			if v.started {
+				wantSeq, wantPrev = v.nextSeq-1, v.lastHash
+			}
+			if lineNo == 1 || m.Seal == nil || m.ChainSeq != wantSeq || m.ChainPrev != wantPrev {
+				v.rep.Break = cut
+				return true
+			}
+			v.rep.Warnings = append(v.rep.Warnings, fmt.Sprintf("%s:%d is a line cut short by an interrupted write; the chain resumes after it with nothing missing", cut.File, cut.Line))
 		}
 		if lineNo == 1 {
 			v.header(path, &env.Meta, first)
@@ -328,17 +389,23 @@ func (v *verifier) line(path string, lineNo int, line []byte, first bool) bool {
 		PrevHash string `json:"prev_hash"`
 		Hash     string `json:"hash"`
 	}
+	if v.pendingCut != nil {
+		// Two bad lines in a row, or a cut line followed by an entry rather
+		// than the logger's resume line: the cut line is the break.
+		v.rep.Break = v.pendingCut
+		return true
+	}
 	if err := json.Unmarshal(line, &e); err != nil {
-		if v.started {
-			v.fail(path, lineNo, "the line is not valid JSON: it was changed")
+		if v.sealing() {
+			v.pendingCut = &VerifyBreak{File: filepath.Base(path), Line: lineNo, Reason: "the line is not valid JSON: it was changed"}
 		} else {
 			v.rep.Unsealed++
 		}
 		return true
 	}
 	if e.Hash == "" {
-		if v.started {
-			v.fail(path, lineNo, "the entry has no hash: it was inserted, or sealing was turned off and on again")
+		if v.sealing() {
+			v.fail(path, lineNo, "the entry has no hash, but the log is sealed from an earlier line: it was inserted, or sealing was turned off")
 		} else {
 			v.rep.Unsealed++
 		}
@@ -415,8 +482,10 @@ func (v *verifier) header(path string, m *MetaRecord, first bool) {
 	case v.started:
 		if m.Seal == nil {
 			v.fail(path, 1, "segment link broken: this file is not sealed but the files before it are")
-		} else if m.ChainSeq != v.nextSeq-1 || m.ChainPrev != v.lastHash {
+		} else if m.ChainSeq != v.nextSeq-1 {
 			v.fail(path, 1, "segment link broken: the header says the previous file ends at seq %d, but it ends at seq %d", m.ChainSeq, v.nextSeq-1)
+		} else if m.ChainPrev != v.lastHash {
+			v.fail(path, 1, "segment link broken: the header's chain_prev %s is not the previous file's last hash %s", shortHash(m.ChainPrev), shortHash(v.lastHash))
 		}
 	case linked:
 		v.fail(path, 1, "segment link broken: the header continues a chain at seq %d that the files before it don't have", m.ChainSeq)
@@ -468,4 +537,15 @@ func (v *verifier) keyIDs() []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// shortHash shortens a hash for messages.
+func shortHash(h string) string {
+	if len(h) > 12 {
+		return h[:12] + "…"
+	}
+	if h == "" {
+		return "(none)"
+	}
+	return h
 }

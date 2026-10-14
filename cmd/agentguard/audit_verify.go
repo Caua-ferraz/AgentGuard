@@ -46,9 +46,11 @@ hash, the seq and prev_hash links between entries, and the links between
 the live file and its rotated archives (gzip or plain). It reads the files
 only; the server does not need to run.
 
-A log that verifies was not changed by anyone without the key. The newest
-entries could still have been cut off: check published anchors with
---anchor to rule that out.
+A log sealed with a key (--audit-seal-key-file) that verifies with
+--key-file was not changed by anyone without the key. A plain SHA-256
+chain only catches careless edits. Entries written before sealing began
+and pruned archives are not covered, and the newest entries could have
+been cut off: check published anchors with --anchor to rule that out.
 
 `)
 		clihelp.WriteFlags(w, fs, clihelp.Options{})

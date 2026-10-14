@@ -317,12 +317,21 @@ func (l *FileLogger) Log(entry Entry) error {
 			return err
 		}
 		// One write per line, so O_APPEND keeps the line whole. A short
-		// write leaves a cut line; end it so the next entry starts clean
-		// (verify reports the cut line, and the chain skips it because it
-		// only advances on success).
+		// write leaves a cut line: end it, then write the _meta line a
+		// restart would, resuming the chain at the last whole entry, so
+		// verify can tell an interrupted write from a changed line and keep
+		// checking the entries after it.
 		if n, err := l.file.Write(line); err != nil {
 			if n > 0 {
-				_, _ = l.file.Write([]byte{'\n'})
+				if _, werr := l.file.Write([]byte{'\n'}); werr == nil {
+					if n == len(line)-1 {
+						// Only the newline was lost: the entry is whole.
+						l.seal.advance(seq, sum, l.segID)
+					}
+					m := MetaRecord{SchemaVersion: CurrentSchemaVersion, CreatedAt: time.Now().UTC(), SegmentID: l.segID}
+					l.seal.meta(&m)
+					_ = l.enc.Encode(metaEnvelope{Meta: m})
+				}
 			}
 			return err
 		}

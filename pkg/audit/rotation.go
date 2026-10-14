@@ -95,7 +95,20 @@ const maxArchiveProbe = 60
 //
 // A name is taken if either the plain or the .gz form exists, because
 // compression writes alongside the rename.
+//
+// The name also sorts after every archive already on disk. Pruning deletes
+// the oldest names, and a burst of rotations inside one second would
+// otherwise take a pruned name again: the next prune would then delete that
+// newest archive, and name order would stop matching write order, which
+// `audit verify` relies on to tell pruning from a removed archive.
 func nextFreeArchivePath(basePath string, ts time.Time) (string, error) {
+	ts = ts.UTC().Truncate(time.Second)
+	if names, err := listArchives(basePath); err == nil && len(names) > 0 {
+		newest, err := time.Parse(ArchiveTimestampFormat, archiveStamp(names[len(names)-1], filepath.Base(basePath)))
+		if err == nil && !ts.After(newest) {
+			ts = newest.Add(time.Second)
+		}
+	}
 	for i := 0; i < maxArchiveProbe; i++ {
 		candidate := fmt.Sprintf("%s.%s", basePath, ts.Format(ArchiveTimestampFormat))
 		if !archiveNameTaken(candidate) {
@@ -104,6 +117,34 @@ func nextFreeArchivePath(basePath string, ts time.Time) (string, error) {
 		ts = ts.Add(time.Second)
 	}
 	return "", fmt.Errorf("no free archive name for %s within %ds", basePath, maxArchiveProbe)
+}
+
+// listArchives lists the base names of basePath's rotated archives, plain or
+// gzip, oldest first: ArchiveTimestampFormat sorts chronologically.
+func listArchives(basePath string) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Dir(basePath))
+	if err != nil {
+		return nil, err
+	}
+	base := filepath.Base(basePath)
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), base+".") {
+			continue
+		}
+		if len(archiveStamp(e.Name(), base)) == len(ArchiveTimestampFormat) {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Slice(names, func(i, j int) bool {
+		return archiveStamp(names[i], base) < archiveStamp(names[j], base)
+	})
+	return names, nil
+}
+
+// archiveStamp returns the timestamp part of an archive's base name.
+func archiveStamp(name, base string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(name, base+"."), ".gz")
 }
 
 // archiveNameTaken reports whether an archive already occupies this path in

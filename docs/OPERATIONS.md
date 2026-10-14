@@ -87,7 +87,7 @@ Since v1.4.0 the file audit log can be sealed into a hash chain: `agentguard ser
 
 Ship anchors off the box: forward the server log to a SIEM, scrape the gauge into Prometheus, or poll `/v1/audit/head` from another machine and keep what it returns. Later, `agentguard audit verify --anchor <seq>:<hash>` checks that the log still contains that entry with that hash.
 
-**What verify proves.** If `verify` passes with your key, no entry it read was changed, removed, inserted or reordered by someone without the key, and the files link up. With an anchor that matches, nothing up to the anchor's `seq` was rewritten, even by someone with the key.
+**What verify proves.** If `verify` passes with your key, no sealed entry was changed, removed, inserted or reordered by someone without the key, and no file between the oldest one left and the live file is missing. Archives are named in write order and pruning deletes the oldest first, so `verify` tells pruning apart from a removed or unlinked archive: an archive still on disk behind a missing link is reported as broken. Once a file says it is sealed, an entry without a hash is reported as inserted, and with `--key-file` a log that declares no seal at all fails. With an anchor that matches, nothing up to the anchor's `seq` was rewritten, even by someone with the key.
 
 **What it does not prove.**
 - That the newest entries are all there. Cutting entries off the end leaves a shorter chain that still verifies. An anchor taken before the cut shows it (`MISSING: the log ends at seq …`); so does the startup check against the replay checkpoint (`WARNING audit: … possible truncation`, `agentguard_audit_seal_tail_mismatch_total`).
@@ -95,7 +95,7 @@ Ship anchors off the box: forward the server log to a SIEM, scrape the gauge int
 - Anything about entries written before sealing was turned on. `verify` counts them and says they are not protected.
 - That an entry is true. The chain covers what the server wrote, after redaction.
 
-Turning sealing off and on again starts a new chain at `seq` 1 in the middle of the file; `verify` reports that as broken. A crash in the middle of a write leaves a cut line; the server ends it on restart and continues the chain, and `verify` reports the cut line.
+Turning sealing off, or off and on again, is reported as broken: the entries written unsealed are not protected. A crash in the middle of a write leaves a cut line. The server ends it (on restart, or right away when a write comes up short) and writes a `_meta` line that continues the chain from the last whole entry; `verify` lists the cut line as a warning and goes on checking everything after it. A cut line that is not followed by that `_meta` line, with the chain continuing exactly where it stopped, is reported as broken.
 
 Exit status of `verify`: `0` intact, `1` broken or an anchor that doesn't match, `2` command-line mistake (or a keyed log without `--key-file`), `3` a file can't be read. `--output json` prints the report for scripts.
 
