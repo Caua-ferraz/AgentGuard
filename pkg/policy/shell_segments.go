@@ -38,61 +38,21 @@ var shellSyntaxByte = func() (t [256]bool) {
 }()
 
 // isCompoundShell reports whether cmd needs the segment-by-segment path:
-// it has shell syntax, or it hands a command string to another shell
-// (`sh -c rm`, `eval rm -rf /`), which the plain whole-string match would
-// see as one harmless-looking command.
+// it has shell syntax, or it runs a command its plain text hides (`sh -c
+// rm`, `eval rm -rf /`, `env rm -rf /`; see shell_nested.go), which the
+// whole-string match would see as one harmless-looking command.
 func isCompoundShell(cmd string) bool {
 	if hasShellSyntax(cmd) {
 		return true
 	}
 	// The full check splits the command into words, which allocates; only
-	// a command that starts with a shell, eval or a wrapper can need it.
+	// a command that starts with an assignment, a shell, eval or a wrapper
+	// can need it.
 	if !startsWithLauncher(cmd) {
 		return false
 	}
-	_, ok := innerScript(strings.Fields(cmd))
-	return ok
+	return runsOtherCommand(strings.Fields(cmd))
 }
-
-// startsWithLauncher reports, without allocating, whether the first word
-// of a syntax-free command (after NAME=value assignments) names a shell,
-// eval or a command wrapper: the only commands that can run another
-// command string. It runs on every shell check, so ordinary commands
-// (`git push --force`, `npm run test -- --watch`) cost a short scan and
-// one map lookup.
-func startsWithLauncher(cmd string) bool {
-	i := 0
-	for {
-		for i < len(cmd) && (cmd[i] == ' ' || cmd[i] == '\t') {
-			i++
-		}
-		j := i
-		for j < len(cmd) && cmd[j] != ' ' && cmd[j] != '\t' {
-			j++
-		}
-		if i == j {
-			return false
-		}
-		if w := cmd[i:j]; !isAssignment(w) {
-			_, ok := launcherNames[baseName(w)]
-			return ok
-		}
-		i = j
-	}
-}
-
-// launcherNames are the command names startsWithLauncher looks for: the
-// shells, eval and the command wrappers.
-var launcherNames = func() map[string]struct{} {
-	m := map[string]struct{}{"eval": {}}
-	for name := range shellNames {
-		m[name] = struct{}{}
-	}
-	for name := range commandWrappers {
-		m[name] = struct{}{}
-	}
-	return m
-}()
 
 // hasShellSyntax reports whether s contains any byte of shellSyntaxChars.
 func hasShellSyntax(s string) bool {
@@ -133,6 +93,13 @@ type shellParse struct {
 	// engine matches whole-string rules against each one, as it does
 	// against the full command line.
 	Scripts []string
+	// Wrapped are the commands run by a wrapper, an assignment or `!`,
+	// without that prefix: `rm -rf /` for `timeout 5 rm -rf /`. The engine
+	// matches deny and require_approval rules against each one; whether
+	// the command may run at all stays with its full segment, so
+	// `sudo reboot` still asks for approval under `sudo *` rather than
+	// needing an allow rule for `reboot` as well.
+	Wrapped []string
 }
 
 // parseShell splits cmd into simple commands and file redirections.
@@ -211,7 +178,18 @@ func (p *shellParser) parseList(closer byte) error {
 	firstIsSubst := false
 	flush := func() error {
 		seg := joinSegment(words)
-		script, nested := innerScript(words)
+		// The command a wrapper, an assignment or `!` runs is matched on
+		// its own too: `timeout 5 rm -rf /` as `rm -rf /`.
+		var unwrapped []string
+		inner, err := unwrapCommand(words, func(cmd []string) {
+			if u := joinSegment(cmd); u != seg {
+				unwrapped = append(unwrapped, u)
+			}
+		})
+		if err != nil {
+			return err
+		}
+		script, nested := innerScript(inner)
 		onlySubst := firstIsSubst && len(words) == 1
 		words, firstIsSubst = words[:0], false
 		if seg == "" {
@@ -229,6 +207,10 @@ func (p *shellParser) parseList(closer byte) error {
 		if err := p.addSegment(seg); err != nil {
 			return err
 		}
+		if len(p.out.Wrapped)+len(unwrapped) > maxShellSegments {
+			return errShellUnparseable
+		}
+		p.out.Wrapped = append(p.out.Wrapped, unwrapped...)
 		if nested {
 			// `bash -c '<script>'` and `eval <script>` run the script as
 			// shell code: its commands are segments of their own, as a
@@ -327,142 +309,6 @@ func (p *shellParser) parseScript(script string) error {
 	p.out.Scripts = append(p.out.Scripts, script)
 	sub := &shellParser{s: script, depth: p.depth + 1, out: p.out, script: true}
 	return sub.parseList(0)
-}
-
-// shellNames are the shells whose -c option runs its argument as a script.
-var shellNames = map[string]struct{}{
-	"sh": {}, "bash": {}, "zsh": {}, "dash": {}, "ksh": {}, "mksh": {},
-	"ash": {}, "yash": {}, "posh": {}, "fish": {},
-}
-
-// commandWrappers run the command that follows them, so `env bash -c …`
-// and `sudo sh -c …` hand a script to a shell just as `bash -c …` does.
-// The value is the set of the wrapper's options that take an argument.
-var commandWrappers = map[string]map[string]bool{
-	"env":     {"-u": true, "-C": true, "-S": true, "--unset": true, "--chdir": true, "--split-string": true},
-	"command": {},
-	"exec":    {"-a": true},
-	"nohup":   {},
-	"nice":    {"-n": true, "--adjustment": true},
-	"sudo":    {"-u": true, "-g": true, "-C": true, "-D": true, "-h": true, "-p": true, "-r": true, "-t": true, "-U": true, "-T": true},
-	"doas":    {"-u": true, "-C": true},
-}
-
-// innerScript reports whether a simple command, as its unquoted words, runs
-// a command string as shell code, and returns that string: the script
-// argument of a shell's -c option (alone or in a cluster such as -lc or
-// -ec), or the arguments of eval joined by spaces. Leading variable
-// assignments and the wrappers above are looked through.
-func innerScript(words []string) (string, bool) {
-	words = skipCommandPrefix(words)
-	if len(words) == 0 {
-		return "", false
-	}
-	if words[0] == "eval" {
-		if len(words) == 1 {
-			return "", false
-		}
-		return strings.Join(words[1:], " "), true
-	}
-	if _, ok := shellNames[baseName(words[0])]; !ok {
-		return "", false
-	}
-	runsString := false
-	for i := 1; i < len(words); i++ {
-		w := words[i]
-		switch {
-		case w == "--":
-			if runsString && i+1 < len(words) {
-				return words[i+1], true
-			}
-			return "", false
-		case strings.HasPrefix(w, "--"):
-			// Long options (--login, --norc); these two take a value.
-			if w == "--rcfile" || w == "--init-file" {
-				i++
-			}
-		case len(w) > 1 && (w[0] == '-' || w[0] == '+'):
-			if strings.ContainsRune(w[1:], 'c') && w[0] == '-' {
-				runsString = true
-			}
-			if strings.ContainsRune(w[1:], 'o') || strings.ContainsRune(w[1:], 'O') {
-				i++ // -o option / -O shopt_option take a name
-			}
-		default:
-			// The first operand: the script when -c was given, else a
-			// script file the shell reads (not something to parse here).
-			if runsString {
-				return w, true
-			}
-			return "", false
-		}
-	}
-	return "", false
-}
-
-// skipCommandPrefix drops leading reserved words, NAME=value assignments
-// and command wrappers (with their options) from a simple command's words.
-func skipCommandPrefix(words []string) []string {
-	for len(words) > 0 {
-		w := words[0]
-		if _, ok := shellLeadingKeywords[w]; ok {
-			words = words[1:]
-			continue
-		}
-		if isAssignment(w) {
-			words = words[1:]
-			continue
-		}
-		opts, ok := commandWrappers[baseName(w)]
-		if !ok {
-			return words
-		}
-		words = words[1:]
-		for len(words) > 0 && len(words[0]) > 1 && words[0][0] == '-' {
-			flag := words[0]
-			words = words[1:]
-			if flag == "--" {
-				break
-			}
-			if opts[flag] && len(words) > 0 {
-				words = words[1:]
-			}
-		}
-	}
-	return words
-}
-
-// isAssignment reports whether w is a NAME=value word.
-func isAssignment(w string) bool {
-	eq := strings.IndexByte(w, '=')
-	if eq <= 0 {
-		return false
-	}
-	for i := 0; i < eq; i++ {
-		if !nameByte(w[i], i == 0) {
-			return false
-		}
-	}
-	return true
-}
-
-// nameByte reports whether c can appear in a shell variable name; a digit
-// can't start one.
-func nameByte(c byte, first bool) bool {
-	switch {
-	case c == '_', c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z':
-		return true
-	}
-	return !first && c >= '0' && c <= '9'
-}
-
-// baseName is the last path element of a command word, so /bin/sh and
-// /usr/bin/bash name sh and bash.
-func baseName(w string) string {
-	if i := strings.LastIndexByte(w, '/'); i >= 0 {
-		return w[i+1:]
-	}
-	return w
 }
 
 // fdRedirectAhead reports whether the digits at p.i are a file-descriptor
@@ -719,6 +565,10 @@ func joinSegment(words []string) string {
 	for len(words) > 0 {
 		if _, ok := shellLeadingKeywords[words[0]]; !ok {
 			break
+		}
+		// `time -p cmd`: -p is the keyword's option, not the command.
+		if words[0] == "time" && len(words) > 1 && words[1] == "-p" {
+			words = words[1:]
 		}
 		words = words[1:]
 	}

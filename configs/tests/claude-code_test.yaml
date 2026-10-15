@@ -43,6 +43,29 @@ tests:
     expect: REQUIRE_APPROVAL
     expect_rule: "require_approval:shell:curl * | *sh"
 
+  - name: rm -rf behind env still needs approval
+    hook: claude-code
+    input: {tool_name: Bash, tool_input: {command: "env rm -rf /tmp/project"}}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:shell:rm -rf *"
+
+  - name: rm -rf behind timeout still needs approval
+    hook: claude-code
+    input: {tool_name: Bash, tool_input: {command: "timeout 5 rm -rf /tmp/project"}}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:shell:rm -rf *"
+
+  - name: rm -rf run by xargs still needs approval
+    hook: claude-code
+    input: {tool_name: Bash, tool_input: {command: "find . -name build | xargs -I {} rm -rf {}"}}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:shell:rm -rf *"
+
+  - name: a command behind timeout runs
+    hook: claude-code
+    input: {tool_name: Bash, tool_input: {command: "timeout 600 npm test"}}
+    expect: ALLOW
+
   - name: eval of a tool's setup output runs
     hook: claude-code
     input: {tool_name: Bash, tool_input: {command: "eval \"$(ssh-agent -s)\""}}

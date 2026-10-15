@@ -1377,23 +1377,31 @@ func (e *Engine) checkCompoundShell(rules []RuleSet, req ActionRequest, rawComma
 
 	// A command string run by another shell (`bash -c '…'`, `eval '…'`) is
 	// a full command line of its own, so whole-string rules written for one
-	// (`:(){ :|:& };:`, `curl * | *sh`) are matched against it too. A deny
-	// decides at once; an approval is kept and the most severe verdict wins
-	// once the commands are checked.
-	var scriptVerdict CheckResult
-	for _, script := range parsed.Scripts {
-		sub := req
-		sub.Command = stripControl(script)
-		res, ok := e.evalScope(rules, sub, tenantID, ruleKindDeny|ruleKindApproval)
-		if !ok {
-			continue
-		}
-		res.Reason = fmt.Sprintf("%s (command string %q)", res.Reason, sub.Command)
-		if res.Decision == Deny {
-			return res
-		}
-		if scriptVerdict.Decision == "" {
-			scriptVerdict = res
+	// (`:(){ :|:& };:`, `curl * | *sh`) are matched against it too. The
+	// command a wrapper runs (`rm -rf /` in `timeout 5 rm -rf /`) is matched
+	// against the same deny and approval rules; whether it may run at all
+	// stays with its full segment below. A deny decides at once; the first
+	// approval is kept and the most severe verdict wins once the segments
+	// are checked.
+	var innerVerdict CheckResult
+	for _, inner := range [...]struct {
+		cmds  []string
+		label string
+	}{{parsed.Scripts, "command string"}, {parsed.Wrapped, "wrapped command"}} {
+		for _, cmd := range inner.cmds {
+			sub := req
+			sub.Command = stripControl(cmd)
+			res, ok := e.evalScope(rules, sub, tenantID, ruleKindDeny|ruleKindApproval)
+			if !ok {
+				continue
+			}
+			res.Reason = fmt.Sprintf("%s (%s %q)", res.Reason, inner.label, sub.Command)
+			if res.Decision == Deny {
+				return res
+			}
+			if innerVerdict.Decision == "" {
+				innerVerdict = res
+			}
 		}
 	}
 
@@ -1419,8 +1427,8 @@ func (e *Engine) checkCompoundShell(rules []RuleSet, req ActionRequest, rawComma
 			}
 		}
 	}
-	if scriptVerdict.Decision != "" && moreSevere(scriptVerdict.Decision, verdict.Decision) {
-		verdict = scriptVerdict
+	if innerVerdict.Decision != "" && moreSevere(innerVerdict.Decision, verdict.Decision) {
+		verdict = innerVerdict
 	}
 
 	for _, r := range parsed.Redirects {
