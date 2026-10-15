@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"log"
 	"os"
 	"path/filepath"
@@ -114,5 +115,85 @@ func TestPostgresStore_AuditIndexesBuildInTheBackground(t *testing.T) {
 	// Idempotent: a second build finds both valid.
 	if err := s.buildAuditIndexes(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Migrate skips the CREATE INDEX statements whose index already exists, so
+// every one of them must yield its index name.
+func TestPgIndexName_CoversEverySchemaIndex(t *testing.T) {
+	n := 0
+	for _, stmt := range pgSchemaStmts {
+		if !strings.HasPrefix(stmt, "CREATE INDEX") {
+			if pgIndexName(stmt) != "" {
+				t.Errorf("pgIndexName(%q) = %q, want none", stmt, pgIndexName(stmt))
+			}
+			continue
+		}
+		n++
+		if pgIndexName(stmt) == "" {
+			t.Errorf("no index name parsed from %q", stmt)
+		}
+	}
+	if n == 0 {
+		t.Fatal("pgSchemaStmts has no CREATE INDEX statements")
+	}
+}
+
+// Migrate on an existing schema must not wait behind another replica's
+// background CREATE INDEX CONCURRENTLY, which itself waits for every older
+// transaction. Before, Migrate's CREATE INDEX IF NOT EXISTS statements
+// locked audit_entries before finding the index there, so a boot could time
+// out behind any long reader.
+func TestPostgresStore_MigrateDoesNotWaitBehindIndexBuild(t *testing.T) {
+	s := newTestPGStore(t)
+	ctx := context.Background()
+	reader, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Rollback() }()
+	var n int
+	if err := reader.QueryRowContext(ctx, `SELECT count(*) FROM audit_entries`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	built := make(chan error, 1)
+	go func() {
+		_, err := conn.ExecContext(ctx, `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_test_build_probe ON audit_entries (agent_id, scope)`)
+		built <- err
+	}()
+	t.Cleanup(func() {
+		_, _ = s.db.ExecContext(context.Background(), `DROP INDEX IF EXISTS idx_test_build_probe`)
+	})
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting bool
+		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			WHERE query LIKE 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_test_build_probe%'
+			AND wait_event_type = 'Lock')`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the concurrent index build never started waiting on the open reader")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	tctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := s.Migrate(tctx); err != nil {
+		t.Fatalf("Migrate waited behind a concurrent index build: %v", err)
+	}
+	_ = reader.Rollback()
+	if err := <-built; err != nil {
+		t.Fatalf("concurrent index build: %v", err)
 	}
 }
