@@ -81,9 +81,15 @@ func TestParseShell_WrapperLimits(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := parseShell(c.in)
-			if (err == nil) != c.ok {
-				t.Errorf("parseShell(%q) error = %v, want ok %v", c.in, err, c.ok)
+			// In a nested script, the limit makes that script unparsed
+			// (asked about) rather than the whole command unparseable.
+			p, err := parseShell(c.in)
+			unparsed := 0
+			if err == nil {
+				unparsed = len(p.Unparsed)
+			}
+			if ok := err == nil && unparsed == 0; ok != c.ok {
+				t.Errorf("parseShell(%q) error = %v, unparsed %d, want ok %v", c.in, err, unparsed, c.ok)
 			}
 		})
 	}

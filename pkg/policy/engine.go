@@ -1420,6 +1420,17 @@ func (e *Engine) checkCompoundShell(rules []RuleSet, req ActionRequest, rawComma
 			}
 		}
 	}
+	// A command string the splitter couldn't read (arithmetic, a heredoc,
+	// case … esac) goes to a person rather than being denied: the outer
+	// command is still checked below, and the deny rules above have
+	// already been matched against the script's text.
+	if len(parsed.Unparsed) > 0 && innerVerdict.Decision == "" {
+		innerVerdict = CheckResult{
+			Decision: RequireApproval,
+			Reason:   fmt.Sprintf("AgentGuard couldn't read the script this command runs (heredoc, arithmetic expansion, case, unbalanced quotes or nesting too deep), so a person should look at it (command string %q)", stripControl(parsed.Unparsed[0])),
+			Rule:     "require_approval:shell:unparseable_script",
+		}
+	}
 
 	var verdict CheckResult
 	if res, ok := e.matchCompoundAllow(rules, req, parsed.Segments, tenantID); ok {

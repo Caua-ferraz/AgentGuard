@@ -128,6 +128,18 @@ tests:
     input: {tool_name: Bash, tool_input: {command: "eval \"$(ssh-agent -s)\""}}
     expect: ALLOW
 
+  - name: a bash -c script AgentGuard can't read asks
+    hook: claude-code
+    input: {tool_name: Bash, tool_input: {command: "sh -c 'echo $((1+2))'"}}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:shell:unparseable_script"
+
+  - name: a command line AgentGuard can't read is denied
+    hook: claude-code
+    input: {tool_name: Bash, tool_input: {command: "echo $((1+2))"}}
+    expect: DENY
+    expect_rule: "deny:shell:unparseable_command"
+
   - name: a harmless bash -c runs
     hook: claude-code
     input: {tool_name: Bash, tool_input: {command: "bash -lc 'git status && ls'"}}

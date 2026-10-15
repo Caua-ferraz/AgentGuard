@@ -632,6 +632,36 @@ func TestCheck_WholeLineApprovalDoesNotHideADeny(t *testing.T) {
 	})
 }
 
+// A script inside bash -c that uses syntax the splitter doesn't read
+// (arithmetic, a heredoc, case … esac) goes to a person instead of being
+// denied: under the allow-everything coding-agent blocks, v1.3 allowed
+// these. A command line that can't be split at the top level is still
+// denied, and so is the outer command under an allowlist that lacks it.
+func TestCheck_UnparseableNestedScriptAsks(t *testing.T) {
+	const ask = "require_approval:shell:unparseable_script"
+	eng := NewEngineFromPolicy(&Policy{Version: "1", Name: "scripts", Rules: []RuleSet{{
+		Scope:           "shell",
+		Deny:            []Rule{{Pattern: "*; reboot"}},
+		RequireApproval: []Rule{{Pattern: "rm -rf *"}},
+		Allow:           []Rule{{Pattern: "*"}},
+	}}})
+	checkShell(t, eng, []shellCheckCase{
+		{"arithmetic in sh -c", "sh -c 'echo $((1+2))'", RequireApproval, ask},
+		{"a heredoc in bash -c", "bash -c 'cat <<EOF > /tmp/a\nhi\nEOF'", RequireApproval, ask},
+		{"case in bash -c", "bash -c 'case $1 in a) echo a;; esac' _ a", RequireApproval, ask},
+		{"arithmetic in eval", "eval 'echo $((2*3))'", RequireApproval, ask},
+		{"arithmetic in a here-string to bash", "bash <<< 'echo $((1))'", RequireApproval, ask},
+		{"a deny rule still matches the script's text", "bash -c 'echo $((1)); reboot'", Deny, "deny:shell:*; reboot"},
+		{"the commands read before still count", "bash -c 'rm -rf /tmp/x; echo $((1))'", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"top-level arithmetic is still denied", "echo $((1+2))", Deny, "deny:shell:unparseable_command"},
+		{"a readable script still runs", "bash -c 'echo hi'", Allow, "allow:shell:*"},
+	})
+	allowlist := NewEngineFromPolicy(compoundTestPolicy())
+	checkShell(t, allowlist, []shellCheckCase{
+		{"the outer bash is still denied under an allowlist", "bash -c 'echo $((1+2))'", Deny, ""},
+	})
+}
+
 func TestParseShell_RecordsNestedScripts(t *testing.T) {
 	cases := []struct {
 		name    string

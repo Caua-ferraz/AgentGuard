@@ -135,6 +135,12 @@ type shellParse struct {
 	// `sudo reboot` still asks for approval under `sudo *` rather than
 	// needing an allow rule for `reboot` as well.
 	Wrapped []string
+	// Unparsed are the command strings in Scripts that couldn't be split
+	// (arithmetic, a heredoc, case … esac, nesting too deep). The engine
+	// asks a person about them rather than denying the command outright:
+	// a script inside `bash -c` is often harmless and only uses syntax the
+	// splitter doesn't read.
+	Unparsed []string
 }
 
 // parseShell splits cmd into simple commands and file redirections.
@@ -354,14 +360,22 @@ func (p *shellParser) nested() error {
 
 // parseScript splits a command string another shell will run (the script
 // of `sh -c` or `eval`) into segments of its own, counted against the same
-// segment and nesting limits.
+// segment and nesting limits. A script that can't be split is recorded in
+// Unparsed, and the rest of the command is still read.
 func (p *shellParser) parseScript(script string) error {
-	if p.depth+1 > maxShellDepth || len(p.out.Scripts) >= maxShellSegments {
+	if len(p.out.Scripts) >= maxShellSegments {
 		return errShellUnparseable
 	}
 	p.out.Scripts = append(p.out.Scripts, script)
+	if p.depth+1 > maxShellDepth {
+		p.out.Unparsed = append(p.out.Unparsed, script)
+		return nil
+	}
 	sub := &shellParser{s: script, depth: p.depth + 1, out: p.out, script: true}
-	return sub.parseList(0)
+	if err := sub.parseList(0); err != nil {
+		p.out.Unparsed = append(p.out.Unparsed, script)
+	}
+	return nil
 }
 
 // fdRedirectAhead reports whether the digits at p.i are a file-descriptor
