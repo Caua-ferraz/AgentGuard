@@ -2348,6 +2348,31 @@ var dashboardHTML = `<!DOCTYPE html>
     .btn-deny { background: #7f1d1d; color: #f87171; }
     .btn-deny:hover { background: #991b1b; }
     .empty { color: #444; text-align: center; padding: 48px; }
+    .tabs { margin-left: auto; display: flex; gap: 4px; }
+    .tab { background: none; border: 1px solid #222; color: #888; padding: 6px 14px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12px; }
+    .tab.active { color: #fff; border-color: #444; background: #161616; }
+    .sessions { display: none; grid-template-columns: 380px 1fr; height: calc(100vh - 170px); }
+    .session-pane { border-right: 1px solid #222; padding: 20px; overflow-y: auto; }
+    .session-tools { display: flex; gap: 8px; margin-bottom: 12px; }
+    .ctl { background: #111; color: #e0e0e0; border: 1px solid #333; border-radius: 6px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+    .ctl:hover { background: #1a1a1a; }
+    .session-item { display: block; width: 100%; text-align: left; background: #0f0f0f; border: 1px solid #222; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; color: inherit; font: inherit; cursor: pointer; }
+    .session-item:hover, .session-item.selected { background: #151515; border-color: #3a3a3a; }
+    .session-id { font-size: 13px; color: #fff; word-break: break-all; }
+    .session-parent { font-size: 11px; color: #0ea5e9; margin-top: 2px; word-break: break-all; }
+    .session-chips { margin-top: 6px; }
+    .session-item .meta, .replay .meta { font-size: 11px; color: #666; margin-top: 4px; word-break: break-all; }
+    .replay { padding: 20px; overflow: auto; }
+    .replay-title { font-size: 15px; color: #fff; word-break: break-all; margin-bottom: 4px; }
+    .link { background: none; border: none; color: #0ea5e9; cursor: pointer; font: inherit; font-size: 12px; padding: 2px 8px 2px 0; text-decoration: underline; word-break: break-all; text-align: left; }
+    .replay-children { margin-top: 6px; font-size: 12px; color: #888; }
+    .replay-controls { display: flex; gap: 8px; align-items: center; margin: 14px 0; flex-wrap: wrap; font-size: 12px; color: #888; }
+    .lanes { display: grid; gap: 6px 12px; align-items: start; }
+    .lane-label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 1px; padding: 4px 0 6px; border-bottom: 1px solid #222; position: sticky; top: 0; background: #0a0a0a; word-break: break-all; }
+    .replay-entry { margin-bottom: 0; }
+    .replay-entry[hidden] { display: none; }
+    .replay-entry.current { box-shadow: 0 0 0 1px #fbbf24; background: #111; }
+    .approval-note { font-size: 11px; color: #fbbf24; margin-top: 6px; word-break: break-all; }
   </style>
 </head>
 <body>
@@ -2364,6 +2389,10 @@ var dashboardHTML = `<!DOCTYPE html>
       <span class="transport-chip gemini_cli">gemini_cli</span>
       <span class="transport-chip codex_cli">codex_cli</span>
     </span>
+    <nav class="tabs" role="tablist" aria-label="Views">
+      <button type="button" class="tab active" role="tab" aria-selected="true" data-view="live">Live</button>
+      <button type="button" class="tab" role="tab" aria-selected="false" data-view="sessions">Sessions</button>
+    </nav>
   </div>
   <div class="stats">
     <div class="stat-card"><div class="label">Total Checks</div><div class="value" id="stat-total">0</div></div>
@@ -2371,7 +2400,7 @@ var dashboardHTML = `<!DOCTYPE html>
     <div class="stat-card denied"><div class="label">Denied</div><div class="value" id="stat-denied">0</div></div>
     <div class="stat-card pending"><div class="label">Pending Approval</div><div class="value" id="stat-approvals">0</div></div>
   </div>
-  <div class="content">
+  <div class="content" id="live-view">
     <div class="feed">
       <h2>Action Feed</h2>
       <div id="feed"><div class="empty">Waiting for agent actions...</div></div>
@@ -2380,6 +2409,21 @@ var dashboardHTML = `<!DOCTYPE html>
       <h2>Pending Approvals</h2>
       <div id="pending"><div class="empty">None</div></div>
     </div>
+  </div>
+  <div class="sessions" id="sessions-view">
+    <div class="session-pane">
+      <h2>Sessions</h2>
+      <div class="session-tools">
+        <select class="ctl" id="session-window" aria-label="Time window">
+          <option value="1">Last hour</option>
+          <option value="24" selected>Last 24 hours</option>
+          <option value="168">Last 7 days</option>
+        </select>
+        <button type="button" class="ctl" id="session-refresh">Refresh</button>
+      </div>
+      <div id="session-list"><div class="empty">Loading...</div></div>
+    </div>
+    <div class="replay" id="replay"><div class="empty">Pick a session to replay it</div></div>
   </div>
   <script>
     const feed = document.getElementById('feed');
@@ -2590,6 +2634,282 @@ var dashboardHTML = `<!DOCTYPE html>
         badge.style.background = '#1a1500';
       }
     };
+
+    // ---- Sessions view ----
+    // The list comes from /v1/sessions; a click loads /v1/sessions/{id} and
+    // replays its entries in order, one lane per agent or sub-agent. Every
+    // value here comes from the audit log, which agents write, so it is set
+    // with textContent, never parsed as HTML, as renderEntry does, and only
+    // whitelisted values become class names.
+    const liveView = document.getElementById('live-view');
+    const sessionsView = document.getElementById('sessions-view');
+    const sessionListEl = document.getElementById('session-list');
+    const replayEl = document.getElementById('replay');
+    const sessionWindow = document.getElementById('session-window');
+    const tabs = document.querySelectorAll('.tab');
+    let sessionsLoaded = false;
+
+    function showView(name) {
+      tabs.forEach(function(t) {
+        const on = t.dataset.view === name;
+        t.classList.toggle('active', on);
+        t.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      liveView.style.display = name === 'live' ? '' : 'none';
+      history.replaceState(null, '', name === 'live' ? location.pathname : '#sessions');
+      sessionsView.style.display = name === 'sessions' ? 'grid' : 'none';
+      if (name === 'sessions' && !sessionsLoaded) {
+        sessionsLoaded = true;
+        loadSessions();
+      }
+    }
+    tabs.forEach(function(t) {
+      t.addEventListener('click', function() { showView(t.dataset.view); });
+    });
+
+    // el builds an element; text, when given, is set as plain text.
+    function el(tag, cls, text) {
+      const e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (text !== undefined) e.textContent = text;
+      return e;
+    }
+
+    function laneName(agentID, subagent) {
+      return (agentID || 'unknown') + (subagent ? ' / ' + subagent : '');
+    }
+
+    function countsText(c) {
+      c = c || {};
+      return (c.total || 0) + ' checks • ' + (c.allow || 0) + ' allowed • ' +
+        (c.deny || 0) + ' denied • ' + (c.require_approval || 0) + ' approvals';
+    }
+
+    function showMessage(target, text) {
+      target.textContent = '';
+      target.appendChild(el('div', 'empty', text));
+    }
+
+    function loadSessions() {
+      const since = new Date(Date.now() - Number(sessionWindow.value) * 3600 * 1000).toISOString();
+      agFetch('/v1/sessions?limit=200&since=' + encodeURIComponent(since))
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(data => {
+          const list = (data && data.sessions) || [];
+          if (list.length === 0) {
+            showMessage(sessionListEl, 'No sessions in this window');
+            return;
+          }
+          sessionListEl.textContent = '';
+          list.forEach(s => sessionListEl.appendChild(renderSessionItem(s)));
+        })
+        .catch(e => { if (e.message !== 'reauth') showMessage(sessionListEl, 'Could not load sessions: ' + e.message); });
+    }
+    sessionWindow.addEventListener('change', loadSessions);
+    document.getElementById('session-refresh').addEventListener('click', loadSessions);
+
+    function renderSessionItem(s) {
+      const item = el('button', 'session-item');
+      item.type = 'button';
+      item.appendChild(el('div', 'session-id', s.session_id));
+      if (s.parent_session_id) {
+        item.appendChild(el('div', 'session-parent', '↳ started by ' + s.parent_session_id));
+      }
+      const chips = el('div', 'session-chips');
+      (s.transports || []).forEach(t => chips.appendChild(el('span', 'transport-chip ' + transportClass(t), t)));
+      item.appendChild(chips);
+      item.appendChild(el('div', 'meta', (s.agents || []).map(a => laneName(a.agent_id, a.subagent)).join(', ')));
+      item.appendChild(el('div', 'meta', countsText(s.counts) + ' • last ' + new Date(s.last_seen).toLocaleString()));
+      item.addEventListener('click', function() {
+        sessionListEl.querySelectorAll('.session-item.selected').forEach(x => x.classList.remove('selected'));
+        item.classList.add('selected');
+        openSession(s.session_id);
+      });
+      return item;
+    }
+
+    const replay = { entries: [], rows: [], pos: -1, timer: null, playing: false, playBtn: null, posEl: null, speed: null };
+
+    function stopReplay() {
+      replay.playing = false;
+      clearTimeout(replay.timer);
+      if (replay.playBtn) replay.playBtn.textContent = 'Play';
+    }
+
+    function showStep(pos) {
+      replay.pos = pos;
+      replay.rows.forEach((r, i) => {
+        r.hidden = i > pos;
+        r.classList.toggle('current', i === pos);
+      });
+      if (replay.posEl) replay.posEl.textContent = (pos + 1) + ' / ' + replay.rows.length;
+      if (pos >= 0 && replay.rows[pos]) replay.rows[pos].scrollIntoView({ block: 'nearest' });
+    }
+
+    // tick shows the next entry, then waits the time that passed between
+    // it and the one after (at most 3 s), divided by the chosen speed.
+    function tick() {
+      if (!replay.playing) return;
+      if (replay.pos >= replay.rows.length - 1) { stopReplay(); return; }
+      showStep(replay.pos + 1);
+      const cur = replay.entries[replay.pos];
+      const next = replay.entries[replay.pos + 1];
+      let gap = next ? new Date(next.timestamp) - new Date(cur.timestamp) : 0;
+      if (!(gap > 0)) gap = 0;
+      const delay = Math.max(80, Math.min(gap, 3000) / Number(replay.speed.value));
+      replay.timer = setTimeout(tick, delay);
+    }
+
+    function openSession(id) {
+      stopReplay();
+      // Keep the replay in the URL so it can be reloaded or shared.
+      history.replaceState(null, '', '#session=' + encodeURIComponent(id));
+      showMessage(replayEl, 'Loading...');
+      agFetch('/v1/sessions/' + encodeURIComponent(id))
+        .then(r => {
+          if (r.status === 404) throw new Error('no audit entries for this session');
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        })
+        .then(renderReplay)
+        .catch(e => { if (e.message !== 'reauth') showMessage(replayEl, 'Could not load the session: ' + e.message); });
+    }
+
+    function sessionLink(label, id) {
+      const b = el('button', 'link', label);
+      b.type = 'button';
+      b.addEventListener('click', function() { openSession(id); });
+      return b;
+    }
+
+    function controlButton(label, onClick) {
+      const b = el('button', 'ctl', label);
+      b.type = 'button';
+      b.addEventListener('click', onClick);
+      return b;
+    }
+
+    function renderReplay(d) {
+      const s = d.session || {};
+      const entries = d.entries || [];
+      replayEl.textContent = '';
+
+      replayEl.appendChild(el('div', 'replay-title', 'Session ' + s.session_id));
+      replayEl.appendChild(el('div', 'meta', countsText(s.counts) + ' • ' +
+        new Date(s.first_seen).toLocaleString() + ' → ' + new Date(s.last_seen).toLocaleString()));
+      if (s.parent_session_id) {
+        const p = el('div', 'replay-children', 'Started by ');
+        p.appendChild(sessionLink(s.parent_session_id, s.parent_session_id));
+        replayEl.appendChild(p);
+      }
+      if ((d.children || []).length > 0) {
+        const kids = el('div', 'replay-children', 'Child sessions: ');
+        d.children.forEach(c => kids.appendChild(sessionLink(c.session_id + ' (' + ((c.counts || {}).total || 0) + ')', c.session_id)));
+        replayEl.appendChild(kids);
+      }
+      if (d.truncated) {
+        replayEl.appendChild(el('div', 'meta', 'Showing the first ' + entries.length + ' entries of ' + ((s.counts || {}).total || 0) + '.'));
+      }
+
+      const controls = el('div', 'replay-controls');
+      replay.playBtn = controlButton('Play', function() {
+        if (replay.playing) { stopReplay(); return; }
+        if (replay.pos >= replay.rows.length - 1) showStep(-1);
+        replay.playing = true;
+        replay.playBtn.textContent = 'Pause';
+        tick();
+      });
+      controls.appendChild(controlButton('Restart', function() { stopReplay(); showStep(-1); }));
+      controls.appendChild(controlButton('Back', function() { stopReplay(); if (replay.pos >= 0) showStep(replay.pos - 1); }));
+      controls.appendChild(replay.playBtn);
+      controls.appendChild(controlButton('Step', function() { stopReplay(); if (replay.pos < replay.rows.length - 1) showStep(replay.pos + 1); }));
+      replay.speed = el('select', 'ctl');
+      replay.speed.setAttribute('aria-label', 'Replay speed');
+      [1, 2, 5, 10, 50].forEach(n => {
+        const o = el('option', null, n + 'x');
+        o.value = String(n);
+        replay.speed.appendChild(o);
+      });
+      controls.appendChild(replay.speed);
+      replay.posEl = el('span');
+      controls.appendChild(replay.posEl);
+      replayEl.appendChild(controls);
+
+      // One lane per agent / sub-agent, in order of first appearance.
+      const lanes = [];
+      const laneIndex = {};
+      entries.forEach(e => {
+        const sub = ((e.request || {}).meta || {}).subagent || '';
+        const key = (e.agent_id || '') + '\u0000' + sub;
+        if (!(key in laneIndex)) {
+          laneIndex[key] = lanes.length;
+          lanes.push(laneName(e.agent_id, sub));
+        }
+      });
+      // A REQUIRE_APPROVAL entry carries the approval id; the agent's retry
+      // carries it in its request. Pair them so the outcome shows inline.
+      const retries = {};
+      entries.forEach(e => {
+        const aid = (e.request || {}).approval_id;
+        if (aid) retries[aid] = e;
+      });
+
+      const grid = el('div', 'lanes');
+      grid.style.gridTemplateColumns = 'repeat(' + Math.max(lanes.length, 1) + ', minmax(240px, 1fr))';
+      lanes.forEach((name, i) => {
+        const h = el('div', 'lane-label', name);
+        h.style.gridColumn = String(i + 1);
+        h.style.gridRow = '1';
+        grid.appendChild(h);
+      });
+      replay.entries = entries;
+      replay.rows = entries.map((e, i) => {
+        const req = e.request || {};
+        const result = e.result || {};
+        const cell = renderEntry(e);
+        cell.classList.add('replay-entry');
+        const key = (e.agent_id || '') + '\u0000' + ((req.meta || {}).subagent || '');
+        cell.style.gridColumn = String(laneIndex[key] + 1);
+        cell.style.gridRow = String(i + 2);
+        if (result.decision === 'REQUIRE_APPROVAL') {
+          const aid = result.approval_id || '';
+          const retry = aid ? retries[aid] : null;
+          let text = 'Sent for approval' + (aid ? ' (' + aid + ')' : '');
+          if (retry) {
+            text += ' → retried after review: ' + ((retry.result || {}).decision || 'unknown');
+          } else if (aid) {
+            text += ' → no retry in this session';
+          }
+          cell.appendChild(el('div', 'approval-note', text));
+        }
+        if (req.approval_id) {
+          cell.appendChild(el('div', 'approval-note', 'Retry of approval ' + req.approval_id));
+        }
+        const conn = (req.meta || {}).gateway_connection;
+        if (conn) cell.appendChild(el('div', 'meta', 'Gateway connection ' + conn));
+        grid.appendChild(cell);
+        return cell;
+      });
+      if (entries.length === 0) {
+        replayEl.appendChild(el('div', 'empty', 'No entries in this session'));
+      }
+      replayEl.appendChild(grid);
+      showStep(entries.length - 1);
+    }
+
+    // /dashboard#sessions opens the list; /dashboard#session=<id> also
+    // opens that session's replay. The id only selects what to fetch.
+    const startHash = location.hash;
+    if (startHash === '#sessions' || startHash.indexOf('#session=') === 0) {
+      showView('sessions');
+      if (startHash.indexOf('#session=') === 0) {
+        try {
+          openSession(decodeURIComponent(startHash.slice('#session='.length)));
+        } catch (e) {
+          showMessage(replayEl, 'The link names a session id that is not valid');
+        }
+      }
+    }
   </script>
 </body>
 </html>`
