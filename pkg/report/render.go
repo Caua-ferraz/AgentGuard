@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Output formats.
@@ -282,12 +284,45 @@ func (m *mdWriter) counts(name string, cs []Count) {
 
 // mdEscaper backslash-escapes Markdown punctuation, turns < > & into
 // entities (Markdown passes raw HTML through) and folds line breaks into
-// spaces so a value stays in its table cell.
+// spaces so a value stays in its table cell. It also breaks GitHub's
+// autolinks, which need no markup at all: "://" becomes `\://` and "@"
+// `\@`, so a URL or an address an agent sent stays text, not a link.
 var mdEscaper = strings.NewReplacer(
 	`\`, `\\`, "`", "\\`", "*", `\*`, "_", `\_`, "[", `\[`, "]", `\]`,
-	"|", `\|`, "#", `\#`, "~", `\~`, "!", `\!`,
+	"|", `\|`, "#", `\#`, "~", `\~`, "!", `\!`, "@", `\@`,
 	"<", "&lt;", ">", "&gt;", "&", "&amp;",
 	"\r\n", " ", "\n", " ", "\r", " ",
+	"://", `\://`,
 )
 
-func md(s string) string { return mdEscaper.Replace(s) }
+// wwwAutolink matches the start of a GitHub "www." autolink.
+var wwwAutolink = regexp.MustCompile(`(?i)\bwww\.`)
+
+// md makes s safe as Markdown text: escaped, no autolinks, and no
+// character a terminal or a browser would act on instead of showing.
+func md(s string) string {
+	s = mdEscaper.Replace(s)
+	s = wwwAutolink.ReplaceAllStringFunc(s, func(m string) string { return m[:3] + `\.` })
+	return visible(s)
+}
+
+// visible replaces the characters that would act instead of showing, with
+// U+FFFD: C0 controls but tab and newline (ESC starts a terminal escape
+// sequence, backspace and CR overwrite what came before), DEL, C1 controls
+// (U+009B is a one-byte escape sequence on some terminals), and the bidi
+// controls that reorder text (U+202A–U+202E, U+2066–U+2069 and the marks
+// U+200E, U+200F, U+061C), which can make a value read as something else.
+// Invalid UTF-8 becomes U+FFFD too.
+func visible(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\t' || r == '\n':
+			return r
+		case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f,
+			r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069,
+			r == 0x200e, r == 0x200f, r == 0x061c:
+			return utf8.RuneError
+		}
+		return r
+	}, s)
+}

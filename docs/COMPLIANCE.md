@@ -42,7 +42,12 @@ hours; Go durations have no day unit, so the report adds it). All flags:
 Formats: `md` (Markdown, the default), `json` (the stable shape below) and
 `html` (one page with inline CSS and no scripts, so it can be mailed or
 archived as is). Every value taken from the log is escaped in Markdown and
-HTML, so an agent id can't add markup to the report.
+HTML, so an agent id can't add markup to the report, and a URL or an
+address in it does not become a link. In both, control characters (but
+tab and newline) and the bidi controls that reorder text are replaced
+with U+FFFD, so a value can't move a terminal's cursor or read as
+something else. JSON keeps every value exactly as logged; its encoder
+escapes the C0 controls.
 
 Exit status: `0` written; `1` written, but the audit log failed
 verification; `2` command-line mistake; `3` the log, a key file, the

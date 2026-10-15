@@ -1,6 +1,7 @@
 package report
 
 import (
+	"bytes"
 	"html/template"
 	"io"
 	"strings"
@@ -8,9 +9,16 @@ import (
 
 // WriteHTML writes r as one self-contained HTML page: inline CSS, no
 // scripts, nothing loaded from elsewhere, so it can be mailed or archived
-// as is. html/template escapes every value.
+// as is. html/template escapes every value; it leaves control and bidi
+// characters alone, so the page goes through visible as well (the
+// template's own text has none).
 func WriteHTML(w io.Writer, r *Report) error {
-	return htmlPage.Execute(w, r)
+	var buf bytes.Buffer
+	if err := htmlPage.Execute(&buf, r); err != nil {
+		return err
+	}
+	_, err := io.WriteString(w, visible(buf.String()))
+	return err
 }
 
 // countTable is one breakdown table: its first column's heading and rows.
