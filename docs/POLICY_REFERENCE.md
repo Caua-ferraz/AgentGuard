@@ -663,7 +663,13 @@ rule on an address catches the other spellings that reach it:
 | `0:0:0:0:0:0:0:1` | `::1` |
 | `metadata.google.internal.` (trailing dot) | `metadata.google.internal` |
 | `１６９.２５４.１６９.２５４`, `169。254。169。254`, `ｍｅｔａｄａｔａ.google.internal` (Unicode that URL parsers fold to ASCII, NFKC) | `169.254.169.254`, `metadata.google.internal` |
-| ` 169.254.169.254:80`, `user@169.254.169.254` (a `domain` field with whitespace, a port or userinfo) | `169.254.169.254` |
+| `169.254.169.2` + soft hyphen + `54`, `metadata.google.internal` + zero-width space (invisible characters URL parsers drop: format characters, variation selectors, other default-ignorable code points) | `169.254.169.254`, `metadata.google.internal` |
+| ` 169.254.169.254:80`, `user@169.254.169.254` (a request's `domain` field with whitespace, a port or userinfo) | `169.254.169.254` |
+
+The zero-width joiner and non-joiner are not dropped: URL parsers keep them,
+so `git` + joiner + `hub.com` is another host, not `github.com`. A port or
+userinfo in a *rule's* `domain` is kept: `localhost:3000` allows that port
+only.
 
 Browsers, Node, curl and the C library all accept these forms, so before
 v1.4 a request written in one of them could slip past a deny rule on the

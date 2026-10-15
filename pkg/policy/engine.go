@@ -259,7 +259,7 @@ func normalizeRuleDomains(pol *Policy) {
 			for _, rules := range [][]Rule{sets[si].Allow, sets[si].Deny, sets[si].RequireApproval} {
 				for ri := range rules {
 					if rules[ri].Domain != "" {
-						rules[ri].Domain = canonicalHost(strings.ToLower(rules[ri].Domain))
+						rules[ri].Domain = canonicalRuleHost(strings.ToLower(rules[ri].Domain))
 					}
 				}
 			}

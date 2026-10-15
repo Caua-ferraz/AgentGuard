@@ -49,6 +49,19 @@ func TestCanonicalHost(t *testing.T) {
 		{"①⑥⑨.254.169.254", "169.254.169.254"},
 		{"Ｍｅｔａｄａｔａ.Google.Internal", "metadata.google.internal"},
 		{"bücher.example", "bücher.example"},
+		// Invisible characters a URL parser drops.
+		{"169.254.169.2\u00ad54", "169.254.169.254"},
+		{"169.254.169.254\u00ad", "169.254.169.254"},
+		{"meta\u00addata.google.internal", "metadata.google.internal"},
+		{"metadata.google.internal\u200b", "metadata.google.internal"},
+		{"169.254\u2060.169.254", "169.254.169.254"},
+		{"169.254.169.254\ufeff", "169.254.169.254"},
+		{"169.254.\ufe0f169.254", "169.254.169.254"},
+		{"169.254.169.254\u034f", "169.254.169.254"},
+		{"169.254.169.254\u3164", "169.254.169.254"},
+		// Joiners are kept: the parser keeps them, so the host is another one.
+		{"git\u200dhub.com", "git\u200dhub.com"},
+		{"git\u200chub.com", "git\u200chub.com"},
 		{"", ""},
 		{".", "."},
 	}
@@ -92,6 +105,8 @@ func TestCheck_DomainRulesSeeEverySpellingOfAHost(t *testing.T) {
 		{Scope: "network", URL: "http://169。254。169。254/latest/meta-data"},
 		{Scope: "network", URL: "http://ｍｅｔａｄａｔａ.google.internal/computeMetadata/v1/"},
 		{Scope: "network", URL: "http://ⓜetadata.google.internal/"},
+		{Scope: "network", URL: "http://169.254.169.2\u00ad54/latest/meta-data/"},
+		{Scope: "network", URL: "http://metadata.google.internal\u200b/computeMetadata/v1/"},
 	}
 	for _, req := range denied {
 		if res := e.Check(req, "local"); res.Decision != Deny {
@@ -106,5 +121,37 @@ func TestCheck_DomainRulesSeeEverySpellingOfAHost(t *testing.T) {
 		if res := e.Check(req, "local"); res.Decision != Allow {
 			t.Errorf("%+v: decision %s (rule %q), want ALLOW", req, res.Decision, res.Rule)
 		}
+	}
+}
+
+// A port or userinfo in a rule's domain is part of the rule: dropping it
+// would let "localhost:3000" allow every port on localhost.
+func TestCheck_RuleDomainKeepsItsPort(t *testing.T) {
+	pol := &Policy{Name: "port", Rules: []RuleSet{{
+		Scope: "network",
+		Allow: []Rule{{Domain: "localhost:3000"}},
+	}}}
+	e := NewEngineFromPolicy(pol)
+	for _, req := range []ActionRequest{
+		{Scope: "network", Domain: "localhost:22"},
+		{Scope: "network", URL: "http://localhost:22/"},
+		{Scope: "network", Domain: "localhost"},
+	} {
+		if res := e.Check(req, "local"); res.Decision != Deny {
+			t.Errorf("%+v: decision %s (rule %q), want DENY", req, res.Decision, res.Rule)
+		}
+	}
+}
+
+// Joiners make a different host, so they must not turn a lookalike into an
+// allowed name.
+func TestCheck_JoinerLookalikeIsNotTheAllowedHost(t *testing.T) {
+	pol := &Policy{Name: "joiners", Rules: []RuleSet{{
+		Scope: "network",
+		Allow: []Rule{{Domain: "github.com"}},
+	}}}
+	e := NewEngineFromPolicy(pol)
+	if res := e.Check(ActionRequest{Scope: "network", URL: "https://git\u200dhub.com/"}, "local"); res.Decision != Deny {
+		t.Errorf("git+ZWJ+hub.com: decision %s (rule %q), want DENY", res.Decision, res.Rule)
 	}
 }
