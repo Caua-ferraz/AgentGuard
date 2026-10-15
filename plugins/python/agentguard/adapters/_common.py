@@ -1,8 +1,8 @@
 """Shared check-parameter extraction for the framework adapters.
 
-LangChain, CrewAI, MCP and the OpenAI Agents SDK all reduce a tool invocation to the same
-``Guard.check`` keyword arguments (command, url, domain, path, action,
-session_id, est_cost). The extraction lives here once so the adapters
+LangChain, CrewAI, MCP and the OpenAI Agents SDK all reduce a tool
+invocation to the same ``Guard.check`` keyword arguments (command, url,
+domain, path, action, session_id, est_cost). The extraction lives here once so the adapters
 cannot drift apart; each adapter keeps only its framework-specific
 glue (input normalisation, error surfacing, redaction).
 """
