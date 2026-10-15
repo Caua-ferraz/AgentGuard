@@ -201,3 +201,57 @@ func TestSeal_ResumeAfterAWriteThatLostOnlyItsNewline(t *testing.T) {
 		t.Fatalf("report = %+v break %+v", rep, rep.Break)
 	}
 }
+
+// unsealedLogWithTrailingSeal writes n unsealed entries, then the _meta line
+// a server writes when it starts sealing, carrying seal: the log declares a
+// seal but no entry is under it.
+func unsealedLogWithTrailingSeal(t *testing.T, seal *SealInfo, n int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	l, err := NewFileLogger(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeEntries(t, l, 0, n)
+	_ = l.Close()
+	if seal != nil {
+		b, _ := json.Marshal(metaEnvelope{Meta: MetaRecord{SchemaVersion: CurrentSchemaVersion, Seal: seal}})
+		writeLines(t, path, append(readLines(t, path), string(b)))
+	}
+	return path
+}
+
+// A seal declared after every entry protects nothing. With a key this used
+// to verify as intact, with 0 sealed entries and 3 unsealed ones.
+func TestVerify_SealDeclaredAfterEveryEntryFailsWithAKey(t *testing.T) {
+	path := unsealedLogWithTrailingSeal(t, &SealInfo{Alg: SealAlgHMACSHA256, KeyID: SealKeyID(testSealKey)}, 3)
+	mustBreak(t, path, VerifyOptions{Keys: [][]byte{testSealKey}}, "no entry is sealed")
+}
+
+// Without a key, a log whose entries are all unsealed is not OK either: it
+// has no break (nothing verify can see was changed), but nothing was
+// verified, so it must not read as intact.
+func TestVerify_LogWithNoSealedEntryIsNotOK(t *testing.T) {
+	cases := []struct {
+		name string
+		seal *SealInfo
+	}{
+		{"no seal at all", nil},
+		{"a plain SHA-256 seal declared after the entries", &SealInfo{Alg: SealAlgSHA256}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := verify(t, unsealedLogWithTrailingSeal(t, tc.seal, 3), VerifyOptions{})
+			if rep.OK || rep.Break != nil || rep.Entries != 0 || rep.Unsealed != 3 {
+				t.Fatalf("report = %+v, break %+v; want not OK, no break, 3 unsealed", rep, rep.Break)
+			}
+		})
+	}
+	// A sealed log with no entries yet has nothing unsealed: still OK.
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	l := openSealed(t, path, testSealKey, RotationConfig{})
+	_ = l.Close()
+	if rep := verify(t, path, VerifyOptions{Keys: [][]byte{testSealKey}}); !rep.OK {
+		t.Errorf("an empty sealed log is not OK: %+v", rep.Break)
+	}
+}

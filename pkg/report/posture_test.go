@@ -40,6 +40,11 @@ func TestIntegrity(t *testing.T) {
 			wantStatus: IntegrityNotSealed, wantText: "--audit-seal",
 		},
 		{
+			name:       "a seal declared after every entry is not sealed, never intact",
+			in:         FromVerify(&audit.VerifyReport{Unsealed: 3, Seals: []string{"sha256"}}),
+			wantStatus: IntegrityNotSealed, wantText: "None of the 3 entries",
+		},
+		{
 			name:       "a keyed log without --key-file is not verified",
 			in:         FromKeyNeeded(&audit.SealKeyNeededError{KeyID: "abc", File: "audit.jsonl"}),
 			wantStatus: IntegrityNotVerified, wantKey: "yes", wantText: "key id abc",

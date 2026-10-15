@@ -74,9 +74,14 @@ func FromVerify(rep *audit.VerifyReport) Integrity {
 			where = " at " + where
 		}
 		in.Summary = fmt.Sprintf("agentguard audit verify found the chain broken%s: %s.", where, strings.TrimSuffix(rep.Break.Reason, "."))
-	case len(rep.Seals) == 0 && rep.Entries == 0 && rep.PrunedBefore == 0:
-		in.Status = IntegrityNotSealed
+	case rep.Entries == 0 && rep.PrunedBefore == 0 && len(rep.Seals) == 0:
+		in.Status, in.KeyBased = IntegrityNotSealed, nil
 		in.Summary = "The audit log is not sealed (the server runs without --audit-seal), so tampering with it can't be detected."
+	case rep.Entries == 0 && rep.PrunedBefore == 0 && rep.Unsealed > 0:
+		// A seal declared after every entry protects none of them: never
+		// "intact".
+		in.Status, in.KeyBased = IntegrityNotSealed, nil
+		in.Summary = fmt.Sprintf("None of the %s in the log is sealed: the seal is declared only after them, so tampering with them can't be detected.", plural(int(rep.Unsealed), "entry", "entries"))
 	case !rep.OK:
 		in.Status = IntegrityBroken
 		in.Summary = "agentguard audit verify failed: an anchor does not match the log."

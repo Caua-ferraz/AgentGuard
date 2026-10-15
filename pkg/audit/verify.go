@@ -58,8 +58,10 @@ type AnchorResult struct {
 
 // VerifyReport is what VerifyChain found.
 type VerifyReport struct {
-	// OK is true when every sealed entry verified, the files link up, and
-	// no anchor mismatched or is missing.
+	// OK is true when every sealed entry verified, the files link up, no
+	// anchor mismatched or is missing, and, when the log has entries, at
+	// least one of them is sealed. An unsealed log is not OK and has no
+	// Break: nothing in it was checked.
 	OK bool `json:"ok"`
 	// Segments are the files walked, oldest first (base names).
 	Segments []string `json:"segments"`
@@ -148,11 +150,20 @@ func VerifyChain(livePath string, opts VerifyOptions) (*VerifyReport, error) {
 	if rep.Break == nil && len(opts.Keys) > 0 && !v.sawHMAC && rep.Entries > 0 {
 		rep.Break = &VerifyBreak{Reason: "no entry is sealed with a key: the log uses plain SHA-256, which anyone who can write the file can recompute"}
 	}
+	// Entries but none sealed: a seal declared only after every entry (a
+	// _meta line appended at the end) protects nothing. With a key this is
+	// a break; it used to verify as intact, with 0 sealed entries.
+	unprotected := rep.Entries == 0 && rep.PrunedBefore == 0 && rep.Unsealed > 0
+	if rep.Break == nil && len(opts.Keys) > 0 && unprotected {
+		rep.Break = &VerifyBreak{Reason: fmt.Sprintf("no entry is sealed: all %d entries come before the seal, so nothing in the log is tied to your key", rep.Unsealed)}
+	}
 	if rep.Break == nil && rep.Entries == 0 && rep.PrunedBefore == 0 {
 		rep.Warnings = append(rep.Warnings, "no sealed entries: is the server running with --audit-seal?")
 	}
 
-	rep.OK = rep.Break == nil
+	// A log with entries and none sealed is not OK either: nothing in it was
+	// verified, and calling it intact would read as a pass.
+	rep.OK = rep.Break == nil && !unprotected
 	for _, a := range opts.Anchors {
 		r := AnchorResult{Seq: a.Seq, Hash: a.Hash}
 		found, seen := v.anchors[a.Seq]

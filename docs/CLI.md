@@ -566,7 +566,7 @@ agentguard audit verify --audit-log /var/lib/agentguard/audit.jsonl \
 # OK: the chain is intact.
 ```
 
-Exit status: `0` the chain is intact, `1` it is broken or an anchor does not match, `2` command-line mistake (also: the log is sealed with a key and no `--key-file` was given), `3` a file can't be read. What a passing `verify` does and does not prove: [OPERATIONS § Sealing and anchoring](OPERATIONS.md#sealing-and-anchoring).
+Exit status: `0` the chain is intact, `1` it is broken, no entry is sealed (`NOT SEALED`: the log has entries and none is under a seal, so nothing was verified; with `--key-file` this is a break), or an anchor does not match, `2` command-line mistake (also: the log is sealed with a key and no `--key-file` was given), `3` a file can't be read. What a passing `verify` does and does not prove: [OPERATIONS § Sealing and anchoring](OPERATIONS.md#sealing-and-anchoring).
 
 ---
 
