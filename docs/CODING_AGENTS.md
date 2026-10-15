@@ -95,7 +95,7 @@ Cursor's deletes through its `Delete` tool aren't checked (its input isn't docum
 
 | Codex tool | Checked as |
 |---|---|
-| `Bash` (shell commands and unified exec) | `shell`: the command. A command that carries a patch (`*** Begin Patch`, such as `apply_patch <<'EOF' …`) is also checked like `apply_patch`, one write per file. |
+| `Bash` (shell commands and unified exec) | `shell`: the command. A command given as an argument list is checked as the command line a shell would read back as those arguments, each quoted where needed. `["apply_patch", "<patch>"]` is checked like `apply_patch`. A command that carries a patch (`*** Begin Patch`, such as `apply_patch <<'EOF' …`) is also checked like `apply_patch`, one write per file. |
 | `apply_patch` | `filesystem`, action `write`: every file the patch adds, updates, deletes or moves to |
 | `mcp__<server>__<tool>` | `mcp_tool`: `<server>:<tool>` |
 

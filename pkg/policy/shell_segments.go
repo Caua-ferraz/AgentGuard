@@ -37,14 +37,22 @@ var shellSyntaxByte = func() (t [256]bool) {
 	return t
 }()
 
-// isCompoundShell reports whether cmd needs the segment-by-segment path.
+// isCompoundShell reports whether cmd needs the segment-by-segment path:
+// it has shell syntax, or it hands a command string to another shell
+// (`sh -c rm`, `eval rm -rf /`), which the plain whole-string match would
+// see as one harmless-looking command.
 func isCompoundShell(cmd string) bool {
 	for i := 0; i < len(cmd); i++ {
 		if shellSyntaxByte[cmd[i]] {
 			return true
 		}
 	}
-	return false
+	mayRunString := strings.Contains(cmd, "eval") || (strings.Contains(cmd, "sh") && strings.Contains(cmd, "-"))
+	if !mayRunString {
+		return false
+	}
+	_, ok := innerScript(strings.Fields(cmd))
+	return ok
 }
 
 // errShellUnparseable means the tokenizer could not split the command with
@@ -116,6 +124,7 @@ func (p *shellParser) parseList(closer byte) error {
 	var words []string
 	flush := func() error {
 		seg := joinSegment(words)
+		script, nested := innerScript(words)
 		words = words[:0]
 		if seg == "" {
 			return nil
@@ -124,6 +133,12 @@ func (p *shellParser) parseList(closer byte) error {
 			return errShellUnparseable
 		}
 		p.out.Segments = append(p.out.Segments, seg)
+		if nested {
+			// `bash -c '<script>'` and `eval <script>` run the script as
+			// shell code: its commands are segments of their own, as a
+			// $( … ) substitution's are.
+			return p.parseScript(script)
+		}
 		return nil
 	}
 	for p.i < len(p.s) {
@@ -201,6 +216,153 @@ func (p *shellParser) nested() error {
 	err := p.parseList(')')
 	p.depth--
 	return err
+}
+
+// parseScript splits a command string another shell will run (the script
+// of `sh -c` or `eval`) into segments of its own, counted against the same
+// segment and nesting limits.
+func (p *shellParser) parseScript(script string) error {
+	if p.depth+1 > maxShellDepth {
+		return errShellUnparseable
+	}
+	sub := &shellParser{s: script, depth: p.depth + 1, out: p.out}
+	return sub.parseList(0)
+}
+
+// shellNames are the shells whose -c option runs its argument as a script.
+var shellNames = map[string]struct{}{
+	"sh": {}, "bash": {}, "zsh": {}, "dash": {}, "ksh": {}, "mksh": {},
+	"ash": {}, "yash": {}, "posh": {}, "fish": {},
+}
+
+// commandWrappers run the command that follows them, so `env bash -c …`
+// and `sudo sh -c …` hand a script to a shell just as `bash -c …` does.
+// The value is the set of the wrapper's options that take an argument.
+var commandWrappers = map[string]map[string]bool{
+	"env":     {"-u": true, "-C": true, "-S": true, "--unset": true, "--chdir": true, "--split-string": true},
+	"command": {},
+	"exec":    {"-a": true},
+	"nohup":   {},
+	"nice":    {"-n": true, "--adjustment": true},
+	"sudo":    {"-u": true, "-g": true, "-C": true, "-D": true, "-h": true, "-p": true, "-r": true, "-t": true, "-U": true, "-T": true},
+	"doas":    {"-u": true, "-C": true},
+}
+
+// innerScript reports whether a simple command, as its unquoted words, runs
+// a command string as shell code, and returns that string: the script
+// argument of a shell's -c option (alone or in a cluster such as -lc or
+// -ec), or the arguments of eval joined by spaces. Leading variable
+// assignments and the wrappers above are looked through.
+func innerScript(words []string) (string, bool) {
+	words = skipCommandPrefix(words)
+	if len(words) == 0 {
+		return "", false
+	}
+	if words[0] == "eval" {
+		if len(words) == 1 {
+			return "", false
+		}
+		return strings.Join(words[1:], " "), true
+	}
+	if _, ok := shellNames[baseName(words[0])]; !ok {
+		return "", false
+	}
+	runsString := false
+	for i := 1; i < len(words); i++ {
+		w := words[i]
+		switch {
+		case w == "--":
+			if runsString && i+1 < len(words) {
+				return words[i+1], true
+			}
+			return "", false
+		case strings.HasPrefix(w, "--"):
+			// Long options (--login, --norc); these two take a value.
+			if w == "--rcfile" || w == "--init-file" {
+				i++
+			}
+		case len(w) > 1 && (w[0] == '-' || w[0] == '+'):
+			if strings.ContainsRune(w[1:], 'c') && w[0] == '-' {
+				runsString = true
+			}
+			if strings.ContainsRune(w[1:], 'o') || strings.ContainsRune(w[1:], 'O') {
+				i++ // -o option / -O shopt_option take a name
+			}
+		default:
+			// The first operand: the script when -c was given, else a
+			// script file the shell reads (not something to parse here).
+			if runsString {
+				return w, true
+			}
+			return "", false
+		}
+	}
+	return "", false
+}
+
+// skipCommandPrefix drops leading reserved words, NAME=value assignments
+// and command wrappers (with their options) from a simple command's words.
+func skipCommandPrefix(words []string) []string {
+	for len(words) > 0 {
+		w := words[0]
+		if _, ok := shellLeadingKeywords[w]; ok {
+			words = words[1:]
+			continue
+		}
+		if isAssignment(w) {
+			words = words[1:]
+			continue
+		}
+		opts, ok := commandWrappers[baseName(w)]
+		if !ok {
+			return words
+		}
+		words = words[1:]
+		for len(words) > 0 && len(words[0]) > 1 && words[0][0] == '-' {
+			flag := words[0]
+			words = words[1:]
+			if flag == "--" {
+				break
+			}
+			if opts[flag] && len(words) > 0 {
+				words = words[1:]
+			}
+		}
+	}
+	return words
+}
+
+// isAssignment reports whether w is a NAME=value word.
+func isAssignment(w string) bool {
+	eq := strings.IndexByte(w, '=')
+	if eq <= 0 {
+		return false
+	}
+	for i := 0; i < eq; i++ {
+		if !nameByte(w[i], i == 0) {
+			return false
+		}
+	}
+	return true
+}
+
+// nameByte reports whether c can appear in a shell variable name; a digit
+// can't start one.
+func nameByte(c byte, first bool) bool {
+	switch {
+	case c == '_', c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z':
+		return true
+	}
+	return !first && c >= '0' && c <= '9'
+}
+
+// baseName is the last path element of a command word, so /bin/sh and
+// /usr/bin/bash name sh and bash.
+func baseName(w string) string {
+	if i := strings.LastIndexByte(w, '/'); i >= 0 {
+		return w[i+1:]
+	}
+	return w
 }
 
 // fdRedirectAhead reports whether the digits at p.i are a file-descriptor

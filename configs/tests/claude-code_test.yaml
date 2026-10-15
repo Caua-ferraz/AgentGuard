@@ -19,6 +19,23 @@ tests:
     expect: REQUIRE_APPROVAL
     expect_rule: "require_approval:shell:sudo *"
 
+  - name: sudo inside bash -c still needs approval
+    hook: claude-code
+    input: {tool_name: Bash, tool_input: {command: "bash -c 'sudo ls'"}}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:shell:sudo *"
+
+  - name: rm -rf passed to eval still needs approval
+    hook: claude-code
+    input: {tool_name: Bash, tool_input: {command: "eval rm -rf /tmp/project"}}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:shell:rm -rf *"
+
+  - name: a harmless bash -c runs
+    hook: claude-code
+    input: {tool_name: Bash, tool_input: {command: "bash -lc 'git status && ls'"}}
+    expect: ALLOW
+
   - name: Claude Code may run the tests
     hook: claude-code
     input: {tool_name: Bash, tool_input: {command: "python -m pytest -q"}}

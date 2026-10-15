@@ -31,6 +31,34 @@ tests:
     expect: REQUIRE_APPROVAL
     expect_rule: "require_approval:shell:git push --force*"
 
+  - name: a list running bash -lc is checked inside the script
+    hook: codex
+    input: {tool_name: Bash, tool_input: {command: [bash, -lc, "rm -rf /tmp/project"]}}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:shell:rm -rf *"
+
+  - name: shell syntax inside one list argument stays in that argument
+    hook: codex
+    input: {tool_name: Bash, tool_input: {command: [git, commit, -m, "fix: a; rm -rf /"]}}
+    expect: ALLOW
+
+  - name: apply_patch called through the shell tool is checked file by file
+    hook: codex
+    input:
+      cwd: /home/dev/app
+      tool_name: Bash
+      tool_input:
+        command:
+          - apply_patch
+          - |
+            *** Begin Patch
+            *** Update File: .env
+            @@
+            -A=1
+            +A=2
+            *** End Patch
+    expect: REQUIRE_APPROVAL
+
   # --- Patches ---
   - name: a patch to two project files is allowed
     hook: codex
