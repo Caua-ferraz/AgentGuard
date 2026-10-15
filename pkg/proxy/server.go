@@ -438,6 +438,13 @@ func NewServer(cfg Config) *Server {
 	// poller copies off the box as an anchor. Same auth as GET /v1/audit.
 	mux.HandleFunc("GET /v1/audit/head", requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleAuditHead))
 
+	// Sessions (v1.4): the audit log grouped by session_id, with
+	// parent/child links from parent_session_id. Read-only views of the
+	// audit log, so the same auth as GET /v1/audit. {id...} takes the rest
+	// of the path: session ids are caller-chosen and may hold a '/'.
+	mux.HandleFunc("GET /v1/sessions", requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleSessionList))
+	mux.HandleFunc("GET /v1/sessions/{id...}", requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleSessionGet))
+
 	// -----------------------------------------------------------------
 	// Tenant-aware mirrors of every operational route.
 	//
@@ -468,6 +475,10 @@ func NewServer(cfg Config) *Server {
 		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, true, s.handleAuditRecord)))
 	mux.HandleFunc("GET /v1/t/{tenant}/audit/head",
 		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleAuditHead)))
+	mux.HandleFunc("GET /v1/t/{tenant}/sessions",
+		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleSessionList)))
+	mux.HandleFunc("GET /v1/t/{tenant}/sessions/{id...}",
+		s.withTenant(requireAuthOrSession(cfg.APIKey, s.sessions, false, s.handleSessionGet)))
 
 	// Auth endpoints for dashboard login/logout.
 	mux.HandleFunc("/auth/login", s.handleLogin)
@@ -1185,6 +1196,11 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 //     Non-integers or values < 1 return 400.
 //   - ?offset=N — integer ≥ 0. Defaults to 0. Non-integers or negatives
 //     return 400.
+//   - ?since=, ?until= — RFC 3339 times (v1.4). since is inclusive, until
+//     exclusive, so consecutive [since, until) windows never repeat or skip
+//     an entry. Anything else, or until before since, returns 400.
+//   - ?parent_session_id= — entries whose request named this parent
+//     session (v1.4).
 func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 	limit, err := parseBoundedInt(r.URL.Query().Get("limit"), s.auditDefaultLimit, 1, s.auditMaxLimit)
 	if err != nil {
@@ -1205,6 +1221,11 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `invalid order: want "asc" or "desc"`, http.StatusBadRequest)
 		return
 	}
+	since, until, err := parseWindow(r.URL.Query())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	// Scope the query to the request's tenant. Legacy /v1/audit has no tenant
 	// in the path → TenantIDFromContext returns LocalTenantID, so it returns
@@ -1222,6 +1243,10 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 		Desc:      desc,
 		Limit:     limit,
 		Offset:    offset,
+		Since:     since,
+		Until:     until,
+
+		ParentSessionID: r.URL.Query().Get("parent_session_id"),
 	}
 
 	entries, err := s.cfg.Logger.Query(filter)
