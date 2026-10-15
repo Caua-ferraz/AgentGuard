@@ -92,6 +92,17 @@ type hookCall struct {
 // lists them.
 var hookAgents = []hookAgent{claudeHookAgent, cursorHookAgent, geminiHookAgent, codexHookAgent}
 
+// hookAgentByName returns the agent `agentguard hook <name>` runs as, or
+// nil when there is none.
+func hookAgentByName(name string) *hookAgent {
+	for i := range hookAgents {
+		if hookAgents[i].name == name {
+			return &hookAgents[i]
+		}
+	}
+	return nil
+}
+
 func hookAgentNames() []string {
 	names := make([]string, len(hookAgents))
 	for i, a := range hookAgents {
@@ -145,12 +156,7 @@ func runHookCmd(args []string) int {
 	if len(positional) == 0 {
 		return usageError("hook", "missing the agent: agentguard hook <agent>, one of %s", supported)
 	}
-	var agent *hookAgent
-	for i := range hookAgents {
-		if hookAgents[i].name == positional[0] {
-			agent = &hookAgents[i]
-		}
-	}
+	agent := hookAgentByName(positional[0])
 	switch {
 	case agent == nil:
 		return usageError("hook", "unknown agent %q (supported: %s)", positional[0], supported)
@@ -216,14 +222,11 @@ func runAgentHook(a hookAgent, stdin io.Reader, stdout, stderr io.Writer, cfg ho
 		}
 		results[i] = res
 	}
-	// The most severe verdict wins: a deny (or a decision this version
-	// doesn't know) blocks before anyone is asked to approve the rest.
-	// Every request was still checked, so the audit trail has each one.
-	for _, res := range results {
-		if res.Decision != policy.Allow && res.Decision != policy.RequireApproval {
-			withdrawApprovals(cfg, results)
-			return a.deny(stdout, stderr, call, denyText(res))
-		}
+	// Every request was checked before the most severe verdict is acted
+	// on, so the audit trail has each one.
+	if res := results[mostSevere(results)]; res.Decision != policy.Allow && res.Decision != policy.RequireApproval {
+		withdrawApprovals(cfg, results)
+		return a.deny(stdout, stderr, call, denyText(res))
 	}
 	// Approvals share one wait, so several of them still answer within
 	// the hook's timeout.
@@ -243,6 +246,27 @@ func runAgentHook(a hookAgent, stdin io.Reader, stdout, stderr io.Writer, cfg ho
 		}
 	}
 	return a.allow(stdout, call)
+}
+
+// mostSevere returns the index of the verdict that decides a call checked
+// as several requests: the first deny (or a decision this version doesn't
+// know), which blocks before anyone is asked to approve the rest; else the
+// first that needs approval; else the first allow. `agentguard test` uses it
+// too, so a hook case gets the verdict the hook would act on.
+func mostSevere(results []policy.CheckResult) int {
+	winner := 0
+	for i, res := range results {
+		switch res.Decision {
+		case policy.Allow:
+		case policy.RequireApproval:
+			if results[winner].Decision == policy.Allow {
+				winner = i
+			}
+		default:
+			return i
+		}
+	}
+	return winner
 }
 
 // withdrawApprovals denies the approval requests a blocked call created for
