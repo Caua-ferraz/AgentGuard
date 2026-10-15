@@ -386,6 +386,15 @@ func readMetaAny(path string) (*MetaRecord, error) {
 // a gzip archive the offset is in the uncompressed stream, so the reader
 // discards that many bytes before scanning.
 func replayFile(path string, start int64, fn func(Entry)) error {
+	return scanFile(path, start, fn, nil)
+}
+
+// scanFile is replayFile with a say in what happens to a line that is not
+// a valid entry: bad is called with the parse error. A nil bad is the
+// startup replay's handling (count it on /metrics, log the first one);
+// ReadEntries passes its own, so a command-line tool can count the lines
+// without log noise.
+func scanFile(path string, start int64, fn func(Entry), bad func(error)) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -413,7 +422,7 @@ func replayFile(path string, start int64, fn func(Entry)) error {
 			return err
 		}
 	}
-	return replayReader(r, path, fn)
+	return scanReader(r, path, fn, bad)
 }
 
 // replayReader is the shared line scanner: skips blank and `_meta` lines,
@@ -421,13 +430,30 @@ func replayFile(path string, start int64, fn func(Entry)) error {
 // agentguard_audit_corrupt_lines_total, exactly as Query reports them), and
 // invokes fn for every well-formed entry.
 func replayReader(r io.Reader, name string, fn func(Entry)) error {
+	return scanReader(r, name, fn, nil)
+}
+
+// scanReader is replayReader with scanFile's bad-line callback. With a
+// caller's bad, nothing is logged or counted on /metrics: the caller
+// reports it.
+func scanReader(r io.Reader, name string, fn func(Entry), bad func(error)) error {
+	replay := bad == nil
+	if replay {
+		corruptLogged := false
+		bad = func(err error) {
+			metrics.IncAuditCorruptLine()
+			if !corruptLogged {
+				log.Printf("WARN audit: replay skipping corrupt line in %s (%v)", name, err)
+				corruptLogged = true
+			}
+		}
+	}
 	scanner := bufio.NewScanner(r)
 	// 4 MiB max line — match Query()'s headroom so a single oversize entry
 	// does not silently abort the replay (bufio.ErrTooLong otherwise stops
 	// the scan with no signal to the caller).
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 
-	corruptLogged := false
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -438,17 +464,16 @@ func replayReader(r io.Reader, name string, fn func(Entry)) error {
 		}
 		var entry Entry
 		if err := json.Unmarshal(line, &entry); err != nil {
-			metrics.IncAuditCorruptLine()
-			if !corruptLogged {
-				log.Printf("WARN audit: replay skipping corrupt line in %s (%v)", name, err)
-				corruptLogged = true
-			}
+			bad(err)
 			continue
 		}
 		fn(entry)
 	}
 
 	if err := scanner.Err(); err != nil {
+		if !replay {
+			return fmt.Errorf("read %s: %w", name, err)
+		}
 		// Replay is best-effort at startup — counters being off after a
 		// truncated replay is preferable to refusing to start. Bump the
 		// corrupt-lines counter so /metrics shows the degradation.
