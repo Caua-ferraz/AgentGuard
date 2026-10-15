@@ -434,6 +434,47 @@ func TestCheck_ANSICQuoting(t *testing.T) {
 	})
 }
 
+// Commands that only look like a nested shell or a wrapper keep their
+// verdict: nothing in them runs another command string.
+func TestCheck_LegitimateCommandsAreNotNested(t *testing.T) {
+	for _, cmd := range []string{
+		"grep -c 'sh -c' notes.txt",
+		"ssh -c aes128-ctr host",
+		"bash ./build.sh -c x",
+		"git commit -m 'eval rm -rf /'",
+		"command -v bash",
+		"exec 3>&1",
+		"shellcheck -x a.sh",
+		`echo $'a\tb'`,
+		"cat <<< 'sudo rm -rf /'",
+	} {
+		got, err := parseShell(cmd)
+		if err != nil {
+			t.Fatalf("parseShell(%q): %v", cmd, err)
+		}
+		if len(got.Scripts) != 0 || len(got.Wrapped) != 0 || len(got.Segments) != 1 {
+			t.Errorf("parseShell(%q) = segments %q, scripts %q, wrapped %q; want one segment and nothing nested",
+				cmd, got.Segments, got.Scripts, got.Wrapped)
+		}
+	}
+	eng := NewEngineFromPolicy(&Policy{Version: "1", Name: "legit", Rules: []RuleSet{{
+		Scope:           "shell",
+		Deny:            []Rule{{Pattern: "reboot"}},
+		RequireApproval: []Rule{{Pattern: "rm -rf *"}, {Pattern: "sudo *"}},
+		Allow:           []Rule{{Pattern: "*"}},
+	}}})
+	checkShell(t, eng, []shellCheckCase{
+		{"grep for sh -c", "grep -c 'sh -c' notes.txt", Allow, ""},
+		{"ssh with a cipher", "ssh -c aes128-ctr host", Allow, ""},
+		{"a script file given -c", "bash ./build.sh -c x", Allow, ""},
+		{"a commit message naming eval", "git commit -m 'eval rm -rf /'", Allow, ""},
+		{"command -v", "command -v bash", Allow, ""},
+		{"exec of a descriptor", "exec 3>&1", Allow, ""},
+		{"shellcheck", "shellcheck -x a.sh", Allow, ""},
+		{"echo of a decoded tab", `echo $'a\tb'`, Allow, ""},
+	})
+}
+
 // isCompoundShell runs on every shell check. An ordinary command without
 // shell syntax must not allocate, even when it holds "sh" and "-" (before,
 // `git push --force` split itself into words to look for a nested shell).

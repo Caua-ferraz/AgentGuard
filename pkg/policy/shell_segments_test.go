@@ -176,16 +176,23 @@ func TestCheck_CompoundAllowPatternMatchesSegmentBySegment(t *testing.T) {
 }
 
 func FuzzParseShell(f *testing.F) {
-	for _, s := range []string{"ls; rm -rf /", "echo $(a `b`) > c", `git "x" 'y'`, "a\nb", "((", "$((1))", "<<<x"} {
+	for _, s := range []string{
+		"ls; rm -rf /", "echo $(a `b`) > c", `git "x" 'y'`, "a\nb", "((", "$((1))", "<<<x",
+		// Nested command strings, wrappers and $'…' (v1.4).
+		`bash -c "sh -c 'eval $(id)'"`, "eval -- \"$(ssh-agent -s)\"", "env -S 'a b' FOO=1 nohup timeout 5 x",
+		"flock f -c 'x; y'", "bash -s -- <<< 'rm -rf /'", "fish --command=x -C y", "BASH5.2 -lc x",
+		`$'\x72é\cA\101'`, "xargs -I{} -n1 sudo -Eu root rm {}", "echo $(eval $(eval $(eval ls)))",
+	} {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
+		_ = isCompoundShell(s)
 		p, err := parseShell(s)
 		if err != nil {
 			return
 		}
-		if len(p.Segments) > maxShellSegments {
-			t.Fatalf("parseShell(%q) returned %d segments", s, len(p.Segments))
+		if len(p.Segments) > maxShellSegments || len(p.Scripts) > maxShellSegments || len(p.Wrapped) > maxShellSegments {
+			t.Fatalf("parseShell(%q) returned %d segments, %d scripts, %d wrapped", s, len(p.Segments), len(p.Scripts), len(p.Wrapped))
 		}
 	})
 }
