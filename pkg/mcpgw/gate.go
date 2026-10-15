@@ -209,6 +209,11 @@ func (c *HTTPPolicyClient) Check(ctx context.Context, req *ToolsCallRequest) (De
 	return decMCP, nil
 }
 
+// MetaGatewayConnectionKey is the /v1/check meta key that carries the
+// gateway process's random connection id (see ToolsCallRequest.ConnectionID).
+// Tool argument keys are all prefixed arg_, so an argument can't overwrite it.
+const MetaGatewayConnectionKey = "gateway_connection"
+
 // buildMcpMeta builds the meta map sent on the mcp_tool /v1/check call.
 // Argument values are best-effort serialised so policy authors can
 // match on them via meta-aware patterns; secrets are redacted by the
@@ -222,6 +227,9 @@ func buildMcpMeta(req *ToolsCallRequest) map[string]string {
 	}
 	if req.ApprovalID != "" {
 		out["approval_id"] = req.ApprovalID
+	}
+	if req.ConnectionID != "" {
+		out[MetaGatewayConnectionKey] = req.ConnectionID
 	}
 	if len(req.Arguments) > 0 {
 		// Best-effort flatten so simple string args become discoverable
