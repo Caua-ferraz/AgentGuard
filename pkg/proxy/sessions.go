@@ -56,6 +56,12 @@ func parseTimeParam(q url.Values, name string) (*time.Time, error) {
 		return nil, nil
 	}
 	t, err := time.Parse(time.RFC3339Nano, raw)
+	// A '+' left unencoded in a query string arrives as a space, so
+	// "…T09:00:00+02:00" reads "…T09:00:00 02:00". A space where the
+	// offset's sign belongs can only have been that '+'.
+	if i := len(raw) - len("+02:00"); err != nil && i > 0 && raw[i] == ' ' {
+		t, err = time.Parse(time.RFC3339Nano, raw[:i]+"+"+raw[i+1:])
+	}
 	if err != nil {
 		return nil, fmt.Errorf("invalid %s %q: want an RFC 3339 time such as 2026-10-14T09:00:00Z", name, raw)
 	}

@@ -151,6 +151,7 @@ func TestSessions_RejectBadInput(t *testing.T) {
 		"/v1/sessions/x?limit=abc",
 		"/v1/sessions/",
 		"/v1/audit?since=1h",
+		"/v1/audit?since=2026-10-01%2010:00:00Z", // a space that can't be a lost '+'
 		"/v1/audit?since=2026-10-02T00:00:00Z&until=2026-10-01T00:00:00Z",
 	} {
 		if code := getJSON(t, srv, path, nil); code != http.StatusBadRequest {
@@ -193,6 +194,9 @@ func TestAuditQuery_SinceUntilAndParent(t *testing.T) {
 			{"until=2026-10-01T08:00:00.5Z", 1},
 			{"since=2026-10-01T08:00:00Z&until=2026-10-01T08:00:01Z", 2},
 			{"since=2026-10-01T10:00:00%2B02:00", 4}, // an offset is the same instant in UTC
+			{"since=2026-10-01T10:00:00+02:00", 4},   // an unencoded '+' arrives as a space
+			{"since=2026-10-01T10:00:00.5+02:00", 3},
+			{"since=2026-10-01T06:00:00-02:00", 4},
 			{"until=2026-10-01T08:00:00Z", 0},
 			{"parent_session_id=p", 2},
 			{"parent_session_id=p&since=2026-10-01T08:00:01Z", 1},

@@ -252,7 +252,7 @@ Query the audit log.
 | `offset` | int | `0` | Skip N matching entries. Must be ≥ 0. With `order=desc` it counts from the newest entry. |
 | `order` | string | `asc` | **(v1.2)** `asc` returns the oldest matches first (the original behaviour); `desc` returns the newest first. Anything else → `400`. |
 | `parent_session_id` | string | — | **(v1.4)** Exact match on `request.parent_session_id`: the calls of the sessions started by that session. |
-| `since` | RFC 3339 time | — | **(v1.4)** Entries at or after this time (inclusive). Any time zone; compared as an instant. |
+| `since` | RFC 3339 time | — | **(v1.4)** Entries at or after this time (inclusive). Any time zone; compared as an instant. In a query string a `+` means a space, so write a positive offset as `%2B` (`2026-10-14T11:00:00%2B02:00`); an unencoded `+` before the offset is still read as one. The same applies to every `since`/`until` below. |
 | `until` | RFC 3339 time | — | **(v1.4)** Entries before this time (exclusive). `until` before `since`, or a value that is not RFC 3339, → `400`. |
 | `transport` | string | — | Filter on the `Entry.Transport` audit field. Recognised values: `sdk`, `mcp_gateway`, `llm_api_proxy`, and the coding-agent hooks' `claude_code`, `cursor`, `gemini_cli`, `codex_cli`. Pre-v0.5 entries have no transport tag and are excluded when this filter is set. |
 
