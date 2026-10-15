@@ -2776,8 +2776,14 @@ var dashboardHTML = `<!DOCTYPE html>
       stopReplay();
       // Keep the replay in the URL so it can be reloaded or shared.
       history.replaceState(null, '', '#session=' + encodeURIComponent(id));
-      showMessage(replayEl, 'Loading...');
       const seq = ++replaySeq;
+      // A path segment of '.' or '..' is collapsed by the browser and the
+      // server before it can name a session.
+      if (id === '.' || id === '..') {
+        showMessage(replayEl, 'A session named "' + id + '" can\'t be opened here; read it with /v1/audit?session_id=' + encodeURIComponent(id));
+        return;
+      }
+      showMessage(replayEl, 'Loading...');
       agFetch('/v1/sessions/' + encodeURIComponent(id))
         .then(r => {
           if (r.status === 404) throw new Error('no audit entries for this session');

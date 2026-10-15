@@ -105,7 +105,7 @@ Pick a session to replay it ([`GET /v1/sessions/{id}`](API.md#get-v1sessionsid--
 - **Started by** links to the parent session; **Child sessions** links to the sessions this one started (`parent_session_id`, see [WIRE_PROTOCOL](WIRE_PROTOCOL.md)).
 - Calls through the MCP gateway show their `gateway_connection` id.
 
-The open replay is in the URL: `/dashboard#session=<id>` (URL-encoded) reopens it, and `/dashboard#sessions` opens the list. A replay shows up to 1000 entries and says so when the session has more.
+The open replay is in the URL: `/dashboard#session=<id>` (URL-encoded) reopens it, and `/dashboard#sessions` opens the list. A replay shows up to 1000 entries and says so when the session has more. A session whose id is `.` or `..` is listed but can't be replayed (the browser collapses such a path segment); the view says to read it with `/v1/audit?session_id=…` instead.
 
 Every value in the view comes from the audit log, which agents write. The page sets it as text, never as HTML, and loads nothing from other origins.
 

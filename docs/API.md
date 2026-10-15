@@ -373,7 +373,7 @@ The file audit backend scans the live audit file (not rotated archives), like `G
 
 Tenant-aware mirror: `GET /v1/t/{tenant}/sessions/{id}`. **(v1.4)** Same auth as `GET /v1/audit`.
 
-Returns one session: its summary (same shape as in the list), the sessions it started, and its entries oldest first. URL-encode the id: session ids are chosen by the caller and may contain `/` or spaces (`sub%2F1`).
+Returns one session: its summary (same shape as in the list), the sessions it started, and its entries oldest first. URL-encode the id: session ids are chosen by the caller and may contain `/` or spaces (`sub%2F1`). The ids `.` and `..` can't be read this way, because clients and the server collapse them as path segments; read such a session with `GET /v1/audit?session_id=.`.
 
 | Param | Type | Default | Notes |
 |---|---|---|---|
