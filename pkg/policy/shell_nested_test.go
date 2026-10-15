@@ -361,6 +361,79 @@ func TestCheck_CommandNamesIgnoreCase(t *testing.T) {
 	}
 }
 
+// $'…' strings are decoded as bash decodes them, so the text matched is the
+// text the command receives. Before, `$'rm' -rf` was matched as "$rm -rf"
+// and `bash -c $'rm -rf /tmp/x'` ran a script the policy never saw.
+func TestParseShell_ANSICQuoting(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string // the first segment
+	}{
+		{"plain text", `$'rm' -rf x`, "rm -rf x"},
+		{"named escapes", `echo $'a\tb\nc\rd\ae\bf\eg\Eh\fi\vj'`, "echo a\tb\nc\rd\ae\bf\x1bg\x1bh\fi\vj"},
+		{"quotes and backslash", `echo $'\\ \' \" \?'`, `echo \ ' " ?`},
+		{"hex", `echo $'\x72\x6D'`, "echo rm"},
+		{"one hex digit", `echo $'\x9z'`, "echo \x09z"},
+		{"octal", `echo $'\162\155'`, "echo rm"},
+		{"short octal", `echo $'\7x'`, "echo \x07x"},
+		{"unicode", `echo $'é\U0001F600'`, "echo é😀"},
+		{"control", `echo $'\cA\c?\ca'`, "echo \x01\x7f\x01"},
+		{"unknown escape keeps its backslash", `echo $'\q'`, `echo \q`},
+		{"next to other quoting", `e$'c'"h"o x`, "echo x"},
+		{"a translated string", `$"rm" -rf x`, "rm -rf x"},
+		{"in double quotes it is literal", `echo "$'x'"`, "echo $'x'"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseShell(c.in)
+			if err != nil {
+				t.Fatalf("parseShell(%q): %v", c.in, err)
+			}
+			if len(got.Segments) == 0 || got.Segments[0] != c.want {
+				t.Errorf("segments = %q, want first %q", got.Segments, c.want)
+			}
+		})
+	}
+	for _, in := range []string{
+		`echo $'unterminated`,
+		`echo $'a\'`,
+		`echo $'\x00'`,
+		`echo $'\0'`,
+		`echo $'\x'`,
+		`echo $'\u'`,
+		`echo $'\U110000'`,
+		`echo $'\ud800'`,
+		`echo $'\777'`,
+		`echo $'\c@'`,
+		`echo $'\c`,
+	} {
+		if _, err := parseShell(in); err == nil {
+			t.Errorf("parseShell(%q) = nil error, want unparseable", in)
+		}
+	}
+}
+
+func TestCheck_ANSICQuoting(t *testing.T) {
+	eng := NewEngineFromPolicy(&Policy{Version: "1", Name: "ansic", Rules: []RuleSet{{
+		Scope:           "shell",
+		RequireApproval: []Rule{{Pattern: "rm -rf *"}},
+		Allow:           []Rule{{Pattern: "*"}},
+	}}})
+	checkShell(t, eng, []shellCheckCase{
+		{"a decoded command name", `$'rm' -rf /tmp/x`, RequireApproval, "require_approval:shell:rm -rf *"},
+		{"a decoded bash -c script", `bash -c $'rm -rf /tmp/x'`, RequireApproval, "require_approval:shell:rm -rf *"},
+		{"a script split by a decoded newline", `bash -c $'ls\nrm -rf /tmp/x'`, RequireApproval, "require_approval:shell:rm -rf *"},
+		{"hex escapes", `$'\x72\x6d' -rf /tmp/x`, RequireApproval, "require_approval:shell:rm -rf *"},
+		{"a NUL is denied as unparseable", `echo $'\x00'`, Deny, "deny:shell:unparseable_command"},
+	})
+	// A decoded tab is an ordinary character: echo still matches echo *.
+	allow := NewEngineFromPolicy(compoundTestPolicy())
+	checkShell(t, allow, []shellCheckCase{
+		{"echo of a decoded tab runs", `echo $'a\tb'`, Allow, "allow:shell:echo *"},
+	})
+}
+
 // isCompoundShell runs on every shell check. An ordinary command without
 // shell syntax must not allocate, even when it holds "sh" and "-" (before,
 // `git push --force` split itself into words to look for a nested shell).

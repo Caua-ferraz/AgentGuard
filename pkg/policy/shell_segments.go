@@ -18,6 +18,7 @@ package policy
 import (
 	"errors"
 	"strings"
+	"unicode"
 )
 
 // shellSyntaxChars are the bytes that can change how a shell splits or
@@ -440,8 +441,20 @@ func (p *shellParser) readWord() (string, error) {
 			}
 			b.WriteByte(next)
 		case '$':
-			if err := p.readDollar(&b); err != nil {
-				return "", err
+			switch p.peek(1) {
+			case '\'':
+				// $'…' (ANSI-C quoting): decoded as bash does, so
+				// $'rm' -rf is checked as rm -rf.
+				if err := p.readANSIC(&b); err != nil {
+					return "", err
+				}
+			case '"':
+				// $"…" (a translated string) is quoted like "…".
+				p.i++
+			default:
+				if err := p.readDollar(&b); err != nil {
+					return "", err
+				}
 			}
 		case '`':
 			if err := p.readBackticks(&b); err != nil {
@@ -455,6 +468,139 @@ func (p *shellParser) readWord() (string, error) {
 	// One substitution and nothing else: "$(cmd)", `cmd`, $(cmd).
 	p.wordIsSubst = p.nsubst == n+1 && b.Len() > 0 && b.Len() == p.substBytes-size
 	return b.String(), nil
+}
+
+// readANSIC decodes a $'…' string whose $ is at p.i, with bash's escapes:
+// \n \t \r \a \b \e \E \f \v \\ \' \" \?, \xHH, \NNN (octal), \uHHHH,
+// \UHHHHHHHH and \cX. Any other escape keeps its backslash, as in bash.
+// An escape that can't be decoded safely (a NUL, which ends the string in
+// bash, a missing digit, a value that isn't a byte or a code point) makes
+// the command unparseable.
+func (p *shellParser) readANSIC(b *strings.Builder) error {
+	p.i += 2 // $'
+	for p.i < len(p.s) {
+		c := p.s[p.i]
+		if c == '\'' {
+			p.i++
+			return nil
+		}
+		if c != '\\' {
+			b.WriteByte(c)
+			p.i++
+			continue
+		}
+		if p.i+1 >= len(p.s) {
+			return errShellUnparseable
+		}
+		e := p.s[p.i+1]
+		p.i += 2
+		switch e {
+		case 'n':
+			b.WriteByte('\n')
+		case 't':
+			b.WriteByte('\t')
+		case 'r':
+			b.WriteByte('\r')
+		case 'a':
+			b.WriteByte(0x07)
+		case 'b':
+			b.WriteByte(0x08)
+		case 'e', 'E':
+			b.WriteByte(0x1b)
+		case 'f':
+			b.WriteByte(0x0c)
+		case 'v':
+			b.WriteByte(0x0b)
+		case '\\', '\'', '"', '?':
+			b.WriteByte(e)
+		case 'x', 'u', 'U':
+			digits := 2
+			switch e {
+			case 'u':
+				digits = 4
+			case 'U':
+				digits = 8
+			}
+			v, n := p.readDigits(16, digits)
+			if n == 0 || v == 0 {
+				return errShellUnparseable
+			}
+			if e == 'x' {
+				b.WriteByte(byte(v))
+			} else if err := writeCodePoint(b, v); err != nil {
+				return err
+			}
+		case '0', '1', '2', '3', '4', '5', '6', '7':
+			p.i-- // the first digit is part of the value
+			v, _ := p.readDigits(8, 3)
+			if v == 0 || v > 0xff {
+				return errShellUnparseable
+			}
+			b.WriteByte(byte(v))
+		case 'c':
+			// \cX is control-X; \c? is DEL.
+			if p.i >= len(p.s) {
+				return errShellUnparseable
+			}
+			x := p.s[p.i]
+			p.i++
+			if x == '\\' && p.peek(0) == '\\' {
+				p.i++
+			}
+			v := byte(0x7f)
+			if x != '?' {
+				if x >= 'a' && x <= 'z' {
+					x -= 'a' - 'A'
+				}
+				v = x & 0x1f
+			}
+			if v == 0 {
+				return errShellUnparseable
+			}
+			b.WriteByte(v)
+		default:
+			b.WriteByte('\\')
+			b.WriteByte(e)
+		}
+	}
+	return errShellUnparseable // unterminated $'
+}
+
+// readDigits reads up to most digits in base (8 or 16) at p.i and returns
+// their value and how many it read.
+func (p *shellParser) readDigits(base, most int) (v uint32, n int) {
+	for n < most && p.i < len(p.s) {
+		d := digitValue(p.s[p.i])
+		if d < 0 || d >= base {
+			break
+		}
+		v = v*uint32(base) + uint32(d)
+		p.i++
+		n++
+	}
+	return v, n
+}
+
+func digitValue(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'a' && c <= 'f':
+		return int(c-'a') + 10
+	case c >= 'A' && c <= 'F':
+		return int(c-'A') + 10
+	}
+	return -1
+}
+
+// writeCodePoint writes v as UTF-8, or fails for a value that is not a
+// Unicode scalar value.
+func writeCodePoint(b *strings.Builder, v uint32) error {
+	if v > unicode.MaxRune || (v >= 0xd800 && v <= 0xdfff) {
+		return errShellUnparseable
+	}
+	b.WriteRune(rune(v))
+	return nil
 }
 
 // readDoubleQuoted reads a "…" string whose opening quote is at p.i.
