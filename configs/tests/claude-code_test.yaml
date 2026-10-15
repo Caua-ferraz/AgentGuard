@@ -1,0 +1,89 @@
+# Hook cases for the claude-code block of configs/default.yaml. Run them
+# with:
+#
+#   agentguard test configs/tests
+#
+# Each case is a tool call as Claude Code sends it to `agentguard hook
+# claude-code` (its PreToolUse input), and the verdict the policy must give
+# it. The call goes through the hook's own mapping, so these cases also
+# catch a tool that stops being checked the way the policy expects. See
+# docs/POLICY_REFERENCE.md § Testing policies.
+
+policy: ../default.yaml
+
+tests:
+  # --- Shell ---
+  - name: Claude Code sudo needs approval
+    hook: claude-code
+    input: {tool_name: Bash, tool_input: {command: "sudo ls"}}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:shell:sudo *"
+
+  - name: Claude Code may run the tests
+    hook: claude-code
+    input: {tool_name: Bash, tool_input: {command: "python -m pytest -q"}}
+    expect: ALLOW
+    expect_rule: "allow:shell:*"
+
+  - name: Claude Code needs approval for a recursive PowerShell delete
+    hook: claude-code
+    input: {tool_name: PowerShell, tool_input: {command: "Remove-Item ./build -Recurse -Force"}}
+    expect: REQUIRE_APPROVAL
+
+  - name: a subagent's commands are checked the same way
+    hook: claude-code
+    input: {tool_name: Bash, agent_type: Explore, tool_input: {command: "npm test && git push --force"}}
+    expect: REQUIRE_APPROVAL
+
+  # --- Files ---
+  - name: Claude Code may write project files
+    hook: claude-code
+    input: {tool_name: Write, tool_input: {file_path: /home/alice/project/main.go, content: "package main"}}
+    expect: ALLOW
+
+  - name: Claude Code may not edit system files
+    hook: claude-code
+    input: {tool_name: Edit, tool_input: {file_path: /etc/hosts, old_string: a, new_string: b}}
+    expect: DENY
+    expect_reason_contains: "Claude Code doesn't write to system folders"
+
+  - name: Claude Code may not read ssh keys
+    hook: claude-code
+    input: {tool_name: Read, tool_input: {file_path: /home/alice/.ssh/id_ed25519}}
+    expect: DENY
+    expect_reason_contains: "off-limits to Claude Code"
+
+  - name: Claude Code needs approval to read a .env file
+    hook: claude-code
+    input: {tool_name: Read, tool_input: {file_path: /home/alice/project/.env}}
+    expect: REQUIRE_APPROVAL
+
+  # --- Web ---
+  - name: Claude Code may fetch documentation
+    hook: claude-code
+    input: {tool_name: WebFetch, tool_input: {url: "https://pkg.go.dev/net/http", prompt: "summarize"}}
+    expect: ALLOW
+
+  - name: Claude Code may not fetch the cloud metadata endpoint
+    hook: claude-code
+    input: {tool_name: WebFetch, tool_input: {url: "http://169.254.169.254/latest/meta-data", prompt: "read"}}
+    expect: DENY
+    expect_reason_contains: "metadata"
+
+  # --- MCP tools keep the policy's normal rules ---
+  - name: a Claude Code GitHub MCP tool needs approval
+    hook: claude-code
+    input: {tool_name: mcp__github__create_issue, tool_input: {title: "flaky test"}}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:mcp_tool:github:*"
+
+  - name: a Claude Code MCP write tool is denied
+    hook: claude-code
+    input: {tool_name: mcp__fs__write_file, tool_input: {path: notes.md, content: x}}
+    expect: DENY
+    expect_rule: "deny:mcp_tool:*:write_file"
+
+  - name: a Claude Code MCP read tool is allowed
+    hook: claude-code
+    input: {tool_name: mcp__fs__read_text_file, tool_input: {path: notes.md}}
+    expect: ALLOW

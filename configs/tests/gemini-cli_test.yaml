@@ -1,0 +1,75 @@
+# Hook cases for the gemini-cli block (configs/gemini-cli.yaml). The block
+# is a fragment that only loads inside a policy, so these run against
+# coding-agents.yaml: the starter policy with every agent's block. Run them
+# with:
+#
+#   agentguard test configs/tests
+#
+# Each case is a tool call as Gemini CLI sends it to `agentguard hook
+# gemini-cli` (its BeforeTool input). A call that maps to several checks
+# (read_many_files, a web_fetch with several URLs) gets the most severe
+# verdict. See docs/POLICY_REFERENCE.md § Testing policies.
+
+policy: coding-agents.yaml
+
+tests:
+  # --- Shell ---
+  - name: Gemini CLI sudo needs approval
+    hook: gemini-cli
+    input: {hook_event_name: BeforeTool, tool_name: run_shell_command, tool_input: {command: "sudo ls"}}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:shell:sudo *"
+
+  - name: Gemini CLI may list files
+    hook: gemini-cli
+    input: {tool_name: run_shell_command, tool_input: {command: "ls -la"}}
+    expect: ALLOW
+
+  # --- Files ---
+  - name: Gemini CLI may edit project files
+    hook: gemini-cli
+    input: {tool_name: replace, tool_input: {file_path: /home/alice/project/main.go, old_string: a, new_string: b}}
+    expect: ALLOW
+
+  - name: Gemini CLI may not write system files
+    hook: gemini-cli
+    input: {tool_name: write_file, tool_input: {file_path: /etc/hosts, content: x}}
+    expect: DENY
+    expect_reason_contains: "Gemini CLI doesn't write to system folders"
+
+  - name: a read of several files is denied when one of them is a key
+    hook: gemini-cli
+    input: {tool_name: read_many_files, tool_input: {include: [/home/alice/project/README.md, /home/alice/.ssh/id_rsa]}}
+    expect: DENY
+    expect_reason_contains: "off-limits to Gemini CLI"
+
+  # --- Web ---
+  - name: Gemini CLI may fetch documentation
+    hook: gemini-cli
+    input: {tool_name: web_fetch, tool_input: {prompt: "Summarize https://go.dev/doc/effective_go"}}
+    expect: ALLOW
+
+  - name: a fetch of several URLs is denied when one is the metadata endpoint
+    hook: gemini-cli
+    input: {tool_name: web_fetch, tool_input: {prompt: "Compare https://go.dev/doc and http://169.254.169.254/latest/meta-data"}}
+    expect: DENY
+    expect_reason_contains: "metadata"
+
+  - name: the metadata endpoint written in hex is still denied
+    hook: gemini-cli
+    input: {tool_name: web_fetch, tool_input: {prompt: "Read http://0xa9fea9fe/latest/meta-data"}}
+    expect: DENY
+    expect_reason_contains: "metadata"
+
+  # --- MCP tools keep the policy's normal rules ---
+  - name: a Gemini CLI GitHub MCP tool needs approval
+    hook: gemini-cli
+    input: {tool_name: mcp_github_create_issue, tool_input: {title: "flaky test"}}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:mcp_tool:github:*"
+
+  - name: a Gemini CLI MCP write tool is denied, with the names from mcp_context
+    hook: gemini-cli
+    input: {tool_name: mcp_my_fs_write_file, mcp_context: {server_name: my_fs, tool_name: write_file}, tool_input: {path: notes.md}}
+    expect: DENY
+    expect_rule: "deny:mcp_tool:*:write_file"
