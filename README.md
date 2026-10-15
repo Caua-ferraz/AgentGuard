@@ -113,7 +113,7 @@ const guard = new AgentGuard({ baseUrl: 'http://localhost:8080', agentId: 'my-bo
 const result = await guard.check('network', { url: 'https://api.production.internal/deploy' });
 ```
 
-The SDKs are not deprecated. They are the right answer when you control the agent's source and want explicit, scope-tagged check points. Polling for approval, decorators/HOFs, cost guardrails, framework adapters (LangChain, CrewAI, browser-use, MCP): [`docs/SDK_PYTHON.md`](docs/SDK_PYTHON.md) • [`docs/ADAPTERS.md`](docs/ADAPTERS.md).
+The SDKs are not deprecated. They are the right answer when you control the agent's source and want explicit, scope-tagged check points. Polling for approval, decorators/HOFs, cost guardrails, framework adapters (LangChain, CrewAI, browser-use, MCP, OpenAI Agents SDK): [`docs/SDK_PYTHON.md`](docs/SDK_PYTHON.md) • [`docs/ADAPTERS.md`](docs/ADAPTERS.md).
 
 ### Install the server
 
@@ -259,7 +259,7 @@ Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS deta
 | Wire protocol (SDK ↔ central server) | [`docs/WIRE_PROTOCOL.md`](docs/WIRE_PROTOCOL.md) |
 | CLI reference | [`docs/CLI.md`](docs/CLI.md) |
 | Python SDK | [`docs/SDK_PYTHON.md`](docs/SDK_PYTHON.md) |
-| Framework adapters (LangChain, CrewAI, browser-use, MCP) | [`docs/ADAPTERS.md`](docs/ADAPTERS.md) |
+| Framework adapters (LangChain, CrewAI, browser-use, MCP, OpenAI Agents SDK) | [`docs/ADAPTERS.md`](docs/ADAPTERS.md) |
 | Dashboard walkthrough | [`docs/DASHBOARD.md`](docs/DASHBOARD.md) |
 | Approval workflow end-to-end | [`docs/APPROVAL_WORKFLOW.md`](docs/APPROVAL_WORKFLOW.md) |
 | Deployment / TLS / CORS | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) |

@@ -60,6 +60,13 @@ default policy, and SDK-specific gotchas. Quickstart:
 
 ## Other integration paths
 
+- **OpenAI Agents SDK adapter.**
+  [`openai-agents-config.py`](openai-agents-config.py) +
+  [`openai-agents-config.md`](openai-agents-config.md) — an OpenAI
+  Agents SDK agent whose function tools are gated in-process with
+  `guard_tools`. The LLM API Proxy speaks Chat Completions, not the
+  Responses API the Agents SDK uses by default; the guide shows how to
+  stack the two.
 - **SDK (compatibility tier).** [`quickstart.py`](quickstart.py) — the
   Python SDK example: explicit `Guard.check(...)` calls in agent code.
   The SDK is documented in [`docs/SDK_PYTHON.md`](../docs/SDK_PYTHON.md).

@@ -55,6 +55,7 @@ Issues = "https://github.com/Caua-ferraz/AgentGuard/issues"
 #   crewai           1.14.x    (was 0.80 when A12 landed; bumped 1.0 → 1.14)
 #   browser-use      0.12.x    (was 0.4 when A13 landed; pre-1.0)
 #   mcp              1.27.x
+#   openai-agents    0.23.x    (added in v1.4; pre-1.0, verified 2026-10-14)
 #
 # The floors below cover the hardened surface AND the current major so a
 # fresh `pip install` resolves successfully. When a framework cuts the next
@@ -75,9 +76,18 @@ browser-use = [
 # Python SDK shape; the floor includes both for compatibility.
 # mcp 2.x verified in v1.2.0 (adapter + gateway suites green on 2.2.0).
 mcp = ["mcp>=0.9,<3.0"]
+# OpenAI Agents SDK (import name `agents`). 0.3.3 is the floor: it is the
+# first release with tool input guardrails and ToolContext.tool_arguments,
+# which agentguard_tool_guardrail uses; the adapter refuses anything older.
+# The ceiling follows the browser-use rule for pre-1.0 packages: <1.0, not
+# the next minor. The adapter touches only FunctionTool.on_invoke_tool and
+# the public guardrail API, which held from 0.3.3 through 0.23.x, and the
+# weekly integration-tests job runs a real Runner loop against whatever
+# minor pip resolves, so a breaking 0.x minor shows up there first.
+openai-agents = ["openai-agents>=0.3.3,<1.0"]
 # Convenience: install every adapter extra in one go (pip install ".[all]").
 # Self-reference picks up the version-pinned extras above.
-all = ["agentguardproxy[langchain,crewai,browser-use,mcp]"]
+all = ["agentguardproxy[langchain,crewai,browser-use,mcp,openai-agents]"]
 # Test deps. responses + pytest-asyncio added so integration tests can use
 # them without each extra group dragging them in.
 dev = [
@@ -90,7 +100,7 @@ dev = [
 # one shot. Mirrors `all` but exists separately so a downstream user
 # who wants the heavyweight test deps does not have to remember every
 # extra. Paired with `[dev]` in the CI workflow.
-integration = ["agentguardproxy[langchain,crewai,browser-use,mcp]"]
+integration = ["agentguardproxy[langchain,crewai,browser-use,mcp,openai-agents]"]
 
 [tool.setuptools.packages.find]
 include = ["agentguard*"]

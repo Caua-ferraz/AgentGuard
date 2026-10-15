@@ -68,7 +68,11 @@ from agentguard import (
     AgentGuardDenied,
     Guard,
 )
-from agentguard.adapters._common import extract_check_params
+from agentguard.adapters._common import (
+    ConflictingToolInput,
+    conflict_denial,
+    extract_check_params,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -282,9 +286,13 @@ def _build_guarded_class() -> type:
 
         def _check_or_raise(self, tool_input: Any) -> None:
             """Run the policy check and raise on DENY / REQUIRE_APPROVAL."""
-            params = self._extract_check_params(tool_input)
-            scope = self._infer_scope(tool_input)
-            result = self._guard.check(scope, **params)
+            try:
+                params = self._extract_check_params(tool_input)
+            except ConflictingToolInput as e:
+                result = conflict_denial(e)
+            else:
+                scope = self._infer_scope(tool_input)
+                result = self._guard.check(scope, **params)
 
             if result.allowed:
                 return

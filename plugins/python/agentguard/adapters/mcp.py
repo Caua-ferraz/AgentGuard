@@ -37,7 +37,11 @@ import re
 import sys
 from typing import Any, Callable, Dict, List, Optional
 from agentguard import Guard, CheckResult, DEFAULT_BASE_URL
-from agentguard.adapters._common import extract_check_params
+from agentguard.adapters._common import (
+    ConflictingToolInput,
+    conflict_denial,
+    extract_check_params,
+)
 
 # MCP protocol constants
 MCP_PROTOCOL_VERSION = "2024-11-05"
@@ -257,14 +261,17 @@ class GuardedMCPServer:
         handler = self._handlers[tool_name]
 
         # Policy check
-        check_params = self._infer_check_params(tool, arguments)
-        scope = tool.scope
-        if check_params.get("domain") or check_params.get("url"):
-            scope = "network"
-        if check_params.get("path"):
-            scope = "filesystem"
-
-        result = self._guard.check(scope, **check_params)
+        try:
+            check_params = self._infer_check_params(tool, arguments)
+        except ConflictingToolInput as e:
+            result = conflict_denial(e)
+        else:
+            scope = tool.scope
+            if check_params.get("domain") or check_params.get("url"):
+                scope = "network"
+            if check_params.get("path"):
+                scope = "filesystem"
+            result = self._guard.check(scope, **check_params)
 
         if result.denied:
             return {
@@ -570,13 +577,16 @@ class GuardedMCPGateway:
 
         # Reuse the shared inference + redaction helper.
         td = ToolDefinition(name=tool_name, description="", scope=scope)
-        check_params = _infer_check_params_for(td, arguments)
-        if check_params.get("domain") or check_params.get("url"):
-            scope = "network"
-        if check_params.get("path"):
-            scope = "filesystem"
-
-        result = self._guard.check(scope, **check_params)
+        try:
+            check_params = _infer_check_params_for(td, arguments)
+        except ConflictingToolInput as e:
+            result = conflict_denial(e)
+        else:
+            if check_params.get("domain") or check_params.get("url"):
+                scope = "network"
+            if check_params.get("path"):
+                scope = "filesystem"
+            result = self._guard.check(scope, **check_params)
 
         if result.denied:
             return {

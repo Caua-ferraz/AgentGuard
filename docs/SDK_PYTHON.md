@@ -32,6 +32,7 @@ pip install agentguardproxy[langchain]
 pip install agentguardproxy[crewai]
 pip install agentguardproxy[browser-use]
 pip install agentguardproxy[mcp]
+pip install 'agentguardproxy[openai-agents]'
 pip install agentguardproxy[all]       # everything
 pip install agentguardproxy[dev]       # pytest, coverage, etc.
 ```
@@ -259,6 +260,7 @@ All adapters import lazily — the extras you do not install are never imported 
 | CrewAI | `agentguard.adapters.crewai` — `GuardedCrewTool`, `guard_crew_tools` | Same, hooking both `run` and `_run`. |
 | browser-use | `agentguard.adapters.browseruse` — `GuardedBrowser` | Gate navigation, actions, and form input; `wrap_page` enforces `goto` transparently. |
 | MCP | `agentguard.adapters.mcp` — `GuardedMCPServer` (or `python -m agentguard.adapters.mcp`) | A guarded stdio MCP server; every `tools/call` is checked first. |
+| OpenAI Agents SDK | `agentguard.adapters.openai_agents` — `guard_tool`, `guard_tools`, `agentguard_tool_guardrail` | Gated copies of an agent's `FunctionTool`s; a deny raises out of `Runner.run`, or the guardrail shows it to the model. |
 
 Per-framework usage, scope-inference rules (keyword tables, runtime
 upgrades, `default_scope` fallback), version pins, and deny/approval

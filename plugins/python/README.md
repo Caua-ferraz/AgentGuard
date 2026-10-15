@@ -4,7 +4,7 @@ Lightweight Python client for [AgentGuard](https://github.com/Caua-ferraz/AgentG
 
 - **Zero runtime dependencies** for the core SDK (stdlib `urllib`).
 - **Fail-closed by default** — if the proxy is unreachable, `check()` returns `DENY`.
-- **Framework adapters** for LangChain, CrewAI, browser-use, and MCP, gated behind optional extras.
+- **Framework adapters** for LangChain, CrewAI, browser-use, MCP, and the OpenAI Agents SDK, gated behind optional extras.
 
 > **Deep reference:** [`docs/SDK_PYTHON.md`](../../docs/SDK_PYTHON.md) — full API, exception hierarchy, fail-mode details, adapter internals.
 
@@ -17,6 +17,8 @@ pip install agentguardproxy
 pip install agentguardproxy[langchain]
 pip install agentguardproxy[crewai]
 pip install agentguardproxy[browser-use]
+pip install agentguardproxy[mcp]
+pip install 'agentguardproxy[openai-agents]'
 pip install agentguardproxy[all]
 ```
 
@@ -160,6 +162,28 @@ Or as a drop-in stdio server:
 ```bash
 python -m agentguard.adapters.mcp --guard-url http://localhost:8080
 ```
+
+### OpenAI Agents SDK
+
+```python
+from agents import Agent, Runner, function_tool
+from agentguard import AgentGuardDenied, Guard
+from agentguard.adapters.openai_agents import guard_tools
+
+@function_tool
+def run_shell(command: str) -> str:
+    ...
+
+guard = Guard("http://localhost:8080", agent_id="ops-agent")
+agent = Agent(name="ops", tools=guard_tools([run_shell], guard))
+
+try:
+    result = await Runner.run(agent, "clean up the build directory")
+except AgentGuardDenied as e:
+    print("blocked:", e.result.reason)
+```
+
+`guard_tools` returns gated copies of the `FunctionTool`s; DENY and REQUIRE_APPROVAL raise out of `Runner.run` before the tool runs. To let the model see the reason and continue instead, attach `agentguard_tool_guardrail(guard)` as a tool input guardrail. Hosted tools (`WebSearchTool`, ...) cannot be gated. Runnable example: [`examples/openai-agents-config.py`](../../examples/openai-agents-config.py).
 
 ## API reference (summary)
 

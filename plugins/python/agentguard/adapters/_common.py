@@ -1,14 +1,73 @@
 """Shared check-parameter extraction for the framework adapters.
 
-LangChain, CrewAI and MCP all reduce a tool invocation to the same
-``Guard.check`` keyword arguments (command, url, domain, path, action,
-session_id, est_cost). The extraction lives here once so the adapters
+LangChain, CrewAI, MCP and the OpenAI Agents SDK all reduce a tool
+invocation to the same ``Guard.check`` keyword arguments (command, url,
+domain, path, action, session_id, est_cost). The extraction lives here once so the adapters
 cannot drift apart; each adapter keeps only its framework-specific
 glue (input normalisation, error surfacing, redaction).
 """
 
-from typing import Any
+from typing import Any, Tuple
 from urllib.parse import urlparse
+
+from agentguard.core import DECISION_DENY, CheckResult
+
+
+# Keys that name the same check parameter. A model writes the tool
+# arguments, so it can send two of them at once; which one the tool
+# actually reads depends on the tool's signature, not on this table.
+_ALIASES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("command", ("command", "cmd")),
+    ("path", ("path", "file_path")),
+)
+
+
+class ConflictingToolInput(ValueError):
+    """Two alias keys for one check parameter carry different values.
+
+    ``{"command": "ls", "cmd": "rm -rf /"}`` sent to a tool whose
+    parameter is ``cmd`` would otherwise be checked as ``ls`` and run as
+    ``rm -rf /``. The extractor cannot know which key the tool reads, so
+    it refuses to pick one; adapters turn this into a DENY via
+    :func:`conflict_denial`.
+    """
+
+    def __init__(self, param: str, keys: Tuple[str, ...]):
+        self.param = param
+        self.keys = keys
+        names = " and ".join(repr(k) for k in keys)
+        super().__init__(
+            f"conflicting values for {param!r} in tool arguments "
+            f"({names}); refusing to guess which one the tool uses"
+        )
+
+
+def conflict_denial(err: ConflictingToolInput) -> CheckResult:
+    """The DENY an adapter reports for a :class:`ConflictingToolInput`.
+
+    Decided locally, without a server round-trip: no policy can make an
+    ambiguous input safe to check.
+    """
+    return CheckResult(decision=DECISION_DENY, reason=str(err))
+
+
+def _same_value(a: Any, b: Any) -> bool:
+    # type() as well as ==, so 1 / True / 1.0 do not count as the same.
+    return type(a) is type(b) and a == b
+
+
+def check_alias_conflicts(tool_input: Any) -> None:
+    """Raise :class:`ConflictingToolInput` if a dict input sets two alias
+    keys (command/cmd, path/file_path) to different values."""
+    if not isinstance(tool_input, dict):
+        return
+    for param, keys in _ALIASES:
+        present = tuple(k for k in keys if k in tool_input)
+        if len(present) < 2:
+            continue
+        first = tool_input[present[0]]
+        if any(not _same_value(first, tool_input[k]) for k in present[1:]):
+            raise ConflictingToolInput(param, present)
 
 
 def domain_from_url(url: Any) -> str:
@@ -71,7 +130,13 @@ def extract_check_params(tool_input: Any, tool_name: Any = None) -> dict:
     keys are projected (command/cmd, url + derived domain,
     path/file_path + action inferred from the tool-name verb,
     session_id, est_cost); everything else is ignored.
+
+    Raises:
+        ConflictingToolInput: two alias keys (command/cmd or
+            path/file_path) are both present with different values.
+            Callers must treat this as DENY (see :func:`conflict_denial`).
     """
+    check_alias_conflicts(tool_input)
     params: dict = {}
     if isinstance(tool_input, str):
         params["command"] = tool_input
