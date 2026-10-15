@@ -43,6 +43,11 @@ tests:
     expect: REQUIRE_APPROVAL
     expect_rule: "require_approval:shell:curl * | *sh"
 
+  - name: eval of a tool's setup output runs
+    hook: claude-code
+    input: {tool_name: Bash, tool_input: {command: "eval \"$(ssh-agent -s)\""}}
+    expect: ALLOW
+
   - name: a harmless bash -c runs
     hook: claude-code
     input: {tool_name: Bash, tool_input: {command: "bash -lc 'git status && ls'"}}

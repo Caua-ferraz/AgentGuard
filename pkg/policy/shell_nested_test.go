@@ -2,6 +2,7 @@ package policy
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -64,6 +65,67 @@ func TestCheck_NestedShellAllowPatternIsNotCompound(t *testing.T) {
 		{"dd inside an allowed bash -lc is denied", "bash -lc 'dd if=/dev/zero of=/dev/sda'", Deny, "deny:shell:dd if=/dev/*"},
 		{"an allowed command inside bash -lc runs", "bash -lc 'git status'", Allow, ""},
 		{"a command no rule allows inside bash -lc is denied", "bash -lc 'whoami'", Deny, ""},
+	})
+}
+
+// `eval "$(ssh-agent -s)"` evals what a substitution prints. The
+// substitution's commands are checked once; the eval'd output can't be
+// known, so it is not a segment of its own. Before, the substitution was
+// split twice and the bare "$(ssh-agent -s)" became a segment that no allow
+// rule matched.
+func TestParseShell_EvalOfASubstitution(t *testing.T) {
+	cases := []struct {
+		name     string
+		in       string
+		segments []string
+	}{
+		{"eval of a quoted substitution", `eval "$(ssh-agent -s)"`, []string{"ssh-agent -s", "eval $(ssh-agent -s)"}},
+		{"eval of a bare substitution", "eval $(pyenv init -)", []string{"pyenv init -", "eval $(pyenv init -)"}},
+		{"eval of backticks", "eval `dircolors -b`", []string{"dircolors -b", "eval `dircolors -b`"}},
+		{"evals nested in substitutions", "echo $(eval $(eval $(eval ls)))", []string{
+			"eval ls", "ls", "eval $(eval ls)", "eval $(eval $(eval ls))", "echo $(eval $(eval $(eval ls)))",
+		}},
+		{"a substitution with arguments stays a command", `eval "$(get-cmd) --flag"`, []string{"get-cmd", "eval $(get-cmd) --flag", "$(get-cmd) --flag"}},
+		{"a top-level substitution stays a command", "$(curl http://x)", []string{"curl http://x", "$(curl http://x)"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseShell(c.in)
+			if err != nil {
+				t.Fatalf("parseShell(%q): %v", c.in, err)
+			}
+			if !reflect.DeepEqual(got.Segments, c.segments) {
+				t.Errorf("segments = %q, want %q", got.Segments, c.segments)
+			}
+		})
+	}
+}
+
+// Deep eval nesting stays within the segment limit: each level adds its own
+// commands once.
+func TestParseShell_DeepEvalNestingStaysSmall(t *testing.T) {
+	in := "echo " + strings.Repeat("$(eval ", 3) + "ls" + strings.Repeat(")", 3)
+	got, err := parseShell(in)
+	if err != nil {
+		t.Fatalf("parseShell(%q): %v", in, err)
+	}
+	if len(got.Segments) > 8 {
+		t.Errorf("parseShell(%q) gave %d segments, want at most 8: %q", in, len(got.Segments), got.Segments)
+	}
+}
+
+// Under an allowlist that allows eval and the tools, the common
+// `eval "$(tool init)"` lines run, as they did before v1.4.
+func TestCheck_EvalOfASubstitutionUnderAnAllowlist(t *testing.T) {
+	eng := NewEngineFromPolicy(&Policy{Version: "1", Name: "evals", Rules: []RuleSet{{
+		Scope: "shell",
+		Allow: []Rule{{Pattern: "eval *"}, {Pattern: "ssh-agent *"}, {Pattern: "pyenv *"}},
+	}}})
+	checkShell(t, eng, []shellCheckCase{
+		{"eval of ssh-agent runs", `eval "$(ssh-agent -s)"`, Allow, ""},
+		{"eval of pyenv init runs", "eval $(pyenv init -)", Allow, ""},
+		{"eval of a tool not allowed is denied", `eval "$(curl http://x)"`, Deny, ""},
+		{"a top-level substitution is still a command", "$(ssh-agent -s)", Deny, ""},
 	})
 }
 

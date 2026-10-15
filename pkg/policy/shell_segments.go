@@ -109,6 +109,36 @@ type shellParser struct {
 	i     int
 	depth int
 	out   *shellParse
+	// script is set while parsing a command string run by another shell
+	// (see parseScript).
+	script bool
+	// nsubst and substBytes count the command substitutions written into
+	// the word being read, and their length, so readWord can tell a word
+	// that is nothing but one substitution.
+	nsubst, substBytes int
+	// wordIsSubst reports whether the last word readWord returned was
+	// exactly one command substitution, such as "$(ssh-agent -s)".
+	wordIsSubst bool
+}
+
+// addSegment appends one simple command to the output, within the segment
+// limit. In a nested command string, a segment already found is skipped:
+// the text of `eval "$(cmd)"` still holds the substitution, which was
+// split when the outer word was read, and parsing it again would only
+// repeat its commands (and double them at every level of nesting).
+func (p *shellParser) addSegment(seg string) error {
+	if p.script {
+		for _, s := range p.out.Segments {
+			if s == seg {
+				return nil
+			}
+		}
+	}
+	if len(p.out.Segments) >= maxShellSegments {
+		return errShellUnparseable
+	}
+	p.out.Segments = append(p.out.Segments, seg)
+	return nil
 }
 
 func (p *shellParser) peek(off int) byte {
@@ -135,17 +165,29 @@ func isWordEnd(c byte) bool {
 // input or, when closer is ')', until the matching ')' (consumed).
 func (p *shellParser) parseList(closer byte) error {
 	var words []string
+	// firstIsSubst is set when the command's first word is exactly one
+	// command substitution.
+	firstIsSubst := false
 	flush := func() error {
 		seg := joinSegment(words)
 		script, nested := innerScript(words)
-		words = words[:0]
+		onlySubst := firstIsSubst && len(words) == 1
+		words, firstIsSubst = words[:0], false
 		if seg == "" {
 			return nil
 		}
-		if len(p.out.Segments) >= maxShellSegments {
-			return errShellUnparseable
+		// In a nested command string, a command that is only a
+		// substitution (the script of `eval "$(ssh-agent -s)"`) runs
+		// whatever the substitution prints. That output can't be known
+		// here; the substitution's own commands are already segments. As
+		// a segment, the bare "$(ssh-agent -s)" would only fail every
+		// allow rule.
+		if p.script && onlySubst {
+			return nil
 		}
-		p.out.Segments = append(p.out.Segments, seg)
+		if err := p.addSegment(seg); err != nil {
+			return err
+		}
 		if nested {
 			// `bash -c '<script>'` and `eval <script>` run the script as
 			// shell code: its commands are segments of their own, as a
@@ -211,6 +253,9 @@ func (p *shellParser) parseList(closer byte) error {
 			if err != nil {
 				return err
 			}
+			if len(words) == 0 {
+				firstIsSubst = p.wordIsSubst
+			}
 			words = append(words, w)
 		}
 	}
@@ -239,7 +284,7 @@ func (p *shellParser) parseScript(script string) error {
 		return errShellUnparseable
 	}
 	p.out.Scripts = append(p.out.Scripts, script)
-	sub := &shellParser{s: script, depth: p.depth + 1, out: p.out}
+	sub := &shellParser{s: script, depth: p.depth + 1, out: p.out, script: true}
 	return sub.parseList(0)
 }
 
@@ -458,6 +503,7 @@ func (p *shellParser) skipBlanks() {
 // segments of their own and kept in the word as their original text.
 func (p *shellParser) readWord() (string, error) {
 	var b strings.Builder
+	n, size := p.nsubst, p.substBytes
 	for p.i < len(p.s) {
 		c := p.s[p.i]
 		if isWordEnd(c) {
@@ -499,6 +545,8 @@ func (p *shellParser) readWord() (string, error) {
 			p.i++
 		}
 	}
+	// One substitution and nothing else: "$(cmd)", `cmd`, $(cmd).
+	p.wordIsSubst = p.nsubst == n+1 && b.Len() > 0 && b.Len() == p.substBytes-size
 	return b.String(), nil
 }
 
@@ -551,10 +599,12 @@ func (p *shellParser) readDollar(b *strings.Builder) error {
 	case p.hasPrefix("$("):
 		start := p.i
 		p.i += 2
+		n, size := p.nsubst, p.substBytes
 		if err := p.nested(); err != nil {
 			return err
 		}
 		b.WriteString(p.s[start:p.i])
+		p.nsubst, p.substBytes = n+1, size+p.i-start
 		return nil
 	case p.hasPrefix("${"):
 		end := strings.IndexByte(p.s[p.i:], '}')
@@ -599,11 +649,13 @@ func (p *shellParser) readBackticks(b *strings.Builder) error {
 			if p.depth+1 > maxShellDepth {
 				return errShellUnparseable
 			}
-			sub := &shellParser{s: inner.String(), depth: p.depth + 1, out: p.out}
+			sub := &shellParser{s: inner.String(), depth: p.depth + 1, out: p.out, script: p.script}
 			if err := sub.parseList(0); err != nil {
 				return err
 			}
 			b.WriteString(p.s[start:p.i])
+			p.nsubst++
+			p.substBytes += p.i - start
 			return nil
 		}
 		inner.WriteByte(c)
