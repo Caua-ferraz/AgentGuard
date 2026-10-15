@@ -1346,6 +1346,8 @@ func (e *Engine) evalScope(rules []RuleSet, req ActionRequest, tenantID string, 
 //     keep working.
 //  2. The raw command is split into simple commands (segments) and file
 //     redirections. A command the tokenizer can't split safely is denied.
+//     Whole-string deny and require_approval rules also run against each
+//     command string another shell runs (`bash -c '…'`, `eval '…'`).
 //  3. An allow rule whose own pattern contains shell syntax matches when it
 //     has the same number of segments and each segment matches its glob, so
 //     `allow: "ls * | grep *"` still allows `ls /tmp | grep x` but not
@@ -1373,6 +1375,28 @@ func (e *Engine) checkCompoundShell(rules []RuleSet, req ActionRequest, rawComma
 	}
 	parts := len(parsed.Segments) + len(parsed.Redirects)
 
+	// A command string run by another shell (`bash -c '…'`, `eval '…'`) is
+	// a full command line of its own, so whole-string rules written for one
+	// (`:(){ :|:& };:`, `curl * | *sh`) are matched against it too. A deny
+	// decides at once; an approval is kept and the most severe verdict wins
+	// once the commands are checked.
+	var scriptVerdict CheckResult
+	for _, script := range parsed.Scripts {
+		sub := req
+		sub.Command = stripControl(script)
+		res, ok := e.evalScope(rules, sub, tenantID, ruleKindDeny|ruleKindApproval)
+		if !ok {
+			continue
+		}
+		res.Reason = fmt.Sprintf("%s (command string %q)", res.Reason, sub.Command)
+		if res.Decision == Deny {
+			return res
+		}
+		if scriptVerdict.Decision == "" {
+			scriptVerdict = res
+		}
+	}
+
 	var verdict CheckResult
 	if res, ok := e.matchCompoundAllow(rules, req, parsed.Segments, tenantID); ok {
 		verdict = res
@@ -1394,6 +1418,9 @@ func (e *Engine) checkCompoundShell(rules []RuleSet, req ActionRequest, rawComma
 				verdict = res
 			}
 		}
+	}
+	if scriptVerdict.Decision != "" && moreSevere(scriptVerdict.Decision, verdict.Decision) {
+		verdict = scriptVerdict
 	}
 
 	for _, r := range parsed.Redirects {

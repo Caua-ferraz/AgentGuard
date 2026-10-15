@@ -79,6 +79,11 @@ type shellParse struct {
 	// backticks, <( … ) and ( … ) are separate segments.
 	Segments  []string
 	Redirects []shellRedirect
+	// Scripts are the command strings run as shell code by a command of
+	// their own (the script of `sh -c` or `eval`), unquoted, in order. The
+	// engine matches whole-string rules against each one, as it does
+	// against the full command line.
+	Scripts []string
 }
 
 // parseShell splits cmd into simple commands and file redirections.
@@ -222,9 +227,10 @@ func (p *shellParser) nested() error {
 // of `sh -c` or `eval`) into segments of its own, counted against the same
 // segment and nesting limits.
 func (p *shellParser) parseScript(script string) error {
-	if p.depth+1 > maxShellDepth {
+	if p.depth+1 > maxShellDepth || len(p.out.Scripts) >= maxShellSegments {
 		return errShellUnparseable
 	}
+	p.out.Scripts = append(p.out.Scripts, script)
 	sub := &shellParser{s: script, depth: p.depth + 1, out: p.out}
 	return sub.parseList(0)
 }

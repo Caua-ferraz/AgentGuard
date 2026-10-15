@@ -200,6 +200,19 @@ func BenchmarkEngineCheck_CompoundShell(b *testing.B) {
 	}
 }
 
+// isCompoundShell runs on every shell check, so ordinary commands must stay
+// cheap and allocation-free.
+func BenchmarkIsCompoundShell(b *testing.B) {
+	for _, cmd := range []string{"ls -la", "git push --force origin main", "npm run test -- --watch"} {
+		b.Run(cmd, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				isCompoundShell(cmd)
+			}
+		})
+	}
+}
+
 // A command string handed to another shell (`sh -c`, `eval`) is split like
 // the outer command line, so its commands are segments of their own; the
 // outer command stays a segment too.
