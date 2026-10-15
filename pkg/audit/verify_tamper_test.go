@@ -255,3 +255,73 @@ func TestVerify_LogWithNoSealedEntryIsNotOK(t *testing.T) {
 		t.Errorf("an empty sealed log is not OK: %+v", rep.Break)
 	}
 }
+
+// WithoutKey checks the structure of a log sealed with a key nobody gave:
+// it can't see a rewritten entry, but it sees entries added, removed or
+// left unsealed, which a report run without --key-file used to call sealed.
+func TestVerify_WithoutKeyChecksTheStructure(t *testing.T) {
+	sealed := func(t *testing.T) string {
+		path := filepath.Join(t.TempDir(), "audit.jsonl")
+		l := openSealed(t, path, testSealKey, RotationConfig{})
+		writeEntries(t, l, 0, 4)
+		_ = l.Close()
+		return path
+	}
+	unsealedEntry, _ := json.Marshal(sampleEntry(99))
+	cases := []struct {
+		name      string
+		tamper    func(t *testing.T, path string)
+		wantBreak string // "" = verifies, hashes unchecked
+	}{
+		{name: "an untouched log passes, hashes unchecked", tamper: func(*testing.T, string) {}},
+		{
+			name: "an unsealed line appended after the sealed ones",
+			tamper: func(t *testing.T, path string) {
+				writeLines(t, path, append(readLines(t, path), string(unsealedEntry)))
+			},
+			wantBreak: "no hash",
+		},
+		{
+			name: "an entry removed from the middle",
+			tamper: func(t *testing.T, path string) {
+				lines := readLines(t, path)
+				writeLines(t, path, append(lines[:2], lines[3:]...))
+			},
+			wantBreak: "seq gap",
+		},
+		{
+			name: "an unsealed log under a forged sealed header",
+			tamper: func(t *testing.T, path string) {
+				lines := readLines(t, path)
+				out := []string{lines[0]}
+				for i := 0; i < 3; i++ {
+					b, _ := json.Marshal(sampleEntry(200 + i))
+					out = append(out, string(b))
+				}
+				writeLines(t, path, out)
+			},
+			wantBreak: "no hash",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := sealed(t)
+			tc.tamper(t, path)
+			opts := VerifyOptions{WithoutKey: true}
+			if tc.wantBreak != "" {
+				mustBreak(t, path, opts, tc.wantBreak)
+				return
+			}
+			rep := verify(t, path, opts)
+			if !rep.OK || !rep.HashesUnchecked || rep.Entries != 4 || rep.LastSeq != 4 {
+				t.Fatalf("report = %+v break %+v", rep, rep.Break)
+			}
+		})
+	}
+
+	// With a key, WithoutKey changes nothing: the hashes are checked.
+	path := sealed(t)
+	if rep := verify(t, path, VerifyOptions{Keys: [][]byte{testSealKey}, WithoutKey: true}); !rep.OK || rep.HashesUnchecked {
+		t.Fatalf("with a key: %+v", rep)
+	}
+}
