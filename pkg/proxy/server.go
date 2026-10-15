@@ -2690,20 +2690,32 @@ var dashboardHTML = `<!DOCTYPE html>
       target.appendChild(el('div', 'empty', text));
     }
 
+    // Responses can arrive out of order (a slow earlier request after a
+    // quick later one). Each load takes a number; a response is drawn only
+    // if no newer load has started since, so the view always shows the
+    // last thing picked.
+    let listSeq = 0;
+    let replaySeq = 0;
+
     function loadSessions() {
+      const seq = ++listSeq;
       const since = new Date(Date.now() - Number(sessionWindow.value) * 3600 * 1000).toISOString();
       agFetch('/v1/sessions?limit=200&since=' + encodeURIComponent(since))
         .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
         .then(data => {
+          if (seq !== listSeq) return;
           const list = (data && data.sessions) || [];
           if (list.length === 0) {
             showMessage(sessionListEl, 'No sessions in this window');
             return;
           }
           sessionListEl.textContent = '';
+          if (data.truncated) {
+            sessionListEl.appendChild(el('div', 'meta', 'This window holds more sessions than the server scans at once; older ones may be missing. Pick a shorter window.'));
+          }
           list.forEach(s => sessionListEl.appendChild(renderSessionItem(s)));
         })
-        .catch(e => { if (e.message !== 'reauth') showMessage(sessionListEl, 'Could not load sessions: ' + e.message); });
+        .catch(e => { if (seq === listSeq && e.message !== 'reauth') showMessage(sessionListEl, 'Could not load sessions: ' + e.message); });
     }
     sessionWindow.addEventListener('change', loadSessions);
     document.getElementById('session-refresh').addEventListener('click', loadSessions);
@@ -2765,14 +2777,15 @@ var dashboardHTML = `<!DOCTYPE html>
       // Keep the replay in the URL so it can be reloaded or shared.
       history.replaceState(null, '', '#session=' + encodeURIComponent(id));
       showMessage(replayEl, 'Loading...');
+      const seq = ++replaySeq;
       agFetch('/v1/sessions/' + encodeURIComponent(id))
         .then(r => {
           if (r.status === 404) throw new Error('no audit entries for this session');
           if (!r.ok) throw new Error('HTTP ' + r.status);
           return r.json();
         })
-        .then(renderReplay)
-        .catch(e => { if (e.message !== 'reauth') showMessage(replayEl, 'Could not load the session: ' + e.message); });
+        .then(d => { if (seq === replaySeq) renderReplay(d); })
+        .catch(e => { if (seq === replaySeq && e.message !== 'reauth') showMessage(replayEl, 'Could not load the session: ' + e.message); });
     }
 
     function sessionLink(label, id) {
@@ -2805,6 +2818,7 @@ var dashboardHTML = `<!DOCTYPE html>
       if ((d.children || []).length > 0) {
         const kids = el('div', 'replay-children', 'Child sessions: ');
         d.children.forEach(c => kids.appendChild(sessionLink(c.session_id + ' (' + ((c.counts || {}).total || 0) + ')', c.session_id)));
+        if (d.children_truncated) kids.appendChild(el('span', null, ' (more not listed)'));
         replayEl.appendChild(kids);
       }
       if (d.truncated) {

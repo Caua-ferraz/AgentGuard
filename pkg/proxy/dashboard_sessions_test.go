@@ -32,6 +32,11 @@ func TestDashboard_HasTheSessionsView(t *testing.T) {
 		`'lane-label'`,
 		`'approval-note'`,
 		`#session=`,
+		// Stale responses are dropped: only the latest load is drawn.
+		`if (seq !== listSeq) return;`,
+		`if (seq === replaySeq) renderReplay(d);`,
+		`data.truncated`,
+		`d.children_truncated`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("dashboard lacks %q", want)
