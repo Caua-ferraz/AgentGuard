@@ -451,25 +451,6 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 	return results, err
 }
 
-// Sessions summarises the sessions in the live file in one pass, holding
-// one summary per session rather than the entries (see SessionQuerier).
-// Like Query, it reads only the live file, not rotated archives.
-func (l *FileLogger) Sessions(f SessionFilter) ([]SessionSummary, error) {
-	l.mu.Lock()
-	path := l.file.Name()
-	l.mu.Unlock()
-
-	agg := NewSessionAggregator(f)
-	err := scanEntries(path, func(e Entry) bool {
-		agg.Add(e)
-		return true
-	})
-	if errors.Is(err, errScan) {
-		log.Printf("WARN audit: scanner error reading %s for sessions (%v)", path, err)
-	}
-	return agg.Result(), err
-}
-
 // errScan marks a scan cut short by a read error or an over-long line.
 var errScan = errors.New("audit scan")
 

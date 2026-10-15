@@ -266,10 +266,11 @@ func checkSessionParity(t *testing.T, fileLogger, storeLogger audit.Logger) {
 
 	// And a known answer: c2 is the newest local session, c1 lists both
 	// of its agents, and both name s1 as their parent.
-	got, err := audit.QuerySessions(storeLogger, audit.SessionFilter{TenantID: "local", ParentSessionID: "s1"})
+	page, err := audit.QuerySessions(storeLogger, audit.SessionFilter{TenantID: "local", ParentSessionID: "s1"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	got := page.Sessions
 	if len(got) != 2 || got[0].SessionID != "c2" || got[1].SessionID != "c1" {
 		t.Fatalf("children of s1 = %+v", got)
 	}

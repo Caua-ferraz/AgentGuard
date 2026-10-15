@@ -346,16 +346,19 @@ A session's summary covers its entries in the window. `agent_id` and `parent_ses
       "last_seen": "2026-10-14T09:14:40Z",
       "counts": {"total": 12, "allow": 10, "deny": 1, "require_approval": 1}
     }
-  ]
+  ],
+  "truncated": false
 }
 ```
 
 - `since` and `until` echo the window that was searched (`until` is omitted when open).
+- `truncated` is `true` when the window held more sessions than the file backend keeps in memory while it scans (50,000, or ten times `limit` if that is more). The list then has the sessions most recently written to, each counted in full; older sessions, and with `agent_id` or `parent_session_id` some matching ones, may be missing. Ask for a narrower `since`/`until`. Session ids come from `/v1/check` callers, so a client can make this happen by sending a new id on every call. The store backend never truncates.
+- `agents` holds at most 32 entries and `transports` at most 16, the first ones seen; `lists_truncated: true` says some were left out. The counts always cover every entry.
 - `agents` lists each distinct `agent_id` and `meta.subagent` pair (the Claude Code hook sets `meta.subagent` for calls made by a sub-agent).
 - `parent_session_id` is the parent named by the session's first entry that names one.
 - Entries with no `transport` count as `sdk`.
 
-The file audit backend scans the live audit file (not rotated archives), like `GET /v1/audit`; the store backend aggregates in SQL. Neither runs on the `/v1/check` path.
+The file audit backend scans the live audit file (not rotated archives), like `GET /v1/audit`: one pass, or two with `agent_id` or `parent_session_id`, plus one more when it truncated. The store backend aggregates in SQL. Neither runs on the `/v1/check` path.
 
 | Code | Meaning |
 |---|---|
@@ -382,12 +385,13 @@ Returns one session: its summary (same shape as in the list), the sessions it st
 {
   "session": {"session_id": "orch-1", "agents": [...], "transports": ["sdk"], "first_seen": "...", "last_seen": "...", "counts": {...}},
   "children": [{"session_id": "sub-7", "parent_session_id": "orch-1", ...}],
+  "children_truncated": false,
   "entries": [{"timestamp": "...", "session_id": "orch-1", "request": {...}, "result": {...}}],
   "truncated": false
 }
 ```
 
-`truncated` is `true` when the session has more entries than `limit`. Fetch the rest with `since` set to the last entry's `timestamp` plus one nanosecond, or with `GET /v1/audit?session_id=…&offset=…`. `children` holds at most 1000 sessions.
+`truncated` is `true` when the session has more entries than `limit`. Fetch the rest with `since` set to the last entry's `timestamp` plus one nanosecond, or with `GET /v1/audit?session_id=…&offset=…`. `children` holds at most 1000 sessions, newest first; `children_truncated` is `true` when there are more, or when the file backend stopped tracking them (as `truncated` on the list). The file backend reads the live audit file once, and a second time only when the session has children.
 
 | Code | Meaning |
 |---|---|

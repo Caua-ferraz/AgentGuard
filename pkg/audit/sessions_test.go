@@ -65,10 +65,11 @@ func sessionIDs(list []SessionSummary) []string {
 
 func TestFileLogger_SessionsSummarisesEachSession(t *testing.T) {
 	l := newSessionLogger(t)
-	got, err := l.Sessions(SessionFilter{TenantID: "local"})
-	if err != nil {
-		t.Fatalf("Sessions: %v", err)
+	page, err := l.Sessions(SessionFilter{TenantID: "local"})
+	if err != nil || page.Truncated {
+		t.Fatalf("Sessions: %v (truncated %v)", err, page.Truncated)
 	}
+	got := page.Sessions
 	// Newest first; the acme session and the entry without a session are
 	// not in the local tenant's list.
 	if ids := sessionIDs(got); !reflect.DeepEqual(ids, []string{"orch", "sub-2", "sub-1"}) {
@@ -111,18 +112,19 @@ func TestFileLogger_SessionsFilters(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := l.Sessions(tc.f)
+			page, err := l.Sessions(tc.f)
 			if err != nil {
 				t.Fatalf("Sessions: %v", err)
 			}
-			if ids := sessionIDs(got); !reflect.DeepEqual(ids, tc.want) {
+			if ids := sessionIDs(page.Sessions); !reflect.DeepEqual(ids, tc.want) {
 				t.Errorf("sessions = %v, want %v", ids, tc.want)
 			}
 		})
 	}
 
 	// A window counts only the entries inside it.
-	got, _ := l.Sessions(SessionFilter{TenantID: "local", SessionID: "sub-1", Since: &since})
+	page, _ := l.Sessions(SessionFilter{TenantID: "local", SessionID: "sub-1", Since: &since})
+	got := page.Sessions
 	if len(got) != 1 || got[0].Counts.Total != 1 || got[0].Agents[0].AgentID != "helper" {
 		t.Errorf("windowed sub-1 = %+v", got)
 	}

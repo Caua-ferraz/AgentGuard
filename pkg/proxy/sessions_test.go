@@ -105,6 +105,9 @@ func TestSessions_ListAndDetail(t *testing.T) {
 		if d.Session.SessionID != "orch" || d.Session.Counts.Total != 1 || len(d.Entries) != 1 || d.Truncated {
 			t.Errorf("orch detail = %+v", d)
 		}
+		if list.Truncated || d.ChildrenTruncated {
+			t.Errorf("small log reported truncated: list %v children %v", list.Truncated, d.ChildrenTruncated)
+		}
 		if len(d.Children) != 2 {
 			t.Fatalf("orch children = %+v, want 2", d.Children)
 		}

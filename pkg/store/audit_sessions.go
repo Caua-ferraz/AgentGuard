@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -189,48 +190,38 @@ func querySessions(ctx context.Context, db *sql.DB, d sqlDialect, tenantID strin
 	}
 	defer rows.Close()
 
-	type seen struct {
-		agents     map[audit.SessionAgent]bool
-		transports map[string]bool
-		parentID   int64 // MIN(id) of the parent chosen so far
+	type tuple struct {
+		agentID, subagent, transport, parent string
+		firstID                              int64 // MIN(id): when the tuple first appears
 	}
-	sets := make([]seen, len(out))
-	for i := range sets {
-		sets[i] = seen{agents: map[audit.SessionAgent]bool{}, transports: map[string]bool{}}
-	}
+	tuples := make([][]tuple, len(out))
 	for rows.Next() {
 		var (
-			sessionID, agentID, subagent, transport, parent string
-			firstID                                         int64
+			sessionID string
+			tp        tuple
 		)
-		if err := rows.Scan(&sessionID, &agentID, &subagent, &transport, &parent, &firstID); err != nil {
+		if err := rows.Scan(&sessionID, &tp.agentID, &tp.subagent, &tp.transport, &tp.parent, &tp.firstID); err != nil {
 			return nil, fmt.Errorf("store: scan session agents: %w", err)
 		}
-		i, ok := index[sessionID]
-		if !ok {
-			continue
-		}
-		set := &sets[i]
-		if ag := (audit.SessionAgent{AgentID: agentID, Subagent: subagent}); ag != (audit.SessionAgent{}) {
-			set.agents[ag] = true
-		}
-		set.transports[transport] = true
-		// The parent is the one named by the session's first entry that
-		// names one, as in the file backend.
-		if parent != "" && (out[i].ParentSessionID == "" || firstID < set.parentID) {
-			out[i].ParentSessionID = parent
-			set.parentID = firstID
+		if i, ok := index[sessionID]; ok {
+			tuples[i] = append(tuples[i], tp)
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: query session agents: %w", err)
 	}
+	// Replay the tuples in the order they first appear, so the lists keep
+	// the first agents and transports seen when they hit their caps, and
+	// the parent is the one named by the session's first entry that names
+	// one: the same rules as the file backend's scan.
 	for i := range out {
-		for ag := range sets[i].agents {
-			out[i].Agents = append(out[i].Agents, ag)
-		}
-		for t := range sets[i].transports {
-			out[i].Transports = append(out[i].Transports, t)
+		sort.Slice(tuples[i], func(a, b int) bool { return tuples[i][a].firstID < tuples[i][b].firstID })
+		for _, tp := range tuples[i] {
+			out[i].AddAgent(tp.agentID, tp.subagent)
+			out[i].AddTransport(tp.transport)
+			if out[i].ParentSessionID == "" {
+				out[i].ParentSessionID = tp.parent
+			}
 		}
 		out[i].SortLists()
 	}
@@ -290,10 +281,13 @@ func (s *PostgresStore) QuerySessions(ctx context.Context, tenantID string, f au
 	return querySessions(ctx, s.db, postgresDialect, tenantID, f)
 }
 
-// Sessions implements audit.SessionQuerier for the store-backed logger.
-func (a auditLoggerAdapter) Sessions(f audit.SessionFilter) ([]audit.SessionSummary, error) {
+// Sessions implements audit.SessionQuerier for the store-backed logger. SQL
+// aggregation holds no per-session state in this process, so the page is
+// never Truncated.
+func (a auditLoggerAdapter) Sessions(f audit.SessionFilter) (audit.SessionPage, error) {
 	if ss, ok := a.s.(SessionSink); ok {
-		return ss.QuerySessions(context.Background(), f.TenantID, f)
+		list, err := ss.QuerySessions(context.Background(), f.TenantID, f)
+		return audit.SessionPage{Sessions: list}, err
 	}
 	// Hide this adapter's own Sessions so QuerySessions aggregates the
 	// entries Query returns instead of calling back here.

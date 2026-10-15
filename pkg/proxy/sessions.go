@@ -27,21 +27,25 @@ const (
 
 // sessionList is the body of GET /v1/sessions. Since and Until echo the
 // window that was searched, so a client that left since out can see the
-// default it got.
+// default it got. Truncated is audit.SessionPage's: the window held more
+// sessions than the file backend tracks, so the list may miss some.
 type sessionList struct {
-	Since    time.Time              `json:"since"`
-	Until    *time.Time             `json:"until,omitempty"`
-	Sessions []audit.SessionSummary `json:"sessions"`
+	Since     time.Time              `json:"since"`
+	Until     *time.Time             `json:"until,omitempty"`
+	Sessions  []audit.SessionSummary `json:"sessions"`
+	Truncated bool                   `json:"truncated"`
 }
 
 // sessionDetail is the body of GET /v1/sessions/{id}. Truncated is true when
 // the session has more entries than ?limit= let through; page on with
 // ?since= set to the last entry's timestamp plus a nanosecond.
+// ChildrenTruncated is true when not every child session is listed.
 type sessionDetail struct {
-	Session   audit.SessionSummary   `json:"session"`
-	Children  []audit.SessionSummary `json:"children"`
-	Entries   []audit.Entry          `json:"entries"`
-	Truncated bool                   `json:"truncated"`
+	Session           audit.SessionSummary   `json:"session"`
+	Children          []audit.SessionSummary `json:"children"`
+	ChildrenTruncated bool                   `json:"children_truncated"`
+	Entries           []audit.Entry          `json:"entries"`
+	Truncated         bool                   `json:"truncated"`
 }
 
 // parseTimeParam parses an optional RFC 3339 query parameter. Empty
@@ -84,8 +88,10 @@ func parseWindow(q url.Values) (since, until *time.Time, err error) {
 //   - ?limit=N — [1, MaxSessionListLimit], clamped above; default
 //     DefaultSessionListLimit.
 //
-// The store backend aggregates in SQL; the file backend scans the live
-// audit file once. Neither runs on the /v1/check path.
+// The store backend aggregates in SQL. The file backend scans the live
+// audit file (one to three passes) holding at most
+// audit.DefaultMaxTrackedSessions sessions, and says truncated when the
+// window held more. Neither runs on the /v1/check path.
 func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, err := parseBoundedInt(q.Get("limit"), DefaultSessionListLimit, 1, MaxSessionListLimit)
@@ -102,7 +108,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		d := time.Now().UTC().Add(-DefaultSessionWindow)
 		since = &d
 	}
-	sessions, err := audit.QuerySessions(s.cfg.Logger, audit.SessionFilter{
+	page, err := audit.QuerySessions(s.cfg.Logger, audit.SessionFilter{
 		TenantID:        TenantIDFromContext(r.Context()),
 		AgentID:         q.Get("agent_id"),
 		ParentSessionID: q.Get("parent_session_id"),
@@ -114,11 +120,11 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Query error: %v", err), http.StatusInternalServerError)
 		return
 	}
-	if sessions == nil {
-		sessions = []audit.SessionSummary{}
+	if page.Sessions == nil {
+		page.Sessions = []audit.SessionSummary{}
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(sessionList{Since: *since, Until: until, Sessions: sessions})
+	_ = json.NewEncoder(w).Encode(sessionList{Since: *since, Until: until, Sessions: page.Sessions, Truncated: page.Truncated})
 }
 
 // handleSessionGet returns one session: its summary, the sessions it
@@ -145,44 +151,29 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	tenant := TenantIDFromContext(r.Context())
-
-	summary, err := audit.QuerySessions(s.cfg.Logger, audit.SessionFilter{TenantID: tenant, SessionID: id, Since: since, Until: until})
+	d, err := audit.QuerySessionDetail(s.cfg.Logger, audit.SessionDetailFilter{
+		TenantID:   TenantIDFromContext(r.Context()),
+		SessionID:  id,
+		Since:      since,
+		Until:      until,
+		EntryLimit: limit,
+		ChildLimit: MaxSessionListLimit,
+	})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Query error: %v", err), http.StatusInternalServerError)
 		return
 	}
-	if len(summary) == 0 {
-		w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/json")
+	if !d.Found {
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "no audit entries for this session; check the id, or widen since/until"})
 		return
 	}
-	children, err := audit.QuerySessions(s.cfg.Logger, audit.SessionFilter{
-		TenantID: tenant, ParentSessionID: id, Since: since, Until: until, Limit: MaxSessionListLimit,
+	_ = json.NewEncoder(w).Encode(sessionDetail{
+		Session:           d.Session,
+		Children:          d.Children,
+		ChildrenTruncated: d.ChildrenTruncated,
+		Entries:           d.Entries,
+		Truncated:         d.Truncated,
 	})
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Query error: %v", err), http.StatusInternalServerError)
-		return
-	}
-	// One more than the limit tells a full page from a cut-off one.
-	entries, err := s.cfg.Logger.Query(audit.QueryFilter{
-		TenantID: tenant, SessionID: id, Since: since, Until: until, Limit: limit + 1,
-	})
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Query error: %v", err), http.StatusInternalServerError)
-		return
-	}
-	truncated := len(entries) > limit
-	if truncated {
-		entries = entries[:limit]
-	}
-	if children == nil {
-		children = []audit.SessionSummary{}
-	}
-	if entries == nil {
-		entries = []audit.Entry{}
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(sessionDetail{Session: summary[0], Children: children, Entries: entries, Truncated: truncated})
 }

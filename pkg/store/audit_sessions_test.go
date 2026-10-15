@@ -148,6 +148,7 @@ func TestPostgresStore_AuditBackendsAgree(t *testing.T) {
 	}
 	t.Run("query", func(t *testing.T) { checkQueryParity(t, fileLogger, pgLogger) })
 	t.Run("sessions", func(t *testing.T) { checkSessionParity(t, fileLogger, pgLogger) })
+	t.Run("detail", func(t *testing.T) { checkDetailParity(t, fileLogger, pgLogger) })
 }
 
 func TestPostgresStore_MigrateAddsSessionColumns(t *testing.T) {
