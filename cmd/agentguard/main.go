@@ -1371,9 +1371,42 @@ type auditQuery struct {
 	Session, ParentSession, Since, Until string
 }
 
+// serverBefore14 asks the server's /health for its version and reports
+// whether it is a release older than 1.4. A version that isn't a release
+// number ("dev", a test build) or a server that doesn't answer counts as
+// not older: the query that follows reports a connection problem itself.
+func serverBefore14(baseURL string) (version string, old bool) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(strings.TrimRight(baseURL, "/") + "/health")
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+	var h struct {
+		Version string `json:"version"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&h) != nil {
+		return "", false
+	}
+	v := strings.TrimPrefix(h.Version, "v")
+	if v == "" || v[0] < '0' || v[0] > '9' {
+		return h.Version, false
+	}
+	major, minor, _ := parseVersionTriple(v)
+	return h.Version, major < 1 || (major == 1 && minor < 4)
+}
+
 // runAuditQuery prints the audit entries matching q from the server at
 // baseURL and returns the exit code.
 func runAuditQuery(stdout, stderr io.Writer, baseURL string, q auditQuery, apiKey string) int {
+	// A server before 1.4 ignores the parameters it doesn't know and
+	// returns every entry, which would read as a filtered answer.
+	if q.ParentSession != "" || q.Since != "" || q.Until != "" {
+		if v, old := serverBefore14(baseURL); old {
+			fmt.Fprintf(stderr, "agentguard audit: the server at %s runs AgentGuard %s, which ignores --since, --until and --parent-session (added in 1.4); upgrade the server, or leave those flags out\n", baseURL, v)
+			return 1
+		}
+	}
 	params := url.Values{}
 	params.Set("limit", fmt.Sprintf("%d", q.Limit))
 	if q.Order != "" {

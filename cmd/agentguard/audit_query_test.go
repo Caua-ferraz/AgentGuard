@@ -76,6 +76,49 @@ func TestRunAuditQuery_SendsSessionAndTimeFilters(t *testing.T) {
 	}
 }
 
+// A server before 1.4 would ignore since/until/parent_session_id and
+// return everything, so the CLI refuses rather than print that as an
+// answer. Dev builds, and servers whose version can't be read, are let
+// through.
+func TestRunAuditQuery_RefusesNewFiltersOnAnOlderServer(t *testing.T) {
+	cases := []struct {
+		name, health string
+		q            auditQuery
+		wantCode     int
+		wantQueried  bool
+	}{
+		{"1.3 server with --since", `{"status":"ok","version":"1.3.2"}`, auditQuery{Limit: 5, Since: "2026-10-14T10:00:00Z"}, 1, false},
+		{"1.3 server with --parent-session", `{"status":"ok","version":"v1.3.0"}`, auditQuery{Limit: 5, ParentSession: "orch"}, 1, false},
+		{"0.9 server with --until", `{"status":"ok","version":"0.9.1"}`, auditQuery{Limit: 5, Until: "2026-10-14T10:00:00Z"}, 1, false},
+		{"1.3 server with only --session", `{"status":"ok","version":"1.3.2"}`, auditQuery{Limit: 5, Session: "s"}, 0, true},
+		{"1.4 server", `{"status":"ok","version":"1.4.0"}`, auditQuery{Limit: 5, Since: "2026-10-14T10:00:00Z"}, 0, true},
+		{"release candidate", `{"status":"ok","version":"1.4.0-rc1"}`, auditQuery{Limit: 5, Since: "2026-10-14T10:00:00Z"}, 0, true},
+		{"dev build", `{"status":"ok","version":"dev"}`, auditQuery{Limit: 5, Since: "2026-10-14T10:00:00Z"}, 0, true},
+		{"no version", `{"status":"ok"}`, auditQuery{Limit: 5, Since: "2026-10-14T10:00:00Z"}, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			queried := false
+			mux := http.NewServeMux()
+			mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(tc.health)) })
+			mux.HandleFunc("/v1/audit", func(w http.ResponseWriter, r *http.Request) {
+				queried = true
+				_, _ = w.Write([]byte(`[]`))
+			})
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+			var out, errOut bytes.Buffer
+			code := runAuditQuery(&out, &errOut, srv.URL, tc.q, "")
+			if code != tc.wantCode || queried != tc.wantQueried {
+				t.Fatalf("exit %d queried %v, want %d %v (stderr %q)", code, queried, tc.wantCode, tc.wantQueried, errOut.String())
+			}
+			if code == 1 && !strings.Contains(errOut.String(), "ignores --since, --until and --parent-session (added in 1.4)") {
+				t.Errorf("stderr = %q", errOut.String())
+			}
+		})
+	}
+}
+
 func TestAuditCmd_BadTimeIsAUsageMistake(t *testing.T) {
 	dir := t.TempDir()
 	agentguard(t, dir, nil, "audit", "--since", "yesterday").expect(t, 2, "", "--since: \"yesterday\" is neither a duration")
