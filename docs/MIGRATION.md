@@ -703,3 +703,115 @@ claude-code`, and 1.2.x has neither command. Before rolling back, open
 `agentguard setup` and choose *Change settings* → start at login: *No*, and
 *Disconnect Claude Code*. Then install 1.2.x with `AGENTGUARD_VERSION=1.2.0`
 and the one-line installer.
+
+## v1.3.x → v1.4.0
+
+1.4.0 adds hooks for Cursor, Gemini CLI and Codex CLI, a tamper-evident audit
+log, `agentguard test`, session correlation and replay, `agentguard report`,
+Streamable HTTP upstreams for the MCP gateway, and an OpenAI Agents SDK
+adapter. Nothing was removed or renamed. A few behaviors are stricter, and
+two of them can change what a policy decides.
+
+### What happens automatically
+
+- **The store gains two columns.** `audit_entries` gets `parent_session_id`
+  and `subagent` on first start, on SQLite and Postgres. SQLite builds their
+  indexes during that start, which can make it slower on a large audit
+  table; it logs `building index … (about N rows)` first. Postgres builds them
+  in the background with `CREATE INDEX CONCURRENTLY`, one replica at a time;
+  queries work meanwhile. Nothing else in the store changes.
+- **Rotated audit files carry a `segment_id`** in their `_meta` header. Older
+  files and checkpoints still match by `created_at`.
+- **The audit log is not sealed** unless you turn it on, so its lines stay
+  byte-identical to 1.3. Installs that `agentguard setup` makes from now on
+  are sealed.
+
+### Behavior changes worth knowing about
+
+**Policy decisions**
+
+- **`require_prior` with an unreadable history.** If the lookup behind a
+  `require_prior` condition fails (a store or audit-log error), a deny or
+  require_approval rule gated on it now fires, and an allow rule doesn't
+  match. In 1.3 a deny rule silently didn't fire. With no history querier
+  configured at all, nothing changes: the condition means "no prior action",
+  as before. Write `agentguard test` cases with `prior:` to pin what your
+  rules should do.
+
+**API**
+
+- **`GET /v1/audit` validates `since` and `until`.** A value that isn't
+  RFC 3339, or an `until` before `since`, gets 400. 1.3 ignored both
+  parameters and returned every entry. Write a `+` in a time offset as `%2B`
+  (an unencoded `+` before the offset is accepted).
+
+**Python adapters**
+
+- **Conflicting alias arguments are denied.** Tool input that sets `command`
+  and `cmd`, or `path` and `file_path`, to different values is denied
+  locally, without a server call, so the denial isn't in the server's audit
+  log. Tool input that sets them to the same value, or only one of them, is
+  checked as before.
+- **`parent_session_id` comes from the `Guard` or the call**, never from a
+  tool's input.
+
+**MCP gateway**
+
+- **A host message without an id is forwarded only if it's a notification**
+  (`notifications/*`). A request method sent without an id, such as an
+  id-less `tools/call`, is dropped and logged. MCP already treats it as
+  invalid.
+
+**CLI**
+
+- **`agentguard audit` with `--session`, `--parent-session`, `--since` or
+  `--until` against a pre-1.4 server** exits 1 instead of printing every
+  entry, since that server would ignore the filters.
+
+### New surfaces
+
+- `agentguard hook cursor`, `hook gemini-cli`, `hook codex`, and
+  `--fail-closed` on every hook; connecting each agent from `agentguard setup`.
+- `agentguard server --audit-seal`, `--audit-seal-key-file`,
+  `--audit-anchor-interval`; `agentguard audit verify`; `GET /v1/audit/head`.
+- `agentguard test`.
+- `parent_session_id` on `/v1/check`; `GET /v1/sessions`,
+  `GET /v1/sessions/{id}`; `since`, `until` and `parent_session_id` on
+  `GET /v1/audit`; `agentguard audit --session --parent-session --since
+  --until`; the dashboard's Sessions view.
+- `agentguard report`.
+- `agentguard-mcp-gateway --upstream-http` and `--upstream-header`.
+- Python `agentguard.adapters.openai_agents` and the `openai-agents` extra.
+- Audit transports `cursor`, `gemini_cli`, `codex_cli` (and `claude_code`).
+
+See [`CLI.md`](CLI.md), [`CODING_AGENTS.md`](CODING_AGENTS.md),
+[`COMPLIANCE.md`](COMPLIANCE.md) and [`MCP_GATEWAY.md`](MCP_GATEWAY.md).
+
+### What you should do
+
+1. If your policy uses `require_prior`, decide whether the stricter handling
+   of an unreadable history is what you want, and add `agentguard test`
+   cases for it.
+2. Check scripts that call `GET /v1/audit` with `since` or `until` for the
+   format: RFC 3339.
+3. Swap the binaries: `agentguard setup` → *Update*, rerun the one-line
+   installer, or `go install github.com/Caua-ferraz/AgentGuard/cmd/...@v1.4.0`.
+   Upgrade the SDKs with `pip install --upgrade agentguardproxy==1.4.0` and
+   `npm install @lictorate/agentguard@1.4.0`.
+4. To seal an existing install, add `--audit-seal --audit-seal-key-file
+   <file>` to the server. Keep the key where agents can't write it, and
+   publish anchors somewhere off the machine (the log line reaches journald,
+   syslog or your SIEM).
+5. Connect Cursor, Gemini CLI or Codex CLI from `agentguard setup` if you
+   use them.
+
+### Rollback to v1.3.x
+
+1.3 reads what 1.4 wrote: the two new store columns are ignored, and a sealed
+audit log is still valid JSON Lines (1.3 ignores the seal fields). Before
+rolling back, disconnect Cursor, Gemini CLI and Codex CLI in `agentguard
+setup`, since 1.3 has no hook for them, and remove `--audit-seal` flags from
+the server's command line if you added them by hand. A login service written
+by 1.4's `setup` passes `--audit-seal`; choose *Change settings* → start at
+login: *No* first, then set it up again after installing 1.3 with
+`AGENTGUARD_VERSION=1.3.0` and the one-line installer.
