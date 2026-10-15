@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -292,12 +293,40 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 			return fmt.Errorf("store: migrate: acquire advisory lock: %w", err)
 		}
 		for _, stmt := range pgSchemaStmts {
+			if name := pgIndexName(stmt); name != "" {
+				// CREATE INDEX IF NOT EXISTS locks the table (SHARE)
+				// before it looks for the index, so on an existing schema
+				// it would wait behind the background CONCURRENTLY build
+				// (SHARE UPDATE EXCLUSIVE), which itself waits for every
+				// older transaction to end: a boot could time out behind
+				// any long reader. Skip the ones that already exist.
+				var exists bool
+				if err := tx.QueryRowContext(ctx, `SELECT to_regclass($1) IS NOT NULL`, name).Scan(&exists); err != nil {
+					return fmt.Errorf("store: migrate: look up index %s: %w", name, err)
+				}
+				if exists {
+					continue
+				}
+			}
 			if _, err := tx.ExecContext(ctx, stmt); err != nil {
 				return fmt.Errorf("store: migrate: %w", err)
 			}
 		}
 		return addMissingColumns(ctx, tx)
 	})
+}
+
+// pgIndexRe matches a schema statement that creates an index and captures
+// the index name.
+var pgIndexRe = regexp.MustCompile(`^CREATE INDEX IF NOT EXISTS (\w+)\s+ON\s`)
+
+// pgIndexName is the index a pgSchemaStmts statement creates, or "" when
+// it creates something else.
+func pgIndexName(stmt string) string {
+	if m := pgIndexRe.FindStringSubmatch(stmt); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
 // Ping verifies connectivity.
