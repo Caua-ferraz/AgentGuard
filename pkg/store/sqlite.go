@@ -12,7 +12,6 @@ import (
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, registered under the name "sqlite"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
-	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
 // SQLiteStore is the single-node, zero-config Store backend. It owns one
@@ -157,7 +156,9 @@ CREATE TABLE IF NOT EXISTS audit_entries (
     reason      TEXT    NOT NULL DEFAULT '',
     rule        TEXT    NOT NULL DEFAULT '',
     duration_ms INTEGER NOT NULL DEFAULT 0,
-    transport   TEXT    NOT NULL DEFAULT ''
+    transport   TEXT    NOT NULL DEFAULT '',
+    parent_session_id TEXT NOT NULL DEFAULT '',
+    subagent    TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_audit_tenant_ts ON audit_entries(tenant_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_agent     ON audit_entries(agent_id);
@@ -201,11 +202,13 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
-	// approvals one-shot/actor columns.
+	// approvals one-shot/actor columns; audit session columns (v1.4).
 	additive := []string{
 		`ALTER TABLE approvals ADD COLUMN consumed_at   TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE approvals ADD COLUMN resolved_via  TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE approvals ADD COLUMN resolved_from TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE audit_entries ADD COLUMN parent_session_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE audit_entries ADD COLUMN subagent          TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range additive {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
@@ -217,7 +220,21 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 			return fmt.Errorf("store: migrate (additive column): %w", err)
 		}
 	}
+	// Indexes on additive columns come after the ALTERs: in schemaSQL they
+	// would fail on a DB whose table predates the column.
+	for _, stmt := range auditSessionIndexes {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("store: migrate (index): %w", err)
+		}
+	}
 	return nil
+}
+
+// auditSessionIndexes serve the session queries (v1.4): one session's
+// entries, and the sessions started by a parent. Same SQL on both backends.
+var auditSessionIndexes = []string{
+	`CREATE INDEX IF NOT EXISTS idx_audit_tenant_session ON audit_entries(tenant_id, session_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_audit_tenant_parent  ON audit_entries(tenant_id, parent_session_id)`,
 }
 
 // Ping verifies connectivity.
@@ -475,8 +492,8 @@ func (s *SQLiteStore) AppendAudit(ctx context.Context, entries []audit.Entry) er
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		stmt, err := tx.PrepareContext(ctx, `
 			INSERT INTO audit_entries
-			    (tenant_id, timestamp, session_id, agent_id, scope, action, command, path, domain, url, decision, reason, rule, duration_ms, transport)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			    (tenant_id, timestamp, session_id, agent_id, scope, action, command, path, domain, url, decision, reason, rule, duration_ms, transport, parent_session_id, subagent)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 		if err != nil {
 			return err
 		}
@@ -491,6 +508,7 @@ func (s *SQLiteStore) AppendAudit(ctx context.Context, entries []audit.Entry) er
 				e.SessionID, e.AgentID, e.Request.Scope, e.Request.Action, e.Request.Command,
 				e.Request.Path, e.Request.Domain, e.Request.URL,
 				string(e.Result.Decision), e.Result.Reason, e.Result.Rule, e.DurationMs, e.EffectiveTransport(),
+				e.Request.ParentSessionID, e.Request.Meta[audit.SubagentMetaKey],
 			); err != nil {
 				return err
 			}
@@ -534,12 +552,17 @@ func (s *SQLiteStore) QueryAudit(ctx context.Context, tenantID string, filter au
 		conds = append(conds, "transport = ?")
 		args = append(args, filter.Transport)
 	}
-	if filter.Since != nil {
-		conds = append(conds, "timestamp >= ?")
-		args = append(args, filter.Since.UTC().Format(time.RFC3339Nano))
+	if filter.ParentSessionID != "" {
+		conds = append(conds, "parent_session_id = ?")
+		args = append(args, filter.ParentSessionID)
+	}
+	if filter.Since != nil || filter.Until != nil {
+		a := &sqlArgs{d: sqliteDialect}
+		conds = append(conds, windowConds(a, filter.Since, filter.Until)...)
+		args = append(args, a.args...)
 	}
 
-	q := `SELECT tenant_id, timestamp, session_id, agent_id, scope, action, command, path, domain, url, decision, reason, rule, duration_ms, transport FROM audit_entries`
+	q := `SELECT tenant_id, timestamp, session_id, agent_id, scope, action, command, path, domain, url, decision, reason, rule, duration_ms, transport, parent_session_id, subagent FROM audit_entries`
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
 	}
@@ -566,25 +589,7 @@ func (s *SQLiteStore) QueryAudit(ctx context.Context, tenantID string, filter au
 	}
 	defer rows.Close()
 
-	var out []audit.Entry
-	for rows.Next() {
-		var (
-			e        audit.Entry
-			tsStr    string
-			decision string
-		)
-		if err := rows.Scan(
-			&e.TenantID, &tsStr, &e.SessionID, &e.AgentID, &e.Request.Scope, &e.Request.Action,
-			&e.Request.Command, &e.Request.Path, &e.Request.Domain, &e.Request.URL,
-			&decision, &e.Result.Reason, &e.Result.Rule, &e.DurationMs, &e.Transport,
-		); err != nil {
-			return out, fmt.Errorf("store: scan audit: %w", err)
-		}
-		e.Timestamp = parseTime(tsStr)
-		e.Result.Decision = policy.Decision(decision)
-		out = append(out, e)
-	}
-	return out, rows.Err()
+	return scanAuditRows(rows)
 }
 
 // --- helpers ---
