@@ -91,7 +91,7 @@ All notable changes to this project will be documented in this file.
   - **Postgres** builds them in the background with `CREATE INDEX CONCURRENTLY`, one replica at a time. An index left invalid by an interrupted build is rebuilt.
 - **A Postgres boot runs DDL only when something is missing.** `ALTER … ADD COLUMN` and `CREATE INDEX` used to run on every start, taking table locks on `approvals` and `audit_entries` even when the schema was current.
 - **Rotated audit files carry a random `segment_id`** in their `_meta` header, and the replay checkpoint identifies files by it (falling back to `created_at` for older files).
-- **Toolchain and dependencies:** Go 1.26.9; `golang.org/x/text` v0.43.0 and `golang.org/x/sync` v0.24.0.
+- **Toolchain and dependencies:** Go 1.26.9; `golang.org/x/text` v0.43.0, `golang.org/x/sync` v0.24.0, `golang.org/x/sys` v0.49.0 and `golang.org/x/term` v0.47.0; the SQLite driver `modernc.org/sqlite` v1.60.1 (SQLite itself stays 3.53.4) with `modernc.org/libc` v1.77.1.
 - **The README roadmap** now lists what 1.3 shipped and what 1.4 and later plan. The AutoGPT adapter is dropped from the roadmap. The Python package classifier is `Production/Stable`.
 
 ### Fixed
@@ -102,6 +102,7 @@ All notable changes to this project will be documented in this file.
 - **A line over 4 MiB stopped the audit reader.** The startup replay dropped every later entry from its counters. The line is now counted as corrupt and skipped.
 - **The MCP gateway's notification fan-out ran on the frame loop**, so a slow upstream delayed the host's next request.
 - **A Postgres node could fail to boot** by timing out behind another replica's index build while any long transaction was open.
+- **A disk fault in SQLite's shared-memory file crashed the server.** With the SQLite store, a fault while reading a WAL database's memory-mapped `-shm` file ended the process. The updated SQLite driver fails that one query with a disk I/O error and keeps the connection usable.
 
 ### Security
 
