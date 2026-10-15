@@ -88,9 +88,12 @@ func codexRequests(in codexHookInput) ([]policy.ActionRequest, bool, error) {
 	case "Bash":
 		cmd, argv := codexCommand(in.ToolInput)
 		// ["apply_patch", "<patch>"] is Codex's own patch call made through
-		// the shell tool: its files get the apply_patch checks, not a shell
-		// rule matched against the patch text.
-		if len(argv) == 2 && baseCommand(argv[0]) == "apply_patch" {
+		// the shell tool (Codex also accepts "applypatch"): its files get
+		// the apply_patch checks, not a shell rule matched against the
+		// patch text. Only the bare names count. Codex handles those
+		// itself; a path such as ./apply_patch runs whatever program is
+		// there, so it gets the shell check like any other command.
+		if len(argv) == 2 && (argv[0] == "apply_patch" || argv[0] == "applypatch") {
 			paths := patchPaths(argv[1])
 			if len(paths) == 0 {
 				return nil, false, errors.New("the patch names no files")
@@ -188,14 +191,6 @@ func shellSafeByte(c byte) bool {
 		return true
 	}
 	return strings.IndexByte("@%+=:,./_-", c) >= 0
-}
-
-// baseCommand is the last path element of a command word.
-func baseCommand(w string) string {
-	if i := strings.LastIndexAny(w, `/\`); i >= 0 {
-		return w[i+1:]
-	}
-	return w
 }
 
 // patchPaths lists the files an apply_patch patch writes, in order and

@@ -165,6 +165,21 @@ func TestCodexRequests(t *testing.T) {
 				{Scope: "filesystem", Action: "write", Path: proj("src/lib.rs")},
 				{Scope: "filesystem", Action: "write", Path: "/tmp/old.txt"},
 			}, false},
+		{"applypatch, Codex's other name for it, gets the file checks too", codexInput("Bash", map[string]any{"command": []string{"applypatch", patch}}),
+			[]wantReq{
+				{Scope: "filesystem", Action: "write", Path: proj("docs/new.md")},
+				{Scope: "filesystem", Action: "write", Path: proj("src/main.rs")},
+				{Scope: "filesystem", Action: "write", Path: proj("src/lib.rs")},
+				{Scope: "filesystem", Action: "write", Path: "/tmp/old.txt"},
+			}, false},
+		{"a program at a path named apply_patch is a shell command too", codexInput("Bash", map[string]any{"command": []string{"./apply_patch", patch}}),
+			[]wantReq{
+				{Scope: "shell", Command: "./apply_patch '" + patch + "'"},
+				{Scope: "filesystem", Action: "write", Path: proj("docs/new.md")},
+				{Scope: "filesystem", Action: "write", Path: proj("src/main.rs")},
+				{Scope: "filesystem", Action: "write", Path: proj("src/lib.rs")},
+				{Scope: "filesystem", Action: "write", Path: "/tmp/old.txt"},
+			}, false},
 		{"apply_patch: one write per file, moves included", codexInput("apply_patch", map[string]any{"command": patch}),
 			[]wantReq{
 				{Scope: "filesystem", Action: "write", Path: proj("docs/new.md")},
