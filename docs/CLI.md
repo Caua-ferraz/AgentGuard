@@ -516,7 +516,7 @@ Query `/v1/audit` for recent decisions. All filters are optional and AND-combine
 | `--since <time>` | *(none)* | **(v1.4)** Entries at or after this time. A duration counts back from now (`2h`, `30m`, `90s`); otherwise an RFC 3339 time (`2026-10-14T09:00:00Z`). |
 | `--until <time>` | *(none)* | **(v1.4)** Entries before this time (exclusive). Same forms as `--since`. A value in neither form is a usage mistake (exit 2). |
 
-A server older than 1.4 ignores the parameters behind `--since`, `--until` and `--parent-session` and returns every entry. So when one of those flags is set, the CLI first reads the server's version from `/health`, and exits 1 if it is an older release. A dev build, or a server whose version it can't read, is queried as usual.
+A server older than 1.4 ignores the parameters behind `--since`, `--until` and `--parent-session` and returns every entry. So when one of those flags is set, the CLI first asks the server whether it reads them (one `/v1/audit` request with a `since` that isn't a time: 1.4 answers `400`, older servers `200`), and exits 1 if it doesn't. Asking, rather than comparing version numbers, also works with dev builds.
 | `--limit <int>` | `50` | Max entries. Server clamps silently above configured ceiling (default 1000). |
 | `--order <desc\|asc>` | `desc` | **(v1.2)** `desc` shows the newest entries first; `asc`, the oldest (the order before v1.2, when `--limit` returned the first entries in the log rather than the latest). |
 | `--api-key <key>` | `$AGENTGUARD_API_KEY` | Bearer token. |

@@ -1371,29 +1371,42 @@ type auditQuery struct {
 	Session, ParentSession, Since, Until string
 }
 
-// serverBefore14 asks the server's /health for its version and reports
-// whether it is a release older than 1.4. A version that isn't a release
-// number ("dev", a test build) or a server that doesn't answer counts as
-// not older: the query that follows reports a connection problem itself.
-func serverBefore14(baseURL string) (version string, old bool) {
+// serverIgnoresTimeFilters reports whether the server would ignore the
+// since, until and parent_session_id parameters, as servers before 1.4
+// do. It asks /v1/audit with a since that isn't a time: a server that
+// reads since answers 400, one that ignores it answers 200.
+//
+// Asking the server what it does, rather than comparing the version from
+// /health, keeps working for dev builds and for a build of the 1.4 code
+// before its version string is bumped. Any other answer (401, an error, no
+// answer) counts as not ignoring: the query that follows reports it.
+// version is /health's, best effort, for the message.
+func serverIgnoresTimeFilters(baseURL, apiKey string) (ignores bool, version string) {
+	base := strings.TrimRight(baseURL, "/")
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(strings.TrimRight(baseURL, "/") + "/health")
+	req, err := http.NewRequest(http.MethodGet, base+"/v1/audit?limit=1&since=probe", nil)
 	if err != nil {
-		return "", false
+		return false, ""
 	}
-	defer resp.Body.Close()
-	var h struct {
-		Version string `json:"version"`
+	attachAuth(req, apiKey)
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, ""
 	}
-	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&h) != nil {
-		return "", false
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, ""
 	}
-	v := strings.TrimPrefix(h.Version, "v")
-	if v == "" || v[0] < '0' || v[0] > '9' {
-		return h.Version, false
+	if h, err := client.Get(base + "/health"); err == nil {
+		var body struct {
+			Version string `json:"version"`
+		}
+		_ = json.NewDecoder(io.LimitReader(h.Body, 64<<10)).Decode(&body)
+		h.Body.Close()
+		version = body.Version
 	}
-	major, minor, _ := parseVersionTriple(v)
-	return h.Version, major < 1 || (major == 1 && minor < 4)
+	return true, version
 }
 
 // runAuditQuery prints the audit entries matching q from the server at
@@ -1402,8 +1415,12 @@ func runAuditQuery(stdout, stderr io.Writer, baseURL string, q auditQuery, apiKe
 	// A server before 1.4 ignores the parameters it doesn't know and
 	// returns every entry, which would read as a filtered answer.
 	if q.ParentSession != "" || q.Since != "" || q.Until != "" {
-		if v, old := serverBefore14(baseURL); old {
-			fmt.Fprintf(stderr, "agentguard audit: the server at %s runs AgentGuard %s, which ignores --since, --until and --parent-session (added in 1.4); upgrade the server, or leave those flags out\n", baseURL, v)
+		if ignores, v := serverIgnoresTimeFilters(baseURL, apiKey); ignores {
+			running := "a version before 1.4"
+			if v != "" {
+				running = "AgentGuard " + v
+			}
+			fmt.Fprintf(stderr, "agentguard audit: the server at %s runs %s, which ignores --since, --until and --parent-session (added in 1.4) and would return every entry; upgrade the server, or leave those flags out\n", baseURL, running)
 			return 1
 		}
 	}
