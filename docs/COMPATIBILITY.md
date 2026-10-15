@@ -156,7 +156,9 @@ stray positional argument is now an error instead of being ignored. 1.4.0 adds
 the `audit verify` subcommand and the server's `--audit-seal`,
 `--audit-seal-key-file` and `--audit-anchor-interval` flags; sealing is off
 unless asked for. It also adds `audit`'s `--session`, `--parent-session`,
-`--since` and `--until` flags. See [`CLI.md`](CLI.md).
+`--since` and `--until` flags, and the `report` subcommand, whose JSON
+output (`format_version: 1`) follows the same additive-only rule
+([`COMPLIANCE.md`](COMPLIANCE.md#json-shape)). See [`CLI.md`](CLI.md).
 
 Full reference: [`CLI.md`](CLI.md) · [`MCP_GATEWAY.md`](MCP_GATEWAY.md) ·
 [`LLM_API_PROXY.md`](LLM_API_PROXY.md).

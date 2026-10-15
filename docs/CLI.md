@@ -22,6 +22,7 @@ Work with a running server:
   approve     Approve a pending action by ID
   deny        Deny a pending action by ID
   audit       Query the audit log
+  report      Write a compliance evidence report from the audit log
 
 Other:
   hook        Checks a coding agent's tool calls (its hook; setup connects it)
@@ -52,7 +53,7 @@ Global conventions:
 - Flags can go before or after positional arguments: `agentguard approve <id> --url <url>` and `agentguard approve --url <url> <id>` are the same. A `--` ends the flags; everything after it is an argument.
 - `agentguard help`, `-h` and `--help` print help on stdout and exit `0`; so do `agentguard help <command>` and `agentguard <command> -h`. A mistyped command or flag gets a suggestion: `agentguard: unknown command "--serve". Did you mean 'agentguard server'?`
 - `--api-key` on `server` and on the client subcommands (`approve`, `deny`, `status`, `audit`) falls back to the `AGENTGUARD_API_KEY` env var; `--url` on the client subcommands falls back to `AGENTGUARD_URL`; `--policy` on `server`, `validate`, `check` and `test` is found automatically when not given (see [Policy file](#policy-file)).
-- Exit code `0` = success, `1` = failure, `2` = the command line was wrong (unknown command or flag, missing or extra argument). `check` and `test` have their own codes — see below; `audit verify` adds `3` for a file it can't read.
+- Exit code `0` = success, `1` = failure, `2` = the command line was wrong (unknown command or flag, missing or extra argument). `check` and `test` have their own codes — see below; `audit verify` and `report` add `3` for a file (or server) they can't read.
 
 ---
 
@@ -569,6 +570,47 @@ Exit status: `0` the chain is intact, `1` it is broken or an anchor does not mat
 
 ---
 
+## `agentguard report`
+
+**(v1.4)** Write a compliance evidence report for a period: decisions by decision, scope, transport, tenant and agent; the top deny and `require_approval` rules; the approvals on record; the agents and sessions seen; whether the audit log is sealed and intact; posture checks; and a mapping to SOC 2 criteria. It is supporting evidence for an audit, not a certification. What the report holds, its JSON shape and its limits: [`COMPLIANCE.md`](COMPLIANCE.md).
+
+```
+agentguard report [--since <time>] [--until <time>]
+                  [--audit-log <path> [--key-file <file> ...] | --url <url> [--api-key <key>] [--tenant-id <id>]]
+                  [--policy <file>] [--output md|json|html] [--out-file <file>]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--since <time>` | 24h before `--until` | Start of the period, inclusive. |
+| `--until <time>` | now | End of the period, exclusive. |
+| `--audit-log <path>` | `audit.jsonl` | The live audit log. Its rotated archives (gzip or plain) are read too. |
+| `--key-file <file>` | *(none)* | HMAC seal key, passed to the audit verify check. Repeatable. |
+| `--url <url>` | *(none)* | Read the audit log from this server instead of the files. `--guard-url` is the same. `AGENTGUARD_URL` does not switch to server mode. |
+| `--api-key <key>` | `$AGENTGUARD_API_KEY`, then the key `setup` saved | Bearer token for `--url`. |
+| `--tenant-id <id>` | `local` | Tenant to report on with `--url` (uses `/v1/t/<id>/audit`). |
+| `--policy <file>` | see below | Policy file named in the report with its SHA-256. |
+| `--output <md\|json\|html>` | `md` | Markdown, JSON (a stable shape) or one self-contained HTML page. |
+| `--out-file <file>` | stdout | Write the report to this file (mode `0600`) and print one line saying where. |
+
+Times are RFC 3339 (`2026-10-01T09:00:00Z`), a date (`2026-10-01`, midnight UTC), or a duration back in time (`90m`, `24h`, `7d`, `1d12h`; `d` is 24 hours). A duration `--until` counts back from now; a duration `--since` counts back from `--until`.
+
+Reading files (the default), the report runs the same check as `audit verify` and then reads every entry of the files it walked. With `--url` it pages `GET /v1/audit` oldest first with `since` and `until`, and drops any entry outside the period itself, so a server older than 1.4 that ignores those parameters still gives a correct report. It reads the seal head from `GET /v1/audit/head`, but does not verify the chain. A server with the file backend answers from its live file only, so rotated archives are left out; run the report on the files to include them.
+
+Without `--policy`, a report on files names the policy `server` would load ([Policy file](#policy-file)); with `--url`, only `--policy` names one.
+
+```bash
+agentguard report --since 2026-09-01 --until 2026-10-01 \
+  --audit-log /var/lib/agentguard/audit.jsonl \
+  --key-file /var/lib/agentguard/audit-seal.key \
+  --output html --out-file september.html
+# Report written to september.html (audit entries in the period: 48211; audit log: intact).
+```
+
+Exit status: `0` the report was written, `1` it was written but the audit log failed verification, `2` command-line mistake, `3` the log, a key file, the policy file or the server can't be read. A log sealed with a key and no `--key-file` is not an error here: the report is written and says the chain was not verified.
+
+---
+
 ## `agentguard tenant` (v0.6)
 
 Manage per-tenant policies in the durable store. Operates directly on the store database (the server need not be running — SQLite WAL permits a concurrent writer, and a running server picks up a new tenant on its next lookup). Requires persistence (the store); these commands open it directly.
@@ -672,12 +714,12 @@ Both replace the binaries and keep your policy, and say whether they updated or 
 
 | Var | Consumed by | Default |
 |---|---|---|
-| `AGENTGUARD_API_KEY` | `server`, `approve`, `deny`, `status`, `audit` (when `--api-key` unset); the MCP gateway and LLM proxy; the SDKs | empty |
+| `AGENTGUARD_API_KEY` | `server`, `approve`, `deny`, `status`, `audit`, `report --url` (when `--api-key` unset); the MCP gateway and LLM proxy; the SDKs | empty |
 | `AGENTGUARD_URL` | `approve`, `deny`, `status`, `audit` (when `--url` unset); the MCP gateway and LLM proxy (when `--guard-url` unset); the SDKs | `http://localhost:8080` (CLI, SDKs), `http://127.0.0.1:8080` (gateway, proxy) |
 | `AGENTGUARD_POLICY` | `server`, `validate`, `check`, `test` (when `--policy` unset) — see [Policy file](#policy-file) | unset |
 | `AGENTGUARD_NO_UPDATE_CHECK` | Every subcommand except `server` (which never checks) — disables the GitHub Releases startup check when set to any value other than `0` | unset |
 
-A flag always wins over its environment variable. When no key is given at all, `approve`, `deny`, `status`, `audit`, the MCP gateway and the LLM proxy use the key [`agentguard setup`](#agentguard-setup) saved (`~/.config/agentguard/api-key`, `%APPDATA%\agentguard\api-key`). The server never picks that file up by itself — a key changes which interfaces it listens on — only through `--api-key-file`.
+A flag always wins over its environment variable. When no key is given at all, `approve`, `deny`, `status`, `audit`, `report --url`, the MCP gateway and the LLM proxy use the key [`agentguard setup`](#agentguard-setup) saved (`~/.config/agentguard/api-key`, `%APPDATA%\agentguard\api-key`). The server never picks that file up by itself — a key changes which interfaces it listens on — only through `--api-key-file`.
 
 ---
 
