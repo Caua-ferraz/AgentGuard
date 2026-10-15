@@ -1466,13 +1466,18 @@ func plural(n int, noun string) string {
 
 // matchCompoundAllow looks for an allow rule whose pattern itself contains
 // shell syntax and matches the command segment by segment.
+//
+// Only real shell syntax makes a pattern compound. A plain pattern such as
+// `bash -lc *` names one command; read as compound, its two segments
+// (`bash -lc *` and `*`) would allow any two-command request outright,
+// skipping the per-command deny and approval rules.
 func (e *Engine) matchCompoundAllow(rules []RuleSet, req ActionRequest, segments []string, tenantID string) (CheckResult, bool) {
 	for _, rs := range rules {
 		if rs.Scope != req.Scope {
 			continue
 		}
 		for _, rule := range rs.Allow {
-			if rule.Pattern == "" || !isCompoundShell(rule.Pattern) {
+			if rule.Pattern == "" || !hasShellSyntax(rule.Pattern) {
 				continue
 			}
 			pat, err := parseShell(rule.Pattern)

@@ -49,6 +49,24 @@ func TestCheck_WholeStringRulesSeeNestedScripts(t *testing.T) {
 	})
 }
 
+// An allow pattern that names a nested shell, such as `bash -lc *`, is a
+// plain pattern for one command. Before, it counted as a compound pattern
+// with two segments and allowed any two-command request outright.
+func TestCheck_NestedShellAllowPatternIsNotCompound(t *testing.T) {
+	eng := NewEngineFromPolicy(&Policy{Version: "1", Name: "lc", Rules: []RuleSet{{
+		Scope:           "shell",
+		Deny:            []Rule{{Pattern: "dd if=/dev/*"}},
+		RequireApproval: []Rule{{Pattern: "rm -rf *"}},
+		Allow:           []Rule{{Pattern: "bash -lc *"}, {Pattern: "git *"}},
+	}}})
+	checkShell(t, eng, []shellCheckCase{
+		{"rm -rf inside an allowed bash -lc needs approval", "bash -lc 'rm -rf /'", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"dd inside an allowed bash -lc is denied", "bash -lc 'dd if=/dev/zero of=/dev/sda'", Deny, "deny:shell:dd if=/dev/*"},
+		{"an allowed command inside bash -lc runs", "bash -lc 'git status'", Allow, ""},
+		{"a command no rule allows inside bash -lc is denied", "bash -lc 'whoami'", Deny, ""},
+	})
+}
+
 func TestParseShell_RecordsNestedScripts(t *testing.T) {
 	cases := []struct {
 		name    string

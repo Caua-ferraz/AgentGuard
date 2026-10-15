@@ -42,10 +42,8 @@ var shellSyntaxByte = func() (t [256]bool) {
 // (`sh -c rm`, `eval rm -rf /`), which the plain whole-string match would
 // see as one harmless-looking command.
 func isCompoundShell(cmd string) bool {
-	for i := 0; i < len(cmd); i++ {
-		if shellSyntaxByte[cmd[i]] {
-			return true
-		}
+	if hasShellSyntax(cmd) {
+		return true
 	}
 	mayRunString := strings.Contains(cmd, "eval") || (strings.Contains(cmd, "sh") && strings.Contains(cmd, "-"))
 	if !mayRunString {
@@ -53,6 +51,16 @@ func isCompoundShell(cmd string) bool {
 	}
 	_, ok := innerScript(strings.Fields(cmd))
 	return ok
+}
+
+// hasShellSyntax reports whether s contains any byte of shellSyntaxChars.
+func hasShellSyntax(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if shellSyntaxByte[s[i]] {
+			return true
+		}
+	}
+	return false
 }
 
 // errShellUnparseable means the tokenizer could not split the command with
