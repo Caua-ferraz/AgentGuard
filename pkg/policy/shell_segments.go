@@ -19,6 +19,7 @@ import (
 	"errors"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // shellSyntaxChars are the bytes that can change how a shell splits or
@@ -505,20 +506,32 @@ func (p *shellParser) readWord() (string, error) {
 
 // readANSIC decodes a $'…' string whose $ is at p.i, with bash's escapes:
 // \n \t \r \a \b \e \E \f \v \\ \' \" \?, \xHH, \NNN (octal), \uHHHH,
-// \UHHHHHHHH and \cX. Any other escape keeps its backslash, as in bash.
-// An escape that can't be decoded safely (a NUL, which ends the string in
-// bash, a missing digit, a value that isn't a byte or a code point) makes
-// the command unparseable.
+// \UHHHHHHHH and \cX. Any other escape keeps its backslash, as in bash. A
+// NUL (\0, \x00, \u0000, \c@) ends the string, as in bash: `$'abc\0def'`
+// is abc, and `read -d $'\0'` reads up to a NUL byte. An escape that can't
+// be decoded safely (a missing digit, a value that isn't a byte or a code
+// point) makes the command unparseable.
 func (p *shellParser) readANSIC(b *strings.Builder) error {
 	p.i += 2 // $'
+	var out []byte
+	ended := false // a NUL was decoded; the rest is read but dropped
+	put := func(c byte) {
+		if c == 0 {
+			ended = true
+		}
+		if !ended {
+			out = append(out, c)
+		}
+	}
 	for p.i < len(p.s) {
 		c := p.s[p.i]
 		if c == '\'' {
 			p.i++
+			b.Write(out)
 			return nil
 		}
 		if c != '\\' {
-			b.WriteByte(c)
+			put(c)
 			p.i++
 			continue
 		}
@@ -529,23 +542,23 @@ func (p *shellParser) readANSIC(b *strings.Builder) error {
 		p.i += 2
 		switch e {
 		case 'n':
-			b.WriteByte('\n')
+			put('\n')
 		case 't':
-			b.WriteByte('\t')
+			put('\t')
 		case 'r':
-			b.WriteByte('\r')
+			put('\r')
 		case 'a':
-			b.WriteByte(0x07)
+			put(0x07)
 		case 'b':
-			b.WriteByte(0x08)
+			put(0x08)
 		case 'e', 'E':
-			b.WriteByte(0x1b)
+			put(0x1b)
 		case 'f':
-			b.WriteByte(0x0c)
+			put(0x0c)
 		case 'v':
-			b.WriteByte(0x0b)
+			put(0x0b)
 		case '\\', '\'', '"', '?':
-			b.WriteByte(e)
+			put(e)
 		case 'x', 'u', 'U':
 			digits := 2
 			switch e {
@@ -555,21 +568,23 @@ func (p *shellParser) readANSIC(b *strings.Builder) error {
 				digits = 8
 			}
 			v, n := p.readDigits(16, digits)
-			if n == 0 || v == 0 {
+			switch {
+			case n == 0:
 				return errShellUnparseable
-			}
-			if e == 'x' {
-				b.WriteByte(byte(v))
-			} else if err := writeCodePoint(b, v); err != nil {
-				return err
+			case e == 'x' || v == 0:
+				put(byte(v))
+			case v > unicode.MaxRune || (v >= 0xd800 && v <= 0xdfff):
+				return errShellUnparseable
+			case !ended:
+				out = utf8.AppendRune(out, rune(v))
 			}
 		case '0', '1', '2', '3', '4', '5', '6', '7':
 			p.i-- // the first digit is part of the value
 			v, _ := p.readDigits(8, 3)
-			if v == 0 || v > 0xff {
+			if v > 0xff {
 				return errShellUnparseable
 			}
-			b.WriteByte(byte(v))
+			put(byte(v))
 		case 'c':
 			// \cX is control-X; \c? is DEL.
 			if p.i >= len(p.s) {
@@ -587,13 +602,10 @@ func (p *shellParser) readANSIC(b *strings.Builder) error {
 				}
 				v = x & 0x1f
 			}
-			if v == 0 {
-				return errShellUnparseable
-			}
-			b.WriteByte(v)
+			put(v)
 		default:
-			b.WriteByte('\\')
-			b.WriteByte(e)
+			put('\\')
+			put(e)
 		}
 	}
 	return errShellUnparseable // unterminated $'
@@ -624,16 +636,6 @@ func digitValue(c byte) int {
 		return int(c-'A') + 10
 	}
 	return -1
-}
-
-// writeCodePoint writes v as UTF-8, or fails for a value that is not a
-// Unicode scalar value.
-func writeCodePoint(b *strings.Builder, v uint32) error {
-	if v > unicode.MaxRune || (v >= 0xd800 && v <= 0xdfff) {
-		return errShellUnparseable
-	}
-	b.WriteRune(rune(v))
-	return nil
 }
 
 // readDoubleQuoted reads a "…" string whose opening quote is at p.i.

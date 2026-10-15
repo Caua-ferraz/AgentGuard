@@ -89,6 +89,11 @@ tests:
     expect: REQUIRE_APPROVAL
     expect_rule: "require_approval:shell:rm -rf *"
 
+  - name: reading NUL-separated file names runs
+    hook: claude-code
+    input: {tool_name: Bash, tool_input: {command: "find . -name '*.log' -print0 | while IFS= read -r -d $'\\0' f; do wc -l \"$f\"; done"}}
+    expect: ALLOW
+
   - name: eval of a tool's setup output runs
     hook: claude-code
     input: {tool_name: Bash, tool_input: {command: "eval \"$(ssh-agent -s)\""}}

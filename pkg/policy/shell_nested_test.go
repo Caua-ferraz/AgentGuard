@@ -384,6 +384,13 @@ func TestParseShell_ANSICQuoting(t *testing.T) {
 		{"next to other quoting", `e$'c'"h"o x`, "echo x"},
 		{"a translated string", `$"rm" -rf x`, "rm -rf x"},
 		{"in double quotes it is literal", `echo "$'x'"`, "echo $'x'"},
+		// A NUL ends the string, as in bash.
+		{"a NUL ends the string", `echo $'abc\0def'`, "echo abc"},
+		{"a hex NUL", `echo $'ab\x00\x41'`, "echo ab"},
+		{"a unicode NUL", `echo $'ab\u0000cd'`, "echo ab"},
+		{"a control NUL", `echo $'ab\c@cd'`, "echo ab"},
+		{"a NUL alone is empty", `read -r -d $'\0' f`, "read -r -d  f"},
+		{"quotes after a NUL still close the string", `echo $'a\0\'b' c`, "echo a c"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -399,14 +406,11 @@ func TestParseShell_ANSICQuoting(t *testing.T) {
 	for _, in := range []string{
 		`echo $'unterminated`,
 		`echo $'a\'`,
-		`echo $'\x00'`,
-		`echo $'\0'`,
 		`echo $'\x'`,
 		`echo $'\u'`,
 		`echo $'\U110000'`,
 		`echo $'\ud800'`,
 		`echo $'\777'`,
-		`echo $'\c@'`,
 		`echo $'\c`,
 	} {
 		if _, err := parseShell(in); err == nil {
@@ -426,12 +430,16 @@ func TestCheck_ANSICQuoting(t *testing.T) {
 		{"a decoded bash -c script", `bash -c $'rm -rf /tmp/x'`, RequireApproval, "require_approval:shell:rm -rf *"},
 		{"a script split by a decoded newline", `bash -c $'ls\nrm -rf /tmp/x'`, RequireApproval, "require_approval:shell:rm -rf *"},
 		{"hex escapes", `$'\x72\x6d' -rf /tmp/x`, RequireApproval, "require_approval:shell:rm -rf *"},
-		{"a NUL is denied as unparseable", `echo $'\x00'`, Deny, "deny:shell:unparseable_command"},
+		{"a bad escape is denied as unparseable", `echo $'\x'`, Deny, "deny:shell:unparseable_command"},
+		{"reading NUL-separated names runs", `find . -print0 | while IFS= read -r -d $'\0' f; do echo "$f"; done`, Allow, "allow:shell:*"},
+		{"sort -z with a NUL separator runs", `sort -z -t $'\0' -k1 list`, Allow, "allow:shell:*"},
+		{"read -d with a hex NUL runs", `read -r -d $'\x00' f`, Allow, "allow:shell:*"},
 	})
 	// A decoded tab is an ordinary character: echo still matches echo *.
 	allow := NewEngineFromPolicy(compoundTestPolicy())
 	checkShell(t, allow, []shellCheckCase{
 		{"echo of a decoded tab runs", `echo $'a\tb'`, Allow, "allow:shell:echo *"},
+		{"echo of a string with a NUL runs", `echo $'abc\0def'`, Allow, "allow:shell:echo *"},
 	})
 }
 
