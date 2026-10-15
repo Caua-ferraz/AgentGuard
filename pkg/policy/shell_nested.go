@@ -433,12 +433,54 @@ func startsWithLauncher(cmd string) bool {
 	if isAssignment(w) {
 		return true
 	}
-	name := baseName(w)
-	if _, ok := launcherNames[name]; ok {
+	var buf [maxLauncherName]byte
+	name, ok := lowerCommandName(&buf, w)
+	if !ok {
+		return false
+	}
+	// string(name) in a map index does not allocate.
+	if _, ok := launcherNames[string(name)]; ok {
 		return true
 	}
-	_, ok := shellNames[trimVersion(name)]
-	return ok
+	if v := trimVersionBytes(name); len(v) < len(name) {
+		_, ok = shellNames[string(v)]
+		return ok
+	}
+	return false
+}
+
+// maxLauncherName bounds the command names startsWithLauncher lowercases;
+// every launcher name, with a version, is shorter.
+const maxLauncherName = 24
+
+// lowerCommandName writes the lowercased last path element of w into buf,
+// without a .exe suffix, as commandName does but without allocating. ok is
+// false when the name doesn't fit, so it can't be a launcher.
+func lowerCommandName(buf *[maxLauncherName]byte, w string) ([]byte, bool) {
+	w = baseName(w)
+	if len(w) > 4 && strings.EqualFold(w[len(w)-4:], ".exe") {
+		w = w[:len(w)-4]
+	}
+	if len(w) > len(buf) {
+		return nil, false
+	}
+	for k := 0; k < len(w); k++ {
+		c := w[k]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		buf[k] = c
+	}
+	return buf[:len(w)], true
+}
+
+// trimVersionBytes is trimVersion for a byte slice.
+func trimVersionBytes(name []byte) []byte {
+	end := len(name)
+	for end > 0 && (isDigit(name[end-1]) || name[end-1] == '.') {
+		end--
+	}
+	return name[:end]
 }
 
 // launcherNames are the command names startsWithLauncher looks for.
@@ -454,9 +496,11 @@ var launcherNames = func() map[string]struct{} {
 }()
 
 // commandName is the name a command word is looked up by: its last path
-// element.
+// element, lowercased and without a .exe suffix. File systems on macOS and
+// Windows ignore case, so BASH and /BIN/SH run bash and sh there.
 func commandName(w string) string {
-	return baseName(w)
+	name := strings.ToLower(baseName(w))
+	return strings.TrimSuffix(name, ".exe")
 }
 
 // isAssignment reports whether w is a NAME=value word.
@@ -484,10 +528,13 @@ func nameByte(c byte, first bool) bool {
 }
 
 // baseName is the last path element of a command word, so /bin/sh and
-// /usr/bin/bash name sh and bash.
+// /usr/bin/bash name sh and bash. A backslash separates too, for a quoted
+// Windows path.
 func baseName(w string) string {
-	if i := strings.LastIndexByte(w, '/'); i >= 0 {
-		return w[i+1:]
+	for i := len(w) - 1; i >= 0; i-- {
+		if w[i] == '/' || w[i] == '\\' {
+			return w[i+1:]
+		}
 	}
 	return w
 }

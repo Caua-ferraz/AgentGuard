@@ -328,6 +328,39 @@ func TestCheck_MoreCommandStrings(t *testing.T) {
 	}
 }
 
+// macOS and Windows file systems ignore case, so BASH and /BIN/SH run bash
+// and sh there. Shell, eval and wrapper names are matched without case
+// (and without .exe), in the parser and in the hot-path pre-check.
+func TestCheck_CommandNamesIgnoreCase(t *testing.T) {
+	eng := NewEngineFromPolicy(&Policy{Version: "1", Name: "case", Rules: []RuleSet{{
+		Scope:           "shell",
+		RequireApproval: []Rule{{Pattern: "rm -rf *"}},
+		Allow:           []Rule{{Pattern: "*"}},
+	}}})
+	checkShell(t, eng, []shellCheckCase{
+		{"BASH -c", "BASH -c 'rm -rf /tmp/x'", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"/BIN/SH -c", "/BIN/SH -c 'rm -rf /tmp/x'", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"Zsh with a version", "Zsh5 -c 'rm -rf /tmp/x'", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"bash.exe on Windows", `"C:\Program Files\Git\bin\bash.exe" -c 'rm -rf /tmp/x'`, RequireApproval, "require_approval:shell:rm -rf *"},
+		{"EVAL", "EVAL 'rm -rf /tmp/x'", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"ENV without shell syntax", "ENV rm -rf /tmp/x", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"Nohup without shell syntax", "Nohup rm -rf /tmp/x", RequireApproval, "require_approval:shell:rm -rf *"},
+	})
+	for _, cmd := range []string{"BASH -c id", "/BIN/SH -c id", "Eval id", "SUDO id", "Bash.EXE -c id"} {
+		if !isCompoundShell(cmd) {
+			t.Errorf("isCompoundShell(%q) = false, want true", cmd)
+		}
+	}
+	for _, cmd := range []string{"GIT status", "Makefile-Builder --all", "LS -LA"} {
+		if isCompoundShell(cmd) {
+			t.Errorf("isCompoundShell(%q) = true, want false", cmd)
+		}
+		if n := testing.AllocsPerRun(100, func() { isCompoundShell(cmd) }); n != 0 {
+			t.Errorf("isCompoundShell(%q) allocates %v times per call, want 0", cmd, n)
+		}
+	}
+}
+
 // isCompoundShell runs on every shell check. An ordinary command without
 // shell syntax must not allocate, even when it holds "sh" and "-" (before,
 // `git push --force` split itself into words to look for a nested shell).

@@ -77,6 +77,12 @@ tests:
     input: {tool_name: Bash, tool_input: {command: "grep -c x <<< 'rm -rf /tmp/project'"}}
     expect: ALLOW
 
+  - name: an upper-case BASH -c still needs approval
+    hook: claude-code
+    input: {tool_name: Bash, tool_input: {command: "BASH -c 'rm -rf /tmp/project'"}}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:shell:rm -rf *"
+
   - name: eval of a tool's setup output runs
     hook: claude-code
     input: {tool_name: Bash, tool_input: {command: "eval \"$(ssh-agent -s)\""}}
