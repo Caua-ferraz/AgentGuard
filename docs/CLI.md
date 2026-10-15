@@ -22,11 +22,11 @@ Work with a running server:
   approve     Approve a pending action by ID
   deny        Deny a pending action by ID
   audit       Query the audit log
-  report      Write a compliance evidence report from the audit log
 
 Other:
   hook        Checks a coding agent's tool calls (its hook; setup connects it)
   migrate     Upgrade the audit log's format (the server does this at startup)
+  report      Write a compliance evidence report from the audit log
   version     Print version information (also: --version)
   help        Show help for a command
 

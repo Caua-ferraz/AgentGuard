@@ -50,9 +50,11 @@ var commands = []command{
 	{Name: "approve", Group: "Work with a running server", Summary: "Approve a pending action by ID"},
 	{Name: "deny", Group: "Work with a running server", Summary: "Deny a pending action by ID"},
 	{Name: "audit", Group: "Work with a running server", Summary: "Query the audit log"},
-	{Name: "report", Group: "Work with a running server", Summary: "Write a compliance evidence report from the audit log"},
 	{Name: "hook", Group: "Other", Summary: "Checks a coding agent's tool calls (its hook; setup connects it)"},
 	{Name: "migrate", Group: "Other", Summary: "Upgrade the audit log's format (the server does this at startup)"},
+	// report reads the audit log files by default, a server only with
+	// --url, so it sits with migrate rather than the server commands.
+	{Name: "report", Group: "Other", Summary: "Write a compliance evidence report from the audit log"},
 	{Name: "version", Group: "Other", Summary: "Print version information (also: --version)"},
 	{Name: "help", Group: "Other", Summary: "Show help for a command"},
 }
