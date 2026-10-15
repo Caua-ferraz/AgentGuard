@@ -58,7 +58,9 @@ func Assess(r *Report) []Check {
 	case act.UnmaskedSecretEntries > 0:
 		secrets.Status, secrets.Detail = CheckFail, fmt.Sprintf("Entries holding text that looks like a secret (an API key, token or password): %d. Is the server running with --audit-redact=false?", act.UnmaskedSecretEntries)
 	case act.RedactedEntries > 0:
-		secrets.Status, secrets.Detail = CheckPass, fmt.Sprintf("Entries with masked secrets: %d. None holds an unmasked one.", act.RedactedEntries)
+		// Never a pass: an agent's own text can hold the marker too, so
+		// it is consistent with masking, not proof of it.
+		secrets.Status, secrets.Detail = CheckUnknown, fmt.Sprintf("Consistent with masking (--audit-redact) being on: entries show %q (%d), and none holds a secret the built-in patterns find. Not proof: an agent's own text can contain %q.", redactedMarker, act.RedactedEntries, redactedMarker)
 	default:
 		secrets.Status, secrets.Detail = CheckUnknown, "No entry holds a secret, masked or not, so the log can't show whether masking (--audit-redact) is on."
 	}

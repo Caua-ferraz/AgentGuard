@@ -102,13 +102,13 @@ func TestAssess(t *testing.T) {
 		want map[string]string // check name -> status
 	}{
 		{
-			name: "a verified keyed log with masked secrets passes the file checks",
+			name: "a verified keyed log passes the file checks; masked secrets are only consistent with masking",
 			r: Report{Source: Source{Mode: SourceFile}, Integrity: intact,
 				Activity: Activity{RedactedEntries: 2}},
 			want: map[string]string{
 				"Audit log sealed": CheckPass, "Seal uses a secret key": CheckPass, "Seal chain verified": CheckPass,
 				"Entries outside the seal chain": CheckPass, "Unreadable lines": CheckPass,
-				"Secrets masked in the log": CheckPass, "Audit API requires an API key": CheckUnknown,
+				"Secrets masked in the log": CheckUnknown, "Audit API requires an API key": CheckUnknown,
 			},
 		},
 		{

@@ -109,7 +109,7 @@ it would be written into the report. Give the key with `--api-key`.
   | Seal chain verified | audit verify's result; unknown in server mode |
   | Entries outside the seal chain | Files: entries written before sealing began, or fail when the chain breaks (nothing after the break is protected). Server: entries in the period that came without `seq` or `hash` |
   | Unreadable lines | Lines of the files that are not entries, or files that end early |
-  | Secrets masked in the log | Fails when a request or reason still matches the built-in secret patterns of `--audit-redact`; passes when masked values (`[REDACTED]`) appear and no unmasked one does; unknown when the period holds neither |
+  | Secrets masked in the log | Fails when a request or reason still matches the built-in secret patterns of `--audit-redact`. Otherwise unknown: masked values (`[REDACTED]`) with no unmasked secret are consistent with masking being on, but not proof, since an agent's own text can contain the marker; with neither, the log can't show it |
   | Audit API requires an API key | Server mode: whether `GET /v1/audit` answers without the key |
 
 - **Control mapping.** See below.
