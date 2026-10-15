@@ -264,6 +264,7 @@ Full reference configs (nginx + Docker Compose + Kubernetes), auth/CORS/TLS deta
 | Approval workflow end-to-end | [`docs/APPROVAL_WORKFLOW.md`](docs/APPROVAL_WORKFLOW.md) |
 | Deployment / TLS / CORS | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) |
 | Day-2 operations | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) |
+| Compliance evidence report (`agentguard report`, SOC 2 mapping) | [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md) |
 | Metrics + alerting | [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) |
 | Tunable knobs | [`docs/TUNING.md`](docs/TUNING.md) |
 | SLO targets + measured baseline | [`docs/SLO.md`](docs/SLO.md) |

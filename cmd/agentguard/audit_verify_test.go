@@ -78,3 +78,36 @@ func TestCLI_AuditVerify(t *testing.T) {
 	// The query form of `audit` is unchanged.
 	agentguard(t, dir, nil, "audit", "stray").expect(t, 2, "", "unexpected argument \"stray\"")
 }
+
+// A log with entries but none sealed must not print "intact" or exit 0,
+// with or without a key.
+func TestCLI_AuditVerifyUnsealedLog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	l, err := audit.NewFileLogger(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := l.Log(audit.Entry{AgentID: "bot", Request: policy.ActionRequest{Scope: "shell", Command: "ls"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = l.Close()
+	agentguard(t, dir, nil, "audit", "verify").expect(t, 1, "NOT SEALED: none of the 3 entries is sealed", "")
+
+	// The _meta line a server writes when it starts sealing, after every
+	// entry.
+	key := []byte("seal-key")
+	keyFile := filepath.Join(dir, "seal.key")
+	if err := os.WriteFile(keyFile, key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(`{"_meta":{"schema_version":2,"created_at":"2026-10-01T00:00:00Z","seal":{"alg":"hmac-sha256","key_id":"` + audit.SealKeyID(key) + `"}}}` + "\n")
+	_ = f.Close()
+	agentguard(t, dir, nil, "audit", "verify", "--key-file", keyFile).expect(t, 1, "BROKEN: no entry is sealed", "")
+}

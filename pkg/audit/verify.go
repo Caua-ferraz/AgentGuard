@@ -30,6 +30,14 @@ type VerifyOptions struct {
 	// Anchors are published heads to check: the entry with Anchor.Seq must
 	// have Anchor.Hash. Other Anchor fields are ignored.
 	Anchors []Anchor
+	// WithoutKey checks a log sealed with an HMAC key when Keys is empty,
+	// instead of returning *SealKeyNeededError: everything but the hashes
+	// of the HMAC-sealed entries (every entry after a seal is sealed, seq
+	// has no gaps, each prev_hash is the hash before it, the files link
+	// up). VerifyReport.HashesUnchecked then says the hashes were skipped.
+	// Anyone can write a chain that passes this; it catches entries added,
+	// removed or reordered by hand, not a rewrite.
+	WithoutKey bool
 }
 
 // VerifyBreak is the first place the chain does not hold.
@@ -58,8 +66,10 @@ type AnchorResult struct {
 
 // VerifyReport is what VerifyChain found.
 type VerifyReport struct {
-	// OK is true when every sealed entry verified, the files link up, and
-	// no anchor mismatched or is missing.
+	// OK is true when every sealed entry verified, the files link up, no
+	// anchor mismatched or is missing, and, when the log has entries, at
+	// least one of them is sealed. An unsealed log is not OK and has no
+	// Break: nothing in it was checked.
 	OK bool `json:"ok"`
 	// Segments are the files walked, oldest first (base names).
 	Segments []string `json:"segments"`
@@ -77,10 +87,13 @@ type VerifyReport struct {
 	Unsealed uint64 `json:"unsealed"`
 	// Seals lists how the entries are sealed ("hmac-sha256 key <id>",
 	// "sha256"), in the order they appear.
-	Seals    []string       `json:"seals,omitempty"`
-	Warnings []string       `json:"warnings,omitempty"`
-	Break    *VerifyBreak   `json:"break,omitempty"`
-	Anchors  []AnchorResult `json:"anchors,omitempty"`
+	Seals []string `json:"seals,omitempty"`
+	// HashesUnchecked is true when VerifyOptions.WithoutKey skipped the
+	// hashes of entries sealed with a key that was not given.
+	HashesUnchecked bool           `json:"hashes_unchecked,omitempty"`
+	Warnings        []string       `json:"warnings,omitempty"`
+	Break           *VerifyBreak   `json:"break,omitempty"`
+	Anchors         []AnchorResult `json:"anchors,omitempty"`
 }
 
 // SealKeyNeededError is returned when the log is sealed with an HMAC key
@@ -109,9 +122,10 @@ func VerifyChain(livePath string, opts VerifyOptions) (*VerifyReport, error) {
 	files, warnings, linkBreak := chainFiles(livePath)
 
 	v := &verifier{
-		keys:    map[string][]byte{},
-		anchors: map[uint64]string{},
-		rep:     &VerifyReport{Warnings: warnings},
+		keys:       map[string][]byte{},
+		anchors:    map[uint64]string{},
+		rep:        &VerifyReport{Warnings: warnings},
+		withoutKey: opts.WithoutKey && len(opts.Keys) == 0,
 	}
 	for _, k := range opts.Keys {
 		v.keys[SealKeyID(k)] = k
@@ -148,11 +162,20 @@ func VerifyChain(livePath string, opts VerifyOptions) (*VerifyReport, error) {
 	if rep.Break == nil && len(opts.Keys) > 0 && !v.sawHMAC && rep.Entries > 0 {
 		rep.Break = &VerifyBreak{Reason: "no entry is sealed with a key: the log uses plain SHA-256, which anyone who can write the file can recompute"}
 	}
+	// Entries but none sealed: a seal declared only after every entry (a
+	// _meta line appended at the end) protects nothing. With a key this is
+	// a break; it used to verify as intact, with 0 sealed entries.
+	unprotected := rep.Entries == 0 && rep.PrunedBefore == 0 && rep.Unsealed > 0
+	if rep.Break == nil && len(opts.Keys) > 0 && unprotected {
+		rep.Break = &VerifyBreak{Reason: fmt.Sprintf("no entry is sealed: all %d entries come before the seal, so nothing in the log is tied to your key", rep.Unsealed)}
+	}
 	if rep.Break == nil && rep.Entries == 0 && rep.PrunedBefore == 0 {
 		rep.Warnings = append(rep.Warnings, "no sealed entries: is the server running with --audit-seal?")
 	}
 
-	rep.OK = rep.Break == nil
+	// A log with entries and none sealed is not OK either: nothing in it was
+	// verified, and calling it intact would read as a pass.
+	rep.OK = rep.Break == nil && !unprotected
 	for _, a := range opts.Anchors {
 		r := AnchorResult{Seq: a.Seq, Hash: a.Hash}
 		found, seen := v.anchors[a.Seq]
@@ -269,7 +292,8 @@ type verifier struct {
 	h       hash.Hash
 	sawHMAC bool
 
-	keyNeeded *SealKeyNeededError
+	keyNeeded  *SealKeyNeededError
+	withoutKey bool // VerifyOptions.WithoutKey
 
 	started  bool // the chain has begun: every entry from here must be sealed
 	nextSeq  uint64
@@ -420,11 +444,15 @@ func (v *verifier) line(path string, lineNo int, line []byte, first bool) bool {
 		v.fail(path, lineNo, `the hash field is malformed or is not the last field of the line`)
 		return true
 	}
-	v.h.Reset()
-	v.h.Write(body)
-	if want := hex.EncodeToString(v.h.Sum(nil)); want != sum {
-		v.fail(path, lineNo, "hash mismatch: the entry was changed after it was written (or it was sealed with another key)")
-		return true
+	// v.h is nil only for an HMAC seal checked WithoutKey: the hash can't
+	// be recomputed, everything else below still is.
+	if v.h != nil {
+		v.h.Reset()
+		v.h.Write(body)
+		if want := hex.EncodeToString(v.h.Sum(nil)); want != sum {
+			v.fail(path, lineNo, "hash mismatch: the entry was changed after it was written (or it was sealed with another key)")
+			return true
+		}
 	}
 
 	switch {
@@ -497,15 +525,19 @@ func (v *verifier) setSeal(path string, lineNo int, s *SealInfo) bool {
 	switch s.Alg {
 	case SealAlgHMACSHA256:
 		key, ok := v.keys[s.KeyID]
-		if !ok {
-			if len(v.keys) == 0 {
-				v.keyNeeded = &SealKeyNeededError{KeyID: s.KeyID, File: filepath.Base(path)}
-				return false
-			}
+		switch {
+		case ok:
+			v.h = hmac.New(sha256.New, key)
+		case v.withoutKey:
+			v.h = nil
+			v.rep.HashesUnchecked = true
+		case len(v.keys) == 0:
+			v.keyNeeded = &SealKeyNeededError{KeyID: s.KeyID, File: filepath.Base(path)}
+			return false
+		default:
 			v.fail(path, lineNo, "sealed with key id %s, but no --key-file has that id (yours: %s)", s.KeyID, strings.Join(v.keyIDs(), ", "))
 			return true
 		}
-		v.h = hmac.New(sha256.New, key)
 	case SealAlgSHA256:
 		if v.sawHMAC {
 			v.fail(path, lineNo, "sealing switches from an HMAC key to plain SHA-256 here: the entries after this line could have been rewritten by anyone")

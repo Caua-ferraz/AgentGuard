@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentGuard compliance evidence report</title>
+<style>
+:root { --fg: #1d1d1f; --muted: #5f6368; --bg: #fff; --line: #d9d9de; --head: #f4f4f6;
+  --pass: #1e7b34; --warn: #9a6200; --fail: #b3261e; --unknown: #5f6368; }
+@media (prefers-color-scheme: dark) {
+  :root { --fg: #e8e8ea; --muted: #a0a0a8; --bg: #161618; --line: #3a3a40; --head: #222226;
+    --pass: #6fcf87; --warn: #e3b341; --fail: #f28b82; --unknown: #a0a0a8; }
+}
+body { margin: 0 auto; max-width: 960px; padding: 24px 16px 48px; background: var(--bg); color: var(--fg);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+h1 { font-size: 1.6em; margin: 0 0 8px; }
+h2 { font-size: 1.25em; margin: 32px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--line); }
+h3 { font-size: 1em; margin: 20px 0 6px; }
+.note { color: var(--muted); }
+.disclaimer { border-left: 4px solid var(--warn); padding: 8px 12px; background: var(--head); }
+table { border-collapse: collapse; width: 100%; margin: 6px 0; }
+th, td { border: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+th { background: var(--head); font-weight: 600; }
+td.num { text-align: right; white-space: nowrap; width: 8em; }
+.status { font-weight: 600; text-transform: uppercase; font-size: 0.85em; white-space: nowrap; }
+.pass, .intact { color: var(--pass); }
+.warn, .not_sealed, .not_verified { color: var(--warn); }
+.fail, .broken { color: var(--fail); }
+.unknown { color: var(--unknown); }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9em; overflow-wrap: anywhere; }
+@media print { body { max-width: none; } h2 { break-after: avoid; } table { break-inside: avoid; } }
+</style>
+</head>
+<body>
+<h1>AgentGuard compliance evidence report</h1>
+<p class="disclaimer">Supporting evidence only. This report is not a SOC 2 report, a certification or an audit opinion; an auditor decides what it shows and whether it is enough.</p>
+
+<h2>Summary</h2>
+<table>
+<tr><th>Period</th><td>2026-10-01T00:00:00Z (inclusive) to 2026-10-08T00:00:00Z (exclusive)</td></tr>
+<tr><th>Generated</th><td>2026-10-08T01:00:00Z</td></tr>
+<tr><th>AgentGuard</th><td>1.4.0 (test)</td></tr>
+<tr><th>Source</th><td>audit log files: /var/lib/agentguard/audit.jsonl (2 files, unreadable lines: 0)</td></tr>
+<tr><th>Policy</th><td>configs/default.yaml (--policy), SHA-256 abababababababababababababababababababababababababababababababab</td></tr>
+<tr><th>Decisions</th><td>12 (ALLOW 5, DENY 3, REQUIRE_APPROVAL 4)</td></tr>
+<tr><th>Audit log</th><td><span class="status intact">intact</span></td></tr>
+</table>
+
+<h2>Audit log integrity</h2>
+<p><span class="status intact">intact</span> agentguard audit verify checked 14 sealed entries (seq 1 to 14): the chain is intact.</p>
+<ul>
+<li>Checked with: agentguard audit verify, over the log files</li>
+<li>Sealed with: hmac-sha256 key 0123456789abcdef</li>
+<li>Latest seal anchor: <code>seq 14, hash cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd</code></li>
+<li>Files, oldest first: audit.jsonl.20260930T120000Z.gz, audit.jsonl</li>
+</ul>
+
+
+<h2>Activity</h2>
+<p>12 entries, the first at 2026-10-01T00:00:00Z and the last at 2026-10-02T01:00:00Z.</p>
+<h3>Decisions</h3>
+<table>
+<tr><th>Decision</th><th>Count</th></tr>
+<tr><td>ALLOW</td><td class="num">5</td></tr>
+<tr><td>DENY</td><td class="num">3</td></tr>
+<tr><td>REQUIRE_APPROVAL</td><td class="num">4</td></tr>
+</table>
+<h3>Scopes</h3>
+<table>
+<tr><th>Scope</th><th>Count</th></tr>
+<tr><td>shell</td><td class="num">10</td></tr>
+<tr><td>network</td><td class="num">2</td></tr>
+</table>
+<h3>Transports</h3>
+<table>
+<tr><th>Transport</th><th>Count</th></tr>
+<tr><td>claude_code</td><td class="num">6</td></tr>
+<tr><td>sdk</td><td class="num">5</td></tr>
+<tr><td>mcp_gateway</td><td class="num">1</td></tr>
+</table>
+<h3>Tenants</h3>
+<table>
+<tr><th>Tenant</th><th>Count</th></tr>
+<tr><td>local</td><td class="num">11</td></tr>
+<tr><td>acme</td><td class="num">1</td></tr>
+</table>
+<h3>Agents</h3>
+<table>
+<tr><th>Agent</th><th>Count</th></tr>
+<tr><td>ci-bot</td><td class="num">6</td></tr>
+<tr><td>dev-bot</td><td class="num">5</td></tr>
+<tr><td>&lt;script&gt;alert(1)&lt;/script&gt;</td><td class="num">1</td></tr>
+</table>
+
+<h2>Top rules</h2>
+<h3>DENY</h3>
+<table>
+<tr><th>Rule</th><th>Count</th></tr>
+<tr><td>(default deny)</td><td class="num">1</td></tr>
+<tr><td>deny:approved</td><td class="num">1</td></tr>
+<tr><td>deny:shell:rm -rf *</td><td class="num">1</td></tr>
+</table>
+<h3>REQUIRE_APPROVAL</h3>
+<table>
+<tr><th>Rule</th><th>Count</th></tr>
+<tr><td>require_approval:shell:make deploy</td><td class="num">3</td></tr>
+<tr><td>require_approval:pending</td><td class="num">1</td></tr>
+</table>
+
+
+<h2>Approvals</h2>
+<table>
+<tr><th>Stage</th><th>Approval ids</th></tr>
+<tr><td>Sent for approval</td><td class="num">3</td></tr>
+<tr><td>Approved by a person</td><td class="num">1</td></tr>
+<tr><td>Denied by a person</td><td class="num">1</td></tr>
+<tr><td>Timed out</td><td class="num">unknown</td></tr>
+<tr><td>No outcome on record</td><td class="num">1</td></tr>
+</table>
+<p class="note">The audit log has an entry when an action is sent for approval, and another when the agent comes back with the approval id after a person decided. &#34;No outcome on record&#34; covers requests that timed out, were decided but not retried, were decided after the period, or are still pending.</p>
+
+<h2>Agents and sessions</h2>
+<ul>
+<li>Agents (3): &lt;script&gt;alert(1)&lt;/script&gt;, ci-bot, dev-bot</li>
+<li>Sessions (4): s1, s2|x, s3, s4</li>
+</ul>
+
+<h2>Posture checks</h2>
+<table>
+<tr><th>Check</th><th>Status</th><th>Detail</th></tr>
+<tr><td>Audit log sealed</td><td><span class="status pass">pass</span></td><td>Yes, and the chain verified: every sealed entry carries seq, prev_hash and hash.</td></tr>
+<tr><td>Seal uses a secret key</td><td><span class="status pass">pass</span></td><td>HMAC-SHA256, verified with the key: only a holder of the key can write a chain that verifies.</td></tr>
+<tr><td>Seal chain verified</td><td><span class="status pass">pass</span></td><td>agentguard audit verify checked 14 sealed entries (seq 1 to 14): the chain is intact.</td></tr>
+<tr><td>Entries outside the seal chain</td><td><span class="status pass">pass</span></td><td>None.</td></tr>
+<tr><td>Unreadable lines</td><td><span class="status pass">pass</span></td><td>Every line of the log files is an audit entry.</td></tr>
+<tr><td>Secrets masked in the log</td><td><span class="status fail">fail</span></td><td>Entries holding text that looks like a secret (an API key, token or password): 1. Is the server running with --audit-redact=false?</td></tr>
+<tr><td>Audit API requires an API key</td><td><span class="status unknown">unknown</span></td><td>Not checked: the report read the log files, not a server.</td></tr>
+</table>
+
+<h2>Control mapping (SOC 2)</h2>
+<p class="disclaimer">Supporting evidence only. This report is not a SOC 2 report, a certification or an audit opinion; an auditor decides what it shows and whether it is enough.</p>
+<table>
+<tr><th>Criterion</th><th>What this report shows</th><th>Where</th></tr>
+<tr><td><strong>CC6.1</strong> Logical access to protected assets is restricted</td><td>Agent actions that reached AgentGuard were checked against a policy (the policy file&#39;s SHA-256 abababababab…): 12 decisions, 3 denied, broken down by scope and agent.</td><td>Summary, Activity, Top rules, Posture checks</td></tr>
+<tr><td><strong>CC6.6</strong> Access from outside the system boundary is controlled</td><td>Actions reaching outside the agent (network, browser, MCP tools, LLM tool calls) went through AgentGuard; the scope and transport breakdowns and the deny rules show what was let through and what was blocked (2 scopes, 3 transports).</td><td>Activity, Top rules</td></tr>
+<tr><td><strong>CC7.2</strong> System components are monitored for anomalies</td><td>Every decision is recorded in the audit log; its seal status is &#34;intact&#34;, and the posture checks cover unreadable lines and unmasked secrets.</td><td>Audit log integrity, Activity, Posture checks</td></tr>
+<tr><td><strong>CC7.3</strong> Security events are evaluated</td><td>Entries sending an action to a person for approval: 4 (3 approval ids). On record as approved by a person: 1; denied by a person: 1. The top deny rules show which risky actions were stopped.</td><td>Approvals, Top rules</td></tr>
+<tr><td><strong>CC8.1</strong> Changes are authorized</td><td>The report names the policy file&#39;s SHA-256 abababababab…, so a reviewer can match it to an approved change. Actions the policy sends for approval (deploys, writes) needed a person&#39;s yes: see Approvals.</td><td>Summary, Approvals</td></tr>
+</table>
+
+<h2>Limits</h2>
+<ul>
+<li>The report counts what the audit log recorded. An action that never reached AgentGuard is not in it.</li>
+<li>Approval outcomes show only when the agent came back with the approval id after a person decided. The log does not record the decision itself, who made it, or a request that timed out.</li>
+<li>The policy SHA-256 is of the file as it was when the report was made. The audit log does not record which version of the policy made each decision.</li>
+<li>The secret check uses the built-in patterns only, not a policy&#39;s notifications.redaction.extra_patterns.</li>
+<li>Archives that no file links to, and archives already pruned by --audit-max-backups or --audit-max-age-days, are not read.</li>
+<li>Entries a running server still holds in its buffer or its overflow file (&lt;audit-log&gt;.overflow.jsonl) are not in the log yet, so they are not counted.</li>
+</ul>
+</body>
+</html>

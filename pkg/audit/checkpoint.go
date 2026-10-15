@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -386,6 +387,15 @@ func readMetaAny(path string) (*MetaRecord, error) {
 // a gzip archive the offset is in the uncompressed stream, so the reader
 // discards that many bytes before scanning.
 func replayFile(path string, start int64, fn func(Entry)) error {
+	return scanFile(path, start, fn, nil)
+}
+
+// scanFile is replayFile with a say in what happens to a line that is not
+// a valid entry: bad is called with the parse error. A nil bad is the
+// startup replay's handling (count it on /metrics, log the first one);
+// ReadEntries passes its own, so a command-line tool can count the lines
+// without log noise.
+func scanFile(path string, start int64, fn func(Entry), bad func(error)) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -413,50 +423,92 @@ func replayFile(path string, start int64, fn func(Entry)) error {
 			return err
 		}
 	}
-	return replayReader(r, path, fn)
+	return scanReader(r, path, fn, bad)
 }
 
-// replayReader is the shared line scanner: skips blank and `_meta` lines,
-// counts and skips unparseable lines (they are visible on /metrics as
-// agentguard_audit_corrupt_lines_total, exactly as Query reports them), and
-// invokes fn for every well-formed entry.
-func replayReader(r io.Reader, name string, fn func(Entry)) error {
-	scanner := bufio.NewScanner(r)
-	// 4 MiB max line — match Query()'s headroom so a single oversize entry
-	// does not silently abort the replay (bufio.ErrTooLong otherwise stops
-	// the scan with no signal to the caller).
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-
-	corruptLogged := false
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		if bytes.HasPrefix(bytes.TrimLeft(line, " \t"), metaLinePrefix) {
-			continue
-		}
-		var entry Entry
-		if err := json.Unmarshal(line, &entry); err != nil {
+// scanReader is the shared line scanner: skips blank and `_meta` lines,
+// hands unparseable lines to bad and skips them, and invokes fn for every
+// well-formed entry. With a nil bad (the startup replay) they are counted
+// on /metrics as agentguard_audit_corrupt_lines_total, exactly as Query
+// reports them, and the first is logged; with a caller's bad nothing is
+// logged or counted: the caller reports them.
+func scanReader(r io.Reader, name string, fn func(Entry), bad func(error)) error {
+	replay := bad == nil
+	if replay {
+		corruptLogged := false
+		bad = func(err error) {
 			metrics.IncAuditCorruptLine()
 			if !corruptLogged {
 				log.Printf("WARN audit: replay skipping corrupt line in %s (%v)", name, err)
 				corruptLogged = true
 			}
+		}
+	}
+	br := bufio.NewReaderSize(r, 64*1024)
+	for {
+		line, tooLong, err := readBoundedLine(br, maxEntryLine)
+		switch {
+		case tooLong:
+			// One bad line, not the end of the file: a bufio.Scanner stopped
+			// here, so every entry after an oversize one was silently lost
+			// while audit verify (which has no cap) called the log intact.
+			bad(fmt.Errorf("line longer than %d bytes", maxEntryLine))
+		case len(line) == 0:
+		case bytes.HasPrefix(bytes.TrimLeft(line, " \t"), metaLinePrefix):
+		default:
+			var entry Entry
+			if jerr := json.Unmarshal(line, &entry); jerr != nil {
+				bad(jerr)
+			} else {
+				fn(entry)
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			if !replay {
+				return fmt.Errorf("read %s: %w", name, err)
+			}
+			// Replay is best-effort at startup — counters being off after a
+			// truncated replay is preferable to refusing to start. Bump the
+			// corrupt-lines counter so /metrics shows the degradation.
+			metrics.IncAuditCorruptLine()
+			log.Printf("WARN audit: replay read error on %s (%v) — counters may be under-seeded", name, err)
+			return fmt.Errorf("replay scan: %w", err)
+		}
+	}
+}
+
+// maxEntryLine is the longest line scanReader parses: Query()'s headroom.
+// A longer line is skipped as one bad line; it is never held in memory
+// whole.
+const maxEntryLine = 4 * 1024 * 1024
+
+// readBoundedLine reads one line without its line ending. A line longer
+// than max is read to its end and dropped (tooLong true), so memory stays
+// bounded and the next call starts at the next line. err is io.EOF after
+// the last line, which may lack a newline.
+func readBoundedLine(br *bufio.Reader, max int) (line []byte, tooLong bool, err error) {
+	for {
+		chunk, rerr := br.ReadSlice('\n')
+		if !tooLong {
+			// +2 leaves room for "\r\n"; the exact length is checked below.
+			if len(line)+len(chunk) > max+2 {
+				tooLong, line = true, nil
+			} else {
+				line = append(line, chunk...)
+			}
+		}
+		if errors.Is(rerr, bufio.ErrBufferFull) {
 			continue
 		}
-		fn(entry)
+		line = bytes.TrimRight(line, "\r\n")
+		if len(line) > max {
+			tooLong, line = true, nil
+		}
+		return line, tooLong, rerr
 	}
-
-	if err := scanner.Err(); err != nil {
-		// Replay is best-effort at startup — counters being off after a
-		// truncated replay is preferable to refusing to start. Bump the
-		// corrupt-lines counter so /metrics shows the degradation.
-		metrics.IncAuditCorruptLine()
-		log.Printf("WARN audit: replay scanner error on %s (%v) — counters may be under-seeded", name, err)
-		return fmt.Errorf("replay scan: %w", err)
-	}
-	return nil
 }
 
 // Path returns the filesystem path of the underlying audit log, or "" if

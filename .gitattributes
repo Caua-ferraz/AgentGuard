@@ -10,3 +10,7 @@ pkg/proxy/schema/v1/schema.json text eol=lf
 # Go sources — keep LF on every checkout so gofmt and any byte-compare
 # checks behave the same on Windows working trees as in CI.
 *.go text eol=lf
+
+# Report golden files are compared byte-for-byte by TestGolden; a CRLF
+# checkout on Windows would make every one of them differ.
+pkg/report/testdata/* text eol=lf

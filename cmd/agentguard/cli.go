@@ -52,6 +52,9 @@ var commands = []command{
 	{Name: "audit", Group: "Work with a running server", Summary: "Query the audit log"},
 	{Name: "hook", Group: "Other", Summary: "Checks a coding agent's tool calls (its hook; setup connects it)"},
 	{Name: "migrate", Group: "Other", Summary: "Upgrade the audit log's format (the server does this at startup)"},
+	// report reads the audit log files by default, a server only with
+	// --url, so it sits with migrate rather than the server commands.
+	{Name: "report", Group: "Other", Summary: "Write a compliance evidence report from the audit log"},
 	{Name: "version", Group: "Other", Summary: "Print version information (also: --version)"},
 	{Name: "help", Group: "Other", Summary: "Show help for a command"},
 }
@@ -346,9 +349,19 @@ func serverURL(fs *flag.FlagSet, value string) (string, error) {
 			value = env
 		}
 	}
+	return checkServerURL(value)
+}
+
+// checkServerURL is serverURL's check of the value alone: an http(s) URL
+// with a host, returned without a trailing slash.
+func checkServerURL(value string) (string, error) {
 	u, err := url.Parse(value)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return "", fmt.Errorf("%q is not a server URL; include the scheme, e.g. http://localhost:8080", value)
+		shown := value
+		if err == nil {
+			shown = u.Redacted() // never echo a password given in the URL
+		}
+		return "", fmt.Errorf("%q is not a server URL; include the scheme, e.g. http://localhost:8080", shown)
 	}
 	return strings.TrimRight(value, "/"), nil
 }

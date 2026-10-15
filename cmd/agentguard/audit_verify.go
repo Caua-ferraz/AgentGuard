@@ -60,9 +60,9 @@ Examples:
     --key-file /var/lib/agentguard/audit-seal.key
   agentguard audit verify --anchor 1200:3f9a...e1 --output json
 
-Exit status: 0 the chain is intact, 1 it is broken or an anchor does not
-match, 2 command-line mistake (or the log needs --key-file), 3 a file
-can't be read.
+Exit status: 0 the chain is intact, 1 it is broken, no entry is sealed,
+or an anchor does not match, 2 command-line mistake (or the log needs
+--key-file), 3 a file can't be read.
 `)
 	}
 	positional, code, ok := parseCommand(fs, usage, args)
@@ -169,6 +169,8 @@ func writeVerifyReport(w io.Writer, path string, rep *audit.VerifyReport) {
 		fmt.Fprintf(w, "BROKEN in %s: %s\n", rep.Break.File, rep.Break.Reason)
 	case rep.Break != nil:
 		fmt.Fprintf(w, "BROKEN: %s\n", rep.Break.Reason)
+	case rep.Entries == 0 && rep.PrunedBefore == 0 && rep.Unsealed > 0:
+		fmt.Fprintf(w, "NOT SEALED: none of the %d entries is sealed, so nothing was verified.\n", rep.Unsealed)
 	case !rep.OK:
 		fmt.Fprintln(w, "FAILED: an anchor does not match the log.")
 	default:

@@ -1,0 +1,284 @@
+{
+  "format_version": 1,
+  "generated_at": "2026-10-08T01:00:00Z",
+  "agentguard_version": "1.4.0 (test)",
+  "period": {
+    "since": "2026-10-01T00:00:00Z",
+    "until": "2026-10-08T00:00:00Z"
+  },
+  "source": {
+    "mode": "file",
+    "audit_log": "/var/lib/agentguard/audit.jsonl",
+    "files": [
+      "audit.jsonl.20260930T120000Z.gz",
+      "audit.jsonl"
+    ],
+    "bad_lines": 0
+  },
+  "policy": {
+    "path": "configs/default.yaml",
+    "sha256": "abababababababababababababababababababababababababababababababab",
+    "found": "--policy"
+  },
+  "integrity": {
+    "method": "verify",
+    "status": "intact",
+    "summary": "agentguard audit verify checked 14 sealed entries (seq 1 to 14): the chain is intact.",
+    "seals": [
+      "hmac-sha256 key 0123456789abcdef"
+    ],
+    "key_based": true,
+    "head": {
+      "seq": 14,
+      "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+    },
+    "verify": {
+      "ok": true,
+      "segments": [
+        "audit.jsonl.20260930T120000Z.gz",
+        "audit.jsonl"
+      ],
+      "entries": 14,
+      "first_seq": 1,
+      "last_seq": 14,
+      "last_hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "unsealed": 0,
+      "seals": [
+        "hmac-sha256 key 0123456789abcdef"
+      ]
+    }
+  },
+  "activity": {
+    "entries": 12,
+    "first_entry": "2026-10-01T00:00:00Z",
+    "last_entry": "2026-10-02T01:00:00Z",
+    "decisions": [
+      {
+        "name": "ALLOW",
+        "count": 5
+      },
+      {
+        "name": "DENY",
+        "count": 3
+      },
+      {
+        "name": "REQUIRE_APPROVAL",
+        "count": 4
+      }
+    ],
+    "scopes": {
+      "distinct": 2,
+      "top": [
+        {
+          "name": "shell",
+          "count": 10
+        },
+        {
+          "name": "network",
+          "count": 2
+        }
+      ]
+    },
+    "transports": {
+      "distinct": 3,
+      "top": [
+        {
+          "name": "claude_code",
+          "count": 6
+        },
+        {
+          "name": "sdk",
+          "count": 5
+        },
+        {
+          "name": "mcp_gateway",
+          "count": 1
+        }
+      ]
+    },
+    "tenants": {
+      "distinct": 2,
+      "top": [
+        {
+          "name": "local",
+          "count": 11
+        },
+        {
+          "name": "acme",
+          "count": 1
+        }
+      ]
+    },
+    "agents": {
+      "distinct": 3,
+      "top": [
+        {
+          "name": "ci-bot",
+          "count": 6
+        },
+        {
+          "name": "dev-bot",
+          "count": 5
+        },
+        {
+          "name": "\u003cscript\u003ealert(1)\u003c/script\u003e",
+          "count": 1
+        }
+      ]
+    },
+    "deny_rules": {
+      "distinct": 3,
+      "top": [
+        {
+          "name": "(default deny)",
+          "count": 1
+        },
+        {
+          "name": "deny:approved",
+          "count": 1
+        },
+        {
+          "name": "deny:shell:rm -rf *",
+          "count": 1
+        }
+      ]
+    },
+    "approval_rules": {
+      "distinct": 2,
+      "top": [
+        {
+          "name": "require_approval:shell:make deploy",
+          "count": 3
+        },
+        {
+          "name": "require_approval:pending",
+          "count": 1
+        }
+      ]
+    },
+    "agents_seen": {
+      "count": 3,
+      "names": [
+        "\u003cscript\u003ealert(1)\u003c/script\u003e",
+        "ci-bot",
+        "dev-bot"
+      ],
+      "truncated": false
+    },
+    "sessions_seen": {
+      "count": 4,
+      "names": [
+        "s1",
+        "s2|x",
+        "s3",
+        "s4"
+      ],
+      "truncated": false
+    },
+    "redacted_entries": 1,
+    "unmasked_secret_entries": 1,
+    "unsealed_entries": 12
+  },
+  "approvals": {
+    "requested": 3,
+    "approved": 1,
+    "denied": 1,
+    "no_outcome": 1,
+    "timed_out": null
+  },
+  "posture": [
+    {
+      "name": "Audit log sealed",
+      "status": "pass",
+      "detail": "Yes, and the chain verified: every sealed entry carries seq, prev_hash and hash."
+    },
+    {
+      "name": "Seal uses a secret key",
+      "status": "pass",
+      "detail": "HMAC-SHA256, verified with the key: only a holder of the key can write a chain that verifies."
+    },
+    {
+      "name": "Seal chain verified",
+      "status": "pass",
+      "detail": "agentguard audit verify checked 14 sealed entries (seq 1 to 14): the chain is intact."
+    },
+    {
+      "name": "Entries outside the seal chain",
+      "status": "pass",
+      "detail": "None."
+    },
+    {
+      "name": "Unreadable lines",
+      "status": "pass",
+      "detail": "Every line of the log files is an audit entry."
+    },
+    {
+      "name": "Secrets masked in the log",
+      "status": "fail",
+      "detail": "Entries holding text that looks like a secret (an API key, token or password): 1. Is the server running with --audit-redact=false?"
+    },
+    {
+      "name": "Audit API requires an API key",
+      "status": "unknown",
+      "detail": "Not checked: the report read the log files, not a server."
+    }
+  ],
+  "controls": [
+    {
+      "criterion": "CC6.1",
+      "title": "Logical access to protected assets is restricted",
+      "shows": "Agent actions that reached AgentGuard were checked against a policy (the policy file's SHA-256 abababababab…): 12 decisions, 3 denied, broken down by scope and agent.",
+      "where": [
+        "Summary",
+        "Activity",
+        "Top rules",
+        "Posture checks"
+      ]
+    },
+    {
+      "criterion": "CC6.6",
+      "title": "Access from outside the system boundary is controlled",
+      "shows": "Actions reaching outside the agent (network, browser, MCP tools, LLM tool calls) went through AgentGuard; the scope and transport breakdowns and the deny rules show what was let through and what was blocked (2 scopes, 3 transports).",
+      "where": [
+        "Activity",
+        "Top rules"
+      ]
+    },
+    {
+      "criterion": "CC7.2",
+      "title": "System components are monitored for anomalies",
+      "shows": "Every decision is recorded in the audit log; its seal status is \"intact\", and the posture checks cover unreadable lines and unmasked secrets.",
+      "where": [
+        "Audit log integrity",
+        "Activity",
+        "Posture checks"
+      ]
+    },
+    {
+      "criterion": "CC7.3",
+      "title": "Security events are evaluated",
+      "shows": "Entries sending an action to a person for approval: 4 (3 approval ids). On record as approved by a person: 1; denied by a person: 1. The top deny rules show which risky actions were stopped.",
+      "where": [
+        "Approvals",
+        "Top rules"
+      ]
+    },
+    {
+      "criterion": "CC8.1",
+      "title": "Changes are authorized",
+      "shows": "The report names the policy file's SHA-256 abababababab…, so a reviewer can match it to an approved change. Actions the policy sends for approval (deploys, writes) needed a person's yes: see Approvals.",
+      "where": [
+        "Summary",
+        "Approvals"
+      ]
+    }
+  ],
+  "limits": [
+    "The report counts what the audit log recorded. An action that never reached AgentGuard is not in it.",
+    "Approval outcomes show only when the agent came back with the approval id after a person decided. The log does not record the decision itself, who made it, or a request that timed out.",
+    "The policy SHA-256 is of the file as it was when the report was made. The audit log does not record which version of the policy made each decision.",
+    "The secret check uses the built-in patterns only, not a policy's notifications.redaction.extra_patterns.",
+    "Archives that no file links to, and archives already pruned by --audit-max-backups or --audit-max-age-days, are not read.",
+    "Entries a running server still holds in its buffer or its overflow file (\u003caudit-log\u003e.overflow.jsonl) are not in the log yet, so they are not counted."
+  ]
+}

@@ -87,6 +87,8 @@ func run(args []string) int {
 		return runStatusCmd(rest)
 	case "audit":
 		return runAuditCmd(rest)
+	case "report":
+		return runReportCmd(rest)
 	case "tenant":
 		return runTenant(rest)
 	case "migrate":
@@ -191,7 +193,7 @@ Also installed:
 
 Environment:
   AGENTGUARD_API_KEY          API key when --api-key is not set
-                              (server, approve, deny, status, audit)
+                              (server, approve, deny, status, audit, report)
   AGENTGUARD_URL              Server URL when --url is not set
                               (approve, deny, status, audit)
   AGENTGUARD_POLICY           Policy file when --policy is not set
