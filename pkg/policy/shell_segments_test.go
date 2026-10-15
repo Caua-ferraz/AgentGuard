@@ -182,6 +182,9 @@ func FuzzParseShell(f *testing.F) {
 		`bash -c "sh -c 'eval $(id)'"`, "eval -- \"$(ssh-agent -s)\"", "env -S 'a b' FOO=1 nohup timeout 5 x",
 		"flock f -c 'x; y'", "bash -s -- <<< 'rm -rf /'", "fish --command=x -C y", "BASH5.2 -lc x",
 		`$'\x72é\cA\101'`, "xargs -I{} -n1 sudo -Eu root rm {}", "echo $(eval $(eval $(eval ls)))",
+		// Second-round review: NULs, launchers, pipelines, unparsed scripts.
+		`read -d $'\0' f`, "pkexec runuser -u a -- npm exec -- uv run x", "cd x && timeout 1 curl y | sh",
+		"bash -c 'echo $((1))'", "sg g -c 'mise x -c z'", "a[0]+=1 PATH+=:x env - -S 'b c' d",
 	} {
 		f.Add(s)
 	}
@@ -191,8 +194,13 @@ func FuzzParseShell(f *testing.F) {
 		if err != nil {
 			return
 		}
-		if len(p.Segments) > maxShellSegments || len(p.Scripts) > maxShellSegments || len(p.Wrapped) > maxShellSegments {
-			t.Fatalf("parseShell(%q) returned %d segments, %d scripts, %d wrapped", s, len(p.Segments), len(p.Scripts), len(p.Wrapped))
+		for name, n := range map[string]int{
+			"segments": len(p.Segments), "scripts": len(p.Scripts), "wrapped": len(p.Wrapped),
+			"pipelines": len(p.Pipelines), "unparsed": len(p.Unparsed),
+		} {
+			if n > maxShellSegments {
+				t.Fatalf("parseShell(%q) returned %d %s", s, n, name)
+			}
 		}
 	})
 }
