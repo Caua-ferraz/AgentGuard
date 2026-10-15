@@ -221,20 +221,9 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		}
 	}
 	// Indexes on additive columns come after the ALTERs: in schemaSQL they
-	// would fail on a DB whose table predates the column.
-	for _, stmt := range auditSessionIndexes {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("store: migrate (index): %w", err)
-		}
-	}
-	return nil
-}
-
-// auditSessionIndexes serve the session queries (v1.4): one session's
-// entries, and the sessions started by a parent. Same SQL on both backends.
-var auditSessionIndexes = []string{
-	`CREATE INDEX IF NOT EXISTS idx_audit_tenant_session ON audit_entries(tenant_id, session_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_audit_tenant_parent  ON audit_entries(tenant_id, parent_session_id)`,
+	// would fail on a DB whose table predates the column. They are built
+	// without the caller's deadline (see buildAuditIndexes).
+	return s.buildAuditIndexes(context.WithoutCancel(ctx))
 }
 
 // Ping verifies connectivity.

@@ -32,6 +32,11 @@ import (
 type PostgresStore struct {
 	db  *sql.DB
 	dsn string
+
+	// stopIndexes and indexesDone run the background audit index build
+	// (startAuditIndexBuild); nil when it was never started.
+	stopIndexes context.CancelFunc
+	indexesDone chan struct{}
 }
 
 // Cold-path pool sizing. Small, bounded, and recycled — the syncer batches its
@@ -84,12 +89,13 @@ func NewPostgresStore(dsn string) (*PostgresStore, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), migrateTimeout)
 	defer cancel()
 	if err := s.Migrate(ctx); err != nil {
-		_ = db.Close()
 		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, fmt.Errorf("store: postgres migration did not complete within %s (unreachable or unresponsive DSN): %w", migrateTimeout, err)
+			err = migrateTimeoutError(db, err)
 		}
+		_ = db.Close()
 		return nil, err
 	}
+	s.startAuditIndexBuild()
 	return s, nil
 }
 
@@ -176,9 +182,9 @@ var pgSchemaStmts = []string{
 	`CREATE INDEX IF NOT EXISTS idx_audit_agent     ON audit_entries(agent_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_audit_decision  ON audit_entries(decision)`,
 	`CREATE INDEX IF NOT EXISTS idx_audit_scope     ON audit_entries(scope)`,
-	// audit session columns (v1.4) for tables that predate them; their
-	// indexes (auditSessionIndexes) are appended by init below, after
-	// these ALTERs, so they never reference a missing column.
+	// audit session columns (v1.4) for tables that predate them. Their
+	// indexes (auditSessionIndexes) are not built here but in the
+	// background after start (startAuditIndexBuild).
 	`ALTER TABLE audit_entries ADD COLUMN IF NOT EXISTS parent_session_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE audit_entries ADD COLUMN IF NOT EXISTS subagent          TEXT NOT NULL DEFAULT ''`,
 
@@ -208,10 +214,6 @@ var pgSchemaStmts = []string{
 	    PRIMARY KEY (tenant_id, session_id, node_id)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_cost_consumption_updated ON cost_consumption(updated_at)`,
-}
-
-func init() {
-	pgSchemaStmts = append(pgSchemaStmts, auditSessionIndexes...)
 }
 
 // Migrate creates the schema. Idempotent (every statement is IF NOT EXISTS), so
@@ -258,8 +260,28 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 // Ping verifies connectivity.
 func (s *PostgresStore) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
-// Close closes the database. Idempotent at the sql.DB layer.
-func (s *PostgresStore) Close() error { return s.db.Close() }
+// Close stops a running audit index build and closes the database.
+// Idempotent at the sql.DB layer.
+func (s *PostgresStore) Close() error {
+	if s.stopIndexes != nil {
+		s.stopIndexes()
+		<-s.indexesDone
+	}
+	return s.db.Close()
+}
+
+// migrateTimeoutError explains a boot migration that ran out of time. When
+// the database still answers, the DSN is fine and the wait was elsewhere:
+// usually a lock on a table held by another replica's migration or a long
+// transaction.
+func migrateTimeoutError(db *sql.DB, err error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if db.PingContext(ctx) == nil {
+		return fmt.Errorf("store: postgres migration did not complete within %s; the database answers, so it was most likely waiting for a lock on a table (another replica migrating, or a long transaction): %w", migrateTimeout, err)
+	}
+	return fmt.Errorf("store: postgres migration did not complete within %s (unreachable or unresponsive DSN): %w", migrateTimeout, err)
+}
 
 // --- approvals ---
 
