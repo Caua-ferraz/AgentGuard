@@ -329,6 +329,39 @@ func TestCheck_MoreCommandStrings(t *testing.T) {
 	}
 }
 
+// More option and assignment forms: BSD xargs value options, += and array
+// assignments, zsh --emulate, and a shell reading /dev/stdin as its script.
+func TestCheck_MoreOptionAndAssignmentForms(t *testing.T) {
+	eng := NewEngineFromPolicy(&Policy{Version: "1", Name: "forms", Rules: []RuleSet{{
+		Scope:           "shell",
+		RequireApproval: []Rule{{Pattern: "rm -rf *"}},
+		Allow:           []Rule{{Pattern: "*"}},
+	}}})
+	checkShell(t, eng, []shellCheckCase{
+		{"xargs -J", "echo x | xargs -J % rm -rf % /tmp/x", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"xargs -R", "xargs -R 1 -I % rm -rf /tmp/x", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"xargs -S", "xargs -S 1024 -I % rm -rf /tmp/x", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"an appending assignment", "PATH+=:/x rm -rf /tmp/x", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"an array assignment", "a[0]=1 rm -rf /tmp/x", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"an appending array assignment", "a[k]+=1 rm -rf /tmp/x", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"zsh --emulate", "zsh --emulate sh -c 'rm -rf /tmp/x'", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"bash /dev/stdin with a here-string", "bash /dev/stdin <<< 'rm -rf /tmp/x'", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"sh /dev/fd/0 with a here-string", "sh /dev/fd/0 <<< 'rm -rf /tmp/x'", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"bash -- /dev/stdin with a here-string", "bash -- /dev/stdin <<< 'rm -rf /tmp/x'", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"a script file with a here-string is data", "bash ./x.sh <<< 'rm -rf /tmp/x'", Allow, "allow:shell:*"},
+	})
+	for _, w := range []string{"A=1", "A+=1", "a[0]=1", "a[k]+=x", "_x9=", "a[]=1"} {
+		if !isAssignment(w) {
+			t.Errorf("isAssignment(%q) = false, want true", w)
+		}
+	}
+	for _, w := range []string{"=1", "9a=1", "a", "a[0", "a[0]", "a+b=1", "a]=1", "--x=1"} {
+		if isAssignment(w) {
+			t.Errorf("isAssignment(%q) = true, want false", w)
+		}
+	}
+}
+
 // macOS and Windows file systems ignore case, so BASH and /BIN/SH run bash
 // and sh there. Shell, eval and wrapper names are matched without case
 // (and without .exe), in the parser and in the hot-path pre-check.

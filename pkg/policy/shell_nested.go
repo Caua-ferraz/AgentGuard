@@ -99,7 +99,8 @@ var commandWrappers = map[string]*wrapperSpec{
 			"--map-user", "--map-group", "--map-users", "--map-groups", "--monotonic", "--boottime", "--load-interp"},
 	},
 	"xargs": {
-		valueShort: "adEILnPs",
+		// J, R and S take a value in BSD and macOS xargs.
+		valueShort: "adEIJLnPRSs",
 		valueLong: []string{"--arg-file", "--delimiter", "--eof", "--replace", "--max-lines",
 			"--max-args", "--max-procs", "--max-chars", "--process-slot-var"},
 	},
@@ -360,7 +361,7 @@ func innerScripts(words []string) (scripts []string, readsStdin bool) {
 			}
 			// With -s, what follows are arguments; otherwise the next
 			// word is a script file.
-			return scripts, stdinFlag || i+1 == len(words)
+			return scripts, stdinFlag || i+1 == len(words) || isStdinPath(words[i+1])
 		case w == "--command" || (fish && w == "--init-command"):
 			if i+1 < len(words) {
 				scripts = append(scripts, words[i+1])
@@ -374,8 +375,8 @@ func innerScripts(words []string) (scripts []string, readsStdin bool) {
 		case fish && strings.HasPrefix(w, "--init-command="):
 			scripts = append(scripts, w[len("--init-command="):])
 		case strings.HasPrefix(w, "--"):
-			// Long options (--login, --norc); these two take a value.
-			if w == "--rcfile" || w == "--init-file" {
+			// Long options (--login, --norc); these take a value.
+			if w == "--rcfile" || w == "--init-file" || w == "--emulate" {
 				i++
 			}
 		case len(w) > 1 && (w[0] == '-' || w[0] == '+'):
@@ -399,7 +400,8 @@ func innerScripts(words []string) (scripts []string, readsStdin bool) {
 			if runsString {
 				return append(scripts, w), false
 			}
-			return scripts, stdinFlag
+			// `bash /dev/stdin` reads its script from standard input.
+			return scripts, stdinFlag || isStdinPath(w)
 		}
 	}
 	// No operand: a shell without -c reads its script from stdin.
@@ -538,18 +540,33 @@ func commandName(w string) string {
 	return strings.TrimSuffix(name, ".exe")
 }
 
-// isAssignment reports whether w is a NAME=value word.
+// isStdinPath reports whether a shell's script file operand is its
+// standard input.
+func isStdinPath(w string) bool {
+	return w == "/dev/stdin" || w == "/dev/fd/0"
+}
+
+// isAssignment reports whether w is an assignment word: NAME=value,
+// NAME+=value, or an array element NAME[subscript]=value (or +=).
 func isAssignment(w string) bool {
-	eq := strings.IndexByte(w, '=')
-	if eq <= 0 {
+	i := 0
+	for i < len(w) && nameByte(w[i], i == 0) {
+		i++
+	}
+	if i == 0 || i == len(w) {
 		return false
 	}
-	for i := 0; i < eq; i++ {
-		if !nameByte(w[i], i == 0) {
+	if w[i] == '[' {
+		end := strings.IndexByte(w[i:], ']')
+		if end < 0 {
 			return false
 		}
+		i += end + 1
 	}
-	return true
+	if i < len(w) && w[i] == '+' {
+		i++
+	}
+	return i < len(w) && w[i] == '='
 }
 
 // nameByte reports whether c can appear in a shell variable name; a digit
