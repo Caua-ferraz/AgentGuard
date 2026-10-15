@@ -130,13 +130,8 @@ var pgSchemaStmts = []string{
 	    PRIMARY KEY (tenant_id, id)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_approvals_resolved ON approvals(resolved, resolved_at)`,
-	// approvals one-shot/actor columns for
-	// DBs whose approvals table predates them; Postgres has native
-	// IF NOT EXISTS so no duplicate-column dance is needed (mirror of
-	// SQLiteStore.Migrate's guarded ALTERs).
-	`ALTER TABLE approvals ADD COLUMN IF NOT EXISTS consumed_at   TEXT NOT NULL DEFAULT ''`,
-	`ALTER TABLE approvals ADD COLUMN IF NOT EXISTS resolved_via  TEXT NOT NULL DEFAULT ''`,
-	`ALTER TABLE approvals ADD COLUMN IF NOT EXISTS resolved_from TEXT NOT NULL DEFAULT ''`,
+	// The approvals one-shot/actor columns for DBs whose table predates
+	// them are added by Migrate (pgAdditiveColumns).
 
 	`CREATE TABLE IF NOT EXISTS rate_buckets (
 	    tenant_id   TEXT    NOT NULL,
@@ -182,11 +177,10 @@ var pgSchemaStmts = []string{
 	`CREATE INDEX IF NOT EXISTS idx_audit_agent     ON audit_entries(agent_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_audit_decision  ON audit_entries(decision)`,
 	`CREATE INDEX IF NOT EXISTS idx_audit_scope     ON audit_entries(scope)`,
-	// audit session columns (v1.4) for tables that predate them. Their
-	// indexes (auditSessionIndexes) are not built here but in the
-	// background after start (startAuditIndexBuild).
-	`ALTER TABLE audit_entries ADD COLUMN IF NOT EXISTS parent_session_id TEXT NOT NULL DEFAULT ''`,
-	`ALTER TABLE audit_entries ADD COLUMN IF NOT EXISTS subagent          TEXT NOT NULL DEFAULT ''`,
+	// The audit session columns (v1.4) for tables that predate them are
+	// added by Migrate (pgAdditiveColumns). Their indexes
+	// (auditSessionIndexes) are built in the background after start
+	// (startAuditIndexBuild).
 
 	`CREATE TABLE IF NOT EXISTS policies (
 	    tenant_id   TEXT NOT NULL PRIMARY KEY,
@@ -216,6 +210,53 @@ var pgSchemaStmts = []string{
 	`CREATE INDEX IF NOT EXISTS idx_cost_consumption_updated ON cost_consumption(updated_at)`,
 }
 
+// pgAdditiveColumns are columns added after their table first shipped, for
+// databases created before them (the mirror of SQLiteStore.Migrate's guarded
+// ALTERs). Migrate adds only the ones information_schema says are missing:
+// ALTER TABLE ... ADD COLUMN IF NOT EXISTS takes ACCESS EXCLUSIVE on the
+// table even when the column is there, so running it on every boot blocked
+// every reader and writer of approvals and audit_entries for a moment.
+var pgAdditiveColumns = []struct{ table, column, def string }{
+	{"approvals", "consumed_at", "TEXT NOT NULL DEFAULT ''"},
+	{"approvals", "resolved_via", "TEXT NOT NULL DEFAULT ''"},
+	{"approvals", "resolved_from", "TEXT NOT NULL DEFAULT ''"},
+	{"audit_entries", "parent_session_id", "TEXT NOT NULL DEFAULT ''"},
+	{"audit_entries", "subagent", "TEXT NOT NULL DEFAULT ''"},
+}
+
+// addMissingColumns runs the ALTERs for the pgAdditiveColumns the current
+// schema lacks. Called inside Migrate's transaction, under its advisory
+// lock, so no other replica adds the same column in between.
+func addMissingColumns(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT table_name, column_name FROM information_schema.columns
+		WHERE table_schema = current_schema() AND table_name IN ('approvals', 'audit_entries')`)
+	if err != nil {
+		return fmt.Errorf("store: migrate: list columns: %w", err)
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var table, column string
+		if err := rows.Scan(&table, &column); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("store: migrate: list columns: %w", err)
+		}
+		have[table+"."+column] = true
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("store: migrate: list columns: %w", err)
+	}
+	for _, c := range pgAdditiveColumns {
+		if have[c.table+"."+c.column] {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, "ALTER TABLE "+c.table+" ADD COLUMN IF NOT EXISTS "+c.column+" "+c.def); err != nil {
+			return fmt.Errorf("store: migrate (additive column %s.%s): %w", c.table, c.column, err)
+		}
+	}
+	return nil
+}
+
 // Migrate creates the schema. Idempotent (every statement is IF NOT EXISTS), so
 // it is safe to run on every boot. Runs inside one transaction so a partial
 // failure leaves the schema untouched.
@@ -229,9 +270,11 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 		//     against a concurrent creator, so two nodes starting together
 		//     collide on the pg_type unique index and one fails with
 		//     SQLSTATE 23505. Measured on 5 of 6 three-replica cold starts.
-		//   - Existing schema: the `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
-		//     statements below still take ACCESS EXCLUSIVE locks even when
-		//     the columns are already present, so concurrent migration
+		//   - Existing schema: `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
+		//     takes ACCESS EXCLUSIVE locks even when the column is already
+		//     present (the ALTERs now run only for missing columns, see
+		//     pgAdditiveColumns, but the lock still guards the first
+		//     upgrade), so concurrent migration
 		//     transactions deadlock (SQLSTATE 40P01) with nothing to do.
 		//     That exposes every rolling restart, not just the first deploy.
 		//
@@ -253,7 +296,7 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 				return fmt.Errorf("store: migrate: %w", err)
 			}
 		}
-		return nil
+		return addMissingColumns(ctx, tx)
 	})
 }
 

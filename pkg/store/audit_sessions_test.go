@@ -171,3 +171,27 @@ func TestPostgresStore_MigrateAddsSessionColumns(t *testing.T) {
 		t.Fatalf("sessions after migrate = %+v, %v", got, err)
 	}
 }
+
+// On a schema that has every column, Migrate runs no ALTER, so an open
+// reader of approvals or audit_entries (ACCESS SHARE) doesn't block it.
+// Before, ADD COLUMN IF NOT EXISTS took ACCESS EXCLUSIVE on every boot.
+func TestPostgresStore_MigrateSkipsPresentColumns(t *testing.T) {
+	s := newTestPGStore(t)
+	ctx := context.Background()
+	reader, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Rollback() }()
+	for _, q := range []string{`SELECT count(*) FROM approvals`, `SELECT count(*) FROM audit_entries`} {
+		var n int
+		if err := reader.QueryRowContext(ctx, q).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := s.Migrate(tctx); err != nil {
+		t.Fatalf("Migrate blocked behind an open reader: %v", err)
+	}
+}
