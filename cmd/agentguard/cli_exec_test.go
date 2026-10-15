@@ -122,7 +122,7 @@ func TestCLI_HelpPages(t *testing.T) {
 	pages := [][]string{
 		{"setup", "-h"}, {"hook", "-h"}, {"server", "-h"}, {"validate", "-h"}, {"check", "-h"}, {"test", "-h"}, {"approve", "-h"}, {"deny", "-h"},
 		{"status", "-h"}, {"audit", "-h"}, {"audit", "verify", "-h"}, {"tenant", "-h"}, {"tenant", "put", "-h"},
-		{"tenant", "list", "-h"}, {"tenant", "rm", "-h"}, {"migrate", "-h"}, {"help", "help"},
+		{"tenant", "list", "-h"}, {"tenant", "rm", "-h"}, {"migrate", "-h"}, {"report", "-h"}, {"help", "help"},
 	}
 	for _, args := range pages {
 		r := agentguard(t, dir, nil, args...)
