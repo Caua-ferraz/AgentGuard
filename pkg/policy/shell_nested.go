@@ -13,10 +13,13 @@ package policy
 
 import "strings"
 
-// shellNames are the shells whose -c option runs its argument as a script.
+// shellNames are the shells whose -c option runs its argument as a script,
+// and which read a script from standard input without one. A versioned
+// name (bash5, ksh93) is looked up without its version.
 var shellNames = map[string]struct{}{
-	"sh": {}, "bash": {}, "zsh": {}, "dash": {}, "ksh": {}, "mksh": {},
-	"ash": {}, "yash": {}, "posh": {}, "fish": {},
+	"sh": {}, "bash": {}, "rbash": {}, "zsh": {}, "dash": {}, "ksh": {},
+	"rksh": {}, "mksh": {}, "pdksh": {}, "oksh": {}, "ash": {}, "yash": {},
+	"posh": {}, "fish": {}, "csh": {}, "tcsh": {},
 }
 
 // wrapperSpec says how a command wrapper reads its own arguments before
@@ -283,55 +286,89 @@ func unwrapCommand(words []string, inner func([]string)) ([]string, error) {
 	return words, nil
 }
 
-// innerScript reports whether a simple command, as its unquoted words with
-// any wrappers already dropped (see unwrapCommand), runs a command string
-// as shell code, and returns that string: the script argument of a shell's
-// -c option (alone or in a cluster such as -lc or -ec), or the arguments of
-// eval joined by spaces.
-func innerScript(words []string) (string, bool) {
+// innerScripts returns the command strings a simple command, as its
+// unquoted words with any wrappers already dropped (see unwrapCommand),
+// runs as shell code: the script of a shell's -c option (alone or in a
+// cluster such as -lc or -ec) or --command, fish's -C / --init-command, or
+// the arguments of eval joined by spaces. readsStdin reports whether the
+// command is a shell that reads its script from standard input (no -c and
+// no script file, or -s), so a here-string fed to it is a script too.
+func innerScripts(words []string) (scripts []string, readsStdin bool) {
 	if len(words) == 0 {
-		return "", false
+		return nil, false
 	}
-	if words[0] == "eval" {
-		if len(words) == 1 {
-			return "", false
+	if commandName(words[0]) == "eval" {
+		args := words[1:]
+		if len(args) > 0 && args[0] == "--" {
+			args = args[1:]
 		}
-		return strings.Join(words[1:], " "), true
+		if len(args) == 0 {
+			return nil, false
+		}
+		return []string{strings.Join(args, " ")}, false
 	}
-	if _, ok := shellNames[baseName(words[0])]; !ok {
-		return "", false
+	shell := shellName(words[0])
+	if shell == "" {
+		return nil, false
 	}
-	runsString := false
+	fish := shell == "fish"
+	runsString, stdinFlag := false, false
 	for i := 1; i < len(words); i++ {
 		w := words[i]
 		switch {
-		case w == "--":
-			if runsString && i+1 < len(words) {
-				return words[i+1], true
+		case w == "--" || w == "-":
+			if runsString {
+				if i+1 < len(words) {
+					scripts = append(scripts, words[i+1])
+				}
+				return scripts, false
 			}
-			return "", false
+			// With -s, what follows are arguments; otherwise the next
+			// word is a script file.
+			return scripts, stdinFlag || i+1 == len(words)
+		case w == "--command" || (fish && w == "--init-command"):
+			if i+1 < len(words) {
+				scripts = append(scripts, words[i+1])
+				i++
+			}
+			if w == "--command" {
+				return scripts, false
+			}
+		case strings.HasPrefix(w, "--command="):
+			return append(scripts, w[len("--command="):]), false
+		case fish && strings.HasPrefix(w, "--init-command="):
+			scripts = append(scripts, w[len("--init-command="):])
 		case strings.HasPrefix(w, "--"):
 			// Long options (--login, --norc); these two take a value.
 			if w == "--rcfile" || w == "--init-file" {
 				i++
 			}
 		case len(w) > 1 && (w[0] == '-' || w[0] == '+'):
-			if strings.ContainsRune(w[1:], 'c') && w[0] == '-' {
-				runsString = true
+			opts := w[1:]
+			if w[0] == '-' {
+				runsString = runsString || strings.IndexByte(opts, 'c') >= 0
+				stdinFlag = stdinFlag || strings.IndexByte(opts, 's') >= 0
+				if fish && strings.IndexByte(opts, 'C') >= 0 && i+1 < len(words) {
+					scripts = append(scripts, words[i+1])
+					i++
+					continue
+				}
 			}
-			if strings.ContainsRune(w[1:], 'o') || strings.ContainsRune(w[1:], 'O') {
+			if strings.IndexByte(opts, 'o') >= 0 || strings.IndexByte(opts, 'O') >= 0 {
 				i++ // -o option / -O shopt_option take a name
 			}
 		default:
-			// The first operand: the script when -c was given, else a
-			// script file the shell reads (not something to parse here).
+			// The first operand: the script when -c was given; with -s,
+			// an argument; else a script file the shell reads (not
+			// something to parse here).
 			if runsString {
-				return w, true
+				return append(scripts, w), false
 			}
-			return "", false
+			return scripts, stdinFlag
 		}
 	}
-	return "", false
+	// No operand: a shell without -c reads its script from stdin.
+	return scripts, !runsString
 }
 
 // runsOtherCommand reports whether a syntax-free command, as its words,
@@ -346,8 +383,32 @@ func runsOtherCommand(words []string) bool {
 	if wrapped {
 		return true
 	}
-	_, ok := innerScript(inner)
-	return ok
+	scripts, _ := innerScripts(inner)
+	return len(scripts) > 0
+}
+
+// shellName returns the shell a command word names, or "". A trailing
+// version (bash5, ksh93, bash5.2) is dropped first.
+func shellName(w string) string {
+	name := commandName(w)
+	if _, ok := shellNames[name]; ok {
+		return name
+	}
+	if v := trimVersion(name); v != name {
+		if _, ok := shellNames[v]; ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// trimVersion drops trailing digits and dots from a command name.
+func trimVersion(name string) string {
+	end := len(name)
+	for end > 0 && (isDigit(name[end-1]) || name[end-1] == '.') {
+		end--
+	}
+	return name[:end]
 }
 
 // startsWithLauncher reports, without allocating, whether a syntax-free
@@ -372,7 +433,11 @@ func startsWithLauncher(cmd string) bool {
 	if isAssignment(w) {
 		return true
 	}
-	_, ok := launcherNames[baseName(w)]
+	name := baseName(w)
+	if _, ok := launcherNames[name]; ok {
+		return true
+	}
+	_, ok := shellNames[trimVersion(name)]
 	return ok
 }
 

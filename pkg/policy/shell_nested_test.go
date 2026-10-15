@@ -264,6 +264,70 @@ func TestCheck_WrappedCommandUnderAnAllowlist(t *testing.T) {
 	})
 }
 
+// Other ways to hand a shell a command string: a here-string fed to a
+// shell that reads its script from stdin, eval after `--` or behind
+// builtin, fish's --command, and shells by other or versioned names.
+func TestParseShell_MoreCommandStrings(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		scripts []string
+	}{
+		{"a here-string fed to bash", "bash <<< 'rm -rf /tmp/x'", []string{"rm -rf /tmp/x"}},
+		{"a here-string fed to sh -s", `sh -s <<< "rm -rf /tmp/x"`, []string{"rm -rf /tmp/x"}},
+		{"a here-string fed to bash -s --", "bash -s -- a b <<< 'rm -rf /tmp/x'", []string{"rm -rf /tmp/x"}},
+		{"a here-string before the shell", "<<< 'rm -rf /tmp/x' bash", []string{"rm -rf /tmp/x"}},
+		{"a here-string fed to a wrapped shell", "sudo bash <<< 'id'", []string{"id"}},
+		{"eval after --", "eval -- 'rm -rf /tmp/x'", []string{"rm -rf /tmp/x"}},
+		{"builtin eval", "builtin eval 'rm -rf /tmp/x'", []string{"rm -rf /tmp/x"}},
+		{"fish --command", "fish --command 'rm -rf /tmp/x'", []string{"rm -rf /tmp/x"}},
+		{"fish --command=", "fish '--command=rm -rf /tmp/x'", []string{"rm -rf /tmp/x"}},
+		{"fish -C", "fish -C 'rm -rf /tmp/x' -c 'ls'", []string{"rm -rf /tmp/x", "ls"}},
+		{"rbash", "rbash -c 'rm -rf /tmp/x'", []string{"rm -rf /tmp/x"}},
+		{"tcsh", "tcsh -c 'rm -rf /tmp/x'", []string{"rm -rf /tmp/x"}},
+		{"csh", "/bin/csh -fc 'rm -rf /tmp/x'", []string{"rm -rf /tmp/x"}},
+		{"ksh93", "ksh93 -c 'rm -rf /tmp/x'", []string{"rm -rf /tmp/x"}},
+		{"bash5.2", "/opt/bin/bash5.2 -c 'rm -rf /tmp/x'", []string{"rm -rf /tmp/x"}},
+		// Data, not a script.
+		{"a here-string fed to cat", "cat <<< 'rm -rf /tmp/x'", nil},
+		{"a here-string fed to bash -c", "bash -c 'cat' <<< 'rm -rf /tmp/x'", []string{"cat"}},
+		{"a here-string fed to a script file", "bash build.sh <<< 'rm -rf /tmp/x'", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseShell(c.in)
+			if err != nil {
+				t.Fatalf("parseShell(%q): %v", c.in, err)
+			}
+			if !reflect.DeepEqual(got.Scripts, c.scripts) {
+				t.Errorf("scripts = %q, want %q (segments %q)", got.Scripts, c.scripts, got.Segments)
+			}
+			if len(got.Redirects) != 0 {
+				t.Errorf("redirects = %+v, want none: a here-string is not a file", got.Redirects)
+			}
+		})
+	}
+}
+
+func TestCheck_MoreCommandStrings(t *testing.T) {
+	eng := NewEngineFromPolicy(&Policy{Version: "1", Name: "strings", Rules: []RuleSet{{
+		Scope:           "shell",
+		RequireApproval: []Rule{{Pattern: "rm -rf *"}},
+		Allow:           []Rule{{Pattern: "*"}},
+	}}})
+	checkShell(t, eng, []shellCheckCase{
+		{"a here-string run by bash needs approval", "bash <<< 'rm -rf /tmp/x'", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"eval -- needs approval", "eval -- 'rm -rf /tmp/x'", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"builtin eval needs approval", "builtin eval 'rm -rf /tmp/x'", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"fish --command needs approval", "fish --command 'rm -rf /tmp/x'", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"a versioned shell needs approval", "bash5 -c 'rm -rf /tmp/x'", RequireApproval, "require_approval:shell:rm -rf *"},
+		{"a here-string fed to grep is data", "grep x <<< 'rm -rf /tmp/x'", Allow, "allow:shell:*"},
+	})
+	if !isCompoundShell("ksh93 -c id") || !isCompoundShell("tcsh -c id") {
+		t.Error("a versioned or C shell given -c must take the segment path")
+	}
+}
+
 // isCompoundShell runs on every shell check. An ordinary command without
 // shell syntax must not allocate, even when it holds "sh" and "-" (before,
 // `git push --force` split itself into words to look for a nested shell).

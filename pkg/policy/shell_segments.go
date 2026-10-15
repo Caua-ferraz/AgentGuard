@@ -176,6 +176,8 @@ func (p *shellParser) parseList(closer byte) error {
 	// firstIsSubst is set when the command's first word is exactly one
 	// command substitution.
 	firstIsSubst := false
+	// heres are the command's here-strings (<<< word), unquoted.
+	var heres []string
 	flush := func() error {
 		seg := joinSegment(words)
 		// The command a wrapper, an assignment or `!` runs is matched on
@@ -189,9 +191,15 @@ func (p *shellParser) parseList(closer byte) error {
 		if err != nil {
 			return err
 		}
-		script, nested := innerScript(inner)
+		scripts, readsStdin := innerScripts(inner)
+		if readsStdin {
+			// `bash <<< 'rm -rf /'`: a shell reading its script from
+			// standard input runs the here-string. Fed to any other
+			// command, a here-string is data.
+			scripts = append(scripts, heres...)
+		}
 		onlySubst := firstIsSubst && len(words) == 1
-		words, firstIsSubst = words[:0], false
+		words, firstIsSubst, heres = words[:0], false, heres[:0]
 		if seg == "" {
 			return nil
 		}
@@ -211,13 +219,23 @@ func (p *shellParser) parseList(closer byte) error {
 			return errShellUnparseable
 		}
 		p.out.Wrapped = append(p.out.Wrapped, unwrapped...)
-		if nested {
-			// `bash -c '<script>'` and `eval <script>` run the script as
-			// shell code: its commands are segments of their own, as a
-			// $( … ) substitution's are.
-			return p.parseScript(script)
+		// `bash -c '<script>'` and `eval <script>` run the script as shell
+		// code: its commands are segments of their own, as a $( … )
+		// substitution's are.
+		for _, script := range scripts {
+			if err := p.parseScript(script); err != nil {
+				return err
+			}
 		}
 		return nil
+	}
+	// redirect reads one redirection, keeping a here-string's word.
+	redirect := func() error {
+		here, isHere, err := p.parseRedirect()
+		if isHere {
+			heres = append(heres, here)
+		}
+		return err
 	}
 	for p.i < len(p.s) {
 		c := p.s[p.i]
@@ -231,7 +249,7 @@ func (p *shellParser) parseList(closer byte) error {
 			p.i++
 			return flush()
 		case c == '&' && p.peek(1) == '>':
-			if err := p.parseRedirect(); err != nil {
+			if err := redirect(); err != nil {
 				return err
 			}
 		case c == ';' || c == '&' || c == '|' || c == '\n' || c == '\r':
@@ -261,14 +279,14 @@ func (p *shellParser) parseList(closer byte) error {
 			}
 			words = append(words, p.s[start:p.i])
 		case c == '<' || c == '>':
-			if err := p.parseRedirect(); err != nil {
+			if err := redirect(); err != nil {
 				return err
 			}
 		case isDigit(c) && p.fdRedirectAhead():
 			for isDigit(p.s[p.i]) {
 				p.i++
 			}
-			if err := p.parseRedirect(); err != nil {
+			if err := redirect(); err != nil {
 				return err
 			}
 		default:
@@ -323,8 +341,10 @@ func (p *shellParser) fdRedirectAhead() bool {
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
-// parseRedirect reads one redirection operator and its target.
-func (p *shellParser) parseRedirect() error {
+// parseRedirect reads one redirection operator and its target. For a
+// here-string (<<< word) it returns the word, unquoted, with isHere set:
+// the caller decides whether a shell runs it as a script.
+func (p *shellParser) parseRedirect() (here string, isHere bool, err error) {
 	write := true
 	switch {
 	case p.hasPrefix("<<<"):
@@ -332,10 +352,10 @@ func (p *shellParser) parseRedirect() error {
 		// can hold a command substitution.
 		p.i += 3
 		p.skipBlanks()
-		_, err := p.readWord()
-		return err
+		w, err := p.readWord()
+		return w, err == nil, err
 	case p.hasPrefix("<<"):
-		return errShellUnparseable // heredoc bodies span lines; not supported
+		return "", false, errShellUnparseable // heredoc bodies span lines; not supported
 	case p.hasPrefix("&>>"):
 		p.i += 3
 	case p.hasPrefix("&>"), p.hasPrefix(">>"), p.hasPrefix(">|"), p.hasPrefix("<>"):
@@ -352,21 +372,21 @@ func (p *shellParser) parseRedirect() error {
 		for p.i < len(p.s) && (isDigit(p.s[p.i]) || p.s[p.i] == '-') {
 			p.i++
 		}
-		return nil
+		return "", false, nil
 	}
 	p.skipBlanks()
 	if p.i >= len(p.s) || isWordEnd(p.s[p.i]) {
-		return errShellUnparseable // redirection without a target
+		return "", false, errShellUnparseable // redirection without a target
 	}
 	target, err := p.readWord()
 	if err != nil {
-		return err
+		return "", false, err
 	}
 	if isHarmlessRedirectTarget(target) {
-		return nil
+		return "", false, nil
 	}
 	p.out.Redirects = append(p.out.Redirects, shellRedirect{Target: target, Write: write})
-	return nil
+	return "", false, nil
 }
 
 // isHarmlessRedirectTarget lists targets that are not files an agent could
