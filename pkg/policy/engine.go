@@ -1343,7 +1343,10 @@ func (e *Engine) evalScope(rules []RuleSet, req ActionRequest, tenantID string, 
 //
 //  1. Whole-string deny and require_approval rules run first, so patterns
 //     written for a full command line (`:(){ :|:& };:`, `curl * | bash`)
-//     keep working.
+//     keep working. A deny decides. An approval is where the verdict
+//     starts: the other checks still run, and a deny rule that matches any
+//     part of the command wins over it. A part that no rule allows doesn't:
+//     the person asked to approve sees the whole line.
 //  2. The raw command is split into simple commands (segments) and file
 //     redirections. A command the tokenizer can't split safely is denied.
 //     Whole-string deny and require_approval rules also run against each
@@ -1359,11 +1362,24 @@ func (e *Engine) evalScope(rules []RuleSet, req ActionRequest, tenantID string, 
 //
 // The most severe verdict wins: DENY over REQUIRE_APPROVAL over ALLOW.
 func (e *Engine) checkCompoundShell(rules []RuleSet, req ActionRequest, rawCommand, tenantID string) CheckResult {
+	var lineApproval CheckResult
 	if res, ok := e.evalScope(rules, req, tenantID, ruleKindDeny|ruleKindApproval); ok {
-		return res
+		if res.Decision == Deny {
+			return res
+		}
+		lineApproval = res
+	}
+	// decides reports whether a part's deny decides the request. Under a
+	// whole-line approval, a part no rule allows (a default deny, which
+	// names no rule) is left to the person approving the line.
+	decides := func(res CheckResult) bool {
+		return res.Decision == Deny && (lineApproval.Decision == "" || res.Rule != "")
 	}
 	parsed, err := parseShell(rawCommand)
 	if err != nil {
+		if lineApproval.Decision != "" {
+			return lineApproval
+		}
 		return CheckResult{
 			Decision: Deny,
 			Reason:   "Shell command could not be split into simple commands safely (heredoc, unbalanced quotes or parentheses, arithmetic expansion, or nesting too deep)",
@@ -1383,7 +1399,7 @@ func (e *Engine) checkCompoundShell(rules []RuleSet, req ActionRequest, rawComma
 	// stays with its full segment below. A deny decides at once; the first
 	// approval is kept and the most severe verdict wins once the segments
 	// are checked.
-	var innerVerdict CheckResult
+	innerVerdict := lineApproval
 	for _, inner := range [...]struct {
 		cmds  []string
 		label string
@@ -1419,10 +1435,13 @@ func (e *Engine) checkCompoundShell(rules []RuleSet, req ActionRequest, rawComma
 			if parts > 1 && res.Decision != Allow {
 				res.Reason = fmt.Sprintf("%s (command %d of %d: %q)", res.Reason, i+1, len(parsed.Segments), sub.Command)
 			}
-			if res.Decision == Deny {
+			if decides(res) {
 				return res
 			}
-			if i == 0 || moreSevere(res.Decision, verdict.Decision) {
+			if res.Decision == Deny {
+				continue // covered by the whole-line approval
+			}
+			if verdict.Decision == "" || moreSevere(res.Decision, verdict.Decision) {
 				verdict = res
 			}
 		}
@@ -1451,10 +1470,13 @@ func (e *Engine) checkCompoundShell(rules []RuleSet, req ActionRequest, rawComma
 		if res.Decision != Allow {
 			res.Reason = fmt.Sprintf("%s (redirection %s %q)", res.Reason, fsReq.Action, r.Target)
 		}
-		if res.Decision == Deny {
+		if decides(res) {
 			return res
 		}
-		if moreSevere(res.Decision, verdict.Decision) {
+		if res.Decision == Deny {
+			continue // covered by the whole-line approval
+		}
+		if verdict.Decision == "" || moreSevere(res.Decision, verdict.Decision) {
 			verdict = res
 		}
 	}

