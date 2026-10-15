@@ -52,7 +52,40 @@ func isCompoundShell(cmd string) bool {
 	if !startsWithLauncher(cmd) {
 		return false
 	}
-	return runsOtherCommand(strings.Fields(cmd))
+	words, complete := firstWords(cmd, maxLauncherWords)
+	if !complete {
+		// Too long to inspect on the hot path; the segment path reads it
+		// in full, and gives the same verdict for a plain command.
+		return true
+	}
+	return runsOtherCommand(words)
+}
+
+// maxLauncherWords bounds the words isCompoundShell splits a command that
+// starts with a launcher into.
+const maxLauncherWords = 64
+
+// firstWords splits cmd at spaces and tabs into at most n words. complete
+// is false when there are more.
+func firstWords(cmd string, n int) (words []string, complete bool) {
+	i := 0
+	for {
+		for i < len(cmd) && (cmd[i] == ' ' || cmd[i] == '\t') {
+			i++
+		}
+		if i == len(cmd) {
+			return words, true
+		}
+		if len(words) == n {
+			return nil, false
+		}
+		j := i
+		for j < len(cmd) && cmd[j] != ' ' && cmd[j] != '\t' {
+			j++
+		}
+		words = append(words, cmd[i:j])
+		i = j
+	}
 }
 
 // hasShellSyntax reports whether s contains any byte of shellSyntaxChars.

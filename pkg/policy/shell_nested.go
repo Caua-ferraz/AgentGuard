@@ -109,7 +109,7 @@ var commandWrappers = map[string]*wrapperSpec{
 // after the wrapper's name, and returns the command it runs. ok is false
 // when the wrapper runs no command (an option such as command -v, or too
 // few words).
-func (s *wrapperSpec) skip(args []string) (rest []string, ok bool, err error) {
+func (s *wrapperSpec) skip(args []string, splits *int) (rest []string, ok bool, err error) {
 	for len(args) > 0 {
 		a := args[0]
 		if a == "-" && s.loneDash {
@@ -139,7 +139,7 @@ func (s *wrapperSpec) skip(args []string) (rest []string, ok bool, err error) {
 				}
 				value, args = args[0], args[1:]
 			}
-			if args, err = splitInto(value, args); err != nil {
+			if args, err = splitInto(value, args, splits); err != nil {
 				return nil, false, err
 			}
 		case containsWord(s.valueLong, name):
@@ -170,7 +170,7 @@ func (s *wrapperSpec) skip(args []string) (rest []string, ok bool, err error) {
 					value, args = args[0], args[1:]
 				}
 				if split {
-					if args, err = splitInto(value, args); err != nil {
+					if args, err = splitInto(value, args, splits); err != nil {
 						return nil, false, err
 					}
 				}
@@ -184,14 +184,19 @@ func (s *wrapperSpec) skip(args []string) (rest []string, ok bool, err error) {
 	args = args[s.operands:]
 	if len(args) > 1 && containsWord(s.shellCommand, args[0]) {
 		// flock FILE -c 'cmd' runs the command string with sh -c.
-		return append([]string{"sh", "-c"}, args[1:]...), true, nil
+		return []string{"sh", "-c", args[1]}, true, nil
 	}
 	return args, len(args) > 0, nil
 }
 
 // splitInto splits value into words the way env -S does, for the common
-// quoting, and returns them followed by rest.
-func splitInto(value string, rest []string) ([]string, error) {
+// quoting, and returns them followed by rest. Each split copies rest, so it
+// counts against a small budget of its own: env -S is used once, in a
+// shebang line, and a chain of them would copy the command each time.
+func splitInto(value string, rest []string, splits *int) ([]string, error) {
+	if *splits--; *splits < 0 {
+		return nil, errShellUnparseable
+	}
 	words, err := splitWords(value)
 	if err != nil {
 		return nil, err
@@ -264,7 +269,16 @@ func containsWord(list []string, w string) bool {
 // `env sudo ls`, `sudo ls` and then `ls`, since sudo has rules of its own.
 // It returns the innermost command. A wrapper that runs no command
 // (`command -v bash`, `sudo -l`) is itself the command.
+//
+// More than maxWrapperLevels wrappers, or maxEnvSplits env -S strings, in
+// one command is unparseable. Real commands nest a few; without a bound, a 1 MiB chain of
+// `env env env …` had the caller join the remaining words at every level,
+// which is quadratic. inner is only called once the whole chain is
+// unwrapped within the bound.
 func unwrapCommand(words []string, inner func([]string)) ([]string, error) {
+	budget, splits := maxWrapperLevels, maxEnvSplits
+	var stages [maxWrapperLevels + 1][]string
+	found := stages[:0]
 	stripped := false
 	for len(words) > 0 {
 		spec, isWrapper := commandWrappers[commandName(words[0])]
@@ -274,13 +288,16 @@ func unwrapCommand(words []string, inner func([]string)) ([]string, error) {
 				continue
 			}
 		}
-		if stripped && inner != nil {
-			inner(words)
+		if stripped {
+			found = append(found, words)
 		}
 		if !isWrapper {
 			break
 		}
-		next, runs, err := spec.skip(words[1:])
+		if budget--; budget < 0 {
+			return nil, errShellUnparseable
+		}
+		next, runs, err := spec.skip(words[1:], &splits)
 		if err != nil {
 			return nil, err
 		}
@@ -289,8 +306,20 @@ func unwrapCommand(words []string, inner func([]string)) ([]string, error) {
 		}
 		words, stripped = next, true
 	}
+	if inner != nil {
+		for _, w := range found {
+			inner(w)
+		}
+	}
 	return words, nil
 }
+
+const (
+	// maxWrapperLevels bounds the wrappers in one simple command.
+	maxWrapperLevels = 16
+	// maxEnvSplits bounds the env -S strings in one simple command.
+	maxEnvSplits = 2
+)
 
 // innerScripts returns the command strings a simple command, as its
 // unquoted words with any wrappers already dropped (see unwrapCommand),
