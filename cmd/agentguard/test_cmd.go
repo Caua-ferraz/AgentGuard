@@ -772,9 +772,11 @@ subfolders). A fixture file holds one YAML document and looks like this:
 The actions under prior: count as allowed just now, so require_prior rules
 can be tested. A case with hook: and input: gives a coding agent's tool
 call instead of a request; it is read the way 'agentguard hook' reads it,
-and when it maps to several checks the most severe verdict counts. Each case gets a fresh engine: cost spent in one case does
-not carry over to the next. Rate limits are not checked; the server
-applies them, not the policy engine.
+and when it maps to several checks the most severe verdict counts.
+
+Each case gets a fresh engine: cost spent in one case does not carry over
+to the next. Rate limits are not checked; the server applies them, not the
+policy engine.
 
 `)
 	clihelp.WriteGroups(w, fs, testFlagGroups, policyHelp)
