@@ -98,7 +98,7 @@ researcher = Guard(agent_id="researcher", parent_session_id="run-42")
 researcher.check("network", domain="api.github.com", session_id="run-42/researcher")
 ```
 
-The framework adapters pass `parent_session_id` through from tool input, like `session_id`, and `@guarded` accepts it.
+`@guarded` accepts it. The framework adapters use the Guard's `parent_session_id` and never read one from tool input: the model writes the tool arguments, and it must not choose which session its calls are filed under.
 
 `Guard` instances are thread-safe for concurrent `check()` calls (all state read-only after init). They are cheap; creating one per request is fine, and reusing one is slightly cheaper.
 

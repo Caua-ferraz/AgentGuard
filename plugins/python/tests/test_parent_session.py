@@ -12,7 +12,7 @@ import pytest
 
 from agentguard import Guard
 from agentguard import core
-from agentguard.adapters._common import extract_check_params
+from agentguard.adapters._common import ConflictingToolInput, extract_check_params
 from agentguard.decorators import guarded
 
 
@@ -60,12 +60,41 @@ def test_parent_session_id_on_the_wire(sent, guard_parent, call_parent, want):
         assert body["parent_session_id"] == want
 
 
-def test_adapters_lift_parent_session_id():
+def test_adapters_never_take_parent_session_id_from_tool_input():
+    # The model writes tool arguments; it must not choose the audit parent.
     params = extract_check_params(
         {"command": "ls", "session_id": "sub-1", "parent_session_id": "orch"}
     )
-    assert params["session_id"] == "sub-1"
-    assert params["parent_session_id"] == "orch"
+    assert params == {"command": "ls", "session_id": "sub-1"}
+
+
+def test_alias_conflicts_still_raise():
+    with pytest.raises(ConflictingToolInput):
+        extract_check_params({"command": "ls", "cmd": "rm -rf /", "parent_session_id": "x"})
+
+
+def test_langchain_single_parent_session_key_is_gated_as_a_command(mock_server):
+    # A one-key input under an unrecognised name is promoted to the command
+    # and checked; "parent_session_id" gets no exemption from that.
+    pytest.importorskip("langchain_core")
+    from langchain_core.tools import Tool
+
+    from agentguard.adapters.langchain import GuardedTool
+    from tests.conftest import MockAgentGuardHandler
+
+    MockAgentGuardHandler.check_response = {"decision": "DENY", "reason": "blocked"}
+    guard = Guard(mock_server, parent_session_id="orch")
+    ran = []
+    tool = Tool.from_function(name="run", description="runs", func=lambda text: ran.append(text))
+    gt = GuardedTool(tool, guard, scope="shell")
+
+    with pytest.raises(PermissionError):
+        gt.invoke({"parent_session_id": "rm -rf /"})
+
+    body = json.loads(MockAgentGuardHandler.last_request_body)
+    assert body["command"] == "rm -rf /"
+    assert body["parent_session_id"] == "orch"  # the Guard's, not the model's
+    assert ran == []
 
 
 def test_guarded_accepts_parent_session_id(sent):
