@@ -42,6 +42,8 @@ type wrapperSpec struct {
 	operands int
 	// wholeWords means options are never clusters of letters (arch -arm64).
 	wholeWords bool
+	// loneDash means a bare "-" is an option (env's -, the same as -i).
+	loneDash bool
 	// splitShort and splitLong take a string that the wrapper splits into
 	// more arguments (env -S 'cmd args').
 	splitShort string
@@ -66,7 +68,7 @@ var commandWrappers = map[string]*wrapperSpec{
 	"doas":    {valueShort: "u", stopShort: "CL"},
 	"env": {
 		valueShort: "uCP", valueLong: []string{"--unset", "--chdir"},
-		splitShort: "S", splitLong: "--split-string",
+		splitShort: "S", splitLong: "--split-string", loneDash: true,
 	},
 	"exec": {valueShort: "a"},
 	"flock": {
@@ -110,6 +112,10 @@ var commandWrappers = map[string]*wrapperSpec{
 func (s *wrapperSpec) skip(args []string) (rest []string, ok bool, err error) {
 	for len(args) > 0 {
 		a := args[0]
+		if a == "-" && s.loneDash {
+			args = args[1:]
+			continue
+		}
 		if len(a) < 2 || a[0] != '-' {
 			break
 		}

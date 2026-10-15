@@ -140,6 +140,7 @@ func TestParseShell_WrappedCommands(t *testing.T) {
 		{"env", "env rm -rf /", []string{"rm -rf /"}},
 		{"env with an assignment and options", "env -i -u HOME FOO=1 rm -rf /", []string{"rm -rf /"}},
 		{"env -P on macOS", "env -P /usr/bin rm -rf x", []string{"rm -rf x"}},
+		{"env - (an empty environment)", "env - PATH=/bin rm -rf x", []string{"rm -rf x"}},
 		{"env -S splits its string", "env -S 'rm -rf x' y", []string{"rm -rf x y"}},
 		{"env --split-string=", `env "--split-string=rm -rf x"`, []string{"rm -rf x"}},
 		{"nohup", "nohup rm -rf /", []string{"rm -rf /"}},
