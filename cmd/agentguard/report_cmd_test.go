@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -274,21 +275,35 @@ func TestCLI_ReportSealClaims(t *testing.T) {
 	}
 }
 
-// fakeAuditServer serves GET /v1/audit from entries, a few at a time, the
-// way a 1.4 server does (filterTime) or an older one does (not).
+// fakeAuditServer serves GET /v1/audit from a live file of entries, a few at
+// a time, the way a 1.4 server does (filterTime) or an older one does (not).
 type fakeAuditServer struct {
 	*httptest.Server
-	entries    []audit.Entry
 	filterTime bool
 	key        string // "" = no key needed
-	head       func(w http.ResponseWriter)
+	head       func(w http.ResponseWriter, segment string)
+	// redirectNoAuth sends a request without the key to a login page
+	// that answers 200, like a reverse proxy with single sign-on.
+	redirectNoAuth bool
+	// garbage answers every page with [{}], whatever is asked.
+	garbage bool
+	// After rotateAfter pages, the live file rotates: rotated becomes the
+	// whole live file and the segment changes, as on a file backend.
+	rotateAfter int
+	rotated     []audit.Entry
 
 	mu       sync.Mutex
+	entries  []audit.Entry
+	segment  string
+	pages    int
 	requests []*http.Request
 }
 
-func newFakeAuditServer(t *testing.T, filterTime bool, key string, head func(w http.ResponseWriter)) *fakeAuditServer {
-	f := &fakeAuditServer{entries: reportEntries(), filterTime: filterTime, key: key, head: head}
+func newFakeAuditServer(t *testing.T, f *fakeAuditServer) *fakeAuditServer {
+	if f.entries == nil {
+		f.entries = reportEntries()
+	}
+	f.segment = "seg1"
 	f.Server = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.Close)
 	return f
@@ -296,22 +311,34 @@ func newFakeAuditServer(t *testing.T, filterTime bool, key string, head func(w h
 
 func (f *fakeAuditServer) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.requests = append(f.requests, r)
-	f.mu.Unlock()
+	if r.URL.Path == "/login" {
+		_, _ = w.Write([]byte("<html>sign in</html>"))
+		return
+	}
 	if f.key != "" && r.Header.Get("Authorization") != "Bearer "+f.key {
+		if f.redirectNoAuth {
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	switch {
 	case strings.HasSuffix(r.URL.Path, "/audit/head"):
-		f.head(w)
+		f.head(w, f.segment)
 	case strings.HasSuffix(r.URL.Path, "/audit"):
+		if f.garbage {
+			_, _ = w.Write([]byte(`[{}]`))
+			return
+		}
 		q := r.URL.Query()
 		var matched []audit.Entry
 		for _, e := range f.entries {
 			if f.filterTime {
-				since, _ := time.Parse(time.RFC3339, q.Get("since"))
-				until, _ := time.Parse(time.RFC3339, q.Get("until"))
+				since, _ := time.Parse(time.RFC3339Nano, q.Get("since"))
+				until, _ := time.Parse(time.RFC3339Nano, q.Get("until"))
 				if e.Timestamp.Before(since) || !e.Timestamp.Before(until) {
 					continue
 				}
@@ -327,6 +354,10 @@ func (f *fakeAuditServer) serve(w http.ResponseWriter, r *http.Request) {
 			page = matched[offset:min(offset+limit, len(matched))]
 		}
 		_ = json.NewEncoder(w).Encode(page)
+		f.pages++
+		if f.rotateAfter > 0 && f.pages == f.rotateAfter {
+			f.entries, f.segment = f.rotated, "seg2"
+		}
 	default:
 		http.NotFound(w, r)
 	}
@@ -342,49 +373,67 @@ func (f *fakeAuditServer) paths() []string {
 	return p
 }
 
-func sealedHead(w http.ResponseWriter) {
-	_ = json.NewEncoder(w).Encode(audit.Anchor{SegmentID: "seg1", Seq: 42, Hash: strings.Repeat("a", 64), At: reportDay})
+// auditPaths are the GET /v1/audit page requests, in order.
+func (f *fakeAuditServer) auditPaths() []string {
+	var p []string
+	for _, path := range f.paths() {
+		if strings.Contains(path, "/audit?") && strings.Contains(path, "offset=") {
+			p = append(p, path)
+		}
+	}
+	return p
 }
 
-func sealingOff(w http.ResponseWriter) {
+func sealedHead(w http.ResponseWriter, segment string) {
+	_ = json.NewEncoder(w).Encode(audit.Anchor{SegmentID: segment, Seq: 42, Hash: strings.Repeat("a", 64), At: reportDay})
+}
+
+func sealingOff(w http.ResponseWriter, _ string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusNotFound)
 	_, _ = w.Write([]byte(`{"error":"audit sealing is off; start the server with --audit-seal (file audit backend only)"}`))
 }
 
-func noHeadRoute(w http.ResponseWriter) { http.Error(w, "404 page not found", http.StatusNotFound) }
+func noHeadRoute(w http.ResponseWriter, _ string) {
+	http.Error(w, "404 page not found", http.StatusNotFound)
+}
 
 func TestCLI_ReportFromServer(t *testing.T) {
 	cases := []struct {
 		name          string
-		filterTime    bool
-		key           string
-		head          func(w http.ResponseWriter)
+		srv           *fakeAuditServer
 		extra         []string
 		wantStatus    string
 		wantOutside   int
-		wantAuth      bool
+		wantAuth      string // "yes", "no" or "unknown"
 		wantPathStart string
 	}{
 		{
-			name: "a 1.4 server filters by time, pages, and needs the key", filterTime: true, key: "k",
-			head: sealedHead, extra: []string{"--api-key", "k"},
-			wantStatus: report.IntegrityNotVerified, wantAuth: true, wantPathStart: "/v1/audit?",
+			name:  "a 1.4 server filters by time, pages, and needs the key",
+			srv:   &fakeAuditServer{filterTime: true, key: "k", head: sealedHead},
+			extra: []string{"--api-key", "k"}, wantStatus: report.IntegrityNotVerified, wantAuth: "yes", wantPathStart: "/v1/audit?",
 		},
 		{
-			name: "an older server ignores since and until and has no head route", filterTime: false,
-			head:       noHeadRoute,
-			wantStatus: report.IntegrityUnknown, wantOutside: 2, wantPathStart: "/v1/audit?",
+			name:       "an older server ignores since and until and has no head route",
+			srv:        &fakeAuditServer{head: noHeadRoute},
+			wantStatus: report.IntegrityUnknown, wantOutside: 2, wantAuth: "no", wantPathStart: "/v1/audit?",
 		},
 		{
-			name: "a server with sealing off, asked for one tenant", filterTime: true,
-			head: sealingOff, extra: []string{"--tenant-id", "acme"},
-			wantStatus: report.IntegrityNotSealed, wantPathStart: "/v1/t/acme/audit?",
+			name:  "a server with sealing off, asked for one tenant",
+			srv:   &fakeAuditServer{filterTime: true, head: sealingOff},
+			extra: []string{"--tenant-id", "acme"}, wantStatus: report.IntegrityNotSealed, wantAuth: "no", wantPathStart: "/v1/t/acme/audit?",
+		},
+		{
+			// A 302 to a login page that answers 200 used to count as an
+			// open audit API.
+			name:  "a probe redirected to a login page proves nothing",
+			srv:   &fakeAuditServer{filterTime: true, key: "k", head: sealedHead, redirectNoAuth: true},
+			extra: []string{"--api-key", "k"}, wantStatus: report.IntegrityNotVerified, wantAuth: "unknown", wantPathStart: "/v1/audit?",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := newFakeAuditServer(t, tc.filterTime, tc.key, tc.head)
+			srv := newFakeAuditServer(t, tc.srv)
 			args := append([]string{"report", "--url", srv.URL, "--output", "json"}, reportPeriodArgs...)
 			res := agentguard(t, t.TempDir(), nil, append(args, tc.extra...)...)
 			if res.code != 0 {
@@ -400,36 +449,122 @@ func TestCLI_ReportFromServer(t *testing.T) {
 			if r.Integrity.Status != tc.wantStatus {
 				t.Errorf("integrity = %q (%s), want %q", r.Integrity.Status, r.Integrity.Summary, tc.wantStatus)
 			}
-			if r.Source.AuthRequired == nil || *r.Source.AuthRequired != tc.wantAuth {
-				t.Errorf("auth required = %v, want %v", r.Source.AuthRequired, tc.wantAuth)
+			auth := "unknown"
+			if r.Source.AuthRequired != nil {
+				auth = map[bool]string{true: "yes", false: "no"}[*r.Source.AuthRequired]
+			}
+			if auth != tc.wantAuth {
+				t.Errorf("auth required = %s, want %s", auth, tc.wantAuth)
 			}
 			if r.Policy != nil {
 				t.Errorf("policy = %+v; with --url only --policy names one", r.Policy)
 			}
-			paths := srv.paths()
-			if !strings.HasPrefix(paths[0], tc.wantPathStart) {
-				t.Errorf("first request %s, want %s…", paths[0], tc.wantPathStart)
+			if len(r.Source.Warnings) != 0 {
+				t.Errorf("warnings = %v", r.Source.Warnings)
+			}
+			pages := srv.auditPaths()
+			if len(pages) < 3 {
+				t.Fatalf("only %d audit pages fetched: %v", len(pages), srv.paths())
+			}
+			if !strings.HasPrefix(pages[0], tc.wantPathStart) {
+				t.Errorf("first page %s, want %s…", pages[0], tc.wantPathStart)
 			}
 			for _, want := range []string{"order=asc", "since=2026-10-01T00%3A00%3A00Z", "until=2026-10-02T00%3A00%3A00Z"} {
-				if !strings.Contains(paths[0], want) {
-					t.Errorf("first request %s lacks %s", paths[0], want)
+				if !strings.Contains(pages[0], want) {
+					t.Errorf("first page %s lacks %s", pages[0], want)
 				}
-			}
-			pages := 0
-			for _, p := range paths {
-				if strings.Contains(p, "offset=") {
-					pages++
-				}
-			}
-			if pages < 3 {
-				t.Errorf("only %d audit pages fetched: %v", pages, paths)
 			}
 		})
 	}
 
-	srv := newFakeAuditServer(t, true, "k", sealedHead)
+	srv := newFakeAuditServer(t, &fakeAuditServer{filterTime: true, key: "k", head: sealedHead})
 	agentguard(t, t.TempDir(), nil, "report", "--url", srv.URL).expect(t, 3, "", "requires an API key")
 	agentguard(t, t.TempDir(), nil, "report", "--url", "http://127.0.0.1:1").expect(t, 3, "", "Cannot connect to AgentGuard at http://127.0.0.1:1")
+}
+
+// A server that answers every page with the same thing used to be paged
+// forever (105k requests in 3 seconds). It now stops at the second page.
+func TestCLI_ReportServerThatRepeatsItself(t *testing.T) {
+	srv := newFakeAuditServer(t, &fakeAuditServer{garbage: true, head: noHeadRoute})
+	args := append([]string{"report", "--url", srv.URL}, reportPeriodArgs...)
+	agentguard(t, t.TempDir(), nil, args...).expect(t, 3, "", "sends the same entries for every offset")
+	if n := len(srv.auditPaths()); n > 5 {
+		t.Errorf("%d page requests before giving up", n)
+	}
+}
+
+// The live file rotates after two pages. Offset paging then read past the
+// end of the new, short file and stopped, losing the entries written after
+// the rotation, with no warning. Paging by time picks them up, and the
+// changed seal head segment puts a warning in the report.
+func TestCLI_ReportServerRotatesWhileReading(t *testing.T) {
+	var after []audit.Entry
+	for i := 0; i < 5; i++ {
+		e := reportEntries()[1]
+		e.Timestamp = reportDay.Add(20*time.Hour + time.Duration(i)*time.Minute)
+		e.Request.Command = fmt.Sprintf("after rotation %d", i)
+		after = append(after, e)
+	}
+	srv := newFakeAuditServer(t, &fakeAuditServer{filterTime: true, head: sealedHead, rotateAfter: 2, rotated: after})
+	args := append([]string{"report", "--url", srv.URL, "--output", "json"}, reportPeriodArgs...)
+	res := agentguard(t, t.TempDir(), nil, args...)
+	if res.code != 0 {
+		t.Fatalf("exit %d\n%s", res.code, res.stderr)
+	}
+	r := decodeReport(t, res.stdout)
+	// Five entries before the rotation (two pages of three; the second
+	// restarts at the last entry of the first, read once), then the five
+	// written after it. The entries left in the old file are gone from
+	// what the server can answer: that is what the warning is for.
+	if r.Activity.Entries != 5+5 {
+		t.Errorf("entries = %d, want 10", r.Activity.Entries)
+	}
+	if len(r.Source.Warnings) != 1 || !strings.Contains(r.Source.Warnings[0], "rotated while the report read it") {
+		t.Errorf("warnings = %v", r.Source.Warnings)
+	}
+	if !strings.Contains(strings.Join(r.Limits, "\n"), "The entries may be incomplete") {
+		t.Errorf("limits miss the rotation: %v", r.Limits)
+	}
+}
+
+// A burst of entries a few milliseconds apart, more than a page of them,
+// some written out of time order: paging by time must neither loop on the
+// burst nor drop or repeat an entry.
+func TestCLI_ReportServerBurst(t *testing.T) {
+	var burst []audit.Entry
+	for i := 0; i < 14; i++ {
+		e := reportEntries()[1]
+		ms := i
+		if i%4 == 3 {
+			ms = i - 2 // written after an entry stamped later
+		}
+		e.Timestamp = reportDay.Add(time.Hour + time.Duration(ms)*time.Millisecond)
+		e.SessionID = fmt.Sprintf("s%d", i)
+		burst = append(burst, e)
+	}
+	srv := newFakeAuditServer(t, &fakeAuditServer{filterTime: true, head: sealedHead, entries: burst})
+	args := append([]string{"report", "--url", srv.URL, "--output", "json"}, reportPeriodArgs...)
+	res := agentguard(t, t.TempDir(), nil, args...)
+	if res.code != 0 {
+		t.Fatalf("exit %d\n%s", res.code, res.stderr)
+	}
+	if r := decodeReport(t, res.stdout); r.Activity.Entries != 14 || r.Activity.SessionsSeen.Count != 14 {
+		t.Errorf("entries = %d, sessions = %d; want 14 each", r.Activity.Entries, r.Activity.SessionsSeen.Count)
+	}
+}
+
+// A user name and password in --url would be written into the report and
+// sent as Basic auth on the probe that is meant to carry no credentials.
+func TestCLI_ReportRejectsCredentialsInURL(t *testing.T) {
+	res := agentguard(t, t.TempDir(), nil, "report", "--url", "http://admin:hunter2@guard.internal:8080")
+	res.expect(t, 2, "", "--url must not hold a user name or password")
+	if strings.Contains(res.stderr, "hunter2") {
+		t.Errorf("the password is echoed: %s", res.stderr)
+	}
+	res = agentguard(t, t.TempDir(), nil, "report", "--url", "ftp://admin:hunter2@guard.internal")
+	if res.code != 2 || strings.Contains(res.stderr, "hunter2") {
+		t.Errorf("exit %d, stderr %s", res.code, res.stderr)
+	}
 }
 
 func TestCLI_ReportMistakes(t *testing.T) {

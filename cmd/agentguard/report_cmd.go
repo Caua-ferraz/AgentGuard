@@ -10,8 +10,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -40,11 +38,6 @@ const (
 
 // defaultReportSpan is how far back --since reaches when it isn't given.
 const defaultReportSpan = 24 * time.Hour
-
-// reportPageSize is the limit asked for on each GET /v1/audit page. The
-// server clamps it to its own maximum (1000 unless the policy changes it),
-// so the paging advances by what each page actually holds.
-const reportPageSize = 1000
 
 var reportFlagGroups = []clihelp.Group{
 	{Title: "Period", Names: []string{"since", "until"}},
@@ -94,6 +87,12 @@ func runReportCmd(args []string) int {
 		return usageError("report", "--api-key and --tenant-id go with --url")
 	}
 	if server {
+		// A password in the URL would be written into the report, printed
+		// in errors, and sent as Basic auth on the probe that is meant to
+		// carry no credentials.
+		if u, err := url.Parse(f.url); err == nil && u.User != nil {
+			return usageError("report", "--url must not hold a user name or password (%s); give the API key with --api-key", u.Redacted())
+		}
 		// Only --url: AGENTGUARD_URL does not turn a report on the local
 		// files into one on a server.
 		base, err := checkServerURL(f.url)
@@ -343,172 +342,4 @@ func collectFiles(r *report.Report, path string, keyFiles []string, stderr io.Wr
 	}
 	r.Activity, r.Approvals = report.Aggregate(entries, r.Period)
 	return 0
-}
-
-// reportClient reads a server's audit log for the report.
-type reportClient struct {
-	base, tenant, key string
-	http              *http.Client
-}
-
-// route is a /v1 path on the legacy route, or on the tenant mirror when a
-// tenant was named (like the MCP gateway and the LLM proxy do).
-func (c *reportClient) route(p string) string {
-	if c.tenant == "" {
-		return c.base + "/v1" + p
-	}
-	return c.base + "/v1/t/" + url.PathEscape(c.tenant) + p
-}
-
-func (c *reportClient) get(u string, auth bool) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
-	}
-	if auth {
-		attachAuth(req, c.key)
-	}
-	return c.http.Do(req)
-}
-
-// collect fills r from the server: the entries of the period, the seal
-// head, and whether the audit API needs the key.
-func (c *reportClient) collect(r *report.Report, stderr io.Writer) int {
-	tenant := c.tenant
-	if tenant == "" {
-		tenant = "local"
-	}
-	r.Source = report.Source{Mode: report.SourceServer, Server: c.base, Tenant: tenant}
-
-	var fetchErr error
-	entries := func(yield func(audit.Entry) bool) {
-		fetchErr = c.pages(r, yield)
-	}
-	r.Activity, r.Approvals = report.Aggregate(entries, r.Period)
-	if fetchErr != nil {
-		var conn *connectError
-		if errors.As(fetchErr, &conn) {
-			cannotConnect(stderr, c.base, conn.err)
-		} else {
-			fmt.Fprintf(stderr, "agentguard report: %v\n", fetchErr)
-		}
-		return reportExitIO
-	}
-
-	r.Integrity = c.head()
-	if c.key == "" {
-		// The pages came back without a key: the audit API is open.
-		open := false
-		r.Source.AuthRequired = &open
-	} else {
-		r.Source.AuthRequired = c.authRequired()
-	}
-	return 0
-}
-
-// connectError is a request that never reached the server.
-type connectError struct{ err error }
-
-func (e *connectError) Error() string { return e.err.Error() }
-
-// pages walks GET /v1/audit oldest first and yields the entries of the
-// period. The since/until parameters (server 1.4) narrow what the server
-// sends; the timestamp check here keeps the report right on an older
-// server that ignores them.
-func (c *reportClient) pages(r *report.Report, yield func(audit.Entry) bool) error {
-	params := url.Values{}
-	params.Set("order", "asc")
-	params.Set("limit", strconv.Itoa(reportPageSize))
-	params.Set("since", r.Period.Since.Format(time.RFC3339Nano))
-	params.Set("until", r.Period.Until.Format(time.RFC3339Nano))
-	for offset := 0; ; {
-		params.Set("offset", strconv.Itoa(offset))
-		resp, err := c.get(c.route("/audit")+"?"+params.Encode(), true)
-		if err != nil {
-			return &connectError{err}
-		}
-		page, err := decodeAuditPage(resp, c.key, c.base)
-		if err != nil {
-			return err
-		}
-		if len(page) == 0 {
-			return nil
-		}
-		for _, e := range page {
-			r.Source.Fetched++
-			if !r.Period.Contains(e.Timestamp) {
-				r.Source.OutsidePeriod++
-				continue
-			}
-			if !yield(e) {
-				return nil
-			}
-		}
-		offset += len(page)
-	}
-}
-
-func decodeAuditPage(resp *http.Response, key, base string) ([]audit.Entry, error) {
-	defer resp.Body.Close()
-	switch {
-	case resp.StatusCode == http.StatusUnauthorized:
-		return nil, errors.New(authFailure(key))
-	case resp.StatusCode != http.StatusOK:
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		var body map[string]string
-		_ = json.Unmarshal(raw, &body)
-		return nil, fmt.Errorf("GET /v1/audit: the server answered HTTP %d: %s", resp.StatusCode, serverMessage(body, raw))
-	}
-	var page []audit.Entry
-	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
-		return nil, fmt.Errorf("unreadable answer from %s (is it an AgentGuard server?): %v", base, err)
-	}
-	return page, nil
-}
-
-// head reads GET /v1/audit/head. The server answers 404 with a JSON error
-// when sealing is off; a server older than 1.4 has no such route and
-// answers a plain-text 404.
-func (c *reportClient) head() report.Integrity {
-	resp, err := c.get(c.route("/audit/head"), true)
-	if err != nil {
-		return report.FromServerHead(nil, false, "GET /v1/audit/head failed ("+connectFailure(err)+")")
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	switch resp.StatusCode {
-	case http.StatusOK:
-		var a audit.Anchor
-		if err := json.Unmarshal(raw, &a); err != nil || a.Seq == 0 {
-			return report.FromServerHead(nil, false, "the server's GET /v1/audit/head answer is unreadable")
-		}
-		return report.FromServerHead(&a, false, "")
-	case http.StatusNotFound:
-		var body map[string]string
-		if json.Unmarshal(raw, &body) == nil && body["error"] != "" {
-			return report.FromServerHead(nil, true, "")
-		}
-		return report.FromServerHead(nil, false, "the server has no GET /v1/audit/head (it is older than 1.4)")
-	}
-	return report.FromServerHead(nil, false, fmt.Sprintf("GET /v1/audit/head answered HTTP %d", resp.StatusCode))
-}
-
-// authRequired asks for one audit entry without the key. It returns nil
-// when the answer says neither yes nor no.
-func (c *reportClient) authRequired() *bool {
-	resp, err := c.get(c.route("/audit")+"?limit=1", false)
-	if err != nil {
-		return nil
-	}
-	resp.Body.Close()
-	var required bool
-	switch resp.StatusCode {
-	case http.StatusUnauthorized:
-		required = true
-	case http.StatusOK:
-		required = false
-	default:
-		return nil
-	}
-	return &required
 }

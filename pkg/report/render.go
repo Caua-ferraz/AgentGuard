@@ -169,6 +169,9 @@ func WriteMarkdown(w io.Writer, r *Report) error {
 	for _, e := range r.Source.ReadErrors {
 		items = append(items, "Read error: "+e)
 	}
+	for _, w := range r.Source.Warnings {
+		items = append(items, "Warning: "+w)
+	}
 	m.list(items)
 
 	a := r.Activity

@@ -241,9 +241,12 @@ func Limits(r *Report) []string {
 		l = append(l, "The policy SHA-256 is of the file as it was when the report was made. The audit log does not record which version of the policy made each decision.")
 	}
 	l = append(l, "The secret check uses the built-in patterns only, not a policy's notifications.redaction.extra_patterns.")
+	for _, w := range r.Source.Warnings {
+		l = append(l, "The entries may be incomplete: "+w+".")
+	}
 	if r.Source.Mode == SourceServer {
 		l = append(l,
-			"A server using the file audit backend answers from its live file only: entries in rotated archives are not included. Run the report with --audit-log on the server's files to cover them.",
+			"A server using the file audit backend answers from its live file only: entries in rotated archives are not included, and entries that rotate out while the report reads are lost. The report notices a rotation only on a sealed server (its seal head names the live file). Run the report with --audit-log on the server's files to cover archives.",
 			fmt.Sprintf("Only tenant %q is covered: the audit API answers for one tenant at a time.", r.Source.Tenant),
 		)
 	} else {

@@ -56,14 +56,28 @@ policy file or the server can't be read.
 | Tenants | All of them | One: `local`, or `--tenant-id` |
 | Seal chain | Verified (`--key-file` for a log sealed with a key) | Not verified. The head comes from `GET /v1/audit/head` |
 | Unreadable lines | Counted | Unknown (the server skips them) |
-| API key check | Unknown | Checked: the report asks for one entry without the key |
+| API key check | Unknown | Checked: the report asks for one entry without the key, without following redirects. 401 or 403 means required; a JSON list of entries means open; anything else is unknown |
 | Policy file | `--policy`, else the file `agentguard server` would load | `--policy` only |
 
-The server is asked for the period with `since` and `until` (1.4). A
-server older than 1.4 ignores them; the report drops entries outside the
+The server is asked for the period with `since` and `until`, which
+`GET /v1/audit` takes from 1.4 (they came with the sessions work). A server
+that predates them ignores them; the report drops entries outside the
 period itself, so the numbers are the same, and `source.outside_period`
-says how many were dropped. A server older than 1.4 has no
+says how many were dropped. A server older than 1.4 also has no
 `GET /v1/audit/head`, so the seal status is then "unknown".
+
+The report pages by time, not by offset: each page starts a moment before
+the last entry of the one before, and an entry seen twice is counted once.
+An offset into the server's live file stops meaning anything when the file
+rotates. Rotation still loses the entries left in the old file, which the
+server no longer serves; on a sealed server the report notices (the seal
+head names a new file afterwards) and adds a warning to the report. The
+report stops with exit 3 if a server sends the same page over and over, or
+after 50,000 pages, 10 million entries or 30 minutes: report on that much
+from the files.
+
+`--url` must not hold a user name or password (`http://user:pass@host`):
+it would be written into the report. Give the key with `--api-key`.
 
 ## What the report holds
 
@@ -157,7 +171,8 @@ only if that ever stops being true. Times are RFC 3339 UTC.
 | `period.since`, `period.until` | The period; `since` inclusive, `until` exclusive |
 | `source.mode` | `"file"` or `"server"` |
 | `source.audit_log`, `source.files`, `source.bad_lines`, `source.read_errors` | Files mode: the live file, the files read (oldest first), lines that are not entries, files that end early |
-| `source.server`, `source.tenant`, `source.fetched`, `source.outside_period`, `source.auth_required` | Server mode: the URL, the tenant, entries fetched, entries dropped as outside the period, whether the audit API needs the key |
+| `source.server`, `source.tenant`, `source.fetched`, `source.outside_period`, `source.auth_required` | Server mode: the URL, the tenant, different entries fetched, entries dropped as outside the period, whether the audit API needs the key (absent when unknown) |
+| `source.warnings` | Why the entries may be incomplete, e.g. the server's live file rotated while the report read it |
 | `policy` | `{path, sha256, found}` or `null`. `found` is `--policy`, `AGENTGUARD_POLICY`, `the default` or `found automatically` |
 | `integrity.method` | `"verify"` or `"seal_head"` |
 | `integrity.status` | `intact`, `broken`, `not_sealed`, `not_verified` or `unknown` |

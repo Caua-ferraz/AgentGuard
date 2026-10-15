@@ -355,7 +355,11 @@ func serverURL(fs *flag.FlagSet, value string) (string, error) {
 func checkServerURL(value string) (string, error) {
 	u, err := url.Parse(value)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return "", fmt.Errorf("%q is not a server URL; include the scheme, e.g. http://localhost:8080", value)
+		shown := value
+		if err == nil {
+			shown = u.Redacted() // never echo a password given in the URL
+		}
+		return "", fmt.Errorf("%q is not a server URL; include the scheme, e.g. http://localhost:8080", shown)
 	}
 	return strings.TrimRight(value, "/"), nil
 }

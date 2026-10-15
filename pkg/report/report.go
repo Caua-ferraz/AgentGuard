@@ -82,6 +82,9 @@ type Source struct {
 	// AuthRequired is whether the server refused an audit query that
 	// carried no API key (server mode). nil when it was not checked.
 	AuthRequired *bool `json:"auth_required,omitempty"`
+	// Warnings say why the entries may be incomplete, e.g. the server's
+	// live file rotated while the report read it.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // PolicyFile identifies a policy file by content.

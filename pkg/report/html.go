@@ -114,6 +114,9 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 {{- range .Source.ReadErrors}}
 <li>Read error: {{.}}</li>
 {{- end}}
+{{- range .Source.Warnings}}
+<li>Warning: {{.}}</li>
+{{- end}}
 </ul>
 
 {{with .Activity}}
