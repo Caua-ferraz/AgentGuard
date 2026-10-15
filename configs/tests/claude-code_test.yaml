@@ -70,6 +70,37 @@ tests:
     expect: DENY
     expect_reason_contains: "metadata"
 
+  # Other spellings of the same address: Node, curl and the C library all
+  # read these as 169.254.169.254 or the metadata host.
+  - name: the metadata endpoint written in hex is still denied
+    hook: claude-code
+    input: {tool_name: WebFetch, tool_input: {url: "http://0xa9fea9fe/latest/meta-data", prompt: "read"}}
+    expect: DENY
+    expect_reason_contains: "metadata"
+
+  - name: the metadata endpoint written as one decimal number is still denied
+    hook: claude-code
+    input: {tool_name: WebFetch, tool_input: {url: "http://2852039166/latest/meta-data", prompt: "read"}}
+    expect: DENY
+    expect_reason_contains: "metadata"
+
+  - name: the metadata endpoint written in octal is still denied
+    hook: claude-code
+    input: {tool_name: WebFetch, tool_input: {url: "http://0251.0376.0251.0376/latest/meta-data", prompt: "read"}}
+    expect: DENY
+    expect_reason_contains: "metadata"
+
+  - name: the metadata endpoint as an IPv4-mapped IPv6 address is still denied
+    hook: claude-code
+    input: {tool_name: WebFetch, tool_input: {url: "http://[::ffff:169.254.169.254]/latest/meta-data", prompt: "read"}}
+    expect: DENY
+    expect_reason_contains: "metadata"
+
+  - name: the metadata host with a trailing dot is still denied
+    hook: claude-code
+    input: {tool_name: WebFetch, tool_input: {url: "http://metadata.google.internal./computeMetadata/v1/", prompt: "read"}}
+    expect: DENY
+
   # --- MCP tools keep the policy's normal rules ---
   - name: a Claude Code GitHub MCP tool needs approval
     hook: claude-code

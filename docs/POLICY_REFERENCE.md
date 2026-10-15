@@ -653,6 +653,20 @@ rule's `domain` patterns are both lowercased before matching, so a deny rule
 for `evil.com` also matches `EVIL.com` — DNS names are case-equivalent, and
 before v1.0 a mixed-case request could slip past a lowercase deny rule.
 
+Hosts are also written one way before matching (v1.4), on both sides, so a
+rule on an address catches the other spellings that reach it:
+
+| Request host | Matched as |
+|---|---|
+| `0xa9fea9fe`, `2852039166`, `0251.0376.0251.0376`, `169.254.43518` | `169.254.169.254` |
+| `::ffff:169.254.169.254`, `::ffff:a9fe:a9fe` | `169.254.169.254` |
+| `0:0:0:0:0:0:0:1` | `::1` |
+| `metadata.google.internal.` (trailing dot) | `metadata.google.internal` |
+
+Browsers, Node, curl and the C library all accept these forms, so before
+v1.4 a request written in one of them could slip past a deny rule on the
+plain address.
+
 ### Paths are cleaned first
 
 `matchRule` applies `filepath.Clean + ToSlash` to both the rule's `paths` entries and the request's `Path`, so `./a/./b` and `a/b` are equivalent.

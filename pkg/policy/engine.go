@@ -259,7 +259,7 @@ func normalizeRuleDomains(pol *Policy) {
 			for _, rules := range [][]Rule{sets[si].Allow, sets[si].Deny, sets[si].RequireApproval} {
 				for ri := range rules {
 					if rules[ri].Domain != "" {
-						rules[ri].Domain = strings.ToLower(rules[ri].Domain)
+						rules[ri].Domain = canonicalHost(strings.ToLower(rules[ri].Domain))
 					}
 				}
 			}
@@ -1739,6 +1739,10 @@ func normalizeRequest(req ActionRequest) ActionRequest {
 	if req.Domain == "" && req.URL != "" {
 		req.Domain = urlHost(req.URL)
 	}
+	// One spelling per host: 0xa9fea9fe, 2852039166 and
+	// "metadata.google.internal." reach the same place as the forms a deny
+	// rule names, so they must be matched as those forms.
+	req.Domain = canonicalHost(req.Domain)
 	req.Path = normalizePath(req.Path)
 	return req
 }
