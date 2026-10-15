@@ -59,17 +59,22 @@ type fixtureFile struct {
 
 // fixtureCase is one test case: an action and the verdict it must get.
 //
-// The action comes from Request today. A case that feeds a raw agent hook
-// payload through a hook adapter will add `hook:` and `input:` as another
-// way to produce it; caseRequest is the one place that has to learn about
-// them.
+// The action is either a Request, or a coding agent's tool call: Hook names
+// the agent and Input is the call as that agent sends it to `agentguard
+// hook`. A hook case goes through the agent's own adapter, so it tests the
+// mapping from tool call to requests as well as the policy.
 type fixtureCase struct {
-	Name                 string           `yaml:"name"`
-	Prior                []fixtureRequest `yaml:"prior"`
-	Request              *fixtureRequest  `yaml:"request"`
-	Expect               string           `yaml:"expect"`
-	ExpectRule           string           `yaml:"expect_rule"`
-	ExpectReasonContains string           `yaml:"expect_reason_contains"`
+	Name    string           `yaml:"name"`
+	Prior   []fixtureRequest `yaml:"prior"`
+	Request *fixtureRequest  `yaml:"request"`
+	Hook    string           `yaml:"hook"`
+	// Input is any YAML value, so the agent's own keys (tool_name,
+	// tool_input, ...) aren't held to the fixture's known keys: the agent
+	// decides what they mean. caseHook checks that it is a mapping.
+	Input                any    `yaml:"input"`
+	Expect               string `yaml:"expect"`
+	ExpectRule           string `yaml:"expect_rule"`
+	ExpectReasonContains string `yaml:"expect_reason_contains"`
 }
 
 // fixtureRequest is policy.ActionRequest with YAML keys. ActionRequest only
@@ -104,15 +109,70 @@ func (r fixtureRequest) actionRequest() policy.ActionRequest {
 	}
 }
 
-// caseRequest returns the action a case checks.
-func caseRequest(c fixtureCase) (policy.ActionRequest, error) {
-	if c.Request == nil {
-		return policy.ActionRequest{}, errors.New("needs a request")
+// checkCaseAction checks that a case gives its action one way, in full: a
+// request with a scope, or a hook and its input. Its errors are fixture
+// errors.
+func checkCaseAction(c fixtureCase) error {
+	if c.Hook == "" && c.Input == nil {
+		switch {
+		case c.Request == nil:
+			return fmt.Errorf("needs a request: (or hook: and input:, a coding agent's tool call; hook is one of %s)", strings.Join(hookAgentNames(), ", "))
+		case c.Request.Scope == "":
+			return errors.New("its request needs a scope")
+		}
+		return nil
 	}
-	if c.Request.Scope == "" {
-		return policy.ActionRequest{}, errors.New("its request needs a scope")
+	_, _, err := caseHook(c)
+	return err
+}
+
+// caseHook returns the agent a hook case's input goes to, and the input as
+// the JSON that agent would send. Its errors are fixture errors.
+func caseHook(c fixtureCase) (*hookAgent, []byte, error) {
+	supported := strings.Join(hookAgentNames(), ", ")
+	switch {
+	case c.Request != nil:
+		return nil, nil, errors.New("has both request: and hook:/input:; a case checks one action, so keep request: for a policy action, or hook: and input: for a coding agent's tool call")
+	case c.Hook == "":
+		return nil, nil, fmt.Errorf("has input: but no hook:; add hook: with the agent that sends this input, one of %s", supported)
+	case c.Input == nil:
+		return nil, nil, fmt.Errorf("has hook: %s but no input:; add input: with the tool call as the agent sends it to the hook, such as {tool_name: Bash, tool_input: {command: ls}} (hook is one of %s)", c.Hook, supported)
 	}
-	return c.Request.actionRequest(), nil
+	agent := hookAgentByName(c.Hook)
+	if agent == nil {
+		return nil, nil, fmt.Errorf("hook is %q; use one of %s", c.Hook, supported)
+	}
+	// Every agent sends its tool call as one JSON object.
+	if _, ok := c.Input.(map[string]any); !ok {
+		return nil, nil, errors.New("input must be a mapping: the JSON object the agent sends, written as YAML")
+	}
+	raw, err := json.Marshal(c.Input)
+	if err != nil {
+		return nil, nil, fmt.Errorf("input can't be written as JSON (%v); every key in it must be text", err)
+	}
+	return agent, raw, nil
+}
+
+// caseRequests returns the requests a case checks. A hook case's input goes
+// through the agent's own parse, as `agentguard hook` reads it. An input
+// the hook doesn't check, or can't read, is an error the case fails with:
+// such a case would test nothing, which is almost certainly a mistake.
+func caseRequests(c fixtureCase) ([]policy.ActionRequest, error) {
+	if c.Hook == "" {
+		return []policy.ActionRequest{c.Request.actionRequest()}, nil
+	}
+	agent, raw, err := caseHook(c)
+	if err != nil {
+		return nil, err // unreachable: parseFixture rejected the case
+	}
+	call, checked, err := agent.parse(raw)
+	switch {
+	case err != nil:
+		return nil, fmt.Errorf("the %s hook can't read this input (%v); the real hook would let the call through unchecked, or block it with --fail-closed", agent.name, err)
+	case !checked || len(call.reqs) == 0:
+		return nil, fmt.Errorf("the %s hook doesn't check this input (hook_event_name %q, tool %q), so the case tests nothing; give it a tool call the hook checks (see docs/CODING_AGENTS.md § What gets checked)", agent.name, call.event, call.tool)
+	}
+	return call.reqs, nil
 }
 
 // unknownKey rewrites yaml.v3's "field x not found in type main.fixtureCase"
@@ -132,7 +192,7 @@ var (
 	fixtureShapes = map[string]string{
 		"main.fixtureFile":      "a mapping with a tests: list",
 		"[]main.fixtureCase":    "a list of test cases",
-		"main.fixtureCase":      "a test case (a mapping with name:, request: and expect:)",
+		"main.fixtureCase":      "a test case (a mapping with name:, request: or hook: and input:, and expect:)",
 		"*main.fixtureRequest":  "a request (a mapping with scope: and the action's fields)",
 		"main.fixtureRequest":   "an action (a mapping with scope: and the action's fields)",
 		"[]main.fixtureRequest": "a list of actions",
@@ -196,7 +256,7 @@ func parseFixture(data []byte) (*fixtureFile, error) {
 			return nil, fmt.Errorf("%s: another case in this file has the same name", where)
 		}
 		seen[c.Name] = true
-		if _, err := caseRequest(c); err != nil {
+		if err := checkCaseAction(c); err != nil {
 			return nil, fmt.Errorf("%s: %v", where, err)
 		}
 		switch policy.Decision(c.Expect) {
@@ -242,6 +302,7 @@ type caseResult struct {
 	File                 string `json:"file"`
 	Policy               string `json:"policy"`
 	Name                 string `json:"name"`
+	Hook                 string `json:"hook,omitempty"` // a hook case's agent; "" for a request
 	Passed               bool   `json:"passed"`
 	Expect               string `json:"expect"`
 	ExpectRule           string `json:"expect_rule,omitempty"`
@@ -430,16 +491,52 @@ func loadTestPolicy(path string, strict bool, stderr io.Writer) (*policy.Policy,
 	return pol, nil
 }
 
-// runCase checks one case on an engine of its own. Engines keep state
-// between checks (cost reserved per session), so sharing one would let an
-// earlier case change a later case's verdict, and reordering the file would
-// change the results.
+// runCase checks one case. A hook input that maps to several requests (a
+// patch that touches several files) gets the verdict the hook acts on: each
+// request is checked, and the most severe verdict wins.
 func runCase(fx loadedFixture, c fixtureCase) caseResult {
+	r := caseResult{
+		File:                 fx.path,
+		Policy:               fx.policyPath,
+		Name:                 c.Name,
+		Hook:                 c.Hook,
+		Expect:               c.Expect,
+		ExpectRule:           c.ExpectRule,
+		ExpectReasonContains: c.ExpectReasonContains,
+	}
+	reqs, err := caseRequests(c)
+	if err != nil {
+		r.Failures = []string{"hook: " + err.Error()}
+		return r
+	}
+	results := make([]policy.CheckResult, len(reqs))
+	for i, req := range reqs {
+		results[i] = checkCaseRequest(fx, c, req)
+	}
+	res := results[mostSevere(results)]
+	r.Decision, r.Rule, r.Reason = string(res.Decision), res.Rule, res.Reason
+	if string(res.Decision) != c.Expect {
+		r.Failures = append(r.Failures, fmt.Sprintf("decision: want %s, got %s", c.Expect, res.Decision))
+	}
+	if c.ExpectRule != "" && c.ExpectRule != res.Rule {
+		r.Failures = append(r.Failures, fmt.Sprintf("rule: want %q, got %q", c.ExpectRule, res.Rule))
+	}
+	if c.ExpectReasonContains != "" && !strings.Contains(res.Reason, c.ExpectReasonContains) {
+		r.Failures = append(r.Failures, fmt.Sprintf("reason: want it to contain %q, got %q", c.ExpectReasonContains, res.Reason))
+	}
+	r.Passed = len(r.Failures) == 0
+	return r
+}
+
+// checkCaseRequest checks one of a case's requests on an engine of its own.
+// Engines keep state between checks (cost reserved per session), so sharing
+// one would let an earlier case change a later case's verdict, and
+// reordering the file would change the results.
+func checkCaseRequest(fx loadedFixture, c fixtureCase, req policy.ActionRequest) policy.CheckResult {
 	tenant := fx.file.Tenant
 	if tenant == "" {
 		tenant = policy.LocalTenantID
 	}
-	req, _ := caseRequest(c) // parseFixture already rejected a case without one
 
 	// A provider over the already-loaded policy: no file watcher per case,
 	// and every case sees the same policy even if the file changes mid-run.
@@ -464,29 +561,7 @@ func runCase(fx loadedFixture, c fixtureCase) caseResult {
 		res = engine.Check(req, tenant)
 		_ = engine.Close()
 	}
-
-	r := caseResult{
-		File:                 fx.path,
-		Policy:               fx.policyPath,
-		Name:                 c.Name,
-		Expect:               c.Expect,
-		ExpectRule:           c.ExpectRule,
-		ExpectReasonContains: c.ExpectReasonContains,
-		Decision:             string(res.Decision),
-		Rule:                 res.Rule,
-		Reason:               res.Reason,
-	}
-	if string(res.Decision) != c.Expect {
-		r.Failures = append(r.Failures, fmt.Sprintf("decision: want %s, got %s", c.Expect, res.Decision))
-	}
-	if c.ExpectRule != "" && c.ExpectRule != res.Rule {
-		r.Failures = append(r.Failures, fmt.Sprintf("rule: want %q, got %q", c.ExpectRule, res.Rule))
-	}
-	if c.ExpectReasonContains != "" && !strings.Contains(res.Reason, c.ExpectReasonContains) {
-		r.Failures = append(r.Failures, fmt.Sprintf("reason: want it to contain %q, got %q", c.ExpectReasonContains, res.Reason))
-	}
-	r.Passed = len(r.Failures) == 0
-	return r
+	return res
 }
 
 // fixtureProvider serves one loaded policy to one tenant. The static
@@ -528,7 +603,16 @@ func writeTestText(w io.Writer, results []caseResult) error {
 			continue
 		}
 		fmt.Fprintf(&sb, "  FAIL  %s\n", r.Name)
+		if r.Decision == "" {
+			// The hook input mapped to no request, so there is no verdict
+			// to show: only why.
+			fmt.Fprintf(&sb, "        %s\n", r.Failures[0])
+			continue
+		}
 		fmt.Fprintf(&sb, "        want %s, got %s\n", r.Expect, r.Decision)
+		if r.Hook != "" {
+			fmt.Fprintf(&sb, "        hook:   %s\n", r.Hook)
+		}
 		rule := fmt.Sprintf("%q", r.Rule)
 		if r.Rule == "" {
 			rule = "(none: no rule matched)"
@@ -592,9 +676,21 @@ type junitSuite struct {
 }
 
 type junitCase struct {
-	Name      string        `xml:"name,attr"`
-	ClassName string        `xml:"classname,attr"`
-	Failure   *junitFailure `xml:"failure,omitempty"`
+	Name      string `xml:"name,attr"`
+	ClassName string `xml:"classname,attr"`
+	// Properties names a hook case's hook, in the <properties> element that
+	// test-report viewers show with a case.
+	Properties *junitProperties `xml:"properties,omitempty"`
+	Failure    *junitFailure    `xml:"failure,omitempty"`
+}
+
+type junitProperties struct {
+	Items []junitProperty `xml:"property"`
+}
+
+type junitProperty struct {
+	Name  string `xml:"name,attr"`
+	Value string `xml:"value,attr"`
 }
 
 type junitFailure struct {
@@ -610,11 +706,16 @@ func writeTestJUnit(w io.Writer, results []caseResult) error {
 		}
 		s := &doc.Suites[len(doc.Suites)-1]
 		jc := junitCase{Name: r.Name, ClassName: r.File}
+		hook := ""
+		if r.Hook != "" {
+			jc.Properties = &junitProperties{Items: []junitProperty{{Name: "hook", Value: r.Hook}}}
+			hook = "hook: " + r.Hook + "\n"
+		}
 		if !r.Passed {
 			jc.Failure = &junitFailure{
 				Message: r.Failures[0],
-				Text: fmt.Sprintf("%s\npolicy: %s\ndecision: %s\nrule: %s\nreason: %s\n",
-					strings.Join(r.Failures, "\n"), r.Policy, r.Decision, r.Rule, r.Reason),
+				Text: fmt.Sprintf("%s\npolicy: %s\n%sdecision: %s\nrule: %s\nreason: %s\n",
+					strings.Join(r.Failures, "\n"), r.Policy, hook, r.Decision, r.Rule, r.Reason),
 			}
 			s.Failures++
 			doc.Failures++
@@ -663,11 +764,19 @@ subfolders). A fixture file holds one YAML document and looks like this:
       prior: [{scope: shell, command: "make test", agent_id: dev}]
       request: {scope: shell, command: "make deploy", agent_id: dev}
       expect: ALLOW
+    - name: Claude Code sudo needs approval
+      hook: claude-code        # claude-code, cursor, gemini-cli or codex
+      input: {tool_name: Bash, tool_input: {command: "sudo ls"}}
+      expect: REQUIRE_APPROVAL
 
 The actions under prior: count as allowed just now, so require_prior rules
-can be tested. Each case gets a fresh engine: cost spent in one case does
-not carry over to the next. Rate limits are not checked; the server
-applies them, not the policy engine.
+can be tested. A case with hook: and input: gives a coding agent's tool
+call instead of a request; it is read the way 'agentguard hook' reads it,
+and when it maps to several checks the most severe verdict counts.
+
+Each case gets a fresh engine: cost spent in one case does not carry over
+to the next. Rate limits are not checked; the server applies them, not the
+policy engine.
 
 `)
 	clihelp.WriteGroups(w, fs, testFlagGroups, policyHelp)

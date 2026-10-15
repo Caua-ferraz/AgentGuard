@@ -1,0 +1,67 @@
+# Hook cases for the cursor block (configs/cursor.yaml). The block is a
+# fragment that only loads inside a policy, so these run against
+# coding-agents.yaml: the starter policy with every agent's block. Run them
+# with:
+#
+#   agentguard test configs/tests
+#
+# Each case is the input Cursor sends to `agentguard hook cursor`. Cursor's
+# input says which event it is (hook_event_name), and the hook reads each
+# event differently, so every case gives one. See
+# docs/POLICY_REFERENCE.md § Testing policies.
+
+policy: coding-agents.yaml
+
+tests:
+  # --- Shell (beforeShellExecution) ---
+  - name: Cursor sudo needs approval
+    hook: cursor
+    input: {hook_event_name: beforeShellExecution, command: "sudo ls", cwd: /home/alice/project}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:shell:sudo *"
+
+  - name: Cursor may build the project
+    hook: cursor
+    input: {hook_event_name: beforeShellExecution, command: "go build ./...", cwd: /home/alice/project}
+    expect: ALLOW
+
+  - name: Cursor needs approval for a force-push chained after the tests
+    hook: cursor
+    input: {hook_event_name: beforeShellExecution, command: "npm test && git push --force", cwd: /home/alice/project}
+    expect: REQUIRE_APPROVAL
+
+  # --- Files (preToolUse Write, beforeReadFile) ---
+  - name: Cursor may write project files
+    hook: cursor
+    input: {hook_event_name: preToolUse, tool_name: Write, tool_input: {file_path: /home/alice/project/main.go}}
+    expect: ALLOW
+
+  - name: Cursor may not write system files
+    hook: cursor
+    input: {hook_event_name: preToolUse, tool_name: Write, tool_input: {file_path: /etc/hosts}}
+    expect: DENY
+    expect_reason_contains: "Cursor doesn't write to system folders"
+
+  - name: Cursor may not read cloud credentials
+    hook: cursor
+    input: {hook_event_name: beforeReadFile, file_path: /home/alice/.aws/credentials}
+    expect: DENY
+    expect_reason_contains: "off-limits to Cursor"
+
+  - name: Cursor needs approval to read a .env file
+    hook: cursor
+    input: {hook_event_name: beforeReadFile, file_path: /home/alice/project/.env.local}
+    expect: REQUIRE_APPROVAL
+
+  # --- MCP tools (beforeMCPExecution) keep the policy's normal rules ---
+  - name: a Cursor GitHub MCP tool needs approval
+    hook: cursor
+    input: {hook_event_name: beforeMCPExecution, mcp_server_name: github, tool_name: create_issue, tool_input: '{"title":"flaky test"}'}
+    expect: REQUIRE_APPROVAL
+    expect_rule: "require_approval:mcp_tool:github:*"
+
+  - name: a Cursor MCP write tool is denied
+    hook: cursor
+    input: {hook_event_name: beforeMCPExecution, mcp_server_name: fs, tool_name: write_file, tool_input: '{}'}
+    expect: DENY
+    expect_rule: "deny:mcp_tool:*:write_file"

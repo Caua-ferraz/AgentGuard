@@ -385,6 +385,10 @@ tests:
     prior: [{scope: shell, command: "make test", agent_id: dev}]
     request: {scope: shell, command: "make deploy", agent_id: dev}
     expect: ALLOW
+  - name: Claude Code sudo needs approval
+    hook: claude-code                # instead of request:
+    input: {tool_name: Bash, tool_input: {command: "sudo ls"}}
+    expect: REQUIRE_APPROVAL
 ```
 
 | Key | Meaning |
@@ -392,7 +396,9 @@ tests:
 | `policy` | Policy file for every case in this file, relative to the fixture's folder. Without it: `--policy`, else the file the server would load (see [Policy file](#policy-file)). |
 | `tenant` | Tenant to check as. Default `local`. The fixture's policy is served to this tenant, so its cases test that policy as the tenant would get it (history and cost are kept per tenant). |
 | `tests[].name` | Required, and unique within the file. `--run` matches against it. |
-| `tests[].request` | The action, with the `/v1/check` request fields: `scope` (required), `action`, `command`, `path`, `domain`, `url`, `agent_id`, `session_id`, `est_cost`, `meta`. |
+| `tests[].request` | The action, with the `/v1/check` request fields: `scope` (required), `action`, `command`, `path`, `domain`, `url`, `agent_id`, `session_id`, `est_cost`, `meta`. Give this or `hook` and `input`. |
+| `tests[].hook` | Instead of `request`: the coding agent whose tool call `input` is, one of `claude-code`, `cursor`, `gemini-cli`, `codex`. Needs `input`. |
+| `tests[].input` | The tool call as that agent sends it to [`agentguard hook`](CODING_AGENTS.md), written as YAML. It is read by the agent's own hook code, unchanged; Cursor's input needs its `hook_event_name`. When it becomes several checks (a Codex patch, one per file), the most severe verdict counts. See [POLICY_REFERENCE § Testing a coding agent's tool calls](POLICY_REFERENCE.md#testing-a-coding-agents-tool-calls). |
 | `tests[].expect` | Required. `ALLOW`, `DENY` or `REQUIRE_APPROVAL`. |
 | `tests[].expect_rule` | Optional. The exact `matched_rule` the verdict must have, such as `allow:shell:ls *`. It is compared as written: the `*` there is part of the rule's name, not a wildcard, so a case can't pass on a different, broader rule. A default deny has no rule; check its reason instead. |
 | `tests[].expect_reason_contains` | Optional. Text the verdict's reason must contain. |
@@ -407,7 +413,7 @@ Unknown keys are an error at every level, so a misspelled `expect_rul:` fails th
 | `--policy <path>` | found automatically | Policy for fixtures without a `policy:` line. A fixture's own `policy:` wins. |
 | `--strict` | `false` | Treat policy load warnings as a load failure (exit `3`), as `validate --strict` does. Without it the warnings are printed as `WARN:` lines on stderr. |
 | `--run <regexp>` | *(all)* | Only run cases whose name matches this Go regular expression. |
-| `--output <fmt>` | `text` | `text`, `json` (one document with `passed`, `failed` and every case), or `junit` (JUnit XML, one `<testsuite>` per fixture file, for CI test-report viewers). |
+| `--output <fmt>` | `text` | `text`, `json` (one document with `passed`, `failed` and every case), or `junit` (JUnit XML, one `<testsuite>` per fixture file, for CI test-report viewers). A hook case's result names its hook: `"hook"` in JSON, a `hook` property on the JUnit `<testcase>`. |
 
 ### Exit codes
 
@@ -425,7 +431,7 @@ agentguard test configs/tests
 # configs/tests/default_test.yaml (policy configs/default.yaml)
 #   PASS  plain ls is allowed
 #   ...
-# PASS: 73 case(s) passed
+# PASS: 115 case(s) passed
 
 agentguard test --run 'claude-code' configs/tests
 
@@ -444,6 +450,7 @@ agentguard test --output junit configs/tests > policy-tests.xml
 - Every case runs on a fresh engine over the same loaded policy. Cost reserved for a `session_id` in one case does not count in the next, and a case sees no history except its own `prior:` entries.
 - Rate limits are not checked: the server applies them before the policy engine, and `test` only runs the engine. The same is true of `check`.
 - `REQUIRE_APPROVAL` has no `approval_id` here; there is no approval queue.
+- A hook case's input that the hook doesn't check (another tool or event) or can't read fails the case with the reason, since it would test nothing. Each check it becomes runs on a fresh engine, with the case's `prior:` entries.
 - The cases for the policies in this repo are in `configs/tests/`, and CI runs them. See [POLICY_REFERENCE § Testing policies](POLICY_REFERENCE.md#testing-policies).
 
 ---

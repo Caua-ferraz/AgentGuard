@@ -1,0 +1,562 @@
+# The starter policy (configs/default.yaml) with every coding agent's block
+# under agents:, as 'agentguard setup' leaves it once Claude Code, Cursor,
+# Gemini CLI and Codex CLI are all connected. The cursor, gemini-cli and
+# codex fixtures in this folder run against it, because those blocks
+# (configs/cursor.yaml and the others) are fragments that only load inside
+# a policy. Don't edit it by hand: TestTest_CodingAgentsPolicyIsCurrent in
+# cmd/agentguard/test_cmd_test.go checks it, and rewrites it with
+#
+#   AGENTGUARD_WRITE_TEST_POLICY=1 go test ./cmd/agentguard -run TestTest_CodingAgentsPolicyIsCurrent
+#
+# AgentGuard Default Policy
+# Safe defaults for development and testing.
+#
+# Evaluation order (see docs/POLICY_REFERENCE.md):
+#   rate-limit → deny → require_approval → allow → default DENY.
+# The FIRST match in deny/require_approval/allow wins. Put broad denies
+# BEFORE narrow allows — a narrow allow earlier won't save you from a
+# later deny, but a later allow won't override an earlier deny.
+#
+# Pattern semantics (docs/POLICY_REFERENCE.md#wildcards):
+#   *   matches any characters INCLUDING "/"  (surprising for paths!)
+#   ?   matches one character
+#   **  matches zero or more path segments (only meaningful split on "/")
+#   *.foo.com matches api.foo.com but NOT foo.com itself.
+# Paths are pre-processed with filepath.Clean + ToSlash before matching;
+# ".." segments are rejected at policy-load AND at request time.
+
+version: "1"
+name: "default-sandbox"
+description: "Restrictive defaults suitable for development agents"
+
+rules:
+  # --- File System ---
+  # Path rules always use `paths:` (a list) + `action:` (read|write|delete).
+  # Use `**` for multi-segment globs — `*` alone crosses "/" but also
+  # matches arbitrary chars, which is rarely what you want for a path.
+  - scope: filesystem
+    allow:
+      - action: read
+        paths: ["./workspace/**", "/tmp/**"]
+      - action: write
+        paths: ["./workspace/**", "/tmp/**"]
+    deny:
+      # `paths: ["**"]` is the canonical "every path" wildcard.
+      - action: delete
+        paths: ["**"]
+        message: "File deletion is not permitted by default policy"
+      - action: write
+        paths: ["/etc/**", "/usr/**", "/var/**"]
+        message: "Writing to system directories is blocked"
+      # `/home/**/.ssh/**` matches /home/alice/.ssh/id_rsa and
+      # /home/alice/work/.ssh/config. It does NOT match /home/alice/.ssh
+      # (no trailing segment) — add an explicit "/home/**/.ssh" entry if
+      # you need to block the directory itself.
+      - action: write
+        paths: ["/home/**/.ssh/**", "/root/.ssh/**", "/home/**/.aws/**", "/root/.aws/**"]
+        message: "Writing to credential directories is blocked"
+
+  # --- Shell Commands ---
+  # Shell rules use `pattern:` matched against the incoming `command`
+  # string. `*` here happily crosses spaces AND slashes — that's usually
+  # what you want for shell. The anchored match covers the whole command,
+  # so `rm -rf *` matches `rm -rf /home/user` but not `sudo rm -rf /`.
+  # Order matters: deny is checked before require_approval before allow.
+  #
+  # A command with shell syntax (`;`, `&&`, `|`, `$( )`, backticks, quotes,
+  # redirections, line breaks) is checked one command at a time, and its
+  # redirection targets against the filesystem rules above: `ls *` allows
+  # `ls /tmp | grep x` but `ls /tmp; rm -rf /` still needs approval. See
+  # docs/POLICY_REFERENCE.md § Compound shell commands.
+  - scope: shell
+    require_approval:
+      - pattern: "sudo *"
+      - pattern: "rm -rf *"
+      # `find *` below is allowed; these arguments make find delete files or
+      # run other programs.
+      - pattern: "find * -exec*"
+      - pattern: "find * -ok*"
+      - pattern: "find * -delete*"
+      - pattern: "curl * | bash"
+      - pattern: "wget * | sh"
+      - pattern: "chmod 777 *"
+      # inline-eval flags — classic exfiltration / arbitrary-code vectors.
+      - pattern: "python -c *"
+      - pattern: "python -m *"
+      - pattern: "python3 -c *"
+      - pattern: "python3 -m *"
+      - pattern: "node -e *"
+      - pattern: "node --eval *"
+    deny:
+      - pattern: ":(){ :|:& };:"
+        message: "Fork bomb detected"
+      - pattern: "dd if=/dev/*"
+        message: "Raw disk operations are blocked"
+      - pattern: "> /dev/sda"
+        message: "Raw disk write blocked"
+    allow:
+      - pattern: "ls *"
+      - pattern: "cat *"
+      - pattern: "grep *"
+      - pattern: "find *"
+      - pattern: "echo *"
+      # `python *.py` matches `python foo.py` but also `python path/to/foo.py`
+      # because `*` crosses `/`. That's intentional here.
+      - pattern: "python *.py"
+      - pattern: "python3 *.py"
+      - pattern: "node *.js"
+      - pattern: "node *.mjs"
+      - pattern: "go run *.go"
+      - pattern: "go build *"
+      - pattern: "go test *"
+      - pattern: "git *"
+
+  # --- Network / API Calls ---
+  # Wildcard gotcha: `*.foo.com` matches `api.foo.com` but NOT `foo.com`.
+  # To cover both, list the apex domain explicitly alongside the wildcard.
+  - scope: network
+    allow:
+      - domain: "api.openai.com"
+      - domain: "api.anthropic.com"
+      - domain: "api.github.com"
+      - domain: "*.googleapis.com"    # api.googleapis.com ✓, googleapis.com ✗
+    deny:
+      - domain: "*.production.internal"
+        message: "Production access requires an elevated policy"
+    # rate_limit is PER-INSTANCE — the bucket key is "scope:tenant:agent".
+    # Multi-replica deployments multiply the effective cap. See
+    # docs/OPERATIONS.md#multi-instance-deployments for mitigations.
+    rate_limit:
+      max_requests: 60
+      window: "1m"
+
+  # --- Browser Automation ---
+  - scope: browser
+    deny:
+      # `*.bank.*` matches `www.bank.com` and `banking.bank.co.uk` but
+      # NOT the bare `bank.com` — add `"bank.com"` if you need to block
+      # the apex. Also won't match `mybank.com` (only `*.mybank.*`).
+      - domain: "*.bank.*"
+        message: "Banking sites are blocked"
+      - domain: "mail.google.com"
+        message: "Email access is blocked by default"
+    allow:
+      - domain: "*.wikipedia.org"
+      - domain: "*.stackoverflow.com"
+      - domain: "*.github.com"
+
+  # --- Data (form inputs, browser data submissions) ---
+  # Gates form-field values and similar "value-bearing" actions for PII
+  # / credential exfiltration. The browser-use adapter sends scope=data
+  # whenever GuardedPage.fill / .type / GuardedBrowser.check_form_input
+  # fires; the Command field carries the (redacted) value, and meta.field
+  # carries the field name. See docs/POLICY_REFERENCE.md#data-scope.
+  #
+  # By default we DO NOT enable any data rules, because every workflow
+  # needs at least one allow rule to make progress and there is no
+  # universal answer. Uncomment and tune for your deployment:
+  #
+  # - scope: data
+  #   deny:
+  #     - pattern: "*ssn:*"                       # explicit SSN markers
+  #     - pattern: "*[0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9]*"  # SSN format
+  #   allow:
+  #     - domain: "*.internal.local"              # form submissions to internal sites only
+
+  # --- MCP Gateway (tools/call gating) ---
+  # The MCP Gateway (agentguard-mcp-gateway) routes every host
+  # tools/call through Engine.Check with scope=mcp_tool. In
+  # --policy-mode strict (default) it ALSO fires a second Engine.Check
+  # against the mapped existing scope (filesystem, network, shell,
+  # browser, data) so existing rules apply to MCP traffic without
+  # duplication. See docs/MCP_GATEWAY.md and
+  # docs/POLICY_REFERENCE.md#mcp_tool-scope.
+  #
+  # IMPORTANT: in strict mode the mcp_tool leg is checked FIRST and
+  # short-circuits on non-ALLOW. If you ship a policy with no
+  # mcp_tool rules, the default-deny fall-through fires and EVERY
+  # MCP tools/call denies — see docs/MCP_GATEWAY.md for the full
+  # dual-check semantics. The block below is the safe-default rule
+  # set used by the MCP quickstart; tune for your deployment.
+  - scope: mcp_tool
+    deny:
+      # Block any namespace's write/delete tools by name. The four write
+      # names are the official filesystem server's (write_file, edit_file,
+      # move_file, create_directory). Deny is checked before allow, so an
+      # allow rule can't re-open these: to permit writes, remove or narrow
+      # the matching deny line (e.g. "fs:edit_file" only for one server).
+      - pattern: "*:write_file"
+        message: "Writes via MCP are blocked by default policy"
+      - pattern: "*:edit_file"
+        message: "Writes via MCP are blocked by default policy"
+      - pattern: "*:move_file"
+        message: "Writes via MCP are blocked by default policy"
+      - pattern: "*:create_directory"
+        message: "Writes via MCP are blocked by default policy"
+      - pattern: "*:delete_*"
+        message: "Deletes via MCP are blocked by default policy"
+      - pattern: "*:remove_*"
+        message: "Removes via MCP are blocked by default policy"
+      # Any tool whose name starts with execute_ is treated as code
+      # execution regardless of namespace (run shells, eval, etc.).
+      - pattern: "*:execute_*"
+        message: "Executable MCP tools are blocked by default policy"
+    require_approval:
+      # Network-touching tools should ask before acting.
+      - pattern: "github:*"
+      # The official fetch server (uvx mcp-server-fetch) exposes a single
+      # tool named `fetch` — i.e. `fetch:fetch`, which `*:fetch_*` below
+      # does not match.
+      - pattern: "fetch:*"
+      - pattern: "*:fetch_*"
+      - pattern: "*:http_*"
+    allow:
+      # Default-allow for safe read/list/get tools across any
+      # upstream namespace. The dual-check still gates the *mapped*
+      # scope (filesystem, network, ...) per tool_scope_map.
+      - pattern: "*:read_*"
+      - pattern: "*:list_*"
+      - pattern: "*:get_*"
+      # The MCP filesystem reference server's tools (read_text_file,
+      # list_directory, etc.) are also covered by *:read_* / *:list_*
+      # but we whitelist the entire fs: namespace so search/info tools
+      # without a read_ prefix still pass the mcp_tool leg. The
+      # filesystem rules above remain authoritative for path-level
+      # gating via the dual-check.
+      - pattern: "fs:*"
+      # MCP "everything" sample server used by the quickstart docs.
+      - pattern: "everything:*"
+
+# tool_scope_map declares the tool-name → existing-scope mapping used
+# by BOTH the MCP Gateway (--policy-mode strict dual-check) and the
+# LLM API Proxy (gates upstream tool_calls against operator policy).
+# Patterns are glob-matched; first match wins. Operators write more
+# specific patterns first.
+#
+# Allowed scope values: shell, filesystem, network, browser, data,
+# cost, mcp_tool. (mcp_tool here would re-run the same scope twice —
+# usually a typo for the MCP gateway, never useful for the LLM proxy.)
+#
+# Two namespaces are addressed by this single section:
+#
+#   1. MCP Gateway tool names are namespaced as `<server>:<tool>`
+#      (e.g. `fs:read_text_file`, `github:list_issues`).
+#   2. LLM API Proxy tool names are bare (e.g. `bash`, `read_file`,
+#      `web_search`). The LLM proxy ships with a default map for
+#      common tool names baked into the binary
+#      (pkg/llmproxy/scope_map.go); operator entries below override
+#      or extend those defaults — see
+#      docs/POLICY_REFERENCE.md#llm-api-proxy-tool-scope-mapping.
+#
+# Tools not matched by any entry in either layer (operator + bundled
+# defaults) get scope=`unmapped` at gate time. The policy engine has
+# no built-in `unmapped` rules, so the gate fails closed (DENY).
+# Operators who want unknown LLM tools to flow through must write an
+# explicit `scope: unmapped` rule.
+#
+# The default map below covers the upstreams shipped in
+# examples/*-config.json (fs / fetch / github). Add entries for any
+# additional MCP servers you wire in.
+tool_scope_map:
+  # --- MCP Gateway entries (namespaced names) ---
+  # Filesystem server (npx @modelcontextprotocol/server-filesystem).
+  - pattern: "fs:*"
+    scope: filesystem
+  # Fetch server (uvx mcp-server-fetch) — its `fetch` tool is a network
+  # egress; the mapped network check takes the host from the tool's
+  # `url` argument, so only allow-listed domains pass after approval.
+  - pattern: "fetch:*"
+    scope: network
+  # GitHub's MCP server (docker … ghcr.io/github/github-mcp-server) is
+  # deliberately NOT mapped. Its tools take owner/repo arguments, not a
+  # URL, so a mapped `network` check would see an empty domain and deny
+  # every call. The mcp_tool rule `require_approval: "github:*"` above is
+  # the gate: an approved GitHub call runs.
+  # Cross-namespace catch-alls (more specific patterns above win).
+  - pattern: "*:execute_*"
+    scope: shell
+  - pattern: "*:run_command"
+    scope: shell
+  - pattern: "*:fetch_*"
+    scope: network
+  - pattern: "*:http_*"
+    scope: network
+
+  # --- LLM API Proxy entries (bare names; defaults live in the
+  # binary, override here when needed) ---
+  #
+  # - pattern: "my_company_deploy"
+  #   scope: shell
+  # - pattern: "fill_form"
+  #   scope: data            # PII gating against `data` scope rules
+  # - pattern: "submit_form"
+  #   scope: data
+
+# Notifier filters (see docs/OBSERVABILITY.md):
+#   `approval_required` only fires on REQUIRE_APPROVAL decisions.
+#   `on_deny`           only fires on DENY decisions (including rate-limit denies).
+# Drops on slow notifiers are counted in
+# `agentguard_notify_events_dropped_total{notifier,reason="queue_full"}`.
+#
+# Example webhook stanza — uncomment and replace the example.invalid URLs
+# with real endpoints before deploying. The .invalid TLD (RFC 6761) is
+# guaranteed never to resolve, so a forgotten placeholder fails loudly
+# instead of silently sinking events.
+#
+# notifications:
+#   approval_required:
+#     - type: webhook
+#       url: https://example.invalid/REPLACE_ME_BEFORE_DEPLOY
+#     - type: slack
+#       url: https://example.invalid/REPLACE_ME_BEFORE_DEPLOY
+#   on_deny:
+#     - type: console
+notifications:
+  approval_required:
+    - type: console
+  on_deny:
+    - type: log
+      level: warn
+
+# --- Per-agent rules ---
+agents:
+  # --- Codex CLI ---
+  # Rules for Codex CLI's tool calls, which `agentguard hook codex`
+  # checks as agent "codex" (connect it with `agentguard setup`). A
+  # coding agent works on your real project, so the sandbox rules above would
+  # block most of its work: these replace them for Codex CLI only, scope by
+  # scope. Scopes not listed here (mcp_tool, browser) keep the rules above.
+  # "replace" drops the base deny and approval lists for the scopes below
+  # (the default "merge" keeps them), so everyday commands such as
+  # `python -m pytest` don't wait for approval; each scope's own lists here
+  # are complete on their own.
+  codex:
+    override_mode: replace
+    override:
+      - scope: filesystem
+        deny:
+          - action: read
+            paths: ["**/.ssh/**", "**/.aws/**", "**/.gnupg/**"]
+            message: "Keys and cloud credentials are off-limits to Codex CLI"
+          - action: write
+            paths: ["**/.ssh/**", "**/.aws/**", "**/.gnupg/**", "/etc/**", "/usr/**", "C:/Windows/**"]
+            message: "Codex CLI doesn't write to system folders or credentials"
+        require_approval:
+          - action: read
+            paths: ["**/.env", "**/.env.*"]
+          - action: write
+            paths: ["**/.env", "**/.env.*"]
+        allow:
+          - action: read
+            paths: ["**"]
+          - action: write
+            paths: ["**"]
+
+      - scope: shell
+        deny:
+          - pattern: ":(){ :|:& };:"
+          - pattern: "dd if=/dev/*"
+          - pattern: "> /dev/sda"
+        require_approval:
+          - pattern: "sudo *"
+          - pattern: "rm -rf *"
+          - pattern: "rm -fr *"
+          - pattern: "git push --force*"
+          - pattern: "git push -f*"
+          - pattern: "git reset --hard*"
+          - pattern: "git clean -*"
+          - pattern: "curl * | *sh"
+          - pattern: "wget * | *sh"
+          - pattern: "chmod 777 *"
+          - pattern: "Remove-Item * -Recurse*"
+        allow:
+          - pattern: "*"
+
+      - scope: network
+        deny:
+          - domain: "169.254.169.254"
+            message: "Cloud metadata endpoints are off-limits"
+          - domain: "metadata.google.internal"
+            message: "Cloud metadata endpoints are off-limits"
+        allow:
+          - domain: "*"
+  # --- Gemini CLI ---
+  # Rules for Gemini CLI's tool calls, which `agentguard hook gemini-cli`
+  # checks as agent "gemini-cli" (connect it with `agentguard setup`). A
+  # coding agent works on your real project, so the sandbox rules above would
+  # block most of its work: these replace them for Gemini CLI only, scope by
+  # scope. Scopes not listed here (mcp_tool, browser) keep the rules above.
+  # "replace" drops the base deny and approval lists for the scopes below
+  # (the default "merge" keeps them), so everyday commands such as
+  # `python -m pytest` don't wait for approval; each scope's own lists here
+  # are complete on their own.
+  gemini-cli:
+    override_mode: replace
+    override:
+      - scope: filesystem
+        deny:
+          - action: read
+            paths: ["**/.ssh/**", "**/.aws/**", "**/.gnupg/**"]
+            message: "Keys and cloud credentials are off-limits to Gemini CLI"
+          - action: write
+            paths: ["**/.ssh/**", "**/.aws/**", "**/.gnupg/**", "/etc/**", "/usr/**", "C:/Windows/**"]
+            message: "Gemini CLI doesn't write to system folders or credentials"
+        require_approval:
+          - action: read
+            paths: ["**/.env", "**/.env.*"]
+          - action: write
+            paths: ["**/.env", "**/.env.*"]
+        allow:
+          - action: read
+            paths: ["**"]
+          - action: write
+            paths: ["**"]
+
+      - scope: shell
+        deny:
+          - pattern: ":(){ :|:& };:"
+          - pattern: "dd if=/dev/*"
+          - pattern: "> /dev/sda"
+        require_approval:
+          - pattern: "sudo *"
+          - pattern: "rm -rf *"
+          - pattern: "rm -fr *"
+          - pattern: "git push --force*"
+          - pattern: "git push -f*"
+          - pattern: "git reset --hard*"
+          - pattern: "git clean -*"
+          - pattern: "curl * | *sh"
+          - pattern: "wget * | *sh"
+          - pattern: "chmod 777 *"
+          - pattern: "Remove-Item * -Recurse*"
+        allow:
+          - pattern: "*"
+
+      - scope: network
+        deny:
+          - domain: "169.254.169.254"
+            message: "Cloud metadata endpoints are off-limits"
+          - domain: "metadata.google.internal"
+            message: "Cloud metadata endpoints are off-limits"
+        allow:
+          - domain: "*"
+  # --- Cursor ---
+  # Rules for Cursor's tool calls, which `agentguard hook cursor`
+  # checks as agent "cursor" (connect it with `agentguard setup`). A
+  # coding agent works on your real project, so the sandbox rules above would
+  # block most of its work: these replace them for Cursor only, scope by
+  # scope. Scopes not listed here (mcp_tool, browser) keep the rules above.
+  # "replace" drops the base deny and approval lists for the scopes below
+  # (the default "merge" keeps them), so everyday commands such as
+  # `python -m pytest` don't wait for approval; each scope's own lists here
+  # are complete on their own.
+  cursor:
+    override_mode: replace
+    override:
+      - scope: filesystem
+        deny:
+          - action: read
+            paths: ["**/.ssh/**", "**/.aws/**", "**/.gnupg/**"]
+            message: "Keys and cloud credentials are off-limits to Cursor"
+          - action: write
+            paths: ["**/.ssh/**", "**/.aws/**", "**/.gnupg/**", "/etc/**", "/usr/**", "C:/Windows/**"]
+            message: "Cursor doesn't write to system folders or credentials"
+        require_approval:
+          - action: read
+            paths: ["**/.env", "**/.env.*"]
+          - action: write
+            paths: ["**/.env", "**/.env.*"]
+        allow:
+          - action: read
+            paths: ["**"]
+          - action: write
+            paths: ["**"]
+
+      - scope: shell
+        deny:
+          - pattern: ":(){ :|:& };:"
+          - pattern: "dd if=/dev/*"
+          - pattern: "> /dev/sda"
+        require_approval:
+          - pattern: "sudo *"
+          - pattern: "rm -rf *"
+          - pattern: "rm -fr *"
+          - pattern: "git push --force*"
+          - pattern: "git push -f*"
+          - pattern: "git reset --hard*"
+          - pattern: "git clean -*"
+          - pattern: "curl * | *sh"
+          - pattern: "wget * | *sh"
+          - pattern: "chmod 777 *"
+          - pattern: "Remove-Item * -Recurse*"
+        allow:
+          - pattern: "*"
+
+      - scope: network
+        deny:
+          - domain: "169.254.169.254"
+            message: "Cloud metadata endpoints are off-limits"
+          - domain: "metadata.google.internal"
+            message: "Cloud metadata endpoints are off-limits"
+        allow:
+          - domain: "*"
+  # --- Claude Code ---
+  # Rules for Claude Code's tool calls, which `agentguard hook claude-code`
+  # checks as agent "claude-code" (connect it with `agentguard setup`). A
+  # coding agent works on your real project, so the sandbox rules above would
+  # block most of its work: these replace them for Claude Code only, scope by
+  # scope. Scopes not listed here (mcp_tool, browser) keep the rules above.
+  # "replace" drops the base deny and approval lists for the scopes below
+  # (the default "merge" keeps them), so everyday commands such as
+  # `python -m pytest` don't wait for approval; each scope's own lists here
+  # are complete on their own.
+  claude-code:
+    override_mode: replace
+    override:
+      - scope: filesystem
+        deny:
+          - action: read
+            paths: ["**/.ssh/**", "**/.aws/**", "**/.gnupg/**"]
+            message: "Keys and cloud credentials are off-limits to Claude Code"
+          - action: write
+            paths: ["**/.ssh/**", "**/.aws/**", "**/.gnupg/**", "/etc/**", "/usr/**", "C:/Windows/**"]
+            message: "Claude Code doesn't write to system folders or credentials"
+        require_approval:
+          - action: read
+            paths: ["**/.env", "**/.env.*"]
+          - action: write
+            paths: ["**/.env", "**/.env.*"]
+        allow:
+          - action: read
+            paths: ["**"]
+          - action: write
+            paths: ["**"]
+
+      - scope: shell
+        deny:
+          - pattern: ":(){ :|:& };:"
+          - pattern: "dd if=/dev/*"
+          - pattern: "> /dev/sda"
+        require_approval:
+          - pattern: "sudo *"
+          - pattern: "rm -rf *"
+          - pattern: "rm -fr *"
+          - pattern: "git push --force*"
+          - pattern: "git push -f*"
+          - pattern: "git reset --hard*"
+          - pattern: "git clean -*"
+          - pattern: "curl * | *sh"
+          - pattern: "wget * | *sh"
+          - pattern: "chmod 777 *"
+          - pattern: "Remove-Item * -Recurse*"
+        allow:
+          - pattern: "*"
+
+      - scope: network
+        deny:
+          - domain: "169.254.169.254"
+            message: "Cloud metadata endpoints are off-limits"
+          - domain: "metadata.google.internal"
+            message: "Cloud metadata endpoints are off-limits"
+        allow:
+          - domain: "*"

@@ -758,7 +758,43 @@ What a case can check:
 
 Each case runs on a fresh engine: cost spent under a `session_id` in one case does not count in the next. Rate limits are not tested, because the server applies them, not the policy engine. A misspelled key in a test file is an error, not a case that silently checks nothing.
 
-Per-agent overrides are tested by setting `agent_id` to the agent's name. The cases for the policies in this repo are in [`configs/tests/`](../configs/tests/); they cover the starter policy's sandbox rules, compound shell commands and the `claude-code` agent block. Full flag and output reference: [`CLI.md` § `agentguard test`](CLI.md#agentguard-test).
+Per-agent overrides are tested by setting `agent_id` to the agent's name, or with hook cases (below). The cases for the policies in this repo are in [`configs/tests/`](../configs/tests/); they cover the starter policy's sandbox rules, compound shell commands, and each coding agent's block through its hook. Full flag and output reference: [`CLI.md` § `agentguard test`](CLI.md#agentguard-test).
+
+### Testing a coding agent's tool calls
+
+A case can give a coding agent's tool call instead of a request. `hook:` names the agent (`claude-code`, `cursor`, `gemini-cli` or `codex`) and `input:` is the call as that agent sends it to [`agentguard hook`](CODING_AGENTS.md), written as YAML:
+
+```yaml
+  - name: Claude Code sudo needs approval
+    hook: claude-code
+    input: {tool_name: Bash, tool_input: {command: "sudo ls"}}
+    expect: REQUIRE_APPROVAL
+
+  - name: a patch is denied when one of its files is a system file
+    hook: codex
+    input:
+      tool_name: apply_patch
+      tool_input:
+        command: |
+          *** Begin Patch
+          *** Update File: /home/alice/project/main.go
+          @@
+          -a
+          +b
+          *** Add File: /etc/cron.d/job
+          +* * * * * root true
+          *** End Patch
+    expect: DENY
+```
+
+The input goes through the same code as the real hook, so the case tests which requests the call becomes as well as the policy's verdict. The requests carry the agent's own `agent_id`, so the agent's block applies.
+
+- The input is passed as it is. Write the keys the hook reads: `tool_name` and `tool_input` for Claude Code, Gemini CLI and Codex; for Cursor, `hook_event_name` too (`beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile` or `preToolUse`), since each event's input differs. [`CODING_AGENTS.md` § What gets checked](CODING_AGENTS.md#what-gets-checked) lists the tools.
+- Use absolute paths. A relative path is joined to the input's `cwd`, which differs between machines.
+- One call can become several checks: a Codex patch is one per file, a Gemini CLI `web_fetch` one per URL. Each is checked, and the most severe verdict counts, as in the hook: a deny wins over an approval, and an approval over an allow. `expect_rule` and `expect_reason_contains` apply to that verdict.
+- An input the hook doesn't check (another tool, another event) or can't read fails the case with the reason. Such a case would test nothing.
+- `prior:` works as for a request. Name the agent in it: `agent_id: claude-code`.
+- A case gives either `request:` or `hook:` with `input:`. Anything else, or an unknown hook name, is a load error.
 
 ### In CI
 
