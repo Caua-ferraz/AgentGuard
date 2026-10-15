@@ -183,6 +183,7 @@ class Guard:
         api_key: str = "",
         fail_mode: str = FAIL_MODE_DENY,
         tenant_id: Optional[str] = None,
+        parent_session_id: Optional[str] = None,
     ):
         """Construct a Guard client.
 
@@ -207,6 +208,12 @@ class Guard:
                 back to ``AGENTGUARD_TENANT_ID``. The bundled
                 FilePolicyProvider only recognises ``"local"``;
                 multi-tenant providers can register others.
+            parent_session_id: Optional. The session that started this
+                agent's sessions, e.g. the orchestrator's session for a
+                sub-agent. Sent as ``parent_session_id`` on every check
+                (a per-call ``parent_session_id`` wins). Policy ignores
+                it; the audit log records it so ``GET /v1/sessions`` can
+                link parent and child sessions.
         """
         if fail_mode not in _VALID_FAIL_MODES:
             raise ValueError(
@@ -224,6 +231,7 @@ class Guard:
         if tenant_id is None:
             tenant_id = os.environ.get("AGENTGUARD_TENANT_ID", "")
         self.tenant_id = tenant_id
+        self.parent_session_id = parent_session_id or ""
 
     def _url(self, suffix: str) -> str:
         """Build the absolute URL for the given /v1 suffix.
@@ -255,6 +263,7 @@ class Guard:
         est_cost: float = 0.0,
         meta: Optional[dict] = None,
         approval_id: str = "",
+        parent_session_id: str = "",
     ) -> CheckResult:
         """Check an action against the policy.
 
@@ -276,6 +285,9 @@ class Guard:
                 actions, and audits the execution as ``allow:approved``.
                 A refused replay (consumed or expired) comes back as a fresh
                 ``REQUIRE_APPROVAL`` under a new id. Omitted when empty.
+            parent_session_id: The session that started ``session_id``.
+                Defaults to the Guard's ``parent_session_id``. Recorded in
+                the audit log, not used by policy. Omitted when empty.
 
         Returns:
             CheckResult with the policy decision
@@ -302,6 +314,9 @@ class Guard:
             payload["meta"] = meta
         if approval_id:
             payload["approval_id"] = approval_id
+        parent = parent_session_id or self.parent_session_id
+        if parent:
+            payload["parent_session_id"] = parent
 
         data = json.dumps(payload).encode("utf-8")
         req = request.Request(

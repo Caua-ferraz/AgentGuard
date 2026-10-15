@@ -29,6 +29,7 @@ _GUARDED_VALID_CHECK_KWARGS = frozenset({
     "domain",
     "url",
     "session_id",
+    "parent_session_id",
     "est_cost",
     "meta",
 })
@@ -84,7 +85,8 @@ def guarded(
     Unknown ``**check_kwargs`` raise ``TypeError`` at decoration time.
     Only the keyword arguments :meth:`Guard.check` understands
     (``action``, ``command``, ``path``, ``domain``, ``url``,
-    ``session_id``, ``est_cost``, ``meta``) are accepted; a typo like
+    ``session_id``, ``parent_session_id``, ``est_cost``, ``meta``) are
+    accepted; a typo like
     ``agent="x"`` is rejected at definition time rather than silently
     dropped.
     """

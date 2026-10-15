@@ -310,7 +310,8 @@ def _build_guarded_tool_class() -> type:
                 # canonical keys (command/cmd/url/path/...) keep their
                 # dict form.
                 recognised = {"command", "cmd", "url", "path", "file_path",
-                              "domain", "session_id", "est_cost"}
+                              "domain", "session_id", "parent_session_id",
+                              "est_cost"}
                 if (
                     len(clean_kwargs) == 1
                     and next(iter(clean_kwargs)) not in recognised
@@ -348,7 +349,8 @@ def _build_guarded_tool_class() -> type:
                     raw_input = raw_input["args"]
             if isinstance(raw_input, dict):
                 recognised = {"command", "cmd", "url", "path", "file_path",
-                              "domain", "session_id", "est_cost"}
+                              "domain", "session_id", "parent_session_id",
+                              "est_cost"}
                 if (
                     len(raw_input) == 1
                     and next(iter(raw_input)) not in recognised

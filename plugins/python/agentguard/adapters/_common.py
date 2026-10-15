@@ -2,7 +2,8 @@
 
 LangChain, CrewAI, MCP and the OpenAI Agents SDK all reduce a tool
 invocation to the same ``Guard.check`` keyword arguments (command, url,
-domain, path, action, session_id, est_cost). The extraction lives here once so the adapters
+domain, path, action, session_id, parent_session_id, est_cost). The
+extraction lives here once so the adapters
 cannot drift apart; each adapter keeps only its framework-specific
 glue (input normalisation, error surfacing, redaction).
 """
@@ -129,7 +130,7 @@ def extract_check_params(tool_input: Any, tool_name: Any = None) -> dict:
     A bare string is treated as a shell command. For dicts, recognised
     keys are projected (command/cmd, url + derived domain,
     path/file_path + action inferred from the tool-name verb,
-    session_id, est_cost); everything else is ignored.
+    session_id, parent_session_id, est_cost); everything else is ignored.
 
     Raises:
         ConflictingToolInput: two alias keys (command/cmd or
@@ -159,6 +160,8 @@ def extract_check_params(tool_input: Any, tool_name: Any = None) -> dict:
                 params["action"] = action
         if "session_id" in tool_input:
             params["session_id"] = tool_input["session_id"]
+        if "parent_session_id" in tool_input:
+            params["parent_session_id"] = tool_input["parent_session_id"]
         if "est_cost" in tool_input:
             params["est_cost"] = tool_input["est_cost"]
     return params
