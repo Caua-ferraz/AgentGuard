@@ -86,6 +86,13 @@ allows, as are 1.4.0's `GET /v1/sessions` and `GET /v1/sessions/{id}`
 `parent_session_id` parameters of `GET /v1/audit`, and the optional
 `parent_session_id` request field.
 
+One deliberate tightening comes with them. Before 1.4, `GET /v1/audit`
+did not read `since` or `until`, so any value, well-formed or not, was
+ignored and every entry came back. From 1.4 a value that is not an RFC
+3339 time, or an `until` before `since`, is answered with `400`. Ignoring
+a malformed audit filter returns entries the caller asked to leave out,
+which is worse than an error that says what to send.
+
 The wire freeze rules — never remove a field, never change a field's type or
 JSON name, decision enum stays the closed set `{ALLOW, DENY, REQUIRE_APPROVAL}`,
 new optional fields only — are spelled out in
