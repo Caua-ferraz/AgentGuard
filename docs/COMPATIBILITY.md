@@ -81,7 +81,10 @@ Supporting endpoints frozen alongside them: `GET /health`, `GET /metrics`,
 `GET /api/stream`, `GET /dashboard` (and their `/v1/t/{tenant}/api/...`
 mirrors). `GET /v1/audit/head` and `GET /v1/t/{tenant}/audit/head` (1.4.0,
 the head of a sealed audit log) are an addition of the kind this surface
-allows.
+allows, as are 1.4.0's `GET /v1/sessions` and `GET /v1/sessions/{id}`
+(with their `/v1/t/{tenant}/...` mirrors), the `since`, `until` and
+`parent_session_id` parameters of `GET /v1/audit`, and the optional
+`parent_session_id` request field.
 
 The wire freeze rules — never remove a field, never change a field's type or
 JSON name, decision enum stays the closed set `{ALLOW, DENY, REQUIRE_APPROVAL}`,
@@ -145,7 +148,8 @@ positional arguments; before, a flag after one was ignored without a word. A
 stray positional argument is now an error instead of being ignored. 1.4.0 adds
 the `audit verify` subcommand and the server's `--audit-seal`,
 `--audit-seal-key-file` and `--audit-anchor-interval` flags; sealing is off
-unless asked for. See [`CLI.md`](CLI.md).
+unless asked for. It also adds `audit`'s `--session`, `--parent-session`,
+`--since` and `--until` flags. See [`CLI.md`](CLI.md).
 
 Full reference: [`CLI.md`](CLI.md) · [`MCP_GATEWAY.md`](MCP_GATEWAY.md) ·
 [`LLM_API_PROXY.md`](LLM_API_PROXY.md).

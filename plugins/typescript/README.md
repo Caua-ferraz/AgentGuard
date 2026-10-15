@@ -150,8 +150,11 @@ new AgentGuard({
   timeout?: number,   // ms, default 5000
   failMode?: 'deny' | 'allow',  // default 'deny'
   tenantId?: string,  // default: process.env.AGENTGUARD_TENANT_ID ?? ''; not 'local' → /v1/t/<tenant>/…
+  parentSessionId?: string,  // v1.4; sent as `parent_session_id` on every check
 });
 ```
+
+`parentSessionId` names the session that started this agent's sessions, e.g. the orchestrator's session for a sub-agent. Policy ignores it; the audit log records it so `GET /v1/sessions` and the dashboard's Sessions view can link parent and child sessions. A per-call `parentSessionId` wins.
 
 Trailing `/` on `baseUrl` is stripped.
 
@@ -171,6 +174,7 @@ interface CheckOptions {
   domain?: string;
   url?: string;
   sessionId?: string;   // → request body `session_id`
+  parentSessionId?: string;  // → `parent_session_id` (v1.4); defaults to the client option
   estCost?: number;     // → `est_cost`; dropped if === 0
   meta?: Record<string, string>;
   approvalId?: string;  // → `approval_id`; replays an approval (see below)

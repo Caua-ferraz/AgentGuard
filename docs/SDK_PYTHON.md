@@ -74,6 +74,7 @@ Guard(
     api_key: str = "",
     fail_mode: str = "deny",   # or "allow"
     tenant_id: Optional[str] = None,
+    parent_session_id: Optional[str] = None,   # v1.4
 )
 ```
 
@@ -83,6 +84,21 @@ Guard(
 - `api_key` — empty string falls back to `AGENTGUARD_API_KEY`. Required whenever the server is started with `--api-key`.
 - `fail_mode` — see [Fail-mode semantics](#fail-mode-semantics). Invalid values raise `ValueError` at construction so misconfiguration fails at startup rather than mid-request.
 - `tenant_id` — `None` falls back to `AGENTGUARD_TENANT_ID`; an explicit `""` ignores the env var. Empty or `"local"` uses the legacy `/v1/…` URLs; any other value uses `/v1/t/<tenant>/…`, with the tenant URL-encoded.
+- `parent_session_id` — **(v1.4)** sent as `parent_session_id` on every `check()` unless the call passes its own. See [Linking sub-agent sessions](#linking-sub-agent-sessions).
+
+### Linking sub-agent sessions
+
+When an orchestrator starts sub-agents, give each sub-agent its own `session_id` and name the orchestrator's session as its parent. Policy ignores the parent; the audit log records it, and [`GET /v1/sessions`](API.md#get-v1sessions--tenant-aware-mirror) and the dashboard's Sessions view show the sessions linked.
+
+```python
+orchestrator = Guard(agent_id="planner")
+orchestrator.check("shell", command="ls", session_id="run-42")
+
+researcher = Guard(agent_id="researcher", parent_session_id="run-42")
+researcher.check("network", domain="api.github.com", session_id="run-42/researcher")
+```
+
+The framework adapters pass `parent_session_id` through from tool input, like `session_id`, and `@guarded` accepts it.
 
 `Guard` instances are thread-safe for concurrent `check()` calls (all state read-only after init). They are cheap; creating one per request is fine, and reusing one is slightly cheaper.
 
@@ -103,8 +119,11 @@ guard.check(
     est_cost: float = 0.0,
     meta: Optional[dict] = None,
     approval_id: str = "",
+    parent_session_id: str = "",   # v1.4
 ) -> CheckResult
 ```
+
+`parent_session_id` names the session that started `session_id` (see [Linking sub-agent sessions](#linking-sub-agent-sessions)). It defaults to the Guard's `parent_session_id` and is omitted from the body when empty.
 
 `approval_id` replays a previously issued approval after `wait_for_approval` resolved ALLOW — the server consumes the one-shot capability, enforces `--approval-validity`, reserves cost, and audits the execution as `allow:approved` (see [`APPROVAL_WORKFLOW.md`](APPROVAL_WORKFLOW.md#5-agent-replays-the-approval-through-v1check)). Omitted from the body when empty.
 

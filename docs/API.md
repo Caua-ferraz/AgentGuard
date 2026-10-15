@@ -51,6 +51,8 @@ Auth posture is **identical** across both URL families — the middleware is URL
 | `POST /v1/deny/{id}` | `POST /v1/t/{tenant}/deny/{id}` | Bearer or session | yes |
 | `GET  /v1/status/{id}` | `GET  /v1/t/{tenant}/status/{id}` | Bearer or session | no |
 | `GET  /v1/audit` | `GET  /v1/t/{tenant}/audit` | Bearer or session | no |
+| `GET  /v1/sessions` | `GET  /v1/t/{tenant}/sessions` | Bearer or session | no |
+| `GET  /v1/sessions/{id}` | `GET  /v1/t/{tenant}/sessions/{id}` | Bearer or session | no |
 | `POST /v1/audit` | `POST /v1/t/{tenant}/audit` | Bearer or session | yes |
 | `GET  /api/pending` | `GET  /v1/t/{tenant}/api/pending` | Bearer or session | no |
 | `GET  /api/stream` | `GET  /v1/t/{tenant}/api/stream` | Bearer or session | no |
@@ -109,7 +111,8 @@ Content-Type: application/json
 | `path` | string | — | For `filesystem`. Normalized with `filepath.Clean + ToSlash`. |
 | `domain` | string | — | For `network` / `browser`. |
 | `url` | string | — | For `network` / `browser`. |
-| `session_id` | string | — | For `cost` scope accumulator. |
+| `session_id` | string | — | For `cost` scope accumulator. Groups entries in [`GET /v1/sessions`](#get-v1sessions--tenant-aware-mirror). |
+| `parent_session_id` | string | — | **(v1.4)** The session that started this one, e.g. an orchestrator's session for a sub-agent. Policy ignores it; the audit log keeps it so `GET /v1/sessions` can link parent and child sessions. |
 | `est_cost` | float | — | For `cost` scope. Negative values denied. |
 | `meta` | object | — | Free-form string→string map; logged as-is. |
 | `approval_id` | string | — | Replay of a previously issued approval (see [`APPROVAL_WORKFLOW.md`](APPROVAL_WORKFLOW.md)). Honored only when the request's operationally-meaningful fields match the original, the resolution is younger than `--approval-validity` (default 5m), and — for ALLOW — **at most once**: approvals are one-shot capabilities, so a second replay of the same id falls through to fresh policy evaluation and re-enters the approval flow under a new id. Refusals are counted in `agentguard_approval_replay_refused_total`. |
@@ -248,6 +251,9 @@ Query the audit log.
 | `limit` | int | `auditDefaultLimit` (default 100) | Silently clamped at `auditMaxLimit` (default 1000). `<1` or non-integer → `400`. |
 | `offset` | int | `0` | Skip N matching entries. Must be ≥ 0. With `order=desc` it counts from the newest entry. |
 | `order` | string | `asc` | **(v1.2)** `asc` returns the oldest matches first (the original behaviour); `desc` returns the newest first. Anything else → `400`. |
+| `parent_session_id` | string | — | **(v1.4)** Exact match on `request.parent_session_id`: the calls of the sessions started by that session. |
+| `since` | RFC 3339 time | — | **(v1.4)** Entries at or after this time (inclusive). Any time zone; compared as an instant. |
+| `until` | RFC 3339 time | — | **(v1.4)** Entries before this time (exclusive). `until` before `since`, or a value that is not RFC 3339, → `400`. |
 | `transport` | string | — | Filter on the `Entry.Transport` audit field. Recognised values: `sdk`, `mcp_gateway`, `llm_api_proxy`, and the coding-agent hooks' `claude_code`, `cursor`, `gemini_cli`, `codex_cli`. Pre-v0.5 entries have no transport tag and are excluded when this filter is set. |
 
 ### Response
@@ -279,6 +285,16 @@ curl -s -H "Authorization: Bearer $K" "http://localhost:8080/v1/audit?limit=100&
 
 For large exports, prefer `curl` over the CLI subcommand — the CLI doesn't expose `offset`. With `order=desc`, pages shift as new entries arrive; use the default order for exports.
 
+To page by time, use `since` and `until`. `since` is inclusive and `until` is exclusive, so back-to-back windows such as `[09:00, 10:00)` and `[10:00, 11:00)` return every entry once. Both compare to the nanosecond, on both audit backends:
+
+```bash
+# one hour of decisions, oldest first
+curl -s -H "Authorization: Bearer $K" \
+  "http://localhost:8080/v1/audit?since=2026-10-14T09:00:00Z&until=2026-10-14T10:00:00Z&limit=1000"
+```
+
+If a window holds more than `limit` entries, page inside it with `offset`, or start the next request at the last entry's `timestamp` plus one nanosecond.
+
 ---
 
 ## `GET /v1/audit/head` · tenant-aware mirror
@@ -298,6 +314,87 @@ Returns the head of the sealed audit log (`agentguard server --audit-seal`): the
 | `200` | The head. |
 | `401` | Missing/invalid Bearer token or session. |
 | `404` | Sealing is off (`{"error":"audit sealing is off; …"}`), or a tenant-aware route with an unregistered tenant. |
+
+---
+
+## `GET /v1/sessions` · tenant-aware mirror
+
+Tenant-aware mirror: `GET /v1/t/{tenant}/sessions`. **(v1.4)** Same auth as `GET /v1/audit`: Bearer or session.
+
+Lists the tenant's sessions: the audit entries grouped by `session_id`, newest first. Entries without a `session_id` are not part of any session. The dashboard's Sessions view is built on this route.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `since` | RFC 3339 time | 24 hours ago | Count entries at or after this time. |
+| `until` | RFC 3339 time | — | Count entries before this time (exclusive). |
+| `agent_id` | string | — | Sessions in which this agent made a call in the window. |
+| `parent_session_id` | string | — | Sessions started by this session. |
+| `limit` | int | `100` | Silently clamped at `1000`. `<1` or non-integer → `400`. |
+
+A session's summary covers its entries in the window. `agent_id` and `parent_session_id` pick sessions; they don't trim them.
+
+```json
+{
+  "since": "2026-10-13T10:00:00Z",
+  "sessions": [
+    {
+      "session_id": "sub-7",
+      "parent_session_id": "orch-1",
+      "agents": [{"agent_id": "claude-code", "subagent": "Explore"}],
+      "transports": ["claude_code"],
+      "first_seen": "2026-10-14T09:12:03.5Z",
+      "last_seen": "2026-10-14T09:14:40Z",
+      "counts": {"total": 12, "allow": 10, "deny": 1, "require_approval": 1}
+    }
+  ]
+}
+```
+
+- `since` and `until` echo the window that was searched (`until` is omitted when open).
+- `agents` lists each distinct `agent_id` and `meta.subagent` pair (the Claude Code hook sets `meta.subagent` for calls made by a sub-agent).
+- `parent_session_id` is the parent named by the session's first entry that names one.
+- Entries with no `transport` count as `sdk`.
+
+The file audit backend scans the live audit file (not rotated archives), like `GET /v1/audit`; the store backend aggregates in SQL. Neither runs on the `/v1/check` path.
+
+| Code | Meaning |
+|---|---|
+| `200` | The list (possibly empty). |
+| `400` | Bad `since`, `until` or `limit`. |
+| `401` | Missing/invalid Bearer token or session. |
+| `404` | Tenant-aware route with an unregistered tenant. |
+
+---
+
+## `GET /v1/sessions/{id}` · tenant-aware mirror
+
+Tenant-aware mirror: `GET /v1/t/{tenant}/sessions/{id}`. **(v1.4)** Same auth as `GET /v1/audit`.
+
+Returns one session: its summary (same shape as in the list), the sessions it started, and its entries oldest first. URL-encode the id: session ids are chosen by the caller and may contain `/` or spaces (`sub%2F1`).
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `since` | RFC 3339 time | — | Narrow the summary, children and entries to entries at or after this time. |
+| `until` | RFC 3339 time | — | ...and before this time (exclusive). |
+| `limit` | int | `1000` | Max entries returned. Silently clamped at `5000`. |
+
+```json
+{
+  "session": {"session_id": "orch-1", "agents": [...], "transports": ["sdk"], "first_seen": "...", "last_seen": "...", "counts": {...}},
+  "children": [{"session_id": "sub-7", "parent_session_id": "orch-1", ...}],
+  "entries": [{"timestamp": "...", "session_id": "orch-1", "request": {...}, "result": {...}}],
+  "truncated": false
+}
+```
+
+`truncated` is `true` when the session has more entries than `limit`. Fetch the rest with `since` set to the last entry's `timestamp` plus one nanosecond, or with `GET /v1/audit?session_id=…&offset=…`. `children` holds at most 1000 sessions.
+
+| Code | Meaning |
+|---|---|
+| `200` | The session. |
+| `400` | Bad `since`, `until` or `limit`, or no id. |
+| `401` | Missing/invalid Bearer token or session. |
+| `404` | The tenant has no entry for this session in the window (`{"error":"no audit entries for this session; …"}`), or an unregistered tenant. Another tenant's session is a `404` too. |
 
 ---
 
