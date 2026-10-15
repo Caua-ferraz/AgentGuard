@@ -425,17 +425,12 @@ func scanFile(path string, start int64, fn func(Entry), bad func(error)) error {
 	return scanReader(r, path, fn, bad)
 }
 
-// replayReader is the shared line scanner: skips blank and `_meta` lines,
-// counts and skips unparseable lines (they are visible on /metrics as
-// agentguard_audit_corrupt_lines_total, exactly as Query reports them), and
-// invokes fn for every well-formed entry.
-func replayReader(r io.Reader, name string, fn func(Entry)) error {
-	return scanReader(r, name, fn, nil)
-}
-
-// scanReader is replayReader with scanFile's bad-line callback. With a
-// caller's bad, nothing is logged or counted on /metrics: the caller
-// reports it.
+// scanReader is the shared line scanner: skips blank and `_meta` lines,
+// hands unparseable lines to bad and skips them, and invokes fn for every
+// well-formed entry. With a nil bad (the startup replay) they are counted
+// on /metrics as agentguard_audit_corrupt_lines_total, exactly as Query
+// reports them, and the first is logged; with a caller's bad nothing is
+// logged or counted: the caller reports them.
 func scanReader(r io.Reader, name string, fn func(Entry), bad func(error)) error {
 	replay := bad == nil
 	if replay {
