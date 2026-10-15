@@ -129,6 +129,23 @@ func TestCheck_EvalOfASubstitutionUnderAnAllowlist(t *testing.T) {
 	})
 }
 
+// isCompoundShell runs on every shell check. An ordinary command without
+// shell syntax must not allocate, even when it holds "sh" and "-" (before,
+// `git push --force` split itself into words to look for a nested shell).
+func TestIsCompoundShell_OrdinaryCommandsDoNotAllocate(t *testing.T) {
+	for _, cmd := range []string{
+		"ls -la", "git push --force origin main", "npm run test -- --watch",
+		"shellcheck -x a.sh", "ssh -c aes128-ctr host", "make -j8 all",
+	} {
+		if isCompoundShell(cmd) {
+			t.Errorf("isCompoundShell(%q) = true, want false", cmd)
+		}
+		if n := testing.AllocsPerRun(100, func() { isCompoundShell(cmd) }); n != 0 {
+			t.Errorf("isCompoundShell(%q) allocates %v times per call, want 0", cmd, n)
+		}
+	}
+}
+
 func TestParseShell_RecordsNestedScripts(t *testing.T) {
 	cases := []struct {
 		name    string

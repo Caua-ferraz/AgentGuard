@@ -45,13 +45,54 @@ func isCompoundShell(cmd string) bool {
 	if hasShellSyntax(cmd) {
 		return true
 	}
-	mayRunString := strings.Contains(cmd, "eval") || (strings.Contains(cmd, "sh") && strings.Contains(cmd, "-"))
-	if !mayRunString {
+	// The full check splits the command into words, which allocates; only
+	// a command that starts with a shell, eval or a wrapper can need it.
+	if !startsWithLauncher(cmd) {
 		return false
 	}
 	_, ok := innerScript(strings.Fields(cmd))
 	return ok
 }
+
+// startsWithLauncher reports, without allocating, whether the first word
+// of a syntax-free command (after NAME=value assignments) names a shell,
+// eval or a command wrapper: the only commands that can run another
+// command string. It runs on every shell check, so ordinary commands
+// (`git push --force`, `npm run test -- --watch`) cost a short scan and
+// one map lookup.
+func startsWithLauncher(cmd string) bool {
+	i := 0
+	for {
+		for i < len(cmd) && (cmd[i] == ' ' || cmd[i] == '\t') {
+			i++
+		}
+		j := i
+		for j < len(cmd) && cmd[j] != ' ' && cmd[j] != '\t' {
+			j++
+		}
+		if i == j {
+			return false
+		}
+		if w := cmd[i:j]; !isAssignment(w) {
+			_, ok := launcherNames[baseName(w)]
+			return ok
+		}
+		i = j
+	}
+}
+
+// launcherNames are the command names startsWithLauncher looks for: the
+// shells, eval and the command wrappers.
+var launcherNames = func() map[string]struct{} {
+	m := map[string]struct{}{"eval": {}}
+	for name := range shellNames {
+		m[name] = struct{}{}
+	}
+	for name := range commandWrappers {
+		m[name] = struct{}{}
+	}
+	return m
+}()
 
 // hasShellSyntax reports whether s contains any byte of shellSyntaxChars.
 func hasShellSyntax(s string) bool {
