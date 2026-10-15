@@ -448,6 +448,7 @@ result if either denies, otherwise the more specific scope's result).
     "meta": {
       "arguments_json": "{\"path\":\"/tmp/x\"}",
       "namespace": "fs",
+      "gateway_connection": "3f9c0a1b2d4e5f60",
       "upstream_cmd": "npx -y @modelcontextprotocol/server-filesystem /tmp",
       "policy_mode": "strict",
       "secondary_check_scope": "filesystem",
@@ -468,6 +469,13 @@ result if either denies, otherwise the more specific scope's result).
 keys, GitHub tokens, Slack tokens, `key=value` secret patterns and, from
 v1.2.0, `sk-…` and Google API keys, JWTs, PEM private keys and
 `Authorization` / `x-api-key` header values are scrubbed.
+
+`session_id` comes from the MCP client's name (`mcp-gateway:<name>`), so
+two hosts running the same client share a session, and its
+`cost.max_per_session` budget. **(v1.4)** To tell them apart, each
+gateway process picks a random id at start and sends it on every check
+as `meta.gateway_connection`; the session id stays as it was. The
+dashboard's session replay shows it under each entry.
 
 The dashboard renders the `transport: "mcp_gateway"` chip in the audit
 feed (blue), distinct from `sdk` (green) and `llm_api_proxy` (purple).

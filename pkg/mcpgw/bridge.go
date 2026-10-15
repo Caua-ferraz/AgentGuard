@@ -3,6 +3,8 @@ package mcpgw
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,6 +61,10 @@ type Bridge struct {
 	negotiatedProto string
 	clientInfo      ClientInfo
 
+	// connID is this process's gateway_connection id (see
+	// ToolsCallRequest.ConnectionID). Set once by NewBridge.
+	connID string
+
 	// Hooks for A18 and A19. All nil-safe — a nil hook means the
 	// bridge falls through with conservative defaults (ALLOW for
 	// policy, no-op for audit/SSE). Set by the binary entry point
@@ -105,6 +111,13 @@ type ToolsCallRequest struct {
 	AgentID    string                 // synthesised from ClientInfo.Name
 	SessionID  string                 // session-scoped key (clientInfo + pid hint)
 	ApprovalID string                 // populated from _meta.dev.agentguard/approval_id if present
+
+	// ConnectionID is this gateway process's random id, sent as
+	// meta["gateway_connection"]. SessionID is derived from the client
+	// name alone, so two hosts with the same name share one session (and
+	// its cost limit); the connection id tells their calls apart in the
+	// audit log without changing the session.
+	ConnectionID string
 }
 
 // Decision is the verdict returned by PolicyCheck. Alias of the shared
@@ -155,7 +168,16 @@ func NewBridge(cfg *Config, logger io.Writer, version string) *Bridge {
 		upstreams: map[string]Upstream{},
 		logger:    tlog,
 		version:   version,
+		connID:    newConnectionID(),
 	}
+}
+
+// newConnectionID returns 8 random bytes, hex-encoded: unique enough to
+// tell gateway processes apart in one audit log.
+func newConnectionID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:]) // crypto/rand.Read does not return an error since Go 1.24
+	return hex.EncodeToString(b[:])
 }
 
 // SetUpstream wires a custom Upstream into the bridge. Used by tests
@@ -629,6 +651,8 @@ func (b *Bridge) handleToolsCall(ctx context.Context, id RequestID, raw json.Raw
 		AgentID:    b.deriveAgentID(),
 		SessionID:  b.deriveSessionID(),
 		ApprovalID: approvalID,
+
+		ConnectionID: b.connID,
 	}
 
 	// Run the policy hook.

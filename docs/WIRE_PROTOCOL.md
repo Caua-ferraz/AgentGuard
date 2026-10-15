@@ -75,6 +75,7 @@ Fields are JSON-encoded; only `scope` is required.
 | `url`            | string            | optional | Full URL for the `network` scope. |
 | `agent_id`       | string            | optional | Stable agent identifier. Used as a per-agent override key and as a rate-limit key. |
 | `session_id`     | string            | optional | Required to use `cost.max_per_session` accumulation; also keyed by audit `Query`. |
+| `parent_session_id` | string         | optional | **(v1.4)** The session that started this one (an orchestrator's session for a sub-agent). Not used by policy; recorded in the audit entry's `request` so `GET /v1/sessions` can link parent and child sessions. Omitted when empty, so requests without it are unchanged. |
 | `est_cost`       | number ≥ 0        | optional | Estimated cost of this action in USD. Required for the `cost` scope. SDKs drop this field when its value is `0` to avoid spurious cost-scope evaluations. |
 | `meta`           | object<string,string> | optional | Free-form string-keyed metadata. Forwarded to notifiers and the audit log; may be redacted by `notify.DefaultRedactor`. |
 

@@ -356,16 +356,17 @@ func buildOpenAINonStreamingCheck(s *Server, r *http.Request, resp *ChatCompleti
 		agent = "llm-proxy"
 	}
 	return ToolCallCheck{
-		Provider:     "openai",
-		ToolName:     tc.Function.Name,
-		ToolCallID:   tc.ID,
-		Arguments:    args,
-		RawArguments: json.RawMessage(tc.Function.Arguments),
-		AgentID:      agent,
-		SessionID:    strings.TrimSpace(r.Header.Get("X-Session-ID")),
-		TenantID:     s.cfg.TenantID,
-		Model:        resp.Model,
-		Stream:       false,
+		Provider:        "openai",
+		ToolName:        tc.Function.Name,
+		ToolCallID:      tc.ID,
+		Arguments:       args,
+		RawArguments:    json.RawMessage(tc.Function.Arguments),
+		AgentID:         agent,
+		SessionID:       strings.TrimSpace(r.Header.Get("X-Session-ID")),
+		ParentSessionID: strings.TrimSpace(r.Header.Get(ParentSessionHeader)),
+		TenantID:        s.cfg.TenantID,
+		Model:           resp.Model,
+		Stream:          false,
 	}
 }
 
@@ -419,16 +420,17 @@ func buildAnthropicNonStreamingCheck(s *Server, r *http.Request, resp *Anthropic
 		agent = "llm-proxy"
 	}
 	return ToolCallCheck{
-		Provider:     "anthropic",
-		ToolName:     block.Name,
-		ToolCallID:   block.ID,
-		Arguments:    args,
-		RawArguments: block.Input,
-		AgentID:      agent,
-		SessionID:    strings.TrimSpace(r.Header.Get("X-Session-ID")),
-		TenantID:     s.cfg.TenantID,
-		Model:        resp.Model,
-		Stream:       false,
+		Provider:        "anthropic",
+		ToolName:        block.Name,
+		ToolCallID:      block.ID,
+		Arguments:       args,
+		RawArguments:    block.Input,
+		AgentID:         agent,
+		SessionID:       strings.TrimSpace(r.Header.Get("X-Session-ID")),
+		ParentSessionID: strings.TrimSpace(r.Header.Get(ParentSessionHeader)),
+		TenantID:        s.cfg.TenantID,
+		Model:           resp.Model,
+		Stream:          false,
 	}
 }
 

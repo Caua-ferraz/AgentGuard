@@ -15,7 +15,6 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib" // pure-Go Postgres driver, registered under the name "pgx"
 
 	"github.com/Caua-ferraz/AgentGuard/pkg/audit"
-	"github.com/Caua-ferraz/AgentGuard/pkg/policy"
 )
 
 // PostgresStore is the multi-node Store backend. It mirrors SQLiteStore
@@ -33,6 +32,11 @@ import (
 type PostgresStore struct {
 	db  *sql.DB
 	dsn string
+
+	// stopIndexes and indexesDone run the background audit index build
+	// (startAuditIndexBuild); nil when it was never started.
+	stopIndexes context.CancelFunc
+	indexesDone chan struct{}
 }
 
 // Cold-path pool sizing. Small, bounded, and recycled — the syncer batches its
@@ -85,12 +89,13 @@ func NewPostgresStore(dsn string) (*PostgresStore, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), migrateTimeout)
 	defer cancel()
 	if err := s.Migrate(ctx); err != nil {
-		_ = db.Close()
 		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, fmt.Errorf("store: postgres migration did not complete within %s (unreachable or unresponsive DSN): %w", migrateTimeout, err)
+			err = migrateTimeoutError(db, err)
 		}
+		_ = db.Close()
 		return nil, err
 	}
+	s.startAuditIndexBuild()
 	return s, nil
 }
 
@@ -125,13 +130,8 @@ var pgSchemaStmts = []string{
 	    PRIMARY KEY (tenant_id, id)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_approvals_resolved ON approvals(resolved, resolved_at)`,
-	// approvals one-shot/actor columns for
-	// DBs whose approvals table predates them; Postgres has native
-	// IF NOT EXISTS so no duplicate-column dance is needed (mirror of
-	// SQLiteStore.Migrate's guarded ALTERs).
-	`ALTER TABLE approvals ADD COLUMN IF NOT EXISTS consumed_at   TEXT NOT NULL DEFAULT ''`,
-	`ALTER TABLE approvals ADD COLUMN IF NOT EXISTS resolved_via  TEXT NOT NULL DEFAULT ''`,
-	`ALTER TABLE approvals ADD COLUMN IF NOT EXISTS resolved_from TEXT NOT NULL DEFAULT ''`,
+	// The approvals one-shot/actor columns for DBs whose table predates
+	// them are added by Migrate (pgAdditiveColumns).
 
 	`CREATE TABLE IF NOT EXISTS rate_buckets (
 	    tenant_id   TEXT    NOT NULL,
@@ -169,12 +169,18 @@ var pgSchemaStmts = []string{
 	    reason      TEXT    NOT NULL DEFAULT '',
 	    rule        TEXT    NOT NULL DEFAULT '',
 	    duration_ms BIGINT  NOT NULL DEFAULT 0,
-	    transport   TEXT    NOT NULL DEFAULT ''
+	    transport   TEXT    NOT NULL DEFAULT '',
+	    parent_session_id TEXT NOT NULL DEFAULT '',
+	    subagent    TEXT    NOT NULL DEFAULT ''
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_audit_tenant_ts ON audit_entries(tenant_id, timestamp)`,
 	`CREATE INDEX IF NOT EXISTS idx_audit_agent     ON audit_entries(agent_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_audit_decision  ON audit_entries(decision)`,
 	`CREATE INDEX IF NOT EXISTS idx_audit_scope     ON audit_entries(scope)`,
+	// The audit session columns (v1.4) for tables that predate them are
+	// added by Migrate (pgAdditiveColumns). Their indexes
+	// (auditSessionIndexes) are built in the background after start
+	// (startAuditIndexBuild).
 
 	`CREATE TABLE IF NOT EXISTS policies (
 	    tenant_id   TEXT NOT NULL PRIMARY KEY,
@@ -204,6 +210,53 @@ var pgSchemaStmts = []string{
 	`CREATE INDEX IF NOT EXISTS idx_cost_consumption_updated ON cost_consumption(updated_at)`,
 }
 
+// pgAdditiveColumns are columns added after their table first shipped, for
+// databases created before them (the mirror of SQLiteStore.Migrate's guarded
+// ALTERs). Migrate adds only the ones information_schema says are missing:
+// ALTER TABLE ... ADD COLUMN IF NOT EXISTS takes ACCESS EXCLUSIVE on the
+// table even when the column is there, so running it on every boot blocked
+// every reader and writer of approvals and audit_entries for a moment.
+var pgAdditiveColumns = []struct{ table, column, def string }{
+	{"approvals", "consumed_at", "TEXT NOT NULL DEFAULT ''"},
+	{"approvals", "resolved_via", "TEXT NOT NULL DEFAULT ''"},
+	{"approvals", "resolved_from", "TEXT NOT NULL DEFAULT ''"},
+	{"audit_entries", "parent_session_id", "TEXT NOT NULL DEFAULT ''"},
+	{"audit_entries", "subagent", "TEXT NOT NULL DEFAULT ''"},
+}
+
+// addMissingColumns runs the ALTERs for the pgAdditiveColumns the current
+// schema lacks. Called inside Migrate's transaction, under its advisory
+// lock, so no other replica adds the same column in between.
+func addMissingColumns(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT table_name, column_name FROM information_schema.columns
+		WHERE table_schema = current_schema() AND table_name IN ('approvals', 'audit_entries')`)
+	if err != nil {
+		return fmt.Errorf("store: migrate: list columns: %w", err)
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var table, column string
+		if err := rows.Scan(&table, &column); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("store: migrate: list columns: %w", err)
+		}
+		have[table+"."+column] = true
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("store: migrate: list columns: %w", err)
+	}
+	for _, c := range pgAdditiveColumns {
+		if have[c.table+"."+c.column] {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, "ALTER TABLE "+c.table+" ADD COLUMN IF NOT EXISTS "+c.column+" "+c.def); err != nil {
+			return fmt.Errorf("store: migrate (additive column %s.%s): %w", c.table, c.column, err)
+		}
+	}
+	return nil
+}
+
 // Migrate creates the schema. Idempotent (every statement is IF NOT EXISTS), so
 // it is safe to run on every boot. Runs inside one transaction so a partial
 // failure leaves the schema untouched.
@@ -217,9 +270,11 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 		//     against a concurrent creator, so two nodes starting together
 		//     collide on the pg_type unique index and one fails with
 		//     SQLSTATE 23505. Measured on 5 of 6 three-replica cold starts.
-		//   - Existing schema: the `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
-		//     statements below still take ACCESS EXCLUSIVE locks even when
-		//     the columns are already present, so concurrent migration
+		//   - Existing schema: `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
+		//     takes ACCESS EXCLUSIVE locks even when the column is already
+		//     present (the ALTERs now run only for missing columns, see
+		//     pgAdditiveColumns, but the lock still guards the first
+		//     upgrade), so concurrent migration
 		//     transactions deadlock (SQLSTATE 40P01) with nothing to do.
 		//     That exposes every rolling restart, not just the first deploy.
 		//
@@ -241,15 +296,35 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 				return fmt.Errorf("store: migrate: %w", err)
 			}
 		}
-		return nil
+		return addMissingColumns(ctx, tx)
 	})
 }
 
 // Ping verifies connectivity.
 func (s *PostgresStore) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
-// Close closes the database. Idempotent at the sql.DB layer.
-func (s *PostgresStore) Close() error { return s.db.Close() }
+// Close stops a running audit index build and closes the database.
+// Idempotent at the sql.DB layer.
+func (s *PostgresStore) Close() error {
+	if s.stopIndexes != nil {
+		s.stopIndexes()
+		<-s.indexesDone
+	}
+	return s.db.Close()
+}
+
+// migrateTimeoutError explains a boot migration that ran out of time. When
+// the database still answers, the DSN is fine and the wait was elsewhere:
+// usually a lock on a table held by another replica's migration or a long
+// transaction.
+func migrateTimeoutError(db *sql.DB, err error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if db.PingContext(ctx) == nil {
+		return fmt.Errorf("store: postgres migration did not complete within %s; the database answers, so it was most likely waiting for a lock on a table (another replica migrating, or a long transaction): %w", migrateTimeout, err)
+	}
+	return fmt.Errorf("store: postgres migration did not complete within %s (unreachable or unresponsive DSN): %w", migrateTimeout, err)
+}
 
 // --- approvals ---
 
@@ -514,8 +589,8 @@ func (s *PostgresStore) AppendAudit(ctx context.Context, entries []audit.Entry) 
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		stmt, err := tx.PrepareContext(ctx, `
 			INSERT INTO audit_entries
-			    (tenant_id, timestamp, session_id, agent_id, scope, action, command, path, domain, url, decision, reason, rule, duration_ms, transport)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`)
+			    (tenant_id, timestamp, session_id, agent_id, scope, action, command, path, domain, url, decision, reason, rule, duration_ms, transport, parent_session_id, subagent)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`)
 		if err != nil {
 			return err
 		}
@@ -530,6 +605,7 @@ func (s *PostgresStore) AppendAudit(ctx context.Context, entries []audit.Entry) 
 				e.SessionID, e.AgentID, e.Request.Scope, e.Request.Action, e.Request.Command,
 				e.Request.Path, e.Request.Domain, e.Request.URL,
 				string(e.Result.Decision), e.Result.Reason, e.Result.Rule, e.DurationMs, e.EffectiveTransport(),
+				e.Request.ParentSessionID, e.Request.Meta[audit.SubagentMetaKey],
 			); err != nil {
 				return err
 			}
@@ -576,12 +652,18 @@ func (s *PostgresStore) QueryAudit(ctx context.Context, tenantID string, filter 
 		conds = append(conds, "transport = "+nextPlaceholder())
 		args = append(args, filter.Transport)
 	}
-	if filter.Since != nil {
-		conds = append(conds, "timestamp >= "+nextPlaceholder())
-		args = append(args, filter.Since.UTC().Format(time.RFC3339Nano))
+	if filter.ParentSessionID != "" {
+		conds = append(conds, "parent_session_id = "+nextPlaceholder())
+		args = append(args, filter.ParentSessionID)
+	}
+	if filter.Since != nil || filter.Until != nil {
+		// Continue the $N numbering from the arguments collected so far.
+		a := &sqlArgs{d: postgresDialect, args: args}
+		conds = append(conds, windowConds(a, filter.Since, filter.Until)...)
+		args = a.args
 	}
 
-	q := `SELECT tenant_id, timestamp, session_id, agent_id, scope, action, command, path, domain, url, decision, reason, rule, duration_ms, transport FROM audit_entries`
+	q := `SELECT tenant_id, timestamp, session_id, agent_id, scope, action, command, path, domain, url, decision, reason, rule, duration_ms, transport, parent_session_id, subagent FROM audit_entries`
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
 	}
@@ -611,25 +693,7 @@ func (s *PostgresStore) QueryAudit(ctx context.Context, tenantID string, filter 
 	}
 	defer rows.Close()
 
-	var out []audit.Entry
-	for rows.Next() {
-		var (
-			e        audit.Entry
-			tsStr    string
-			decision string
-		)
-		if err := rows.Scan(
-			&e.TenantID, &tsStr, &e.SessionID, &e.AgentID, &e.Request.Scope, &e.Request.Action,
-			&e.Request.Command, &e.Request.Path, &e.Request.Domain, &e.Request.URL,
-			&decision, &e.Result.Reason, &e.Result.Rule, &e.DurationMs, &e.Transport,
-		); err != nil {
-			return out, fmt.Errorf("store: scan audit: %w", err)
-		}
-		e.Timestamp = parseTime(tsStr)
-		e.Result.Decision = policy.Decision(decision)
-		out = append(out, e)
-	}
-	return out, rows.Err()
+	return scanAuditRows(rows)
 }
 
 // --- tenant policies (mirrors pkg/store/policy.go for SQLiteStore) ---

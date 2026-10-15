@@ -121,6 +121,16 @@ proxied traffic. Spec-compliant: `User-Agent` is mutable per RFC 7231.
 The `Host` header is rewritten to the upstream's authority. Cookie
 headers (rare for LLM APIs) are forwarded unchanged.
 
+Three request headers also name who is calling. The proxy copies them
+into each tool call's `/v1/check` request (and forwards them upstream
+like any other header):
+
+| Header | `/v1/check` field | Notes |
+|---|---|---|
+| `X-Agent-ID` | `agent_id` | `llm-proxy` when absent. |
+| `X-Session-ID` | `session_id` | Keys `cost.max_per_session` and the audit's sessions. |
+| `X-AgentGuard-Parent-Session` | `parent_session_id` | **(v1.4)** The session that started this one, e.g. the orchestrator's session when a sub-agent calls the model. Not used by policy; [`GET /v1/sessions`](API.md#get-v1sessions--tenant-aware-mirror) and the dashboard's Sessions view use it to link the two. Omitted when the header is absent. |
+
 ### 3.2 Body handling
 
 Two paths:
@@ -691,6 +701,7 @@ One audit entry per **tool call** (not per stream, not per delta).
   "agent_id": "<from x-agent-id header, or 'llm-proxy'>",
   "request": {
     "scope": "filesystem",
+    "parent_session_id": "<from x-agentguard-parent-session header; omitted when absent>",
     "command": "read_file",
     "path": "/tmp/x",
     "action": "read",

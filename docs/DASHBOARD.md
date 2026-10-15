@@ -57,6 +57,7 @@ The dashboard is a single HTML page (`dashboardHTML` in `pkg/proxy/server.go`) t
 2. Fetches `/api/pending` once on page load.
 3. Fetches `/v1/audit?order=desc&limit=200` once on page load — the 200 most recent entries (server clamps to `auditMaxLimit`, default 1000, so 200 passes through unclamped). Before v1.2 it fetched the oldest 200.
 4. Subscribes to `/api/stream` for live deltas.
+5. Fetches `/v1/sessions` and `/v1/sessions/{id}` when you open the **Sessions** tab (v1.4).
 
 Sections you'll see:
 
@@ -66,6 +67,7 @@ Sections you'll see:
 | **Pending Approvals** | `/api/pending` + SSE | Each entry shows scope, command/path/domain, agent, timestamp. Approve / Deny buttons. |
 | **Audit** | `/v1/audit?order=desc&limit=200` | Most recent decisions. No auto-refresh — reload the page for a newer slice. |
 | **LIVE badge** | EventSource state | Green when `EventSource.readyState === OPEN`. |
+| **Sessions** tab | `/v1/sessions`, `/v1/sessions/{id}` | **(v1.4)** Sessions and a replay of each. See [Sessions view](#sessions-view). |
 
 ---
 
@@ -86,6 +88,26 @@ If the fetch returns `401`/`403`, `agFetch` (the dashboard's helper) redirects t
 Shows timestamp, decision, scope, agent, and the action's key identifier (command / path / domain). Click an entry to expand JSON details (if built into your dashboard build) or `curl` the audit API for the full record.
 
 Dashboard always requests `limit=200`; the server clamps at `auditMaxLimit` (default 1000, configurable via `proxy.audit.max_limit`). The dashboard does not paginate — for deep historical queries use the CLI or `curl /v1/audit?offset=...`.
+
+---
+
+## Sessions view
+
+**(v1.4)** The **Sessions** tab in the header groups the audit log by `session_id`.
+
+The left pane lists the sessions of the last hour, 24 hours or 7 days, newest first ([`GET /v1/sessions`](API.md#get-v1sessions--tenant-aware-mirror)). Each shows its id, the session that started it, its transports, its agents and its decision counts. Entries without a `session_id` are not listed. **Refresh** reloads the list; it does not update by itself.
+
+Pick a session to replay it ([`GET /v1/sessions/{id}`](API.md#get-v1sessionsid--tenant-aware-mirror)):
+
+- Entries are drawn in order, with the same cards as the live feed, one column (lane) per agent. A sub-agent gets its own lane: the Claude Code hook marks a sub-agent's calls with `meta.subagent`.
+- **Play** steps through the entries, waiting the real time between them (at most 3 seconds) divided by the speed (1x to 50x). **Step** and **Back** move one entry; **Restart** goes back to the start. The current entry is outlined.
+- A `REQUIRE_APPROVAL` entry says when the agent's retry with that approval is in the session, and what it was decided. Approving or denying is still done from the live view.
+- **Started by** links to the parent session; **Child sessions** links to the sessions this one started (`parent_session_id`, see [WIRE_PROTOCOL](WIRE_PROTOCOL.md)).
+- Calls through the MCP gateway show their `gateway_connection` id.
+
+The open replay is in the URL: `/dashboard#session=<id>` (URL-encoded) reopens it, and `/dashboard#sessions` opens the list. A replay shows up to 1000 entries and says so when the session has more. A session whose id is `.` or `..` is listed but can't be replayed (the browser collapses such a path segment); the view says to read it with `/v1/audit?session_id=…` instead.
+
+Every value in the view comes from the audit log, which agents write. The page sets it as text, never as HTML, and loads nothing from other origins.
 
 ---
 

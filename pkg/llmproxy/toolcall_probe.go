@@ -151,12 +151,13 @@ func undecodableToolCallDecision(provider string) Decision {
 // Runs only on this rare branch, never on a body that decodes.
 func (s *Server) auditUndecodableToolCall(r *http.Request, provider, model string) {
 	check := ToolCallCheck{
-		Provider:  provider,
-		Model:     model,
-		TenantID:  s.cfg.TenantID,
-		AgentID:   strings.TrimSpace(r.Header.Get("X-Agent-ID")),
-		SessionID: strings.TrimSpace(r.Header.Get("X-Session-ID")),
-		Stream:    false,
+		Provider:        provider,
+		Model:           model,
+		TenantID:        s.cfg.TenantID,
+		AgentID:         strings.TrimSpace(r.Header.Get("X-Agent-ID")),
+		SessionID:       strings.TrimSpace(r.Header.Get("X-Session-ID")),
+		ParentSessionID: strings.TrimSpace(r.Header.Get(ParentSessionHeader)),
+		Stream:          false,
 	}
 	if check.AgentID == "" {
 		check.AgentID = "llm-proxy"

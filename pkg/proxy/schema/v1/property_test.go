@@ -48,6 +48,9 @@ func generateActionRequest(rnd *rand.Rand) ActionRequest {
 		AgentID:       randomASCII(rnd, rnd.Intn(20)),
 		SessionID:     randomASCII(rnd, rnd.Intn(20)),
 		EstCost:       float64(rnd.Intn(10000)) / 100.0, // two-decimal "$" range
+		// ParentSessionID (v1.4) is optional; empty half the time so the
+		// omitempty path is exercised too.
+		ParentSessionID: randomASCII(rnd, rnd.Intn(2)*rnd.Intn(20)),
 		// Meta omitted — map ordering is non-deterministic and the
 		// round-trip already exercises the type's JSON shape.
 	}

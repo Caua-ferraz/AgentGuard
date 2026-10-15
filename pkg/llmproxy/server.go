@@ -46,6 +46,12 @@ var BuildVersion = "dev"
 // upstream's Authorization.
 const ProxyAuthHeader = "X-AgentGuard-Proxy-Auth"
 
+// ParentSessionHeader names the session that started the caller's session
+// (X-Session-ID): an orchestrator's session for a sub-agent. The proxy sends
+// it to /v1/check as parent_session_id; like X-Session-ID it is also
+// forwarded upstream unchanged.
+const ParentSessionHeader = "X-AgentGuard-Parent-Session"
+
 // ----- Hook input/output types -----
 
 // ToolCallCheck is the bridge-internal shape passed to PolicyCheck.
@@ -87,6 +93,11 @@ type ToolCallCheck struct {
 	SessionID  string
 	TenantID   string
 	ApprovalID string
+
+	// ParentSessionID is the X-AgentGuard-Parent-Session header: the
+	// session that started this one, recorded in the audit log so the
+	// sessions API can group them. Policy ignores it.
+	ParentSessionID string
 
 	// Model is the model name from the request body — surfaced in
 	// audit meta.

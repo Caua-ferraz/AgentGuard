@@ -511,11 +511,18 @@ Query `/v1/audit` for recent decisions. All filters are optional and AND-combine
 | `--decision <D>` | *(none)* | `ALLOW`, `DENY`, or `REQUIRE_APPROVAL`. |
 | `--scope <name>` | *(none)* | `shell`, `filesystem`, `network`, `browser`, `cost`, `data`, `mcp_tool`. |
 | `--transport <name>` | *(none)* | Filter by audit `transport` tag: `sdk`, `mcp_gateway`, `llm_api_proxy`, or a coding-agent hook's `claude_code`, `cursor`, `gemini_cli`, `codex_cli`. Pre-v0.5 entries are excluded when set. |
+| `--session <id>` | *(none)* | **(v1.4)** Filter by exact `session_id`. |
+| `--parent-session <id>` | *(none)* | **(v1.4)** Only the calls of sessions started by this session (entries whose request named it as `parent_session_id`). |
+| `--since <time>` | *(none)* | **(v1.4)** Entries at or after this time. A duration counts back from now (`2h`, `30m`, `90s`); otherwise an RFC 3339 time (`2026-10-14T09:00:00Z`). |
+| `--until <time>` | *(none)* | **(v1.4)** Entries before this time (exclusive). Same forms as `--since`. A value in neither form is a usage mistake (exit 2). |
+
+A server older than 1.4 ignores the parameters behind `--since`, `--until` and `--parent-session` and returns every entry. So when one of those flags is set, the CLI first asks the server whether it reads them (one `/v1/audit` request with a `since` that isn't a time: 1.4 answers `400`, older servers `200`), and exits 1 if it doesn't. Asking, rather than comparing version numbers, also works with dev builds.
 | `--limit <int>` | `50` | Max entries. Server clamps silently above configured ceiling (default 1000). |
 | `--order <desc\|asc>` | `desc` | **(v1.2)** `desc` shows the newest entries first; `asc`, the oldest (the order before v1.2, when `--limit` returned the first entries in the log rather than the latest). |
 | `--api-key <key>` | `$AGENTGUARD_API_KEY` | Bearer token. |
 
 ```bash
+agentguard audit --session sess-42 --since 2h --order asc
 agentguard audit --decision DENY --scope shell --limit 20
 # Showing 20 audit entries:
 #
@@ -524,7 +531,7 @@ agentguard audit --decision DENY --scope shell --limit 20
 #   ...
 ```
 
-The CLI uses `/v1/audit?limit=N` directly — pagination (`?offset=`) is supported on the HTTP API but not exposed as a CLI flag yet; use `curl` for paginated exports.
+The CLI uses `/v1/audit?limit=N` directly — pagination (`?offset=`) is supported on the HTTP API but not exposed as a CLI flag yet; use `curl` for paginated exports, or page by time with `--since` and `--until`. To see sessions grouped, with their parent and child sessions, use the dashboard's Sessions view or [`GET /v1/sessions`](API.md#get-v1sessions--tenant-aware-mirror).
 
 ## `agentguard audit verify`
 

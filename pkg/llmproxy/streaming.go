@@ -569,6 +569,7 @@ func (s *Server) gateAndFlushOpenAI(w http.ResponseWriter, flusher http.Flusher,
 			calls[i].AgentID = "llm-proxy"
 		}
 		calls[i].SessionID = strings.TrimSpace(r.Header.Get("X-Session-ID"))
+		calls[i].ParentSessionID = strings.TrimSpace(r.Header.Get(ParentSessionHeader))
 		calls[i].Stream = true
 		decision, err := s.runPolicyCheck(r.Context(), calls[i])
 		if err != nil {
@@ -741,13 +742,14 @@ func (s *Server) closeAnthropicStreamAtEOF(w http.ResponseWriter, flusher http.F
 // already received. Runs once per refused stream, never per event.
 func (s *Server) auditStreamRefusal(r *http.Request, provider string, decision Decision, toolName, toolCallID string) {
 	call := ToolCallCheck{
-		Provider:   provider,
-		ToolName:   toolName,
-		ToolCallID: toolCallID,
-		TenantID:   s.cfg.TenantID,
-		AgentID:    strings.TrimSpace(r.Header.Get("X-Agent-ID")),
-		SessionID:  strings.TrimSpace(r.Header.Get("X-Session-ID")),
-		Stream:     true,
+		Provider:        provider,
+		ToolName:        toolName,
+		ToolCallID:      toolCallID,
+		TenantID:        s.cfg.TenantID,
+		AgentID:         strings.TrimSpace(r.Header.Get("X-Agent-ID")),
+		SessionID:       strings.TrimSpace(r.Header.Get("X-Session-ID")),
+		ParentSessionID: strings.TrimSpace(r.Header.Get(ParentSessionHeader)),
+		Stream:          true,
 	}
 	if call.AgentID == "" {
 		call.AgentID = "llm-proxy"
@@ -802,6 +804,7 @@ func (s *Server) auditMalformedToolCalls(r *http.Request, calls []ToolCallCheck)
 			calls[i].AgentID = "llm-proxy"
 		}
 		calls[i].SessionID = strings.TrimSpace(r.Header.Get("X-Session-ID"))
+		calls[i].ParentSessionID = strings.TrimSpace(r.Header.Get(ParentSessionHeader))
 		calls[i].Stream = true
 		s.RecordForcedAudit(r.Context(), &calls[i], decision)
 	}
@@ -830,6 +833,7 @@ func (s *Server) auditDeniedToolCalls(r *http.Request, calls []ToolCallCheck) {
 			calls[i].AgentID = "llm-proxy"
 		}
 		calls[i].SessionID = strings.TrimSpace(r.Header.Get("X-Session-ID"))
+		calls[i].ParentSessionID = strings.TrimSpace(r.Header.Get(ParentSessionHeader))
 		calls[i].Stream = true
 		_, _ = s.runPolicyCheck(r.Context(), calls[i])
 	}
@@ -982,6 +986,7 @@ func (s *Server) gateAndFlushAnthropic(w http.ResponseWriter, flusher http.Flush
 			calls[i].AgentID = "llm-proxy"
 		}
 		calls[i].SessionID = strings.TrimSpace(r.Header.Get("X-Session-ID"))
+		calls[i].ParentSessionID = strings.TrimSpace(r.Header.Get(ParentSessionHeader))
 		calls[i].Stream = true
 		decision, err := s.runPolicyCheck(r.Context(), calls[i])
 		if err != nil {

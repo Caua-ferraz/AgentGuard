@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -182,14 +183,22 @@ type QueryFilter struct {
 	// Entry.EffectiveTenant so entries stored with an empty tenant_id (the
 	// default "local" tenant, and entries predating multi-tenancy) match the value "local".
 	// Empty disables the filter (returns all tenants — operator/global view).
-	TenantID  string     `json:"tenant_id,omitempty"`
-	AgentID   string     `json:"agent_id,omitempty"`
-	SessionID string     `json:"session_id,omitempty"`
-	Decision  string     `json:"decision,omitempty"`
-	Scope     string     `json:"scope,omitempty"`
-	Since     *time.Time `json:"since,omitempty"`
-	Limit     int        `json:"limit,omitempty"`
-	Offset    int        `json:"offset,omitempty"`
+	TenantID  string `json:"tenant_id,omitempty"`
+	AgentID   string `json:"agent_id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	Decision  string `json:"decision,omitempty"`
+	Scope     string `json:"scope,omitempty"`
+	// Since keeps entries at or after this time (inclusive); Until keeps
+	// entries before it (exclusive, v1.4). Together they page a time range
+	// without overlap: [since, until) followed by [until, next) sees every
+	// entry once.
+	Since  *time.Time `json:"since,omitempty"`
+	Until  *time.Time `json:"until,omitempty"`
+	Limit  int        `json:"limit,omitempty"`
+	Offset int        `json:"offset,omitempty"`
+	// ParentSessionID keeps entries whose request named this parent
+	// session (v1.4): the calls of the sessions started by it.
+	ParentSessionID string `json:"parent_session_id,omitempty"`
 	// Transport filters by the integration path that produced the
 	// entry ("sdk", "mcp_gateway", "llm_api_proxy"). Compared against
 	// Entry.EffectiveTransport so older entries (no Transport on
@@ -396,18 +405,7 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 	path := l.file.Name()
 	l.mu.Unlock()
 
-	readFile, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer readFile.Close()
-
 	var results []Entry
-	scanner := bufio.NewScanner(readFile)
-	// Default Scanner buffer is 64KB; bump to 4 MiB max so unusually large
-	// entries (base64 payloads, deeply nested meta blobs) don't silently
-	// truncate the scan. Audit entries normally sit well under 4KB.
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 
 	// skip counts remaining matches to discard before results are collected.
 	// A negative Offset is treated as zero (defensive: handler should clamp).
@@ -416,11 +414,6 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 		skip = 0
 	}
 
-	// Log at most one corrupt-line warning per Query call so a single bad
-	// byte in a multi-megabyte audit file does not flood stderr. The
-	// Prometheus counter still counts every occurrence.
-	corruptLogged := false
-
 	// Newest-first: the file is append-only, so scan forward keeping only the
 	// newest skip+Limit matches (a window that is compacted as it slides),
 	// then reverse. Without a limit every match is kept.
@@ -428,6 +421,64 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 	if filter.Desc && filter.Limit > 0 {
 		keep = skip + filter.Limit
 	}
+
+	err := scanEntries(path, func(entry Entry) bool {
+		if !matchesFilter(entry, filter) {
+			return true
+		}
+		if filter.Desc {
+			results = append(results, entry)
+			if keep > 0 && len(results) >= 2*keep {
+				results = append(results[:0], results[len(results)-keep:]...)
+			}
+			return true
+		}
+		if skip > 0 {
+			skip--
+			return true
+		}
+		results = append(results, entry)
+		return filter.Limit <= 0 || len(results) < filter.Limit
+	})
+	if filter.Desc {
+		results = newestFirst(results, skip, filter.Limit)
+	}
+	// A scan error still returns the partial results collected before it,
+	// so callers can degrade gracefully: Query is a best-effort scan.
+	if errors.Is(err, errScan) {
+		log.Printf("WARN audit: scanner error reading %s after %d matches (%v)", path, len(results), err)
+	}
+	return results, err
+}
+
+// errScan marks a scan cut short by a read error or an over-long line.
+var errScan = errors.New("audit scan")
+
+// scanEntries calls fn for each entry of the audit file at path, in file
+// order, until fn returns false. It skips `_meta` lines, and skips and
+// counts corrupt lines.
+//
+// A scanner error (bufio.ErrTooLong for a line over 4 MiB, or an I/O
+// failure) comes back wrapped in errScan after fn has seen every entry
+// before it. Without it the caller's results would be cut short with no
+// way to know.
+func scanEntries(path string, fn func(Entry) bool) error {
+	readFile, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer readFile.Close()
+
+	scanner := bufio.NewScanner(readFile)
+	// Default Scanner buffer is 64KB; bump to 4 MiB max so unusually large
+	// entries (base64 payloads, deeply nested meta blobs) don't silently
+	// truncate the scan. Audit entries normally sit well under 4KB.
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+
+	// Log at most one corrupt-line warning per scan so a single bad byte in
+	// a multi-megabyte audit file does not flood stderr. The Prometheus
+	// counter still counts every occurrence.
+	corruptLogged := false
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -445,7 +496,7 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 			// Silent skip is dangerous: a gradually corrupted audit file
 			// would return fewer entries than expected with no signal.
 			// Count every corrupt line and log the first occurrence per
-			// query so the operator sees the degradation.
+			// scan so the operator sees the degradation.
 			metrics.IncAuditCorruptLine()
 			if !corruptLogged {
 				log.Printf("WARN audit: skipping corrupt line in %s (%v)", path, err)
@@ -453,45 +504,15 @@ func (l *FileLogger) Query(filter QueryFilter) ([]Entry, error) {
 			}
 			continue
 		}
-
-		if !matchesFilter(entry, filter) {
-			continue
-		}
-		if filter.Desc {
-			results = append(results, entry)
-			if keep > 0 && len(results) >= 2*keep {
-				results = append(results[:0], results[len(results)-keep:]...)
-			}
-			continue
-		}
-		if skip > 0 {
-			skip--
-			continue
-		}
-		results = append(results, entry)
-
-		if filter.Limit > 0 && len(results) >= filter.Limit {
-			break
+		if !fn(entry) {
+			return nil
 		}
 	}
-	if filter.Desc {
-		results = newestFirst(results, skip, filter.Limit)
-	}
-
-	// Surface scanner errors. A silent EOF from bufio.Scanner.Scan can be
-	// caused by (a) a single line exceeding the max buffer
-	// (bufio.ErrTooLong), or (b) a transient I/O failure. Either way, the
-	// caller's result set is truncated and they have no way to know unless
-	// we return the error. We still return any partial results collected
-	// before the failure so downstream callers can degrade gracefully —
-	// matching the invariant that `Query` is best-effort filtered scan.
 	if err := scanner.Err(); err != nil {
 		metrics.IncAuditCorruptLine()
-		log.Printf("WARN audit: scanner error reading %s after %d matches (%v)", path, len(results), err)
-		return results, fmt.Errorf("audit scan: %w", err)
+		return fmt.Errorf("%w: %w", errScan, err)
 	}
-
-	return results, nil
+	return nil
 }
 
 func matchesFilter(entry Entry, filter QueryFilter) bool {
@@ -511,6 +532,12 @@ func matchesFilter(entry Entry, filter QueryFilter) bool {
 		return false
 	}
 	if filter.Since != nil && entry.Timestamp.Before(*filter.Since) {
+		return false
+	}
+	if filter.Until != nil && !entry.Timestamp.Before(*filter.Until) {
+		return false
+	}
+	if filter.ParentSessionID != "" && entry.Request.ParentSessionID != filter.ParentSessionID {
 		return false
 	}
 	if filter.Transport != "" && entry.EffectiveTransport() != filter.Transport {

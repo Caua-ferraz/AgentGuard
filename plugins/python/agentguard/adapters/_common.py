@@ -131,6 +131,11 @@ def extract_check_params(tool_input: Any, tool_name: Any = None) -> dict:
     path/file_path + action inferred from the tool-name verb,
     session_id, est_cost); everything else is ignored.
 
+    ``parent_session_id`` is deliberately not read from tool input: the
+    model writes the tool arguments, and it must not be able to file its
+    calls under another session in the audit log. Set it on the
+    ``Guard`` (or per call) instead.
+
     Raises:
         ConflictingToolInput: two alias keys (command/cmd or
             path/file_path) are both present with different values.

@@ -180,16 +180,17 @@ func (c *HTTPPolicyClient) Check(ctx context.Context, req *ToolCallCheck) (Decis
 	scope := c.MapScope(req.ToolName)
 
 	ar := policy.ActionRequest{
-		SchemaVersion: "v1",
-		Scope:         scope,
-		AgentID:       req.AgentID,
-		SessionID:     req.SessionID,
-		Command:       formatLLMCommand(req, scope, c.redactor),
-		Path:          projectPath(scope, req.Arguments),
-		Domain:        projectDomain(scope, req.Arguments),
-		URL:           projectURL(scope, req.Arguments),
-		ApprovalID:    req.ApprovalID,
-		Meta:          buildLLMMeta(req, scope, c.redactor),
+		SchemaVersion:   "v1",
+		Scope:           scope,
+		AgentID:         req.AgentID,
+		SessionID:       req.SessionID,
+		ParentSessionID: req.ParentSessionID,
+		Command:         formatLLMCommand(req, scope, c.redactor),
+		Path:            projectPath(scope, req.Arguments),
+		Domain:          projectDomain(scope, req.Arguments),
+		URL:             projectURL(scope, req.Arguments),
+		ApprovalID:      req.ApprovalID,
+		Meta:            buildLLMMeta(req, scope, c.redactor),
 	}
 	if scope == "filesystem" {
 		ar.Action = gateclient.InferFilesystemAction(req.ToolName)
@@ -229,16 +230,17 @@ func (c *HTTPPolicyClient) RecordForcedAudit(ctx context.Context, req *ToolCallC
 	scope := c.MapScope(req.ToolName)
 
 	ar := policy.ActionRequest{
-		SchemaVersion: "v1",
-		Scope:         scope,
-		AgentID:       req.AgentID,
-		SessionID:     req.SessionID,
-		Command:       formatLLMCommand(req, scope, c.redactor),
-		Path:          projectPath(scope, req.Arguments),
-		Domain:        projectDomain(scope, req.Arguments),
-		URL:           projectURL(scope, req.Arguments),
-		ApprovalID:    req.ApprovalID,
-		Meta:          buildLLMMeta(req, scope, c.redactor),
+		SchemaVersion:   "v1",
+		Scope:           scope,
+		AgentID:         req.AgentID,
+		SessionID:       req.SessionID,
+		ParentSessionID: req.ParentSessionID,
+		Command:         formatLLMCommand(req, scope, c.redactor),
+		Path:            projectPath(scope, req.Arguments),
+		Domain:          projectDomain(scope, req.Arguments),
+		URL:             projectURL(scope, req.Arguments),
+		ApprovalID:      req.ApprovalID,
+		Meta:            buildLLMMeta(req, scope, c.redactor),
 	}
 	if scope == "filesystem" {
 		ar.Action = gateclient.InferFilesystemAction(req.ToolName)
