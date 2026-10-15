@@ -545,6 +545,10 @@ func runAuditCmd(args []string) int {
 	fs.StringVar(&q.Decision, "decision", "", "Filter by decision (ALLOW, DENY, REQUIRE_APPROVAL)")
 	fs.StringVar(&q.Scope, "scope", "", "Filter by scope (shell, filesystem, network, browser, data, cost, mcp_tool)")
 	fs.StringVar(&q.Transport, "transport", "", "Filter by integration path (sdk|mcp_gateway|llm_api_proxy, or a coding-agent hook: claude_code|cursor|gemini_cli|codex_cli)")
+	fs.StringVar(&q.Session, "session", "", "Filter by session ID")
+	fs.StringVar(&q.ParentSession, "parent-session", "", "Only the calls of sessions started by this session")
+	sinceFlag := fs.String("since", "", "Entries at or after this time: a duration back from now (2h, 30m) or an RFC 3339 time")
+	untilFlag := fs.String("until", "", "Entries before this time, same forms as --since")
 	fs.IntVar(&q.Limit, "limit", 50, "Max entries to return")
 	fs.StringVar(&q.Order, "order", "desc", "Entry order: desc (newest first) or asc (oldest first)")
 	key := fs.String("api-key", "", "Bearer token. Env: AGENTGUARD_API_KEY, then the key agentguard setup saved")
@@ -553,17 +557,19 @@ func runAuditCmd(args []string) int {
        agentguard audit verify [flags]
 
 Query the audit log of a running AgentGuard server (newest first),
-optionally filtered by agent, decision, scope, or transport.
+optionally filtered by agent, session, decision, scope, transport or time.
 
 'agentguard audit verify' checks a sealed audit log (server --audit-seal)
 for tampering, offline; see 'agentguard audit verify -h'.
 
 `)
-		clihelp.WriteFlags(w, fs, urlAlias)
+		clihelp.WriteGroups(w, fs, auditFlagGroups, urlAlias)
 		fmt.Fprint(w, `
 Examples:
   agentguard audit --decision DENY --limit 20
   agentguard audit --agent my-bot --scope shell --order asc
+  agentguard audit --session sess-42 --since 2h --order asc
+  agentguard audit --parent-session sess-42 --since 2026-10-14T09:00:00Z
   agentguard audit verify --audit-log audit.jsonl --key-file seal.key
 
 Exit status: 0 success (also when nothing matches), 1 the server refused or
@@ -577,11 +583,47 @@ couldn't be reached, 2 command-line mistake.
 	if len(positional) > 0 {
 		return usageError("audit", "unexpected argument %q (filters are flags, e.g. --agent %s)", positional[0], positional[0])
 	}
+	now := time.Now()
+	var err error
+	if q.Since, err = parseAuditTime(*sinceFlag, now); err != nil {
+		return usageError("audit", "--since: %v", err)
+	}
+	if q.Until, err = parseAuditTime(*untilFlag, now); err != nil {
+		return usageError("audit", "--until: %v", err)
+	}
 	base, err := serverURL(fs, *serverFlag)
 	if err != nil {
 		return usageError("audit", "%v", err)
 	}
 	return runAuditQuery(os.Stdout, os.Stderr, base, q, resolveClientAPIKey(*key))
+}
+
+// auditFlagGroups lays out `agentguard audit -h`.
+var auditFlagGroups = []clihelp.Group{
+	{Title: "Filters", Names: []string{"agent", "session", "parent-session", "decision", "scope", "transport"}},
+	{Title: "Time window", Names: []string{"since", "until"}},
+	{Title: "Output", Names: []string{"limit", "order"}},
+	{Title: "Server", Names: []string{"url", "api-key"}},
+}
+
+// parseAuditTime reads --since / --until: a duration back from now ("2h",
+// "90m") or an RFC 3339 time. It returns the time in RFC 3339 (UTC) for the
+// server's since/until parameters, or "" when raw is empty.
+func parseAuditTime(raw string, now time.Time) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	if d, err := time.ParseDuration(raw); err == nil {
+		if d < 0 {
+			return "", fmt.Errorf("%q is negative; give how long ago, e.g. 2h", raw)
+		}
+		return now.Add(-d).UTC().Format(time.RFC3339Nano), nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return "", fmt.Errorf("%q is neither a duration (2h, 30m) nor an RFC 3339 time (2026-10-14T09:00:00Z)", raw)
+	}
+	return t.UTC().Format(time.RFC3339Nano), nil
 }
 
 // ── migrate ──────────────────────────────────────────────────────────────
@@ -1323,6 +1365,10 @@ func statusReport(stdout, stderr io.Writer, baseURL, apiKey string) int {
 type auditQuery struct {
 	Agent, Decision, Scope, Transport, Order string
 	Limit                                    int
+	// Session and ParentSession filter by session_id and
+	// parent_session_id; Since and Until are RFC 3339 times (already
+	// resolved from a duration by the flag parser).
+	Session, ParentSession, Since, Until string
 }
 
 // runAuditQuery prints the audit entries matching q from the server at
@@ -1344,6 +1390,18 @@ func runAuditQuery(stdout, stderr io.Writer, baseURL string, q auditQuery, apiKe
 	}
 	if q.Transport != "" {
 		params.Set("transport", q.Transport)
+	}
+	if q.Session != "" {
+		params.Set("session_id", q.Session)
+	}
+	if q.ParentSession != "" {
+		params.Set("parent_session_id", q.ParentSession)
+	}
+	if q.Since != "" {
+		params.Set("since", q.Since)
+	}
+	if q.Until != "" {
+		params.Set("until", q.Until)
 	}
 	queryURL := fmt.Sprintf("%s/v1/audit?%s", baseURL, params.Encode())
 
