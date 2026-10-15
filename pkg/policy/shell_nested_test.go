@@ -329,6 +329,71 @@ func TestCheck_MoreCommandStrings(t *testing.T) {
 	}
 }
 
+// Privilege, sandbox, tracing and project launchers run the command after
+// their own options; pkexec and runuser also stand in for sudo.
+func TestCheck_MoreLaunchers(t *testing.T) {
+	eng := NewEngineFromPolicy(&Policy{Version: "1", Name: "launchers", Rules: []RuleSet{{
+		Scope:           "shell",
+		RequireApproval: []Rule{{Pattern: "rm -rf *"}},
+		Allow:           []Rule{{Pattern: "*"}},
+	}}})
+	const want = "require_approval:shell:rm -rf *"
+	checkShell(t, eng, []shellCheckCase{
+		{"pkexec", "pkexec --user root rm -rf /tmp/x", RequireApproval, want},
+		{"runuser -u", "runuser -u app -- rm -rf /tmp/x", RequireApproval, want},
+		{"runuser -c", "runuser -l app -c 'rm -rf /tmp/x'", RequireApproval, want},
+		{"setpriv", "setpriv --reuid 1000 --regid 1000 --clear-groups rm -rf /tmp/x", RequireApproval, want},
+		{"chroot", "chroot --userspec 1000:1000 /srv/root rm -rf /tmp/x", RequireApproval, want},
+		{"sg -c", "sg wheel -c 'rm -rf /tmp/x'", RequireApproval, want},
+		{"sg without -c", "sg wheel 'rm -rf /tmp/x'", RequireApproval, want},
+		{"strace", "strace -f -e trace=file -o /tmp/log rm -rf /tmp/x", RequireApproval, want},
+		{"ltrace", "ltrace -o /tmp/log -s 64 rm -rf /tmp/x", RequireApproval, want},
+		{"fakeroot", "fakeroot -s state rm -rf /tmp/x", RequireApproval, want},
+		{"npx", "npx -y rimraf /tmp/x; npx --package=x rm -rf /tmp/x", RequireApproval, want},
+		{"npx -c", "npx -c 'rm -rf /tmp/x'", RequireApproval, want},
+		{"npm exec --", "npm exec -- rm -rf /tmp/x", RequireApproval, want},
+		{"npm x", "npm x rm -rf /tmp/x", RequireApproval, want},
+		{"pnpm exec", "pnpm exec rm -rf /tmp/x", RequireApproval, want},
+		{"pnpm dlx", "pnpm dlx rm -rf /tmp/x", RequireApproval, want},
+		{"yarn exec", "yarn exec rm -rf /tmp/x", RequireApproval, want},
+		{"uv run", "uv run --python 3.12 --with httpx rm -rf /tmp/x", RequireApproval, want},
+		{"poetry run", "poetry run rm -rf /tmp/x", RequireApproval, want},
+		{"bundle exec", "bundle exec rm -rf /tmp/x", RequireApproval, want},
+		{"direnv exec", "direnv exec /srv/app rm -rf /tmp/x", RequireApproval, want},
+		{"mise exec --", "mise exec node@20 python@3 -- rm -rf /tmp/x", RequireApproval, want},
+		{"mise x -c", "mise x -c 'rm -rf /tmp/x'", RequireApproval, want},
+		{"nix-shell --run", "nix-shell -p hello --run 'rm -rf /tmp/x'", RequireApproval, want},
+		{"nix develop -c", "nix develop .#dev -c rm -rf /tmp/x", RequireApproval, want},
+		{"nix shell --command", "nix shell nixpkgs#hello --command rm -rf /tmp/x", RequireApproval, want},
+		{"conda run", "conda run -n base rm -rf /tmp/x", RequireApproval, want},
+		// Not a launch: the subcommand or option runs no command.
+		{"npm run", "npm run clean", Allow, "allow:shell:*"},
+		{"npm install", "npm install rimraf", Allow, "allow:shell:*"},
+		{"uv pip", "uv pip install x", Allow, "allow:shell:*"},
+		{"mise exec without --", "mise exec node@20", Allow, "allow:shell:*"},
+		{"runuser starting a shell", "runuser -l app", Allow, "allow:shell:*"},
+		{"setpriv --dump", "setpriv --dump", Allow, "allow:shell:*"},
+	})
+	// pkexec and runuser stand in for sudo: their command is matched.
+	sudo := NewEngineFromPolicy(&Policy{Version: "1", Name: "sudo", Rules: []RuleSet{{
+		Scope:           "shell",
+		RequireApproval: []Rule{{Pattern: "sudo *"}, {Pattern: "rm -rf *"}},
+		Allow:           []Rule{{Pattern: "*"}},
+	}}})
+	checkShell(t, sudo, []shellCheckCase{
+		{"pkexec of sudo", "pkexec sudo ls", RequireApproval, "require_approval:shell:sudo *"},
+		{"rm -rf behind pkexec", "pkexec rm -rf /", RequireApproval, want},
+	})
+	for _, cmd := range []string{"npm run test -- --watch", "uv pip list", "nix build .", "conda list", "yarn install"} {
+		if isCompoundShell(cmd) {
+			t.Errorf("isCompoundShell(%q) = true, want false", cmd)
+		}
+		if n := testing.AllocsPerRun(100, func() { isCompoundShell(cmd) }); n != 0 {
+			t.Errorf("isCompoundShell(%q) allocates %v times per call, want 0", cmd, n)
+		}
+	}
+}
+
 // More option and assignment forms: BSD xargs value options, += and array
 // assignments, zsh --emulate, and a shell reading /dev/stdin as its script.
 func TestCheck_MoreOptionAndAssignmentForms(t *testing.T) {

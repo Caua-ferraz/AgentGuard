@@ -51,12 +51,25 @@ type wrapperSpec struct {
 	// shellCommand is the option, after the operands, that hands the next
 	// word to `sh -c` (flock FILE -c 'cmd').
 	shellCommand []string
+	// sub, when set, is the subcommand that makes the program a launcher:
+	// `npm exec cmd` runs cmd, `npm install` runs nothing.
+	sub []string
+	// scriptOpts are options whose value is run as a shell script
+	// (npx -c 'cmd', mise exec --command 'cmd').
+	scriptOpts []string
+	// afterDashDash means the command only follows a `--`; words before
+	// it are the launcher's own (mise exec node@20 -- node app.js).
+	afterDashDash bool
+	// custom reads the arguments itself, for launchers whose layout the
+	// fields above can't describe (runuser, sg, nix-shell, nix develop).
+	custom func(args []string) (cmd []string, ok bool)
 }
 
 // commandWrappers run the command that follows their own options and
 // operands, so `env bash -c …` and `sudo sh -c …` hand a script to a shell
 // just as `bash -c …` does, and `timeout 5 rm -rf /` runs `rm -rf /`.
 var commandWrappers = map[string]*wrapperSpec{
+	"bundle":     {sub: []string{"exec"}},
 	"builtin":    {},
 	"busybox":    {},
 	"caffeinate": {valueShort: "tw"},
@@ -64,13 +77,21 @@ var commandWrappers = map[string]*wrapperSpec{
 		valueShort: "TPD", valueLong: []string{"--sched-runtime", "--sched-period", "--sched-deadline"},
 		stopShort: "pm", stopLong: []string{"--pid", "--max"}, operands: 1,
 	},
+	"chroot": {
+		valueLong: []string{"--userspec", "--groups"}, stopLong: []string{"--help", "--version"}, operands: 1,
+	},
 	"command": {stopShort: "vV"},
+	"conda":   condaRun,
+	"direnv":  {sub: []string{"exec"}, operands: 1},
 	"doas":    {valueShort: "u", stopShort: "CL"},
 	"env": {
 		valueShort: "uCP", valueLong: []string{"--unset", "--chdir"},
 		splitShort: "S", splitLong: "--split-string", loneDash: true,
 	},
 	"exec": {valueShort: "a"},
+	"fakeroot": {
+		valueShort: "lsib", valueLong: []string{"--lib", "--faked"},
+	},
 	"flock": {
 		valueShort: "wE", valueLong: []string{"--wait", "--timeout", "--conflict-exit-code"},
 		operands: 1, shellCommand: []string{"-c", "--command"},
@@ -79,11 +100,51 @@ var commandWrappers = map[string]*wrapperSpec{
 		valueShort: "cn", valueLong: []string{"--class", "--classdata"},
 		stopShort: "pPu", stopLong: []string{"--pid", "--pgid", "--uid"},
 	},
-	"arch":   {wholeWords: true, valueLong: []string{"-arch", "-d", "-e"}},
-	"nice":   {valueShort: "n", valueLong: []string{"--adjustment"}},
-	"nohup":  {},
+	"arch": {wholeWords: true, valueLong: []string{"-arch", "-d", "-e"}},
+	"ltrace": {
+		valueShort: "aADeFlnopsuwx",
+		valueLong:  []string{"--align", "--config", "--library", "--output", "--indent"},
+	},
+	"mamba":      condaRun,
+	"micromamba": condaRun,
+	"mise": {
+		sub: []string{"exec", "x"}, valueShort: "jC", valueLong: []string{"--jobs", "--cd"},
+		scriptOpts: []string{"-c", "--command"}, afterDashDash: true,
+	},
+	"nice":      {valueShort: "n", valueLong: []string{"--adjustment"}},
+	"nix":       {sub: []string{"develop", "shell"}, custom: nixCommand},
+	"nix-shell": {custom: nixShellScript},
+	"nohup":     {},
+	"npm": {
+		sub: []string{"exec", "x"}, valueShort: "pw", valueLong: []string{"--package", "--workspace", "--prefix"},
+		scriptOpts: []string{"-c", "--call"},
+	},
+	"npx": {
+		valueShort: "p", valueLong: []string{"--package"}, scriptOpts: []string{"-c", "--call"},
+	},
+	"pkexec": {valueLong: []string{"--user"}},
+	"pnpm": {
+		sub: []string{"exec", "dlx"}, valueShort: "C", valueLong: []string{"--package", "--dir", "--filter", "--workspace-concurrency"},
+		scriptOpts: []string{"-c", "--shell-mode"},
+	},
+	"poetry":  {sub: []string{"run"}, valueShort: "CP", valueLong: []string{"--directory", "--project"}},
+	"runuser": {custom: runuserCommand},
+	"setpriv": {
+		valueLong: []string{"--ruid", "--euid", "--rgid", "--egid", "--reuid", "--regid", "--groups",
+			"--inh-caps", "--ambient-caps", "--bounding-set", "--securebits", "--pdeathsig",
+			"--selinux-label", "--apparmor-profile", "--landlock-access", "--landlock-rule", "--seccomp-filter"},
+		stopShort: "dV", stopLong: []string{"--dump", "--list-caps", "--help", "--version"},
+	},
 	"setsid": {},
+	"sg":     {custom: sgScript},
 	"stdbuf": {valueShort: "ioe", valueLong: []string{"--input", "--output", "--error"}},
+	"strace": {
+		valueShort: "abeEIoOpPsSuUX",
+		valueLong: []string{"--abbrev", "--argv0", "--attach", "--columns", "--const-print-style", "--detach-on",
+			"--env", "--fault", "--inject", "--interruptible", "--kvm", "--output", "--raw", "--read", "--signal",
+			"--status", "--string-limit", "--summary-columns", "--summary-sort-by", "--summary-syscall-overhead",
+			"--syscall-limit", "--trace", "--trace-path", "--user", "--verbose", "--write"},
+	},
 	"sudo": {
 		valueShort: "ugCDhprtUTR",
 		valueLong: []string{"--user", "--group", "--close-from", "--chdir", "--host", "--prompt",
@@ -93,11 +154,21 @@ var commandWrappers = map[string]*wrapperSpec{
 	"taskset": {stopShort: "p", stopLong: []string{"--pid"}, operands: 1},
 	"time":    {valueShort: "fo", valueLong: []string{"--format", "--output"}},
 	"timeout": {valueShort: "sk", valueLong: []string{"--signal", "--kill-after"}, operands: 1},
+	"uv": {
+		sub: []string{"run"}, valueShort: "pfiC",
+		valueLong: []string{"--with", "--with-editable", "--with-requirements", "--python", "--package", "--extra",
+			"--group", "--only-group", "--no-group", "--env-file", "--directory", "--project", "--index",
+			"--default-index", "--index-url", "--extra-index-url", "--find-links", "--config-file", "--cache-dir",
+			"--color", "--exclude-newer", "--index-strategy", "--keyring-provider", "--resolution", "--prerelease",
+			"--link-mode", "--config-setting", "--refresh-package", "--upgrade-package", "--reinstall-package",
+			"--no-binary-package", "--no-build-package"},
+	},
 	"unshare": {
 		valueShort: "RwSGl",
 		valueLong: []string{"--root", "--wd", "--setuid", "--setgid", "--propagation", "--setgroups",
 			"--map-user", "--map-group", "--map-users", "--map-groups", "--monotonic", "--boottime", "--load-interp"},
 	},
+	"yarn": {sub: []string{"exec", "dlx"}, valueShort: "p", valueLong: []string{"--package"}},
 	"xargs": {
 		// J, R and S take a value in BSD and macOS xargs.
 		valueShort: "adEIJLnPRSs",
@@ -111,6 +182,11 @@ var commandWrappers = map[string]*wrapperSpec{
 // when the wrapper runs no command (an option such as command -v, or too
 // few words).
 func (s *wrapperSpec) skip(args []string, splits *int) (rest []string, ok bool, err error) {
+	if s.custom != nil {
+		rest, ok = s.custom(args)
+		return rest, ok, nil
+	}
+	dashDash := false
 	for len(args) > 0 {
 		a := args[0]
 		if a == "-" && s.loneDash {
@@ -122,6 +198,7 @@ func (s *wrapperSpec) skip(args []string, splits *int) (rest []string, ok bool, 
 		}
 		args = args[1:]
 		if a == "--" {
+			dashDash = true
 			break
 		}
 		name, value, hasValue := a, "", false
@@ -133,6 +210,15 @@ func (s *wrapperSpec) skip(args []string, splits *int) (rest []string, ok bool, 
 		switch {
 		case containsWord(s.stopLong, name):
 			return nil, false, nil
+		case containsWord(s.scriptOpts, name):
+			// npx -c 'cmd': the value is a script for sh -c.
+			if !hasValue {
+				if len(args) == 0 {
+					return nil, false, nil
+				}
+				value = args[0]
+			}
+			return []string{"sh", "-c", value}, true, nil
 		case s.splitLong != "" && name == s.splitLong:
 			if !hasValue {
 				if len(args) == 0 {
@@ -178,6 +264,14 @@ func (s *wrapperSpec) skip(args []string, splits *int) (rest []string, ok bool, 
 				break
 			}
 		}
+	}
+	if s.afterDashDash && !dashDash {
+		// mise exec node@20 -- node app.js: the command follows the --.
+		i := indexWord(args, "--")
+		if i < 0 {
+			return nil, false, nil
+		}
+		args = args[i+1:]
 	}
 	if len(args) < s.operands {
 		return nil, false, nil
@@ -254,6 +348,97 @@ func splitWords(s string) ([]string, error) {
 	return words, nil
 }
 
+// condaRun is `conda run` (also mamba and micromamba): -n NAME or -p PATH,
+// then the command.
+var condaRun = &wrapperSpec{
+	sub: []string{"run"}, valueShort: "np", valueLong: []string{"--name", "--prefix", "--cwd"},
+}
+
+// runuserCommand reads `runuser -u USER [--] cmd …` (the command follows)
+// and `runuser [-l] USER -c 'script'` (a script for the user's shell).
+// Without -u or a script, runuser starts a shell: no command to check.
+func runuserCommand(args []string) ([]string, bool) {
+	if script, ok := optionValue(args, "-c", "--command", "--session-command"); ok {
+		return []string{"sh", "-c", script}, true
+	}
+	if _, ok := optionValue(args, "-u", "--user"); !ok {
+		return nil, false
+	}
+	spec := wrapperSpec{valueShort: "ugGsw", valueLong: []string{"--user", "--group", "--supp-group", "--shell", "--whitelist-environment"}}
+	splits := 0
+	rest, ok, _ := spec.skip(args, &splits)
+	return rest, ok
+}
+
+// sgScript reads `sg [-] GROUP [-c] 'cmd'`: sg runs cmd with sh -c.
+func sgScript(args []string) ([]string, bool) {
+	if len(args) > 0 && args[0] == "-" {
+		args = args[1:]
+	}
+	if len(args) < 2 {
+		return nil, false // sg GROUP starts a shell
+	}
+	args = args[1:]
+	if args[0] == "-c" {
+		args = args[1:]
+	}
+	if len(args) == 0 {
+		return nil, false
+	}
+	return []string{"sh", "-c", args[0]}, true
+}
+
+// nixShellScript reads `nix-shell … --run 'cmd'` (or --command): the
+// script runs in the shell nix-shell starts.
+func nixShellScript(args []string) ([]string, bool) {
+	if script, ok := optionValue(args, "--run", "--command"); ok {
+		return []string{"sh", "-c", script}, true
+	}
+	return nil, false
+}
+
+// nixCommand reads `nix develop|shell … -c cmd …` (or --command): the
+// words after the option are the command.
+func nixCommand(args []string) ([]string, bool) {
+	for i, a := range args {
+		if a == "--" {
+			return nil, false
+		}
+		if (a == "-c" || a == "--command") && i+1 < len(args) {
+			return args[i+1:], true
+		}
+	}
+	return nil, false
+}
+
+// optionValue finds the first of names among args, before any --, and
+// returns its value: the next word, or what follows = in --name=value.
+func optionValue(args []string, names ...string) (string, bool) {
+	for i, a := range args {
+		if a == "--" {
+			break
+		}
+		for _, n := range names {
+			if a == n && i+1 < len(args) {
+				return args[i+1], true
+			}
+			if strings.HasPrefix(n, "--") && strings.HasPrefix(a, n+"=") {
+				return a[len(n)+1:], true
+			}
+		}
+	}
+	return "", false
+}
+
+func indexWord(list []string, w string) int {
+	for i, x := range list {
+		if x == w {
+			return i
+		}
+	}
+	return -1
+}
+
 func containsWord(list []string, w string) bool {
 	for _, x := range list {
 		if x == w {
@@ -298,7 +483,15 @@ func unwrapCommand(words []string, inner func([]string)) ([]string, error) {
 		if budget--; budget < 0 {
 			return nil, errShellUnparseable
 		}
-		next, runs, err := spec.skip(words[1:], &splits)
+		args := words[1:]
+		if len(spec.sub) > 0 {
+			// npm exec, uv run: only the subcommand launches a command.
+			if len(args) == 0 || !containsWord(spec.sub, args[0]) {
+				break
+			}
+			args = args[1:]
+		}
+		next, runs, err := spec.skip(args, &splits)
 		if err != nil {
 			return nil, err
 		}
@@ -476,8 +669,26 @@ func startsWithLauncher(cmd string) bool {
 		return false
 	}
 	// string(name) in a map index does not allocate.
-	if _, ok := launcherNames[string(name)]; ok {
-		return true
+	if spec, ok := launcherNames[string(name)]; ok {
+		if spec == nil || len(spec.sub) == 0 {
+			return true
+		}
+		// npm exec, uv run: look at the subcommand, so `npm run test`
+		// stays on the fast path.
+		k := j
+		for k < len(cmd) && (cmd[k] == ' ' || cmd[k] == '\t') {
+			k++
+		}
+		e := k
+		for e < len(cmd) && cmd[e] != ' ' && cmd[e] != '\t' {
+			e++
+		}
+		for _, sub := range spec.sub {
+			if cmd[k:e] == sub {
+				return true
+			}
+		}
+		return false
 	}
 	if v := trimVersionBytes(name); len(v) < len(name) {
 		_, ok = shellNames[string(v)]
@@ -521,13 +732,14 @@ func trimVersionBytes(name []byte) []byte {
 }
 
 // launcherNames are the command names startsWithLauncher looks for.
-var launcherNames = func() map[string]struct{} {
-	m := map[string]struct{}{"eval": {}, "!": {}}
+// The value is the wrapper's spec, nil for a shell, eval or !.
+var launcherNames = func() map[string]*wrapperSpec {
+	m := map[string]*wrapperSpec{"eval": nil, "!": nil}
 	for name := range shellNames {
-		m[name] = struct{}{}
+		m[name] = nil
 	}
-	for name := range commandWrappers {
-		m[name] = struct{}{}
+	for name, spec := range commandWrappers {
+		m[name] = spec
 	}
 	return m
 }()
