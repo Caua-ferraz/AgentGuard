@@ -112,6 +112,8 @@ A coding agent works on your real projects, so the starter policy's sandbox rule
 
 Each block uses `override_mode: replace`, so the base deny and approval lists don't apply on top (they would put everyday commands like `python -m pytest` behind approval). It is plain policy YAML — edit it like any other rule; the server reloads the file when you save. The blocks are [`configs/claude-code.yaml`](../configs/claude-code.yaml), [`configs/cursor.yaml`](../configs/cursor.yaml), [`configs/gemini-cli.yaml`](../configs/gemini-cli.yaml) and [`configs/codex.yaml`](../configs/codex.yaml); per-agent rules are explained in [`POLICY_REFERENCE.md`](POLICY_REFERENCE.md#per-agent-overrides).
 
+To check what your policy does with an agent's tool calls, write test cases that give the call as the agent sends it (`hook: codex` and `input: {tool_name: apply_patch, ...}`) and run `agentguard test`: see [Testing a coding agent's tool calls](POLICY_REFERENCE.md#testing-a-coding-agents-tool-calls). The cases for the blocks above are in [`configs/tests/`](../configs/tests/).
+
 When a policy has no block for the agent you connect, setup offers to add it, as text under your policy's `agents:` section (or a new one at the end), and keeps the old file as `.agentguard-backup`. If the result wouldn't load, or would change anything else in your policy — for example because your `agents:` entries are indented differently — the file is left alone: copy the block from `configs/` under `agents:` yourself.
 
 ## Without setup
