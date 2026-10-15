@@ -141,6 +141,12 @@ type shellParse struct {
 	// a script inside `bash -c` is often harmless and only uses syntax the
 	// splitter doesn't read.
 	Unparsed []string
+	// Pipelines are the pipelines (`a | b`) of more than one command, each
+	// rebuilt from its commands without their wrappers, joined by " | ".
+	// The engine matches whole-string rules against each one, so
+	// `curl * | *sh` catches `cd /tmp && curl … | sh` too, where the
+	// pipeline is only part of the line.
+	Pipelines []string
 }
 
 // parseShell splits cmd into simple commands and file redirections.
@@ -219,6 +225,18 @@ func (p *shellParser) parseList(closer byte) error {
 	firstIsSubst := false
 	// heres are the command's here-strings (<<< word), unquoted.
 	var heres []string
+	// pipe holds the commands of the current pipeline so far.
+	var pipe []string
+	endPipe := func() error {
+		if len(pipe) > 1 {
+			if len(p.out.Pipelines) >= maxShellSegments {
+				return errShellUnparseable
+			}
+			p.out.Pipelines = append(p.out.Pipelines, strings.Join(pipe, " | "))
+		}
+		pipe = pipe[:0]
+		return nil
+	}
 	flush := func() error {
 		seg := joinSegment(words)
 		// The command a wrapper, an assignment or `!` runs is matched on
@@ -243,6 +261,13 @@ func (p *shellParser) parseList(closer byte) error {
 		words, firstIsSubst, heres = words[:0], false, heres[:0]
 		if seg == "" {
 			return nil
+		}
+		// In a pipeline, the command is its innermost one, without its
+		// wrappers: `timeout 60 curl … | sh` is the pipeline `curl … | sh`.
+		if len(unwrapped) > 0 {
+			pipe = append(pipe, unwrapped[len(unwrapped)-1])
+		} else {
+			pipe = append(pipe, seg)
 		}
 		// In a nested command string, a command that is only a
 		// substitution (the script of `eval "$(ssh-agent -s)"`) runs
@@ -288,13 +313,18 @@ func (p *shellParser) parseList(closer byte) error {
 				return errShellUnparseable
 			}
 			p.i++
-			return flush()
+			if err := flush(); err != nil {
+				return err
+			}
+			return endPipe()
 		case c == '&' && p.peek(1) == '>':
 			if err := redirect(); err != nil {
 				return err
 			}
 		case c == ';' || c == '&' || c == '|' || c == '\n' || c == '\r':
-			// ; ;; & && | || |& and line breaks all end the simple command.
+			// ; ;; & && | || |& and line breaks all end the simple command;
+			// all but | and |& also end the pipeline.
+			start := p.i
 			p.i++
 			if n := p.peek(0); (c == ';' && n == ';') || (c == '&' && n == '&') || (c == '|' && (n == '|' || n == '&')) {
 				p.i++
@@ -302,9 +332,17 @@ func (p *shellParser) parseList(closer byte) error {
 			if err := flush(); err != nil {
 				return err
 			}
+			if op := p.s[start:p.i]; op != "|" && op != "|&" {
+				if err := endPipe(); err != nil {
+					return err
+				}
+			}
 		case c == '(':
 			// A subshell: its commands are segments of their own.
 			if err := flush(); err != nil {
+				return err
+			}
+			if err := endPipe(); err != nil {
 				return err
 			}
 			p.i++
@@ -344,7 +382,10 @@ func (p *shellParser) parseList(closer byte) error {
 	if closer != 0 {
 		return errShellUnparseable // missing ')'
 	}
-	return flush()
+	if err := flush(); err != nil {
+		return err
+	}
+	return endPipe()
 }
 
 // nested parses a parenthesised command list whose '(' was just consumed.

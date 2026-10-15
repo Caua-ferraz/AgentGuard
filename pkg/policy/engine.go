@@ -1393,7 +1393,8 @@ func (e *Engine) checkCompoundShell(rules []RuleSet, req ActionRequest, rawComma
 
 	// A command string run by another shell (`bash -c '…'`, `eval '…'`) is
 	// a full command line of its own, so whole-string rules written for one
-	// (`:(){ :|:& };:`, `curl * | *sh`) are matched against it too. The
+	// (`:(){ :|:& };:`, `curl * | *sh`) are matched against it too, and
+	// against each pipeline, which may be only part of the line. The
 	// command a wrapper runs (`rm -rf /` in `timeout 5 rm -rf /`) is matched
 	// against the same deny and approval rules; whether it may run at all
 	// stays with its full segment below. A deny decides at once; the first
@@ -1403,7 +1404,7 @@ func (e *Engine) checkCompoundShell(rules []RuleSet, req ActionRequest, rawComma
 	for _, inner := range [...]struct {
 		cmds  []string
 		label string
-	}{{parsed.Scripts, "command string"}, {parsed.Wrapped, "wrapped command"}} {
+	}{{parsed.Scripts, "command string"}, {parsed.Pipelines, "pipeline"}, {parsed.Wrapped, "wrapped command"}} {
 		for _, cmd := range inner.cmds {
 			sub := req
 			sub.Command = stripControl(cmd)
