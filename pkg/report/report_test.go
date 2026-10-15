@@ -144,11 +144,11 @@ func TestMd(t *testing.T) {
 		{"a URL is not an autolink", "see https://evil.example/x", `see https\://evil.example/x`},
 		{"a www. host is not an autolink", "go to WWW.evil.example", `go to WWW\.evil.example`},
 		{"an address is not an autolink", "mail a@evil.example", `mail a\@evil.example`},
-		{"a terminal escape is defused", "red\x1b[31mtext", "red�\\[31mtext"},
-		{"backspace and C1 CSI", "ok\b\b\u009b2J", "ok���2J"},
-		{"bidi overrides", "abc‮evil⁦x⁩", "abc�evil�x�"},
+		{"a terminal escape is defused", "red\x1b[31mtext", "red\ufffd\\[31mtext"},
+		{"backspace and C1 CSI", "ok\b\b\u009b2J", "ok\ufffd\ufffd\ufffd2J"},
+		{"bidi overrides", "abc\u202eevil\u2066x\u2069", "abc\ufffdevil\ufffdx\ufffd"},
 		{"tab stays, newline folds", "a\tb\nc", "a\tb c"},
-		{"invalid UTF-8", "a\xffb", "a�b"},
+		{"invalid UTF-8", "a\xffb", "a\ufffdb"},
 	}
 	for _, tc := range cases {
 		if got := md(tc.in); got != tc.want {
@@ -160,17 +160,17 @@ func TestMd(t *testing.T) {
 // Control and bidi characters from the log never reach the HTML page.
 func TestHTML_ReplacesControlCharacters(t *testing.T) {
 	r := fixtureReport()
-	r.Activity.AgentsSeen.Names = append(r.Activity.AgentsSeen.Names, "evil\x1b]0;title\x07‮gnp.exe")
+	r.Activity.AgentsSeen.Names = append(r.Activity.AgentsSeen.Names, "evil\x1b]0;title\x07\u202egnp.exe")
 	var buf bytes.Buffer
 	if err := WriteHTML(&buf, r); err != nil {
 		t.Fatal(err)
 	}
-	for _, bad := range []string{"\x1b", "\x07", "‮"} {
+	for _, bad := range []string{"\x1b", "\x07", "\u202e"} {
 		if strings.Contains(buf.String(), bad) {
 			t.Errorf("the page holds %q", bad)
 		}
 	}
-	if !strings.Contains(buf.String(), "evil�]0;title��gnp.exe") {
+	if !strings.Contains(buf.String(), "evil\ufffd]0;title\ufffd\ufffdgnp.exe") {
 		t.Error("the agent id is not shown with U+FFFD in place of the controls")
 	}
 }
