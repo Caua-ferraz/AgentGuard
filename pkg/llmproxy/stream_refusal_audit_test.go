@@ -64,6 +64,7 @@ func runStreamWithAudit(t *testing.T, provider, body string, maxBuffer int) (str
 	req, _ := http.NewRequest("POST", base+path, strings.NewReader(reqBody))
 	req.Header.Set("X-Agent-ID", "audit-probe")
 	req.Header.Set("X-Session-ID", "sess-42")
+	req.Header.Set(ParentSessionHeader, "orch-7")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("post: %v", err)
@@ -99,6 +100,9 @@ func assertAudited(t *testing.T, spy *forcedAuditSpy, wantRule, wantProvider str
 	}
 	if c.SessionID != "sess-42" {
 		t.Errorf("audited session = %q, want the request's X-Session-ID", c.SessionID)
+	}
+	if c.ParentSessionID != "orch-7" {
+		t.Errorf("audited parent session = %q, want the request's %s", c.ParentSessionID, ParentSessionHeader)
 	}
 	if !c.Stream {
 		t.Error("audited entry is not marked as a streaming call")
