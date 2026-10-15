@@ -607,7 +607,7 @@ agentguard report --since 2026-09-01 --until 2026-10-01 \
 # Report written to september.html (audit entries in the period: 48211; audit log: intact).
 ```
 
-Exit status: `0` the report was written, `1` it was written but the audit log failed verification, `2` command-line mistake, `3` the log, a key file, the policy file or the server can't be read. A log sealed with a key and no `--key-file` is not an error here: the report is written and says the chain was not verified.
+Exit status: `0` the report was written, `1` it was written but the audit log failed verification, `2` command-line mistake, `3` the log, a key file, the policy file or the server can't be read. A log sealed with a key and no `--key-file` is not an error here: the report checks everything but the hashes (every entry after the seal is sealed, `seq` has no gaps, each `prev_hash` links up), and says the hashes were not checked.
 
 ---
 

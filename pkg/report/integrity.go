@@ -36,7 +36,9 @@ type Integrity struct {
 	// 3f9a…" or "sha256", in the order they appear. Empty when unknown.
 	Seals []string `json:"seals,omitempty"`
 	// KeyBased is true for an HMAC key, false for plain SHA-256, nil when
-	// not sealed or not known.
+	// not sealed or not known. It is read from the log's _meta header,
+	// which anyone who can write the file can forge: only Status intact
+	// confirms it.
 	KeyBased *bool `json:"key_based"`
 	// Head is the latest seal anchor: the last sealed entry's seq and hash.
 	Head *Head `json:"head,omitempty"`
@@ -85,24 +87,15 @@ func FromVerify(rep *audit.VerifyReport) Integrity {
 	case !rep.OK:
 		in.Status = IntegrityBroken
 		in.Summary = "agentguard audit verify failed: an anchor does not match the log."
+	case rep.HashesUnchecked:
+		// Checked WithoutKey: the structure holds, the hashes are unknown.
+		in.Status = IntegrityNotVerified
+		in.Summary = fmt.Sprintf("The log says it is sealed with an HMAC key, and its structure holds for %s (seq %d to %d): every entry after the seal is sealed, seq has no gaps, each prev_hash links to the entry before. Without --key-file the hashes were not checked, so a rewrite can't be ruled out.", plural(int(rep.Entries), "sealed entry", "sealed entries"), rep.FirstSeq, rep.LastSeq)
 	default:
 		in.Status = IntegrityIntact
 		in.Summary = fmt.Sprintf("agentguard audit verify checked %s (seq %d to %d): the chain is intact.", plural(int(rep.Entries), "sealed entry", "sealed entries"), rep.FirstSeq, rep.LastSeq)
 	}
 	return in
-}
-
-// FromKeyNeeded describes a sealed log that could not be verified because
-// no --key-file was given.
-func FromKeyNeeded(e *audit.SealKeyNeededError) Integrity {
-	keyed := true
-	return Integrity{
-		Method:   MethodVerify,
-		Status:   IntegrityNotVerified,
-		Summary:  fmt.Sprintf("The log is sealed with an HMAC key (key id %s), but no --key-file was given, so the chain was not checked.", e.KeyID),
-		Seals:    []string{audit.SealAlgHMACSHA256 + " key " + e.KeyID},
-		KeyBased: &keyed,
-	}
 }
 
 // FromServerHead describes a server's GET /v1/audit/head answer: a head

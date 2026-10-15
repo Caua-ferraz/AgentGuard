@@ -303,19 +303,17 @@ func collectFiles(r *report.Report, path string, keyFiles []string, stderr io.Wr
 		}
 		opts.Keys = append(opts.Keys, key)
 	}
+	// Without a key, a log sealed with one still gets every check but its
+	// hashes, so an entry added, removed or left unsealed is still caught.
+	opts.WithoutKey = len(opts.Keys) == 0
 	rep, err := audit.VerifyChain(path, opts)
-	var needKey *audit.SealKeyNeededError
-	switch {
-	case errors.As(err, &needKey):
-		// The report is still worth having; it says the chain was not
-		// checked, and so does this line.
-		fmt.Fprintf(stderr, "agentguard report: %v to verify it; the report says it was not verified.\n", err)
-		r.Integrity = report.FromKeyNeeded(needKey)
-	case err != nil:
+	if err != nil {
 		fmt.Fprintf(stderr, "agentguard report: can't read the audit log: %v (name it with --audit-log)\n", err)
 		return reportExitIO
-	default:
-		r.Integrity = report.FromVerify(rep)
+	}
+	r.Integrity = report.FromVerify(rep)
+	if rep.HashesUnchecked && rep.Break == nil {
+		fmt.Fprintln(stderr, "agentguard report: the log is sealed with an HMAC key; give it with --key-file to verify the hashes. The report says they were not checked.")
 	}
 
 	files, err := audit.LogFiles(path)

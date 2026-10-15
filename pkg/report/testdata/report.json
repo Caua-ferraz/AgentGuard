@@ -176,7 +176,8 @@
       "truncated": false
     },
     "redacted_entries": 1,
-    "unmasked_secret_entries": 1
+    "unmasked_secret_entries": 1,
+    "unsealed_entries": 12
   },
   "approvals": {
     "requested": 3,
@@ -189,12 +190,12 @@
     {
       "name": "Audit log sealed",
       "status": "pass",
-      "detail": "Yes: every entry carries seq, prev_hash and hash."
+      "detail": "Yes, and the chain verified: every sealed entry carries seq, prev_hash and hash."
     },
     {
       "name": "Seal uses a secret key",
       "status": "pass",
-      "detail": "HMAC-SHA256: only a holder of the key can write a chain that verifies."
+      "detail": "HMAC-SHA256, verified with the key: only a holder of the key can write a chain that verifies."
     },
     {
       "name": "Seal chain verified",

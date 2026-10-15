@@ -130,7 +130,10 @@ func TestCLI_ReportFromFiles(t *testing.T) {
 	// and says so.
 	args = append([]string{"report", "--audit-log", path, "--output", "json"}, reportPeriodArgs...)
 	res = agentguard(t, dir, nil, args...)
-	res.expect(t, 0, `"status": "not_verified"`, "give that key with --key-file")
+	res.expect(t, 0, `"status": "not_verified"`, "give it with --key-file")
+	if r := decodeReport(t, res.stdout); r.Integrity.Verify == nil || !r.Integrity.Verify.HashesUnchecked {
+		t.Errorf("without the key the structure should still be checked: %+v", r.Integrity)
+	}
 
 	// A changed entry: exit 1, and the report is still written.
 	b, err := os.ReadFile(path)
@@ -154,6 +157,121 @@ func TestCLI_ReportFromFiles(t *testing.T) {
 	agentguard(t, dir, nil, "report", "--audit-log", filepath.Join(dir, "missing.jsonl")).expect(t, 3, "", "can't read the audit log")
 	agentguard(t, dir, nil, "report", "--audit-log", path, "--key-file", "nope.key").expect(t, 3, "", "seal key file")
 	agentguard(t, dir, nil, "report", "--audit-log", path, "--key-file", keyFile, "--policy", "nope.yaml").expect(t, 3, "", "--policy")
+}
+
+// The review's repros: logs whose seal is only claimed, or broken by an
+// unsealed line, must not pass the seal checks.
+func TestCLI_ReportSealClaims(t *testing.T) {
+	key := []byte("report-seal-key")
+	unsealedLine, _ := json.Marshal(audit.Entry{Timestamp: reportDay.Add(time.Hour), AgentID: "x", Request: policy.ActionRequest{Scope: "shell", Command: "forged"}})
+	write := func(t *testing.T, dir string, seal *audit.SealConfig) string {
+		path := filepath.Join(dir, "audit.jsonl")
+		l, err := audit.NewFileLoggerWithOptions(path, audit.FileLoggerOptions{Seal: seal})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range reportEntries()[1:4] {
+			if err := l.Log(e); err != nil {
+				t.Fatal(err)
+			}
+		}
+		_ = l.Close()
+		return path
+	}
+	lines := func(t *testing.T, path string) []string {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	}
+	save := func(t *testing.T, path string, ls []string) {
+		if err := os.WriteFile(path, []byte(strings.Join(ls, "\n")+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name     string
+		build    func(t *testing.T, dir string) string
+		withKey  bool
+		wantCode int
+		want     map[string]string // posture check -> status
+	}{
+		{
+			name: "an unsealed log under a forged keyed header, no key",
+			build: func(t *testing.T, dir string) string {
+				path := write(t, dir, nil)
+				ls := lines(t, path)
+				ls[0] = `{"_meta":{"schema_version":2,"created_at":"2026-10-01T00:00:00Z","seal":{"alg":"hmac-sha256","key_id":"` + audit.SealKeyID(key) + `"}}}`
+				save(t, path, ls)
+				return path
+			},
+			wantCode: 1,
+			want:     map[string]string{"Audit log sealed": "fail", "Seal uses a secret key": "unknown"},
+		},
+		{
+			name: "a keyed log with an unsealed line appended, no key",
+			build: func(t *testing.T, dir string) string {
+				path := write(t, dir, &audit.SealConfig{Key: key})
+				save(t, path, append(lines(t, path), string(unsealedLine)))
+				return path
+			},
+			wantCode: 1,
+			want:     map[string]string{"Audit log sealed": "fail", "Entries outside the seal chain": "fail"},
+		},
+		{
+			name:     "an unsealed log given --key-file",
+			build:    func(t *testing.T, dir string) string { return write(t, dir, nil) },
+			withKey:  true,
+			wantCode: 1,
+			want:     map[string]string{"Audit log sealed": "fail", "Seal uses a secret key": "warn"},
+		},
+		{
+			name: "a SHA-256 log with an unsealed entry inserted",
+			build: func(t *testing.T, dir string) string {
+				path := write(t, dir, &audit.SealConfig{})
+				ls := lines(t, path)
+				save(t, path, append(ls[:2], append([]string{string(unsealedLine)}, ls[2:]...)...))
+				return path
+			},
+			wantCode: 1,
+			want:     map[string]string{"Audit log sealed": "fail", "Entries outside the seal chain": "fail"},
+		},
+		{
+			name:     "an untouched keyed log, no key: a claim, not a pass",
+			build:    func(t *testing.T, dir string) string { return write(t, dir, &audit.SealConfig{Key: key}) },
+			wantCode: 0,
+			want:     map[string]string{"Audit log sealed": "warn", "Seal uses a secret key": "unknown", "Entries outside the seal chain": "pass"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := tc.build(t, dir)
+			args := append([]string{"report", "--audit-log", path, "--output", "json"}, reportPeriodArgs...)
+			if tc.withKey {
+				keyFile := filepath.Join(dir, "seal.key")
+				if err := os.WriteFile(keyFile, key, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				args = append(args, "--key-file", keyFile)
+			}
+			res := agentguard(t, dir, nil, args...)
+			if res.code != tc.wantCode {
+				t.Fatalf("exit %d, want %d\n%s", res.code, tc.wantCode, res.stderr)
+			}
+			r := decodeReport(t, res.stdout)
+			got := map[string]string{}
+			for _, c := range r.Posture {
+				got[c.Name] = c.Status
+			}
+			for name, want := range tc.want {
+				if got[name] != want {
+					t.Errorf("%s = %q, want %q (integrity %s: %s)", name, got[name], want, r.Integrity.Status, r.Integrity.Summary)
+				}
+			}
+		})
+	}
 }
 
 // fakeAuditServer serves GET /v1/audit from entries, a few at a time, the

@@ -103,8 +103,8 @@ The audit log has an entry when an action is sent for approval, and another when
 
 | Check | Status | Detail |
 | --- | --- | --- |
-| Audit log sealed | pass | Yes: every entry carries seq, prev\_hash and hash. |
-| Seal uses a secret key | pass | HMAC-SHA256: only a holder of the key can write a chain that verifies. |
+| Audit log sealed | pass | Yes, and the chain verified: every sealed entry carries seq, prev\_hash and hash. |
+| Seal uses a secret key | pass | HMAC-SHA256, verified with the key: only a holder of the key can write a chain that verifies. |
 | Seal chain verified | pass | agentguard audit verify checked 14 sealed entries (seq 1 to 14): the chain is intact. |
 | Entries outside the seal chain | pass | None. |
 | Unreadable lines | pass | Every line of the log files is an audit entry. |

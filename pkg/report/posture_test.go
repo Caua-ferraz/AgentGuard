@@ -45,9 +45,10 @@ func TestIntegrity(t *testing.T) {
 			wantStatus: IntegrityNotSealed, wantText: "None of the 3 entries",
 		},
 		{
-			name:       "a keyed log without --key-file is not verified",
-			in:         FromKeyNeeded(&audit.SealKeyNeededError{KeyID: "abc", File: "audit.jsonl"}),
-			wantStatus: IntegrityNotVerified, wantKey: "yes", wantText: "key id abc",
+			name: "a keyed log checked without --key-file is not verified",
+			in: FromVerify(&audit.VerifyReport{OK: true, HashesUnchecked: true, Entries: 4, FirstSeq: 1, LastSeq: 4,
+				Seals: []string{"hmac-sha256 key abc"}}),
+			wantStatus: IntegrityNotVerified, wantKey: "yes", wantHead: 4, wantText: "hashes were not checked",
 		},
 		{
 			name:       "a server head is sealed but not verified",
@@ -116,10 +117,44 @@ func TestAssess(t *testing.T) {
 				Integrity: FromVerify(&audit.VerifyReport{Seals: []string{"sha256"}, Unsealed: 4, Break: &audit.VerifyBreak{Reason: "seq gap"}}),
 				Activity:  Activity{UnmaskedSecretEntries: 1, RedactedEntries: 5}},
 			want: map[string]string{
-				"Seal uses a secret key": CheckWarn, "Seal chain verified": CheckFail,
-				"Entries outside the seal chain": CheckWarn, "Unreadable lines": CheckWarn,
+				"Audit log sealed": CheckFail, "Seal uses a secret key": CheckWarn, "Seal chain verified": CheckFail,
+				"Entries outside the seal chain": CheckFail, "Unreadable lines": CheckWarn,
 				"Secrets masked in the log": CheckFail,
 			},
+		},
+		{
+			name: "a sealed header over unsealed entries is a break, and the header's key is not trusted",
+			r: Report{Source: Source{Mode: SourceFile}, Integrity: FromVerify(&audit.VerifyReport{
+				Seals: []string{"hmac-sha256 key abc"}, HashesUnchecked: true,
+				Break: &audit.VerifyBreak{File: "audit.jsonl", Line: 2, Reason: "the entry has no hash"}})},
+			want: map[string]string{
+				"Audit log sealed": CheckFail, "Seal uses a secret key": CheckUnknown,
+				"Seal chain verified": CheckFail, "Entries outside the seal chain": CheckFail,
+			},
+		},
+		{
+			name: "an unsealed log given --key-file fails and says no seal is declared",
+			r: Report{Source: Source{Mode: SourceFile}, Integrity: FromVerify(&audit.VerifyReport{
+				Unsealed: 3, Break: &audit.VerifyBreak{Reason: "the log is not sealed"}})},
+			want: map[string]string{
+				"Audit log sealed": CheckFail, "Seal uses a secret key": CheckWarn, "Entries outside the seal chain": CheckFail,
+			},
+		},
+		{
+			name: "a keyed log whose structure holds without the key is a claim, not a pass",
+			r: Report{Source: Source{Mode: SourceFile}, Integrity: FromVerify(&audit.VerifyReport{
+				OK: true, HashesUnchecked: true, Entries: 4, FirstSeq: 1, LastSeq: 4, Seals: []string{"hmac-sha256 key abc"}})},
+			want: map[string]string{
+				"Audit log sealed": CheckWarn, "Seal uses a secret key": CheckUnknown,
+				"Seal chain verified": CheckUnknown, "Entries outside the seal chain": CheckPass,
+			},
+		},
+		{
+			name: "a sealed server whose entries in the period lack a seal warns",
+			r: Report{Source: Source{Mode: SourceServer, AuthRequired: &yes},
+				Integrity: FromServerHead(&audit.Anchor{Seq: 1, Hash: "h"}, false, ""),
+				Activity:  Activity{Entries: 5, UnsealedEntries: 2}},
+			want: map[string]string{"Audit log sealed": CheckUnknown, "Entries outside the seal chain": CheckWarn},
 		},
 		{
 			name: "a file that can't be read to the end fails the line check",
@@ -139,8 +174,8 @@ func TestAssess(t *testing.T) {
 			r: Report{Source: Source{Mode: SourceServer, AuthRequired: &yes},
 				Integrity: FromServerHead(&audit.Anchor{Seq: 1, Hash: "h", At: time.Now()}, false, "")},
 			want: map[string]string{
-				"Audit log sealed": CheckPass, "Seal uses a secret key": CheckUnknown, "Seal chain verified": CheckUnknown,
-				"Entries outside the seal chain": CheckUnknown, "Unreadable lines": CheckUnknown,
+				"Audit log sealed": CheckUnknown, "Seal uses a secret key": CheckUnknown, "Seal chain verified": CheckUnknown,
+				"Entries outside the seal chain": CheckPass, "Unreadable lines": CheckUnknown,
 				"Audit API requires an API key": CheckPass,
 			},
 		},

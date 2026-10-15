@@ -11,7 +11,10 @@ recorded. An auditor decides what that proves and whether it is enough.
 ## Generate it
 
 From the audit log files (the default). This also verifies the seal chain,
-as `agentguard audit verify` does:
+as `agentguard audit verify` does. Without `--key-file`, a log sealed with
+a key still gets every check but its hashes (every entry after the seal is
+sealed, `seq` has no gaps, each `prev_hash` links up), and the report says
+the hashes were not checked:
 
 ```bash
 agentguard report --since 2026-09-01 --until 2026-10-01 \
@@ -68,8 +71,8 @@ says how many were dropped. A server older than 1.4 has no
   version, where the entries came from, and the policy file with its
   SHA-256.
 - **Audit log integrity.** `intact`, `broken`, `not_sealed`,
-  `not_verified` (sealed, but the chain was not checked: server mode, or no
-  `--key-file`) or `unknown`. With the seal type (HMAC key or plain
+  `not_verified` (the log says it is sealed, but the hashes were not
+  checked: server mode, or no `--key-file`) or `unknown`. With the seal type (HMAC key or plain
   SHA-256), the latest seal anchor (seq and hash), the files read, and
   audit verify's warnings.
 - **Activity.** Entries by decision (ALLOW, DENY and REQUIRE_APPROVAL are
@@ -87,10 +90,10 @@ says how many were dropped. A server older than 1.4 has no
 
   | Check | How it is decided |
   |---|---|
-  | Audit log sealed | The `_meta` lines of the files, or the server's head |
-  | Seal uses a secret key | HMAC-SHA256 passes; plain SHA-256 warns (anyone who can write the file can recompute it) |
+  | Audit log sealed | Passes only when the chain verified. Fails when it is broken. A seal the report could not verify is a claim: a `_meta` header anyone who can write the file can forge (warn, files read without `--key-file`), or the server's word (unknown) |
+  | Seal uses a secret key | HMAC-SHA256 passes only when it verified with `--key-file`; read from an unverified header it is unknown. Plain SHA-256 warns (anyone who can write the file can recompute it) |
   | Seal chain verified | audit verify's result; unknown in server mode |
-  | Entries outside the seal chain | Entries written before sealing began |
+  | Entries outside the seal chain | Files: entries written before sealing began, or fail when the chain breaks (nothing after the break is protected). Server: entries in the period that came without `seq` or `hash` |
   | Unreadable lines | Lines of the files that are not entries, or files that end early |
   | Secrets masked in the log | Fails when a request or reason still matches the built-in secret patterns of `--audit-redact`; passes when masked values (`[REDACTED]`) appear and no unmasked one does; unknown when the period holds neither |
   | Audit API requires an API key | Server mode: whether `GET /v1/audit` answers without the key |
@@ -159,7 +162,7 @@ only if that ever stops being true. Times are RFC 3339 UTC.
 | `integrity.method` | `"verify"` or `"seal_head"` |
 | `integrity.status` | `intact`, `broken`, `not_sealed`, `not_verified` or `unknown` |
 | `integrity.summary` | One sentence |
-| `integrity.seals`, `integrity.key_based` | How the entries are sealed; `key_based` is `null` when unknown |
+| `integrity.seals`, `integrity.key_based` | How the entries are sealed, as the log's `_meta` headers say; `key_based` is `null` when unknown. Confirmed only when `status` is `intact` |
 | `integrity.head` | `{seq, hash, segment_id?, at?}`: the latest seal anchor |
 | `integrity.verify` | audit verify's full report, as `audit verify --output json` prints it (files mode) |
 | `activity.entries`, `activity.first_entry`, `activity.last_entry` | Entries in the period and their time span |
@@ -167,6 +170,7 @@ only if that ever stops being true. Times are RFC 3339 UTC.
 | `activity.scopes`, `.transports`, `.tenants`, `.agents`, `.deny_rules`, `.approval_rules` | `{distinct, top: [{name, count}]}`: how many values, and the most frequent (all scopes and transports, the top 10 of the others) |
 | `activity.agents_seen`, `activity.sessions_seen` | `{count, names, truncated}`: the first 100 ids by name |
 | `activity.redacted_entries`, `activity.unmasked_secret_entries` | Entries with masked secrets, and with text that looks like an unmasked one |
+| `activity.unsealed_entries` | Entries in the period without `seq` or `hash` |
 | `approvals` | `{requested, approved, denied, no_outcome, timed_out}`; `timed_out` is always `null` |
 | `posture` | `[{name, status, detail}]` |
 | `controls` | `[{criterion, title, shows, where}]` |

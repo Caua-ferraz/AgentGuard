@@ -128,8 +128,8 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 <h2>Posture checks</h2>
 <table>
 <tr><th>Check</th><th>Status</th><th>Detail</th></tr>
-<tr><td>Audit log sealed</td><td><span class="status pass">pass</span></td><td>Yes: every entry carries seq, prev_hash and hash.</td></tr>
-<tr><td>Seal uses a secret key</td><td><span class="status pass">pass</span></td><td>HMAC-SHA256: only a holder of the key can write a chain that verifies.</td></tr>
+<tr><td>Audit log sealed</td><td><span class="status pass">pass</span></td><td>Yes, and the chain verified: every sealed entry carries seq, prev_hash and hash.</td></tr>
+<tr><td>Seal uses a secret key</td><td><span class="status pass">pass</span></td><td>HMAC-SHA256, verified with the key: only a holder of the key can write a chain that verifies.</td></tr>
 <tr><td>Seal chain verified</td><td><span class="status pass">pass</span></td><td>agentguard audit verify checked 14 sealed entries (seq 1 to 14): the chain is intact.</td></tr>
 <tr><td>Entries outside the seal chain</td><td><span class="status pass">pass</span></td><td>None.</td></tr>
 <tr><td>Unreadable lines</td><td><span class="status pass">pass</span></td><td>Every line of the log files is an audit entry.</td></tr>

@@ -34,62 +34,10 @@ func Finish(r *Report) {
 // Assess runs the posture checks that can be decided from what the report
 // read. A check that can't is "unknown", never a guess.
 func Assess(r *Report) []Check {
-	in := r.Integrity
 	file := r.Source.Mode == SourceFile
 	var checks []Check
 
-	sealed := Check{Name: "Audit log sealed"}
-	switch in.Status {
-	case IntegrityNotSealed:
-		sealed.Status, sealed.Detail = CheckWarn, "No: edits to the log can't be detected. Start the server with --audit-seal."
-	case IntegrityUnknown:
-		sealed.Status, sealed.Detail = CheckUnknown, in.Summary
-	default:
-		sealed.Status, sealed.Detail = CheckPass, "Yes: every entry carries seq, prev_hash and hash."
-	}
-	checks = append(checks, sealed)
-
-	key := Check{Name: "Seal uses a secret key"}
-	switch {
-	case in.KeyBased != nil && *in.KeyBased:
-		key.Status, key.Detail = CheckPass, "HMAC-SHA256: only a holder of the key can write a chain that verifies."
-	case in.KeyBased != nil:
-		key.Status, key.Detail = CheckWarn, "Plain SHA-256: anyone who can write the file can recompute the chain. Set --audit-seal-key-file."
-	case in.Status == IntegrityNotSealed:
-		key.Status, key.Detail = CheckWarn, "Not sealed."
-	default:
-		key.Status, key.Detail = CheckUnknown, "The server's head does not say how the chain is sealed."
-	}
-	checks = append(checks, key)
-
-	chain := Check{Name: "Seal chain verified"}
-	switch in.Status {
-	case IntegrityIntact:
-		chain.Status, chain.Detail = CheckPass, in.Summary
-	case IntegrityBroken:
-		chain.Status, chain.Detail = CheckFail, in.Summary
-	case IntegrityNotSealed:
-		chain.Status, chain.Detail = CheckWarn, "Not sealed: nothing to verify."
-	default:
-		chain.Status, chain.Detail = CheckUnknown, in.Summary
-	}
-	checks = append(checks, chain)
-
-	unsealed := Check{Name: "Entries outside the seal chain"}
-	switch {
-	case in.Verify == nil:
-		unsealed.Status, unsealed.Detail = CheckUnknown, "Known only when the report verifies the log files."
-	case in.Status == IntegrityNotSealed:
-		unsealed.Status, unsealed.Detail = CheckWarn, fmt.Sprintf("All of them: the files hold %s and no seal.", plural(int(in.Verify.Unsealed), "entry", "entries"))
-	case in.Verify.Unsealed > 0:
-		unsealed.Status, unsealed.Detail = CheckWarn, fmt.Sprintf("Written before sealing began, and not protected: %s.", plural(int(in.Verify.Unsealed), "entry", "entries"))
-	default:
-		unsealed.Status, unsealed.Detail = CheckPass, "None."
-	}
-	if in.Verify != nil && in.Verify.PrunedBefore > 0 {
-		unsealed.Detail += fmt.Sprintf(" Older files were pruned; the chain starts at seq %d.", in.Verify.PrunedBefore+1)
-	}
-	checks = append(checks, unsealed)
+	checks = append(checks, sealedCheck(r), keyCheck(r), chainCheck(r), outsideChainCheck(r))
 
 	lines := Check{Name: "Unreadable lines"}
 	switch {
@@ -129,6 +77,112 @@ func Assess(r *Report) []Check {
 	}
 	checks = append(checks, auth)
 	return checks
+}
+
+// sealedCheck passes only for a chain that verified. A seal the report
+// could not verify is only a claim: a _meta header anyone can write, or a
+// server's word.
+func sealedCheck(r *Report) Check {
+	in := r.Integrity
+	c := Check{Name: "Audit log sealed"}
+	switch in.Status {
+	case IntegrityIntact:
+		c.Status, c.Detail = CheckPass, "Yes, and the chain verified: every sealed entry carries seq, prev_hash and hash."
+	case IntegrityBroken:
+		c.Status, c.Detail = CheckFail, "The seal does not hold: "+in.Summary
+	case IntegrityNotSealed:
+		c.Status, c.Detail = CheckWarn, "No: edits to the log can't be detected. Start the server with --audit-seal."
+	case IntegrityNotVerified:
+		if r.Source.Mode == SourceFile {
+			c.Status, c.Detail = CheckWarn, "The log says so and its structure holds, but its hashes were not checked: give --key-file to verify it."
+		} else {
+			c.Status, c.Detail = CheckUnknown, "The server reports a seal head, but the report did not check the chain. Run it on the log files to verify."
+		}
+	default:
+		c.Status, c.Detail = CheckUnknown, in.Summary
+	}
+	return c
+}
+
+// keyCheck reports how the chain is sealed. The algorithm is read from the
+// log's header, so unless the chain verified with the key it is a claim.
+func keyCheck(r *Report) Check {
+	in := r.Integrity
+	c := Check{Name: "Seal uses a secret key"}
+	unverified := ""
+	switch in.Status {
+	case IntegrityBroken:
+		unverified = " (the header says so, but the chain is broken)"
+	case IntegrityNotVerified:
+		unverified = " (the header says so; without --key-file that is not verified, and anyone who can write the file can write a header)"
+	}
+	switch {
+	case in.Status == IntegrityNotSealed:
+		c.Status, c.Detail = CheckWarn, "Not sealed."
+	case in.KeyBased != nil && *in.KeyBased && unverified == "":
+		c.Status, c.Detail = CheckPass, "HMAC-SHA256, verified with the key: only a holder of the key can write a chain that verifies."
+	case in.KeyBased != nil && *in.KeyBased:
+		c.Status, c.Detail = CheckUnknown, "HMAC-SHA256"+unverified+"."
+	case in.KeyBased != nil:
+		c.Status, c.Detail = CheckWarn, "Plain SHA-256"+unverified+": anyone who can write the file can recompute the chain. Set --audit-seal-key-file."
+	case r.Source.Mode == SourceFile:
+		c.Status, c.Detail = CheckWarn, "No seal is declared in the log files."
+	default:
+		c.Status, c.Detail = CheckUnknown, "The server's head does not say how the chain is sealed."
+	}
+	return c
+}
+
+func chainCheck(r *Report) Check {
+	in := r.Integrity
+	c := Check{Name: "Seal chain verified"}
+	switch in.Status {
+	case IntegrityIntact:
+		c.Status, c.Detail = CheckPass, in.Summary
+	case IntegrityBroken:
+		c.Status, c.Detail = CheckFail, in.Summary
+	case IntegrityNotSealed:
+		c.Status, c.Detail = CheckWarn, "Not sealed: nothing to verify."
+	default:
+		c.Status, c.Detail = CheckUnknown, in.Summary
+	}
+	return c
+}
+
+// outsideChainCheck counts the entries no seal protects. Reading files,
+// audit verify counts them (up to a break); from a server, the report
+// counts entries in the period that came without seq or hash.
+func outsideChainCheck(r *Report) Check {
+	in := r.Integrity
+	c := Check{Name: "Entries outside the seal chain"}
+	if v := in.Verify; v != nil {
+		switch {
+		case in.Status == IntegrityBroken:
+			c.Status, c.Detail = CheckFail, "Unknown past the break, and nothing after it is protected: "+in.Summary
+		case in.Status == IntegrityNotSealed:
+			c.Status, c.Detail = CheckWarn, fmt.Sprintf("All of them: the files hold %s and none is sealed.", plural(int(v.Unsealed), "entry", "entries"))
+		case v.Unsealed > 0:
+			c.Status, c.Detail = CheckWarn, fmt.Sprintf("Written before sealing began, and not protected: %s.", plural(int(v.Unsealed), "entry", "entries"))
+		default:
+			c.Status, c.Detail = CheckPass, "None."
+		}
+		if v.PrunedBefore > 0 {
+			c.Detail += fmt.Sprintf(" Older files were pruned; the chain starts at seq %d.", v.PrunedBefore+1)
+		}
+		return c
+	}
+	n, total := r.Activity.UnsealedEntries, r.Activity.Entries
+	switch {
+	case in.Status == IntegrityNotSealed:
+		c.Status, c.Detail = CheckWarn, "All of them: the server's log is not sealed."
+	case n > 0:
+		c.Status, c.Detail = CheckWarn, fmt.Sprintf("Entries in the period that came without seq or hash: %d of %d.", n, total)
+	case in.Status == IntegrityNotVerified:
+		c.Status, c.Detail = CheckPass, "Every entry in the period carries seq and hash (the chain itself was not checked)."
+	default:
+		c.Status, c.Detail = CheckUnknown, "Unknown whether the server seals its log."
+	}
+	return c
 }
 
 // MapControls maps the report's evidence to the SOC 2 criteria it bears

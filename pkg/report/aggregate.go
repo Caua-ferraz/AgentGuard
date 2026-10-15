@@ -67,6 +67,9 @@ type Activity struct {
 	// patterns.
 	RedactedEntries       int `json:"redacted_entries"`
 	UnmaskedSecretEntries int `json:"unmasked_secret_entries"`
+	// UnsealedEntries counts entries in the period without a seal (no hash
+	// or no seq). In server mode it is the only seal evidence per entry.
+	UnsealedEntries int `json:"unsealed_entries"`
 }
 
 // Approvals is the approval lifecycle as the audit log records it. The log
@@ -153,6 +156,9 @@ func Aggregate(entries iter.Seq[audit.Entry], p Period) (Activity, Approvals) {
 			}
 		}
 
+		if e.Hash == "" || e.Seq == 0 {
+			a.UnsealedEntries++
+		}
 		if mentionsRedaction(e) {
 			a.RedactedEntries++
 		}
