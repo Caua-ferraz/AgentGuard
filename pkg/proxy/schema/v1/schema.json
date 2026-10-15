@@ -32,6 +32,7 @@
         "url":            { "type": "string", "description": "Full URL for the network scope." },
         "agent_id":       { "type": "string", "description": "Stable agent identifier. Used as a per-agent override key and as a rate-limit key." },
         "session_id":     { "type": "string", "description": "Session identifier; required to use cost.max_per_session accumulation." },
+        "parent_session_id": { "type": "string", "description": "Optional. The session that started this one (an orchestrator's session for a sub-agent). Not used by policy; recorded in the audit log for session correlation." },
         "est_cost":       { "type": "number", "description": "Estimated cost of this action in USD. Required for the cost scope.", "minimum": 0 },
         "meta":           {
           "type": "object",

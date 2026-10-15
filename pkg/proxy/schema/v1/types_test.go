@@ -33,6 +33,8 @@ func TestActionRequest_RoundTrip(t *testing.T) {
 		SessionID:     "sess-1",
 		EstCost:       0.25,
 		Meta:          map[string]string{"k": "v", "k2": "v2"},
+		// Optional since v1.4.
+		ParentSessionID: "sess-0",
 	}
 
 	b, err := json.Marshal(original)

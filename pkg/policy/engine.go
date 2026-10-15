@@ -1120,6 +1120,14 @@ type ActionRequest struct {
 	// approval queue (a server-side construct) is not dragged into the
 	// pure policy package.
 	ApprovalID string `json:"approval_id,omitempty"`
+
+	// ParentSessionID names the session that started this one: an
+	// orchestrator's session for a sub-agent's calls. Policy ignores it;
+	// it is recorded in the audit log so GET /v1/sessions can show which
+	// sessions belong together. omitempty keeps requests without it, and
+	// the audit lines written for them, byte-identical to before it
+	// existed (sealed logs still verify).
+	ParentSessionID string `json:"parent_session_id,omitempty"`
 }
 
 // Check evaluates an action request against the active policy for the
