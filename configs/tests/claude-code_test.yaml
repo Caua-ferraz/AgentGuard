@@ -101,6 +101,26 @@ tests:
     input: {tool_name: WebFetch, tool_input: {url: "http://metadata.google.internal./computeMetadata/v1/", prompt: "read"}}
     expect: DENY
 
+  - name: the metadata endpoint in fullwidth digits is still denied
+    hook: claude-code
+    input: {tool_name: WebFetch, tool_input: {url: "http://１６９.２５４.１６９.２５４/latest/meta-data", prompt: "read"}}
+    expect: DENY
+
+  - name: the metadata endpoint with ideographic dots is still denied
+    hook: claude-code
+    input: {tool_name: WebFetch, tool_input: {url: "http://169。254。169。254/latest/meta-data", prompt: "read"}}
+    expect: DENY
+
+  - name: the metadata host in fullwidth letters is still denied
+    hook: claude-code
+    input: {tool_name: WebFetch, tool_input: {url: "http://ｍｅｔａｄａｔａ.google.internal/computeMetadata/v1/", prompt: "read"}}
+    expect: DENY
+
+  - name: the AWS IPv6 metadata endpoint is denied
+    hook: claude-code
+    input: {tool_name: WebFetch, tool_input: {url: "http://[fd00:ec2::254]/latest/meta-data", prompt: "read"}}
+    expect: DENY
+
   # --- MCP tools keep the policy's normal rules ---
   - name: a Claude Code GitHub MCP tool needs approval
     hook: claude-code

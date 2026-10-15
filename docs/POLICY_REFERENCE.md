@@ -662,10 +662,22 @@ rule on an address catches the other spellings that reach it:
 | `::ffff:169.254.169.254`, `::ffff:a9fe:a9fe` | `169.254.169.254` |
 | `0:0:0:0:0:0:0:1` | `::1` |
 | `metadata.google.internal.` (trailing dot) | `metadata.google.internal` |
+| `１６９.２５４.１６９.２５４`, `169。254。169。254`, `ｍｅｔａｄａｔａ.google.internal` (Unicode that URL parsers fold to ASCII, NFKC) | `169.254.169.254`, `metadata.google.internal` |
+| ` 169.254.169.254:80`, `user@169.254.169.254` (a `domain` field with whitespace, a port or userinfo) | `169.254.169.254` |
 
 Browsers, Node, curl and the C library all accept these forms, so before
 v1.4 a request written in one of them could slip past a deny rule on the
 plain address.
+
+Rules compare names, not where a name resolves. A DNS name that points at an
+address (`169.254.169.254.nip.io`, an attacker's own record, or GCE's short
+name `metadata` through the search domain) is not the address to a domain
+rule; deny such names by name, or block the address at the network level.
+The deprecated IPv4-compatible (`::169.254.169.254`) and NAT64
+(`64:ff9b::a9fe:a9fe`) forms are not mapped to IPv4 either; operating
+systems don't route them to the IPv4 address. The shipped coding-agent
+blocks deny `169.254.169.254`, `metadata.google.internal`, `metadata` and
+AWS's IPv6 endpoint `fd00:ec2::254`.
 
 ### Paths are cleaned first
 

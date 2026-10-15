@@ -29,7 +29,26 @@ func TestCanonicalHost(t *testing.T) {
 		{"4294967296", "4294967296"},
 		{"09.1.1.1", "09.1.1.1"},
 		{"*.internal", "*.internal"},
-		{"example.com:8080", "example.com:8080"},
+		// A domain field written by a caller or a model.
+		{"example.com:8080", "example.com"},
+		{"169.254.169.254:80", "169.254.169.254"},
+		{"0xa9fea9fe:80", "169.254.169.254"},
+		{"[::ffff:a9fe:a9fe]:80", "169.254.169.254"},
+		{"user@169.254.169.254", "169.254.169.254"},
+		{"a@b@169.254.169.254", "169.254.169.254"},
+		{" 169.254.169.254\t", "169.254.169.254"},
+		{"metadata.google.internal..", "metadata.google.internal"},
+		{"1.2.3.04", "1.2.3.4"},
+		{"example.com:http", "example.com:http"},
+		// Unicode a WHATWG parser folds to ASCII.
+		{"１６９.２５４.１６９.２５４", "169.254.169.254"},
+		{"169。254。169。254", "169.254.169.254"},
+		{"169．254｡169.254", "169.254.169.254"},
+		{"ｍｅｔａｄａｔａ.google.internal", "metadata.google.internal"},
+		{"ⓜetadata.google.internal", "metadata.google.internal"},
+		{"①⑥⑨.254.169.254", "169.254.169.254"},
+		{"Ｍｅｔａｄａｔａ.Google.Internal", "metadata.google.internal"},
+		{"bücher.example", "bücher.example"},
 		{"", ""},
 		{".", "."},
 	}
@@ -67,6 +86,12 @@ func TestCheck_DomainRulesSeeEverySpellingOfAHost(t *testing.T) {
 		{Scope: "network", URL: "http://metadata.google.internal./computeMetadata/v1/"},
 		{Scope: "network", URL: "http://METADATA.Google.Internal/computeMetadata/v1/"},
 		{Scope: "network", Domain: "db.corp.internal."},
+		{Scope: "network", Domain: "169.254.169.254:80"},
+		{Scope: "network", Domain: "user@0xa9fea9fe"},
+		{Scope: "network", URL: "http://１６９.２５４.１６９.２５４/latest/meta-data"},
+		{Scope: "network", URL: "http://169。254。169。254/latest/meta-data"},
+		{Scope: "network", URL: "http://ｍｅｔａｄａｔａ.google.internal/computeMetadata/v1/"},
+		{Scope: "network", URL: "http://ⓜetadata.google.internal/"},
 	}
 	for _, req := range denied {
 		if res := e.Check(req, "local"); res.Decision != Deny {
