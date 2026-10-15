@@ -28,6 +28,12 @@ export interface CheckOptions {
   url?: string;
   /** Session identifier for session-level cost tracking. */
   sessionId?: string;
+  /**
+   * The session that started `sessionId` → request body
+   * `parent_session_id`. Defaults to the client's `parentSessionId`.
+   * Recorded in the audit log, not used by policy. Omitted when empty.
+   */
+  parentSessionId?: string;
   /** Estimated cost of this action in USD (for cost scope). */
   estCost?: number;
   meta?: Record<string, string>;
@@ -104,6 +110,14 @@ export interface AgentGuardOptions {
    * multi-tenant providers can register others.
    */
   tenantId?: string;
+  /**
+   * The session that started this agent's sessions, e.g. the
+   * orchestrator's session for a sub-agent. Sent as `parent_session_id`
+   * on every check (a per-call `parentSessionId` wins). Policy ignores
+   * it; the audit log records it so `GET /v1/sessions` can link parent
+   * and child sessions.
+   */
+  parentSessionId?: string;
 }
 
 /**
@@ -259,6 +273,7 @@ const VALID_AGENTGUARD_OPTION_KEYS: ReadonlySet<string> = new Set([
   "timeout",
   "failMode",
   "tenantId",
+  "parentSessionId",
 ]);
 
 /**
@@ -278,6 +293,7 @@ export class AgentGuard {
   private timeout: number;
   private failMode: "deny" | "allow";
   private tenantId: string;
+  private parentSessionId: string;
 
   constructor(baseUrlOrOptions?: string | AgentGuardOptions) {
     // Environment fallbacks mirror the Python SDK: AGENTGUARD_URL supplies
@@ -296,6 +312,7 @@ export class AgentGuard {
       this.timeout = 5000;
       this.failMode = "deny";
       this.tenantId = envTenantId;
+      this.parentSessionId = "";
     } else {
       const opts = baseUrlOrOptions ?? {};
 
@@ -328,6 +345,7 @@ export class AgentGuard {
       // the supported way to suppress an env-var-leaked tenant in a
       // scoped test or a sub-process that should hit the legacy URLs.
       this.tenantId = opts.tenantId !== undefined ? opts.tenantId : envTenantId;
+      this.parentSessionId = opts.parentSessionId ?? "";
     }
 
     // Validate failMode. "deny" and "allow" are the only meaningful
@@ -410,6 +428,8 @@ export class AgentGuard {
     if (options.estCost !== undefined && options.estCost !== 0) payload.est_cost = options.estCost;
     if (options.meta) payload.meta = options.meta;
     if (options.approvalId) payload.approval_id = options.approvalId;
+    const parentSessionId = options.parentSessionId || this.parentSessionId;
+    if (parentSessionId) payload.parent_session_id = parentSessionId;
 
     try {
       return await this.withTimeout(
