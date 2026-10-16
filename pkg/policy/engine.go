@@ -1343,9 +1343,14 @@ func (e *Engine) evalScope(rules []RuleSet, req ActionRequest, tenantID string, 
 //
 //  1. Whole-string deny and require_approval rules run first, so patterns
 //     written for a full command line (`:(){ :|:& };:`, `curl * | bash`)
-//     keep working.
+//     keep working. A deny decides. An approval is where the verdict
+//     starts: the other checks still run, and a deny rule that matches any
+//     part of the command wins over it. A part that no rule allows doesn't:
+//     the person asked to approve sees the whole line.
 //  2. The raw command is split into simple commands (segments) and file
 //     redirections. A command the tokenizer can't split safely is denied.
+//     Whole-string deny and require_approval rules also run against each
+//     command string another shell runs (`bash -c '…'`, `eval '…'`).
 //  3. An allow rule whose own pattern contains shell syntax matches when it
 //     has the same number of segments and each segment matches its glob, so
 //     `allow: "ls * | grep *"` still allows `ls /tmp | grep x` but not
@@ -1357,11 +1362,24 @@ func (e *Engine) evalScope(rules []RuleSet, req ActionRequest, tenantID string, 
 //
 // The most severe verdict wins: DENY over REQUIRE_APPROVAL over ALLOW.
 func (e *Engine) checkCompoundShell(rules []RuleSet, req ActionRequest, rawCommand, tenantID string) CheckResult {
+	var lineApproval CheckResult
 	if res, ok := e.evalScope(rules, req, tenantID, ruleKindDeny|ruleKindApproval); ok {
-		return res
+		if res.Decision == Deny {
+			return res
+		}
+		lineApproval = res
+	}
+	// decides reports whether a part's deny decides the request. Under a
+	// whole-line approval, a part no rule allows (a default deny, which
+	// names no rule) is left to the person approving the line.
+	decides := func(res CheckResult) bool {
+		return res.Decision == Deny && (lineApproval.Decision == "" || res.Rule != "")
 	}
 	parsed, err := parseShell(rawCommand)
 	if err != nil {
+		if lineApproval.Decision != "" {
+			return lineApproval
+		}
 		return CheckResult{
 			Decision: Deny,
 			Reason:   "Shell command could not be split into simple commands safely (heredoc, unbalanced quotes or parentheses, arithmetic expansion, or nesting too deep)",
@@ -1372,6 +1390,48 @@ func (e *Engine) checkCompoundShell(rules []RuleSet, req ActionRequest, rawComma
 		return defaultDenyResult()
 	}
 	parts := len(parsed.Segments) + len(parsed.Redirects)
+
+	// A command string run by another shell (`bash -c '…'`, `eval '…'`) is
+	// a full command line of its own, so whole-string rules written for one
+	// (`:(){ :|:& };:`, `curl * | *sh`) are matched against it too, and
+	// against each pipeline, which may be only part of the line. The
+	// command a wrapper runs (`rm -rf /` in `timeout 5 rm -rf /`) is matched
+	// against the same deny and approval rules; whether it may run at all
+	// stays with its full segment below. A deny decides at once; the first
+	// approval is kept and the most severe verdict wins once the segments
+	// are checked.
+	innerVerdict := lineApproval
+	for _, inner := range [...]struct {
+		cmds  []string
+		label string
+	}{{parsed.Scripts, "command string"}, {parsed.Pipelines, "pipeline"}, {parsed.Wrapped, "wrapped command"}} {
+		for _, cmd := range inner.cmds {
+			sub := req
+			sub.Command = stripControl(cmd)
+			res, ok := e.evalScope(rules, sub, tenantID, ruleKindDeny|ruleKindApproval)
+			if !ok {
+				continue
+			}
+			res.Reason = fmt.Sprintf("%s (%s %q)", res.Reason, inner.label, sub.Command)
+			if res.Decision == Deny {
+				return res
+			}
+			if innerVerdict.Decision == "" {
+				innerVerdict = res
+			}
+		}
+	}
+	// A command string the splitter couldn't read (arithmetic, a heredoc,
+	// case … esac) goes to a person rather than being denied: the outer
+	// command is still checked below, and the deny rules above have
+	// already been matched against the script's text.
+	if len(parsed.Unparsed) > 0 && innerVerdict.Decision == "" {
+		innerVerdict = CheckResult{
+			Decision: RequireApproval,
+			Reason:   fmt.Sprintf("AgentGuard couldn't read the script this command runs (heredoc, arithmetic expansion, case, unbalanced quotes or nesting too deep), so a person should look at it (command string %q)", stripControl(parsed.Unparsed[0])),
+			Rule:     "require_approval:shell:unparseable_script",
+		}
+	}
 
 	var verdict CheckResult
 	if res, ok := e.matchCompoundAllow(rules, req, parsed.Segments, tenantID); ok {
@@ -1387,13 +1447,19 @@ func (e *Engine) checkCompoundShell(rules []RuleSet, req ActionRequest, rawComma
 			if parts > 1 && res.Decision != Allow {
 				res.Reason = fmt.Sprintf("%s (command %d of %d: %q)", res.Reason, i+1, len(parsed.Segments), sub.Command)
 			}
-			if res.Decision == Deny {
+			if decides(res) {
 				return res
 			}
-			if i == 0 || moreSevere(res.Decision, verdict.Decision) {
+			if res.Decision == Deny {
+				continue // covered by the whole-line approval
+			}
+			if verdict.Decision == "" || moreSevere(res.Decision, verdict.Decision) {
 				verdict = res
 			}
 		}
+	}
+	if innerVerdict.Decision != "" && moreSevere(innerVerdict.Decision, verdict.Decision) {
+		verdict = innerVerdict
 	}
 
 	for _, r := range parsed.Redirects {
@@ -1416,10 +1482,13 @@ func (e *Engine) checkCompoundShell(rules []RuleSet, req ActionRequest, rawComma
 		if res.Decision != Allow {
 			res.Reason = fmt.Sprintf("%s (redirection %s %q)", res.Reason, fsReq.Action, r.Target)
 		}
-		if res.Decision == Deny {
+		if decides(res) {
 			return res
 		}
-		if moreSevere(res.Decision, verdict.Decision) {
+		if res.Decision == Deny {
+			continue // covered by the whole-line approval
+		}
+		if verdict.Decision == "" || moreSevere(res.Decision, verdict.Decision) {
 			verdict = res
 		}
 	}
@@ -1439,13 +1508,18 @@ func plural(n int, noun string) string {
 
 // matchCompoundAllow looks for an allow rule whose pattern itself contains
 // shell syntax and matches the command segment by segment.
+//
+// Only real shell syntax makes a pattern compound. A plain pattern such as
+// `bash -lc *` names one command; read as compound, its two segments
+// (`bash -lc *` and `*`) would allow any two-command request outright,
+// skipping the per-command deny and approval rules.
 func (e *Engine) matchCompoundAllow(rules []RuleSet, req ActionRequest, segments []string, tenantID string) (CheckResult, bool) {
 	for _, rs := range rules {
 		if rs.Scope != req.Scope {
 			continue
 		}
 		for _, rule := range rs.Allow {
-			if rule.Pattern == "" || !isCompoundShell(rule.Pattern) {
+			if rule.Pattern == "" || !hasShellSyntax(rule.Pattern) {
 				continue
 			}
 			pat, err := parseShell(rule.Pattern)

@@ -95,7 +95,7 @@ Cursor's deletes through its `Delete` tool aren't checked (its input isn't docum
 
 | Codex tool | Checked as |
 |---|---|
-| `Bash` (shell commands and unified exec) | `shell`: the command. A command that carries a patch (`*** Begin Patch`, such as `apply_patch <<'EOF' …`) is also checked like `apply_patch`, one write per file. |
+| `Bash` (shell commands and unified exec) | `shell`: the command. A command given as an argument list is checked as the command line a shell would read back as those arguments, each quoted where needed. `["apply_patch", "<patch>"]` (or `applypatch`, Codex's other name for it) is checked like `apply_patch`; only the bare name counts, so `["./apply_patch", …]` is a shell command. A command that carries a patch (`*** Begin Patch`, such as `apply_patch <<'EOF' …`) is also checked like `apply_patch`, one write per file. |
 | `apply_patch` | `filesystem`, action `write`: every file the patch adds, updates, deletes or moves to |
 | `mcp__<server>__<tool>` | `mcp_tool`: `<server>:<tool>` |
 
@@ -106,7 +106,7 @@ Hosted tools such as web search don't go through Codex's hooks.
 A coding agent works on your real projects, so the starter policy's sandbox rules (files only under `./workspace`, a short list of commands) would block most of its work. The starter policy therefore ends with rules for agent `claude-code` that replace them for Claude Code only, and setup offers the same rules for the other agents when you connect them:
 
 - **Files:** read and write anywhere, except keys and cloud credentials (`.ssh`, `.aws`, `.gnupg`: denied) and system folders (`/etc`, `/usr`, `C:/Windows`: no writes). `.env` files need approval.
-- **Shell:** any command, except fork bombs and raw disk writes (denied); `sudo`, `rm -rf`, `git push --force`, `git reset --hard`, `git clean`, `curl … | sh` and `Remove-Item -Recurse` need approval. A chained command is checked piece by piece, so `git status && rm -rf /` needs approval too.
+- **Shell:** any command, except fork bombs and raw disk writes (denied); `sudo`, `rm -rf`, `git push --force`, `git reset --hard`, `git clean`, `curl … | sh` and `Remove-Item -Recurse` need approval. A chained command is checked piece by piece, so `git status && rm -rf /` needs approval too. So is the script of `bash -c`, `eval` or a here-string fed to a shell, and the command behind a wrapper such as `env`, `timeout`, `sudo` or `npm exec` (see [Compound shell commands](POLICY_REFERENCE.md#compound-shell-commands)). A `bash -c` script AgentGuard can't read (arithmetic, a heredoc, `case`) needs approval rather than being blocked.
 - **Web:** any site except cloud metadata endpoints.
 - **MCP tools and the browser:** the policy's normal rules.
 

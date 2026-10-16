@@ -86,7 +86,25 @@ func codexRequests(in codexHookInput) ([]policy.ActionRequest, bool, error) {
 	}
 	switch in.ToolName {
 	case "Bash":
-		cmd := codexCommand(in.ToolInput)
+		cmd, argv := codexCommand(in.ToolInput)
+		// ["apply_patch", "<patch>"] is Codex's own patch call made through
+		// the shell tool (Codex also accepts "applypatch"): its files get
+		// the apply_patch checks, not a shell rule matched against the
+		// patch text. Only the bare names count. Codex handles those
+		// itself; a path such as ./apply_patch runs whatever program is
+		// there, so it gets the shell check like any other command.
+		if len(argv) == 2 && (argv[0] == "apply_patch" || argv[0] == "applypatch") {
+			paths := patchPaths(argv[1])
+			if len(paths) == 0 {
+				return nil, false, errors.New("the patch names no files")
+			}
+			reqs := make([]policy.ActionRequest, len(paths))
+			for i, p := range paths {
+				reqs[i] = base
+				reqs[i].Scope, reqs[i].Action, reqs[i].Path = "filesystem", "write", hookAbs(in.Cwd, p)
+			}
+			return reqs, true, nil
+		}
 		req := base
 		req.Scope, req.Command = "shell", cmd
 		reqs := []policy.ActionRequest{req}
@@ -102,7 +120,8 @@ func codexRequests(in codexHookInput) ([]policy.ActionRequest, bool, error) {
 		}
 		return reqs, true, nil
 	case "apply_patch":
-		paths := patchPaths(codexCommand(in.ToolInput))
+		patch, _ := codexCommand(in.ToolInput)
+		paths := patchPaths(patch)
 		if len(paths) == 0 {
 			return nil, false, errors.New("the patch names no files")
 		}
@@ -121,26 +140,57 @@ func codexRequests(in codexHookInput) ([]policy.ActionRequest, bool, error) {
 	return []policy.ActionRequest{mcpToolRequest(base, server, tool)}, true, nil
 }
 
-// codexCommand is tool_input.command: a string, or an argument list, which
-// is joined with spaces the way a shell would read it back.
-func codexCommand(input json.RawMessage) string {
+// codexCommand is tool_input.command: a string, or an argument list. An
+// argument list is also returned as the command line a shell would read back
+// as those same arguments, each one quoted where needed, so the policy sees
+// ["bash", "-lc", "rm -rf /"] as bash running "rm -rf /" and
+// ["git", "commit", "-m", "a; b"] as one git command. Joined with plain
+// spaces, the first read as a harmless bash call and the second as two
+// commands.
+func codexCommand(input json.RawMessage) (string, []string) {
 	var in struct {
 		Command any `json:"command"`
 	}
 	_ = json.Unmarshal(input, &in)
 	switch c := in.Command.(type) {
 	case string:
-		return c
+		return c, nil
 	case []any:
-		parts := make([]string, 0, len(c))
+		argv := make([]string, 0, len(c))
+		quoted := make([]string, 0, len(c))
 		for _, p := range c {
 			if s, ok := p.(string); ok {
-				parts = append(parts, s)
+				argv = append(argv, s)
+				quoted = append(quoted, shellQuote(s))
 			}
 		}
-		return strings.Join(parts, " ")
+		return strings.Join(quoted, " "), argv
 	}
-	return ""
+	return "", nil
+}
+
+// shellQuote quotes one argument for a POSIX shell. Arguments made only of
+// characters that are never special stay as they are, so ordinary commands
+// still read naturally in the audit log and match plain rules.
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	for i := 0; i < len(s); i++ {
+		if !shellSafeByte(s[i]) {
+			return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+		}
+	}
+	return s
+}
+
+// shellSafeByte reports whether c never needs quoting in a POSIX shell word.
+func shellSafeByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	}
+	return strings.IndexByte("@%+=:,./_-", c) >= 0
 }
 
 // patchPaths lists the files an apply_patch patch writes, in order and

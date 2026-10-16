@@ -18,6 +18,8 @@ package policy
 import (
 	"errors"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // shellSyntaxChars are the bytes that can change how a shell splits or
@@ -37,10 +39,60 @@ var shellSyntaxByte = func() (t [256]bool) {
 	return t
 }()
 
-// isCompoundShell reports whether cmd needs the segment-by-segment path.
+// isCompoundShell reports whether cmd needs the segment-by-segment path:
+// it has shell syntax, or it runs a command its plain text hides (`sh -c
+// rm`, `eval rm -rf /`, `env rm -rf /`; see shell_nested.go), which the
+// whole-string match would see as one harmless-looking command.
 func isCompoundShell(cmd string) bool {
-	for i := 0; i < len(cmd); i++ {
-		if shellSyntaxByte[cmd[i]] {
+	if hasShellSyntax(cmd) {
+		return true
+	}
+	// The full check splits the command into words, which allocates; only
+	// a command that starts with an assignment, a shell, eval or a wrapper
+	// can need it.
+	if !startsWithLauncher(cmd) {
+		return false
+	}
+	words, complete := firstWords(cmd, maxLauncherWords)
+	if !complete {
+		// Too long to inspect on the hot path; the segment path reads it
+		// in full, and gives the same verdict for a plain command.
+		return true
+	}
+	return runsOtherCommand(words)
+}
+
+// maxLauncherWords bounds the words isCompoundShell splits a command that
+// starts with a launcher into.
+const maxLauncherWords = 64
+
+// firstWords splits cmd at spaces and tabs into at most n words. complete
+// is false when there are more.
+func firstWords(cmd string, n int) (words []string, complete bool) {
+	i := 0
+	for {
+		for i < len(cmd) && (cmd[i] == ' ' || cmd[i] == '\t') {
+			i++
+		}
+		if i == len(cmd) {
+			return words, true
+		}
+		if len(words) == n {
+			return nil, false
+		}
+		j := i
+		for j < len(cmd) && cmd[j] != ' ' && cmd[j] != '\t' {
+			j++
+		}
+		words = append(words, cmd[i:j])
+		i = j
+	}
+}
+
+// hasShellSyntax reports whether s contains any byte of shellSyntaxChars.
+func hasShellSyntax(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if shellSyntaxByte[s[i]] {
 			return true
 		}
 	}
@@ -71,6 +123,30 @@ type shellParse struct {
 	// backticks, <( … ) and ( … ) are separate segments.
 	Segments  []string
 	Redirects []shellRedirect
+	// Scripts are the command strings run as shell code by a command of
+	// their own (the script of `sh -c` or `eval`), unquoted, in order. The
+	// engine matches whole-string rules against each one, as it does
+	// against the full command line.
+	Scripts []string
+	// Wrapped are the commands run by a wrapper, an assignment or `!`,
+	// without that prefix: `rm -rf /` for `timeout 5 rm -rf /`. The engine
+	// matches deny and require_approval rules against each one; whether
+	// the command may run at all stays with its full segment, so
+	// `sudo reboot` still asks for approval under `sudo *` rather than
+	// needing an allow rule for `reboot` as well.
+	Wrapped []string
+	// Unparsed are the command strings in Scripts that couldn't be split
+	// (arithmetic, a heredoc, case … esac, nesting too deep). The engine
+	// asks a person about them rather than denying the command outright:
+	// a script inside `bash -c` is often harmless and only uses syntax the
+	// splitter doesn't read.
+	Unparsed []string
+	// Pipelines are the pipelines (`a | b`) of more than one command, each
+	// rebuilt from its commands without their wrappers, joined by " | ".
+	// The engine matches whole-string rules against each one, so
+	// `curl * | *sh` catches `cd /tmp && curl … | sh` too, where the
+	// pipeline is only part of the line.
+	Pipelines []string
 }
 
 // parseShell splits cmd into simple commands and file redirections.
@@ -88,6 +164,36 @@ type shellParser struct {
 	i     int
 	depth int
 	out   *shellParse
+	// script is set while parsing a command string run by another shell
+	// (see parseScript).
+	script bool
+	// nsubst and substBytes count the command substitutions written into
+	// the word being read, and their length, so readWord can tell a word
+	// that is nothing but one substitution.
+	nsubst, substBytes int
+	// wordIsSubst reports whether the last word readWord returned was
+	// exactly one command substitution, such as "$(ssh-agent -s)".
+	wordIsSubst bool
+}
+
+// addSegment appends one simple command to the output, within the segment
+// limit. In a nested command string, a segment already found is skipped:
+// the text of `eval "$(cmd)"` still holds the substitution, which was
+// split when the outer word was read, and parsing it again would only
+// repeat its commands (and double them at every level of nesting).
+func (p *shellParser) addSegment(seg string) error {
+	if p.script {
+		for _, s := range p.out.Segments {
+			if s == seg {
+				return nil
+			}
+		}
+	}
+	if len(p.out.Segments) >= maxShellSegments {
+		return errShellUnparseable
+	}
+	p.out.Segments = append(p.out.Segments, seg)
+	return nil
 }
 
 func (p *shellParser) peek(off int) byte {
@@ -114,17 +220,88 @@ func isWordEnd(c byte) bool {
 // input or, when closer is ')', until the matching ')' (consumed).
 func (p *shellParser) parseList(closer byte) error {
 	var words []string
+	// firstIsSubst is set when the command's first word is exactly one
+	// command substitution.
+	firstIsSubst := false
+	// heres are the command's here-strings (<<< word), unquoted.
+	var heres []string
+	// pipe holds the commands of the current pipeline so far.
+	var pipe []string
+	endPipe := func() error {
+		if len(pipe) > 1 {
+			if len(p.out.Pipelines) >= maxShellSegments {
+				return errShellUnparseable
+			}
+			p.out.Pipelines = append(p.out.Pipelines, strings.Join(pipe, " | "))
+		}
+		pipe = pipe[:0]
+		return nil
+	}
 	flush := func() error {
 		seg := joinSegment(words)
-		words = words[:0]
+		// The command a wrapper, an assignment or `!` runs is matched on
+		// its own too: `timeout 5 rm -rf /` as `rm -rf /`.
+		var unwrapped []string
+		inner, err := unwrapCommand(words, func(cmd []string) {
+			if u := joinSegment(cmd); u != seg {
+				unwrapped = append(unwrapped, u)
+			}
+		})
+		if err != nil {
+			return err
+		}
+		scripts, readsStdin := innerScripts(inner)
+		if readsStdin {
+			// `bash <<< 'rm -rf /'`: a shell reading its script from
+			// standard input runs the here-string. Fed to any other
+			// command, a here-string is data.
+			scripts = append(scripts, heres...)
+		}
+		onlySubst := firstIsSubst && len(words) == 1
+		words, firstIsSubst, heres = words[:0], false, heres[:0]
 		if seg == "" {
 			return nil
 		}
-		if len(p.out.Segments) >= maxShellSegments {
+		// In a pipeline, the command is its innermost one, without its
+		// wrappers: `timeout 60 curl … | sh` is the pipeline `curl … | sh`.
+		if len(unwrapped) > 0 {
+			pipe = append(pipe, unwrapped[len(unwrapped)-1])
+		} else {
+			pipe = append(pipe, seg)
+		}
+		// In a nested command string, a command that is only a
+		// substitution (the script of `eval "$(ssh-agent -s)"`) runs
+		// whatever the substitution prints. That output can't be known
+		// here; the substitution's own commands are already segments. As
+		// a segment, the bare "$(ssh-agent -s)" would only fail every
+		// allow rule.
+		if p.script && onlySubst {
+			return nil
+		}
+		if err := p.addSegment(seg); err != nil {
+			return err
+		}
+		if len(p.out.Wrapped)+len(unwrapped) > maxShellSegments {
 			return errShellUnparseable
 		}
-		p.out.Segments = append(p.out.Segments, seg)
+		p.out.Wrapped = append(p.out.Wrapped, unwrapped...)
+		// `bash -c '<script>'` and `eval <script>` run the script as shell
+		// code: its commands are segments of their own, as a $( … )
+		// substitution's are.
+		for _, script := range scripts {
+			if err := p.parseScript(script); err != nil {
+				return err
+			}
+		}
 		return nil
+	}
+	// redirect reads one redirection, keeping a here-string's word.
+	redirect := func() error {
+		here, isHere, err := p.parseRedirect()
+		if isHere {
+			heres = append(heres, here)
+		}
+		return err
 	}
 	for p.i < len(p.s) {
 		c := p.s[p.i]
@@ -136,13 +313,18 @@ func (p *shellParser) parseList(closer byte) error {
 				return errShellUnparseable
 			}
 			p.i++
-			return flush()
+			if err := flush(); err != nil {
+				return err
+			}
+			return endPipe()
 		case c == '&' && p.peek(1) == '>':
-			if err := p.parseRedirect(); err != nil {
+			if err := redirect(); err != nil {
 				return err
 			}
 		case c == ';' || c == '&' || c == '|' || c == '\n' || c == '\r':
-			// ; ;; & && | || |& and line breaks all end the simple command.
+			// ; ;; & && | || |& and line breaks all end the simple command;
+			// all but | and |& also end the pipeline.
+			start := p.i
 			p.i++
 			if n := p.peek(0); (c == ';' && n == ';') || (c == '&' && n == '&') || (c == '|' && (n == '|' || n == '&')) {
 				p.i++
@@ -150,9 +332,17 @@ func (p *shellParser) parseList(closer byte) error {
 			if err := flush(); err != nil {
 				return err
 			}
+			if op := p.s[start:p.i]; op != "|" && op != "|&" {
+				if err := endPipe(); err != nil {
+					return err
+				}
+			}
 		case c == '(':
 			// A subshell: its commands are segments of their own.
 			if err := flush(); err != nil {
+				return err
+			}
+			if err := endPipe(); err != nil {
 				return err
 			}
 			p.i++
@@ -168,14 +358,14 @@ func (p *shellParser) parseList(closer byte) error {
 			}
 			words = append(words, p.s[start:p.i])
 		case c == '<' || c == '>':
-			if err := p.parseRedirect(); err != nil {
+			if err := redirect(); err != nil {
 				return err
 			}
 		case isDigit(c) && p.fdRedirectAhead():
 			for isDigit(p.s[p.i]) {
 				p.i++
 			}
-			if err := p.parseRedirect(); err != nil {
+			if err := redirect(); err != nil {
 				return err
 			}
 		default:
@@ -183,13 +373,19 @@ func (p *shellParser) parseList(closer byte) error {
 			if err != nil {
 				return err
 			}
+			if len(words) == 0 {
+				firstIsSubst = p.wordIsSubst
+			}
 			words = append(words, w)
 		}
 	}
 	if closer != 0 {
 		return errShellUnparseable // missing ')'
 	}
-	return flush()
+	if err := flush(); err != nil {
+		return err
+	}
+	return endPipe()
 }
 
 // nested parses a parenthesised command list whose '(' was just consumed.
@@ -201,6 +397,26 @@ func (p *shellParser) nested() error {
 	err := p.parseList(')')
 	p.depth--
 	return err
+}
+
+// parseScript splits a command string another shell will run (the script
+// of `sh -c` or `eval`) into segments of its own, counted against the same
+// segment and nesting limits. A script that can't be split is recorded in
+// Unparsed, and the rest of the command is still read.
+func (p *shellParser) parseScript(script string) error {
+	if len(p.out.Scripts) >= maxShellSegments {
+		return errShellUnparseable
+	}
+	p.out.Scripts = append(p.out.Scripts, script)
+	if p.depth+1 > maxShellDepth {
+		p.out.Unparsed = append(p.out.Unparsed, script)
+		return nil
+	}
+	sub := &shellParser{s: script, depth: p.depth + 1, out: p.out, script: true}
+	if err := sub.parseList(0); err != nil {
+		p.out.Unparsed = append(p.out.Unparsed, script)
+	}
+	return nil
 }
 
 // fdRedirectAhead reports whether the digits at p.i are a file-descriptor
@@ -215,8 +431,10 @@ func (p *shellParser) fdRedirectAhead() bool {
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
-// parseRedirect reads one redirection operator and its target.
-func (p *shellParser) parseRedirect() error {
+// parseRedirect reads one redirection operator and its target. For a
+// here-string (<<< word) it returns the word, unquoted, with isHere set:
+// the caller decides whether a shell runs it as a script.
+func (p *shellParser) parseRedirect() (here string, isHere bool, err error) {
 	write := true
 	switch {
 	case p.hasPrefix("<<<"):
@@ -224,10 +442,10 @@ func (p *shellParser) parseRedirect() error {
 		// can hold a command substitution.
 		p.i += 3
 		p.skipBlanks()
-		_, err := p.readWord()
-		return err
+		w, err := p.readWord()
+		return w, err == nil, err
 	case p.hasPrefix("<<"):
-		return errShellUnparseable // heredoc bodies span lines; not supported
+		return "", false, errShellUnparseable // heredoc bodies span lines; not supported
 	case p.hasPrefix("&>>"):
 		p.i += 3
 	case p.hasPrefix("&>"), p.hasPrefix(">>"), p.hasPrefix(">|"), p.hasPrefix("<>"):
@@ -244,21 +462,21 @@ func (p *shellParser) parseRedirect() error {
 		for p.i < len(p.s) && (isDigit(p.s[p.i]) || p.s[p.i] == '-') {
 			p.i++
 		}
-		return nil
+		return "", false, nil
 	}
 	p.skipBlanks()
 	if p.i >= len(p.s) || isWordEnd(p.s[p.i]) {
-		return errShellUnparseable // redirection without a target
+		return "", false, errShellUnparseable // redirection without a target
 	}
 	target, err := p.readWord()
 	if err != nil {
-		return err
+		return "", false, err
 	}
 	if isHarmlessRedirectTarget(target) {
-		return nil
+		return "", false, nil
 	}
 	p.out.Redirects = append(p.out.Redirects, shellRedirect{Target: target, Write: write})
-	return nil
+	return "", false, nil
 }
 
 // isHarmlessRedirectTarget lists targets that are not files an agent could
@@ -282,6 +500,7 @@ func (p *shellParser) skipBlanks() {
 // segments of their own and kept in the word as their original text.
 func (p *shellParser) readWord() (string, error) {
 	var b strings.Builder
+	n, size := p.nsubst, p.substBytes
 	for p.i < len(p.s) {
 		c := p.s[p.i]
 		if isWordEnd(c) {
@@ -311,8 +530,20 @@ func (p *shellParser) readWord() (string, error) {
 			}
 			b.WriteByte(next)
 		case '$':
-			if err := p.readDollar(&b); err != nil {
-				return "", err
+			switch p.peek(1) {
+			case '\'':
+				// $'…' (ANSI-C quoting): decoded as bash does, so
+				// $'rm' -rf is checked as rm -rf.
+				if err := p.readANSIC(&b); err != nil {
+					return "", err
+				}
+			case '"':
+				// $"…" (a translated string) is quoted like "…".
+				p.i++
+			default:
+				if err := p.readDollar(&b); err != nil {
+					return "", err
+				}
 			}
 		case '`':
 			if err := p.readBackticks(&b); err != nil {
@@ -323,7 +554,143 @@ func (p *shellParser) readWord() (string, error) {
 			p.i++
 		}
 	}
+	// One substitution and nothing else: "$(cmd)", `cmd`, $(cmd).
+	p.wordIsSubst = p.nsubst == n+1 && b.Len() > 0 && b.Len() == p.substBytes-size
 	return b.String(), nil
+}
+
+// readANSIC decodes a $'…' string whose $ is at p.i, with bash's escapes:
+// \n \t \r \a \b \e \E \f \v \\ \' \" \?, \xHH, \NNN (octal), \uHHHH,
+// \UHHHHHHHH and \cX. Any other escape keeps its backslash, as in bash. A
+// NUL (\0, \x00, \u0000, \c@) ends the string, as in bash: `$'abc\0def'`
+// is abc, and `read -d $'\0'` reads up to a NUL byte. An escape that can't
+// be decoded safely (a missing digit, a value that isn't a byte or a code
+// point) makes the command unparseable.
+func (p *shellParser) readANSIC(b *strings.Builder) error {
+	p.i += 2 // $'
+	var out []byte
+	ended := false // a NUL was decoded; the rest is read but dropped
+	put := func(c byte) {
+		if c == 0 {
+			ended = true
+		}
+		if !ended {
+			out = append(out, c)
+		}
+	}
+	for p.i < len(p.s) {
+		c := p.s[p.i]
+		if c == '\'' {
+			p.i++
+			b.Write(out)
+			return nil
+		}
+		if c != '\\' {
+			put(c)
+			p.i++
+			continue
+		}
+		if p.i+1 >= len(p.s) {
+			return errShellUnparseable
+		}
+		e := p.s[p.i+1]
+		p.i += 2
+		switch e {
+		case 'n':
+			put('\n')
+		case 't':
+			put('\t')
+		case 'r':
+			put('\r')
+		case 'a':
+			put(0x07)
+		case 'b':
+			put(0x08)
+		case 'e', 'E':
+			put(0x1b)
+		case 'f':
+			put(0x0c)
+		case 'v':
+			put(0x0b)
+		case '\\', '\'', '"', '?':
+			put(e)
+		case 'x', 'u', 'U':
+			digits := 2
+			switch e {
+			case 'u':
+				digits = 4
+			case 'U':
+				digits = 8
+			}
+			v, n := p.readDigits(16, digits)
+			switch {
+			case n == 0:
+				return errShellUnparseable
+			case e == 'x' || v == 0:
+				put(byte(v))
+			case v > unicode.MaxRune || (v >= 0xd800 && v <= 0xdfff):
+				return errShellUnparseable
+			case !ended:
+				out = utf8.AppendRune(out, rune(v))
+			}
+		case '0', '1', '2', '3', '4', '5', '6', '7':
+			p.i-- // the first digit is part of the value
+			v, _ := p.readDigits(8, 3)
+			if v > 0xff {
+				return errShellUnparseable
+			}
+			put(byte(v))
+		case 'c':
+			// \cX is control-X; \c? is DEL.
+			if p.i >= len(p.s) {
+				return errShellUnparseable
+			}
+			x := p.s[p.i]
+			p.i++
+			if x == '\\' && p.peek(0) == '\\' {
+				p.i++
+			}
+			v := byte(0x7f)
+			if x != '?' {
+				if x >= 'a' && x <= 'z' {
+					x -= 'a' - 'A'
+				}
+				v = x & 0x1f
+			}
+			put(v)
+		default:
+			put('\\')
+			put(e)
+		}
+	}
+	return errShellUnparseable // unterminated $'
+}
+
+// readDigits reads up to most digits in base (8 or 16) at p.i and returns
+// their value and how many it read.
+func (p *shellParser) readDigits(base, most int) (v uint32, n int) {
+	for n < most && p.i < len(p.s) {
+		d := digitValue(p.s[p.i])
+		if d < 0 || d >= base {
+			break
+		}
+		v = v*uint32(base) + uint32(d)
+		p.i++
+		n++
+	}
+	return v, n
+}
+
+func digitValue(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'a' && c <= 'f':
+		return int(c-'a') + 10
+	case c >= 'A' && c <= 'F':
+		return int(c-'A') + 10
+	}
+	return -1
 }
 
 // readDoubleQuoted reads a "…" string whose opening quote is at p.i.
@@ -375,10 +742,12 @@ func (p *shellParser) readDollar(b *strings.Builder) error {
 	case p.hasPrefix("$("):
 		start := p.i
 		p.i += 2
+		n, size := p.nsubst, p.substBytes
 		if err := p.nested(); err != nil {
 			return err
 		}
 		b.WriteString(p.s[start:p.i])
+		p.nsubst, p.substBytes = n+1, size+p.i-start
 		return nil
 	case p.hasPrefix("${"):
 		end := strings.IndexByte(p.s[p.i:], '}')
@@ -423,11 +792,13 @@ func (p *shellParser) readBackticks(b *strings.Builder) error {
 			if p.depth+1 > maxShellDepth {
 				return errShellUnparseable
 			}
-			sub := &shellParser{s: inner.String(), depth: p.depth + 1, out: p.out}
+			sub := &shellParser{s: inner.String(), depth: p.depth + 1, out: p.out, script: p.script}
 			if err := sub.parseList(0); err != nil {
 				return err
 			}
 			b.WriteString(p.s[start:p.i])
+			p.nsubst++
+			p.substBytes += p.i - start
 			return nil
 		}
 		inner.WriteByte(c)
@@ -450,6 +821,10 @@ func joinSegment(words []string) string {
 	for len(words) > 0 {
 		if _, ok := shellLeadingKeywords[words[0]]; !ok {
 			break
+		}
+		// `time -p cmd`: -p is the keyword's option, not the command.
+		if words[0] == "time" && len(words) > 1 && words[1] == "-p" {
+			words = words[1:]
 		}
 		words = words[1:]
 	}
