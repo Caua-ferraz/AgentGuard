@@ -1351,7 +1351,9 @@ func TestHandleCheck_503OnApprovalQueueFull(t *testing.T) {
 	body, err := json.Marshal(policy.ActionRequest{
 		AgentID: "bot",
 		Scope:   "shell",
-		Command: "sudo rm -rf /tmp/thing", // matches the REQUIRE_APPROVAL rule in newTestServer
+		// Matches the REQUIRE_APPROVAL rule in newTestServer. (sudo rm -rf …
+		// would hit the rm -rf * deny on the command sudo runs.)
+		Command: "sudo ls /tmp/thing",
 	})
 	if err != nil {
 		t.Fatal(err)
