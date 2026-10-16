@@ -8,12 +8,12 @@ receive security fixes and how to report a vulnerability privately.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.3.x   | Yes                |
-| < 1.3   | No                 |
+| 1.4.x   | Yes                |
+| < 1.4   | No                 |
 
-Security fixes ship on the latest minor release line (currently 1.3.x).
-Older lines, including 1.2.x, do not receive backports — upgrade to the
-latest 1.3.x release. Releases within 1.x follow the compatibility policy
+Security fixes ship on the latest minor release line (currently 1.4.x).
+Older lines, including 1.3.x, do not receive backports — upgrade to the
+latest 1.4.x release. Releases within 1.x follow the compatibility policy
 in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md); each release's
 CHANGELOG entry lists any behaviour changes.
 

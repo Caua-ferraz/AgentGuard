@@ -4,6 +4,196 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-10-15
+
+> **Guard every coding agent, prove the audit log wasn't touched, and test your policy like code.** Cursor, Gemini CLI and Codex CLI join Claude Code behind a hook, each able to fail open or fail closed when the server is down. A sealed audit log chains every entry with an HMAC, and `agentguard audit verify` finds any edit, deletion or reordering offline. `agentguard test` runs a policy against test cases in CI, including coding agents' raw tool calls. Sessions link agents to the subagents and sessions they start, and the dashboard replays them. `agentguard report` writes compliance evidence for a period. The MCP gateway guards remote Streamable HTTP MCP servers, and an OpenAI Agents SDK adapter joins the Python adapters.
+>
+> **No field, route, flag, subcommand or schema version was removed or renamed.** Several behaviours are stricter:
+> - A `require_prior` deny or approval rule now fires when its history can't be read.
+> - `GET /v1/audit` rejects a malformed `since`/`until` it used to ignore.
+> - Shell rules now see commands hidden inside `bash -c`, `eval` and wrappers such as `env`, `timeout`, `xargs` and `sudo`.
+> - Domain rules now match every spelling of a host.
+>
+> Security fixes close several ways a tool call could get past the policy unchecked. See *Compatibility* and [`docs/MIGRATION.md`](docs/MIGRATION.md#v13x--v140).
+
+### Added
+
+- **Hooks for Cursor, Gemini CLI and Codex CLI** (`agentguard hook cursor|gemini-cli|codex`), alongside `claude-code`. Each maps its agent's tool calls to checks made as that agent:
+  - **Cursor:** shell, file reads, file writes and MCP tools, through `~/.cursor/hooks.json`.
+  - **Gemini CLI:** `run_shell_command`, file reads and writes, every URL in a `web_fetch`, and MCP tools (`mcp_<server>_<tool>`), through a `BeforeTool` hook in `~/.gemini/settings.json`. URL hosts are read the way Gemini's WHATWG parser reads them (userinfo, backslashes, percent-encoding, shorthand IPv4).
+  - **Codex CLI:** `Bash`, each file an `apply_patch` adds, updates, deletes or moves to (also for a patch passed through the shell), and MCP tools, through `~/.codex/hooks.json`.
+  - A call that maps to several checks gets the most severe verdict. When one is denied, the approval requests the others created are withdrawn.
+  - New audit transports: `cursor`, `gemini_cli`, `codex_cli` and `claude_code`, each with a dashboard chip. See [`docs/CODING_AGENTS.md`](docs/CODING_AGENTS.md), which replaces `docs/CLAUDE_CODE.md` (the old file now links to it).
+- **`--fail-closed` for every hook.** A call the hook can't check is denied with rule `deny:hook:fail_closed`. That covers an unreachable server, a rejected API key, a failed approval poll and unreadable input. The default is still to let it through with a warning. For Cursor, `failClosed: true` is also set in `hooks.json`, so a hook crash or timeout blocks too.
+- **`agentguard setup` connects and disconnects each agent**, and asks whether calls go ahead or are blocked when AgentGuard isn't running. It also offers to add the agent's rule block (`configs/cursor.yaml`, `configs/gemini-cli.yaml`, `configs/codex.yaml`) to the policy, as text so comments stay. Settings files are edited in place with a backup. A file the hook can't parse is left alone.
+- **Tamper-evident audit log** (file backend). Turned on with `agentguard server --audit-seal`.
+  - **Format:** each entry gains `seq`, `prev_hash` and `hash`, an HMAC-SHA256 over the exact line bytes when `--audit-seal-key-file` is given (plain SHA-256 otherwise, with a startup warning). `_meta` headers gain `seal`, `chain_prev`, `chain_seq` and `node_id`, so the chain spans rotated and gzipped files.
+  - **Anchors** (the chain head) are published every `--audit-anchor-interval` (default 5m) and on rotation, as a log line, the `agentguard_audit_seal_seq` gauge, and `GET /v1/audit/head`.
+  - **Resume:** after a crash mid-write, the next line starts a resumed segment instead of breaking the chain.
+  - **Compatibility:** sealing is off by default, so existing logs stay byte-identical. `schema_version` stays 2. With `--audit-backend=store` the flags are refused at startup.
+- **`agentguard audit verify`** checks a sealed log offline. It walks the live file and its archives, plain or gzip.
+  - **Flags:** `--key-file` (repeatable, for key rotation), `--anchor seq:hash` (repeatable) and `--output text|json`.
+  - **Result:** the first broken `file:line` with the reason, missing or stray archives, and entries from before sealing began.
+  - **Exit codes:** 0 intact; 1 broken or not sealed; 2 usage; 3 error.
+- **New installs are sealed.** `agentguard setup` generates a seal key (mode 0600) in the data folder and passes `--audit-seal --audit-seal-key-file` to the login service.
+- **`agentguard test`** runs a policy against YAML test cases. It takes files, or folders scanned for `*_test.yaml`.
+  - **Cases** give a `request` and an `expect`ed decision, with optional `expect_rule` (exact) and `expect_reason_contains`. A case may also seed `prior` actions for `require_prior` conditions.
+  - **Hook cases:** a case can give `hook: <agent>` and `input:`, a coding agent's tool call as it sends it, which goes through that agent's hook mapping.
+  - **Isolation:** each case uses a fresh engine.
+  - **Flags:** `--output text|json|junit`, `--run <regex>`, `--strict`.
+  - **Exit codes:** 0 pass, 1 failure, 2 usage, 3 load error. A fixture with unknown keys, a second YAML document, or contradictory keys is a load error.
+  - **Shipped fixtures:** `configs/tests` has 158 cases for the shipped policies and each coding agent. CI runs them.
+- **Session correlation.**
+  - **Field:** an optional `parent_session_id` on `/v1/check` requests, recorded in the audit entry's request and omitted when empty.
+  - **Sources:** Python `Guard(parent_session_id=)` and `check(parent_session_id=)`; TypeScript `parentSessionId`; the LLM proxy's `X-AgentGuard-Parent-Session` header. The MCP gateway adds `meta.gateway_connection`, a random id per process, and leaves `session_id` unchanged so cost limits behave the same. The hooks record subagents in `meta.subagent`.
+- **`GET /v1/sessions` and `GET /v1/sessions/{id}`**, with `/v1/t/{tenant}/` mirrors and the same auth as `GET /v1/audit`.
+  - **The list** gives each session's parent, agents and subagents, transports, first and last seen, and counts by decision. It defaults to the last 24 hours and a limit of 100 (max 1000).
+  - **The detail** gives the summary, child sessions and entries oldest first (bounded, with `truncated`).
+  - **Bounds on the file backend:** a scan tracks at most max(10×limit, 50,000) sessions (`truncated`, `children_truncated`). A summary lists at most 32 agents and 16 transports (`lists_truncated`).
+- **`GET /v1/audit` filters:** `since` (inclusive), `until` (exclusive), both RFC 3339, and `parent_session_id`, on both backends. An unencoded `+` before a time offset is accepted.
+- **`agentguard audit --session --parent-session --since --until`.** The time flags take a duration such as `2h` or an RFC 3339 time. Against a server that ignores the new parameters (before 1.4), the command exits 1 rather than print every entry.
+- **Dashboard Sessions view.** A session list and a replay timeline.
+  - One lane per agent and subagent.
+  - Play, pause, step, back, restart and 1x–50x speed.
+  - Approvals paired inline with the retry they unblocked.
+  - Parent and child sessions linked.
+  - `#session=<id>` links.
+- **`agentguard report`** writes compliance evidence for a period (`--since` inclusive, `--until` exclusive; RFC 3339, a date, or a duration such as `24h` or `7d`; default the last 24 hours).
+  - **Formats:** Markdown, JSON (`format_version: 1`, a stable shape) or one self-contained HTML page (`--output md|json|html`, `--out-file`).
+  - **Contents:**
+    - the policy's SHA-256;
+    - audit integrity;
+    - totals by decision, scope, transport, tenant and agent;
+    - top deny and approval rules;
+    - the approval lifecycle on record;
+    - agents and sessions;
+    - posture checks (pass, warn, fail or unknown);
+    - a SOC 2 mapping (CC6.1, CC6.6, CC7.2, CC7.3, CC8.1) labelled as supporting evidence.
+  - **Sources:** it reads the audit files, archives included, and verifies them (`--key-file`; without it, everything but the hashes is checked). With `--url` it pages `GET /v1/audit` by time, bounded against misbehaving servers, and warns if the server's log rotated mid-read.
+  - **Exit codes:** 0 written; 1 written but verification failed; 2 usage; 3 can't read the log or server.
+  - See [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md).
+- **Streamable HTTP upstreams for `agentguard-mcp-gateway`.** `--upstream-http "ns:https://host/mcp"` (repeatable; plain `http://` only for loopback) and `--upstream-header "ns:Name=Value"`, whose value may use `${ENV_VAR}`.
+  - **Replies:** JSON or SSE.
+  - **Sessions:** `Mcp-Session-Id` and `MCP-Protocol-Version` are kept. A session that expires (404) is re-initialized and the call retried once.
+  - **Outages:** a server that is down, slow or failing at first connect is retried on the backoff schedule, and the host gets `tools/list_changed` when it returns.
+  - **Server-initiated messages:** the optional GET stream forwards `tools/list_changed`.
+  - **Shutdown:** `DELETE` on shutdown.
+  - **Safety:** redirects are not followed, and header values are never logged.
+  - MCP protocol `2025-06-18` is supported.
+- **OpenAI Agents SDK adapter** (`agentguard.adapters.openai_agents`).
+  - **API:** `guard_tool`, `guard_tools`, and `agentguard_tool_guardrail` for the SDK's tool input guardrails.
+  - **Behaviour:** checks run off the event loop. DENY and REQUIRE_APPROVAL raise without running the tool.
+  - **Install:** extra `agentguardproxy[openai-agents]` (`openai-agents>=0.3.3,<1.0`), also in `all` and `integration`. Example: `examples/openai-agents-config.py`.
+- **Go API:**
+  - `audit.LogFiles` and `audit.ReadEntries`;
+  - `audit.VerifyChain` with `VerifyOptions.WithoutKey` and `VerifyReport.HashesUnchecked`;
+  - the `pkg/report` package;
+  - `audit.MetaRecord.SegmentID`.
+
+### Changed
+
+- **Store schema:** `audit_entries` gains `parent_session_id` and `subagent` columns, added in place on first start.
+  - **SQLite** builds the two new indexes during that start, logging it, with no 30 s deadline.
+  - **Postgres** builds them in the background with `CREATE INDEX CONCURRENTLY`, one replica at a time. An index left invalid by an interrupted build is rebuilt.
+- **A Postgres boot runs DDL only when something is missing.** `ALTER … ADD COLUMN` and `CREATE INDEX` used to run on every start, taking table locks on `approvals` and `audit_entries` even when the schema was current.
+- **Rotated audit files carry a random `segment_id`** in their `_meta` header, and the replay checkpoint identifies files by it (falling back to `created_at` for older files).
+- **The shipped coding-agent blocks** (and the claude-code block in `configs/default.yaml`) also deny GCE's short name `metadata` and AWS's IPv6 metadata endpoint `fd00:ec2::254`.
+- **Toolchain and dependencies:** Go 1.26.9; `golang.org/x/text` v0.43.0, `golang.org/x/sync` v0.24.0, `golang.org/x/sys` v0.49.0 and `golang.org/x/term` v0.47.0; the SQLite driver `modernc.org/sqlite` v1.60.1 (SQLite itself stays 3.53.4) with `modernc.org/libc` v1.77.1.
+- **The README roadmap** now lists what 1.3 shipped and what 1.4 and later plan. The AutoGPT adapter is dropped from the roadmap. The Python package classifier is `Production/Stable`.
+
+### Fixed
+
+- **`require_prior` failed open.** When the history lookup behind a `require_prior` condition errored, a deny or approval rule gated on it never fired. Deny and approval rules now treat an unknown history as met, and allow rules as not met. The first failed lookup logs a warning, once per process, so the hot path stays quiet.
+- **Rotated audit files created in the same clock tick were confused.** Replay and its checkpoint could resume inside the wrong file or match the wrong archive, which was seen on Windows. Files are now identified by `segment_id`.
+- **The store's `since` filter misplaced entries in the same second as the bound**, because RFC3339Nano text drops trailing zeros. This also affected history lookups for policy conditions on the store backend.
+- **A line over 4 MiB stopped the audit reader.** The startup replay dropped every later entry from its counters. The line is now counted as corrupt and skipped.
+- **The MCP gateway's notification fan-out ran on the frame loop**, so a slow upstream delayed the host's next request.
+- **A Postgres node could fail to boot** by timing out behind another replica's index build while any long transaction was open.
+- **A disk fault in SQLite's shared-memory file crashed the server.** With the SQLite store, a fault while reading a WAL database's memory-mapped `-shm` file ended the process. The updated SQLite driver fails that one query with a disk I/O error and keeps the connection usable.
+
+### Security
+
+- **Domain rules missed other spellings of a host.**
+  - **What got through:** A rule compared the host as written, only lower-cased. A deny on `169.254.169.254` let these through, though browsers, Node, curl and the C library all reach the same place:
+    - `0xa9fea9fe`, `2852039166` and `0251.0376.0251.0376`;
+    - `::ffff:a9fe:a9fe`;
+    - `１６９.２５４.１６９.２５４` and `169。254。169。254`;
+    - the address with a soft hyphen or zero-width space inside it;
+    - `metadata.google.internal.`, with a trailing dot.
+  - **Who was affected:** every network check, including Claude Code's `WebFetch` since 1.3.
+  - **The fix:** the engine now writes every host one way before matching, on requests and on rule domains:
+    - loose IPv4 forms become a dotted quad;
+    - IPv6 is written in canonical form, and an IPv4-mapped address becomes IPv4;
+    - non-ASCII is folded with NFKC, after dropping default-ignorable code points (the zero-width joiner and non-joiner are kept);
+    - a trailing dot is dropped;
+    - in a request's domain field, whitespace, a `user@` prefix and a `:port` are dropped.
+  - **Rules with ports:** a rule domain with a port matches that host on that port only.
+  - **Cost:** an ordinary hostname still costs one scan and no allocation.
+- **Shell rules didn't see commands run by another shell or a wrapper.**
+  - **What got through:** `bash -c 'rm -rf /'`, `sh -lc "sudo ls"`, `eval rm -rf /`, `timeout 5 bash -c …` and `env rm -rf /` each read as one harmless-looking command. A catch-all allow passed them, which every coding-agent block has, and the `rm -rf` and `sudo` approval rules never saw the command that ran.
+  - **Who was affected:** every shell check, including Claude Code since 1.3.
+  - **The fix:** the splitter now looks inside these command strings:
+    - the script of a shell given `-c` (alone or in a cluster such as `-lc`);
+    - `eval`, `fish --command`, and here-strings fed to a shell;
+    - commands behind `NAME=value` assignments and launchers (`env`, `sudo`, `doas`, `pkexec`, `runuser`, `nohup`, `nice`, `timeout`, `xargs`, `flock`, `chroot`, `strace`, `npx`, `npm exec`, `uv run`, `poetry run`, `bundle exec`, `nix-shell --run` and others, listed in `POLICY_REFERENCE.md`).
+  - **How the verdict is reached:**
+    - Whole-line deny and approval rules (the fork bomb, `curl * | *sh`) are matched against each nested script and each pipeline as well as the full line.
+    - A deny on any part wins over a whole-line approval.
+  - **Scripts that can't be split:** a nested script with arithmetic, a heredoc or `case` asks for approval (`require_approval:shell:unparseable_script`) rather than being allowed.
+  - **Also handled:** ANSI-C `$'…'` strings are decoded, and command names are matched case-insensitively, as macOS and Windows file systems are.
+- **The Codex hook joined argument-list commands without quoting** (new in 1.4, not in a release): `["bash", "-lc", "rm -rf /"]` became `bash -lc rm -rf /`. Each argument is now quoted as a shell reads it back, and `["apply_patch", <patch>]` gets the file checks.
+
+- **The MCP gateway forwarded a `tools/call` without an id to every upstream with no policy check.** Any frame without an id was treated as a notification. Only `notifications/*` methods are forwarded now. This affected stdio upstreams in earlier releases.
+- **Python adapters checked one tool argument while the tool ran another.** LangChain, CrewAI, MCP and OpenAI Agents read `command` before `cmd` and `path` before `file_path`. Tool input setting both to different values (`{"command": "ls", "cmd": "rm -rf /"}`) is now denied locally. The OpenAI Agents adapter also checks exactly the arguments the tool's schema passes to it. The adapters never take `parent_session_id` from tool input.
+- **`require_prior` failing open** (above) let a gated deny rule be skipped by a history outage.
+
+### Compatibility
+
+- **`require_prior` polarity.** When the history can't be read, deny and approval rules fire, and allow rules don't match. With no history querier configured, a condition is still "no prior action", so offline `agentguard check` matches the server.
+- **`GET /v1/audit` rejects a malformed `since`/`until`** (400), and an `until` before `since`. Before 1.4 the parameters were ignored and every entry returned. This is recorded in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) as a deliberate tightening.
+- **Python adapters deny conflicting alias arguments** (`command`/`cmd`, `path`/`file_path`) without calling the server, so these denials are not in the server's audit log.
+- **The MCP gateway drops a host frame without an id** unless its method is `notifications/*`. MCP already treats such frames as invalid.
+- **Shell commands hiding another command are checked as that command.** Under a policy that allows everything except what it denies or sends to approval, `bash -c 'rm -rf /tmp/x'` now needs approval like `rm -rf /tmp/x`. Under an allowlist, `sudo X` is denied when `X` is denied; a deny on any part now wins over a whole-line approval. A `bash -c` script AgentGuard can't split (arithmetic, a heredoc, `case`) asks for approval instead of being allowed. `time cmd` and `! cmd` are matched as `cmd`.
+- **Domain rules match every spelling of a host** (above). A rule domain written in a non-canonical form, such as `0xa9fea9fe`, now also matches `169.254.169.254`, and a rule without a port matches the host on any port, as URL requests already did.
+- **Additive surfaces:**
+  - transports `claude_code`, `cursor`, `gemini_cli`, `codex_cli`;
+  - request field `parent_session_id`;
+  - entry fields `seq`, `prev_hash`, `hash`;
+  - `_meta` fields `seal`, `chain_prev`, `chain_seq`, `node_id`, `segment_id`;
+  - routes `GET /v1/audit/head`, `GET /v1/sessions` and `GET /v1/sessions/{id}`;
+  - subcommands `audit verify`, `test` and `report`;
+  - hook agents `cursor`, `gemini-cli`, `codex` and the flag `--fail-closed`;
+  - the gateway's `--upstream-http` and `--upstream-header`;
+  - the server's `--audit-seal`, `--audit-seal-key-file` and `--audit-anchor-interval`.
+- **The store gains two columns**, added in place. A 1.3 binary ignores them, so downgrading the store is safe. A sealed audit log is still valid JSON Lines that 1.3 reads.
+- **Before downgrading to 1.3**, disconnect Cursor, Gemini CLI and Codex CLI in `agentguard setup`: 1.3 has no hook for them.
+
+### Verification
+
+- **Go** (1.26.9): `go build ./...`, `go vet ./...` and `gofmt -l .` are clean, `golangci-lint run ./...` reports 0 issues, and `go test -race ./...` passes in every package. CI is green on `master` for Linux, macOS and Windows, including the Postgres integration job and the p99 latency gate.
+- **Every feature pull request had an independent review** that reproduced each finding before it was fixed. Every finding was fixed with a regression test that fails without the fix.
+- **Python** (3.13): 432 unit tests pass. The OpenAI Agents integration tests pass on `openai-agents` 0.3.3, 0.20.0 and 0.23.1 with an offline model. **TypeScript:** 100 tests pass.
+- **A real Claude Code session** (2.1.282) with the hook and a subagent:
+  - The main agent's and the subagent's calls were checked.
+  - A read under `~/.ssh` was denied with the policy's reason.
+  - `GET /v1/sessions` showed one session with a `general-purpose` subagent lane.
+  - The dashboard replay rendered both lanes, checked in headless Chrome.
+- **The MCP gateway against a real Streamable HTTP server** (`@modelcontextprotocol/server-everything`):
+  - Handshake on `2025-06-18`, and all 13 tools listed.
+  - Allowed tools ran, a denied tool and a default-denied tool were blocked, and every call was audited as `mcp_gateway`.
+  - After the server was killed and restarted, the next call succeeded and the host got `tools/list_changed`.
+- **Sealing end to end** against a live `--audit-seal` server:
+  - `audit verify` and `report` passed on the untouched log.
+  - Both failed with the exact `file:line` after one byte was changed.
+  - Edits, deletions, reordering, truncation and splices are covered by tests.
+- **`agentguard test configs/tests`:** 158 cases pass.
+- **The two pre-release security fixes** went through three rounds of independent review, with every finding reproduced and fixed.
+  - The command splitter was fuzzed (about 15M inputs per run, no failures).
+  - A 1 MiB command of nested wrappers is decided in about 20 ms.
+  - The p99 gate stays under 0.5 µs.
+  - Around 200 everyday agent commands keep their verdicts under the shipped policies, apart from the intended changes above.
+- **Not run for this release:** live Cursor, Gemini CLI and Codex CLI sessions. Those CLIs weren't available, so their hooks were driven with each vendor's documented hook input. The Postgres paths ran only in CI's Postgres job.
+
 ## [1.3.0] — 2026-09-26
 
 > **Install AgentGuard with one command, set it up from a menu, and guard Claude Code.** Every release now ships prebuilt binaries for Linux, macOS and Windows, one-line installers that also update and uninstall, and a container image, so no Go toolchain is needed. `agentguard setup` sets AgentGuard up on a computer from a menu — a policy, an API key, a login service that starts the server — and later updates or removes it. Claude Code's shell commands, file edits, web fetches and MCP tool calls can be checked against your policy through a hook. And the command line got a pass for the mistakes people make: `server` is the command's name (`serve` still works), flags work after arguments, typos get suggestions, and help exits 0.

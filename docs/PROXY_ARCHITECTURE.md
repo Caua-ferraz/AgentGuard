@@ -413,7 +413,7 @@ The two proxies have very different surfaces here:
   ```json
   {
     "status": "ok",
-    "version": "1.3.0",
+    "version": "1.4.0",
     "transport": "llm_api_proxy",
     "uptime_s": 412
   }

@@ -45,7 +45,7 @@ from agentguard.adapters._common import (
 
 # MCP protocol constants
 MCP_PROTOCOL_VERSION = "2024-11-05"
-SDK_VERSION = "1.3.0"
+SDK_VERSION = "1.4.0"
 
 # Secret patterns mirrored from pkg/notify/notify.go's DefaultRedactor. The
 # MCP adapter forwards handler exception text back to the client as a
