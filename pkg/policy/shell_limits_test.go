@@ -20,46 +20,54 @@ func TestCheck_LongWrapperChainsStayCheap(t *testing.T) {
 		Allow:           []Rule{{Pattern: "*"}},
 	}}})
 	const size = 1 << 20
-	chain := func(link, end string) string {
-		return strings.Repeat(link, (size-len(end))/len(link)) + end
+	chain := func(n int, link, end string) string {
+		return strings.Repeat(link, (n-len(end))/len(link)) + end
 	}
 	cases := []struct {
 		name string
-		cmd  string
+		cmd  func(n int) string
 	}{
-		{"an env chain", chain("env ", "ls")},
-		{"a timeout chain", chain("timeout 1 ", "ls")},
-		{"an env -S chain", chain("env -S ", "ls")},
-		{"one sudo with many options", "sudo " + chain("-u root ", "rm -rf /")},
-		{"an env chain with syntax", chain("env ", "ls; ls")},
-		{"a sudo chain", chain("sudo -u root ", "rm -rf /")},
-		{"assignments before a command", chain("A=1 ", "rm -rf /")},
+		{"an env chain", func(n int) string { return chain(n, "env ", "ls") }},
+		{"a timeout chain", func(n int) string { return chain(n, "timeout 1 ", "ls") }},
+		{"an env -S chain", func(n int) string { return chain(n, "env -S ", "ls") }},
+		{"one sudo with many options", func(n int) string { return "sudo " + chain(n, "-u root ", "rm -rf /") }},
+		{"an env chain with syntax", func(n int) string { return chain(n, "env ", "ls; ls") }},
+		{"a sudo chain", func(n int) string { return chain(n, "sudo -u root ", "rm -rf /") }},
+		{"assignments before a command", func(n int) string { return chain(n, "A=1 ", "rm -rf /") }},
+	}
+	check := func(cmd string) (Decision, string, time.Duration, uint64) {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		start := time.Now()
+		got := eng.Check(ActionRequest{Scope: "shell", Command: cmd, AgentID: "a"}, LocalTenantID)
+		elapsed := time.Since(start)
+		runtime.ReadMemStats(&after)
+		return got.Decision, got.Reason, elapsed, after.TotalAlloc - before.TotalAlloc
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			var before, after runtime.MemStats
-			runtime.GC()
-			runtime.ReadMemStats(&before)
-			start := time.Now()
-			got := eng.Check(ActionRequest{Scope: "shell", Command: c.cmd, AgentID: "a"}, LocalTenantID)
-			elapsed := time.Since(start)
-			runtime.ReadMemStats(&after)
-			allocated := after.TotalAlloc - before.TotalAlloc
-			t.Logf("%s: %s in %v, %d MiB allocated", c.name, got.Decision, elapsed, allocated>>20)
-			// A quadratic chain needs seconds and gigabytes; a linear one
-			// about 20 ms here.
-			limit := 50 * time.Millisecond
-			if raceDetector {
-				limit *= 10
+			_, _, quarter, _ := check(c.cmd(size / 4))
+			cmd := c.cmd(size)
+			decision, reason, full, allocated := check(cmd)
+			t.Logf("%s: %s in %v (a quarter of it: %v), %d MiB allocated", c.name, decision, full, quarter, allocated>>20)
+			// Linear work takes about 4 times as long for 4 times the
+			// input; the quadratic chains took 16 times as long (seconds
+			// and gigabytes at 1 MiB). Wall time alone is a poor bound:
+			// CI runs this under -race and coverage on shared machines,
+			// where a linear 1 MiB check takes most of a second. Short
+			// runs are left alone, since their ratio is mostly noise.
+			if full > 100*time.Millisecond && full > 10*quarter {
+				t.Errorf("Check took %v for 1 MiB and %v for 256 KiB: it grows faster than linearly", full, quarter)
 			}
-			if elapsed > limit {
-				t.Errorf("Check took %v, want under %v", elapsed, limit)
+			if full > 20*time.Second {
+				t.Errorf("Check took %v for a 1 MiB command", full)
 			}
 			if allocated > 48*size {
 				t.Errorf("Check allocated %d MiB for a 1 MiB command, want at most 48 MiB", allocated>>20)
 			}
-			if got.Decision == Allow && strings.Contains(c.cmd, "rm -rf") {
-				t.Errorf("Check = ALLOW (%s), want approval or a deny", got.Reason)
+			if decision == Allow && strings.Contains(cmd, "rm -rf") {
+				t.Errorf("Check = ALLOW (%s), want approval or a deny", reason)
 			}
 		})
 	}
