@@ -8,7 +8,13 @@ All notable changes to this project will be documented in this file.
 
 > **Guard every coding agent, prove the audit log wasn't touched, and test your policy like code.** Cursor, Gemini CLI and Codex CLI join Claude Code behind a hook, each able to fail open or fail closed when the server is down. A sealed audit log chains every entry with an HMAC, and `agentguard audit verify` finds any edit, deletion or reordering offline. `agentguard test` runs a policy against test cases in CI, including coding agents' raw tool calls. Sessions link agents to the subagents and sessions they start, and the dashboard replays them. `agentguard report` writes compliance evidence for a period. The MCP gateway guards remote Streamable HTTP MCP servers, and an OpenAI Agents SDK adapter joins the Python adapters.
 >
-> **No field, route, flag, subcommand or schema version was removed or renamed.** Two behaviours are stricter: a `require_prior` deny or approval rule now fires when its history can't be read, and `GET /v1/audit` rejects a malformed `since`/`until` it used to ignore. Two security fixes close ways a tool call could get past the policy unchecked. See *Compatibility* and [`docs/MIGRATION.md`](docs/MIGRATION.md#v13x--v140).
+> **No field, route, flag, subcommand or schema version was removed or renamed.** Several behaviours are stricter:
+> - A `require_prior` deny or approval rule now fires when its history can't be read.
+> - `GET /v1/audit` rejects a malformed `since`/`until` it used to ignore.
+> - Shell rules now see commands hidden inside `bash -c`, `eval` and wrappers such as `env`, `timeout`, `xargs` and `sudo`.
+> - Domain rules now match every spelling of a host.
+>
+> Security fixes close several ways a tool call could get past the policy unchecked. See *Compatibility* and [`docs/MIGRATION.md`](docs/MIGRATION.md#v13x--v140).
 
 ### Added
 
@@ -36,7 +42,7 @@ All notable changes to this project will be documented in this file.
   - **Isolation:** each case uses a fresh engine.
   - **Flags:** `--output text|json|junit`, `--run <regex>`, `--strict`.
   - **Exit codes:** 0 pass, 1 failure, 2 usage, 3 load error. A fixture with unknown keys, a second YAML document, or contradictory keys is a load error.
-  - **Shipped fixtures:** `configs/tests` has 115 cases for the shipped policies and each coding agent. CI runs them.
+  - **Shipped fixtures:** `configs/tests` has 158 cases for the shipped policies and each coding agent. CI runs them.
 - **Session correlation.**
   - **Field:** an optional `parent_session_id` on `/v1/check` requests, recorded in the audit entry's request and omitted when empty.
   - **Sources:** Python `Guard(parent_session_id=)` and `check(parent_session_id=)`; TypeScript `parentSessionId`; the LLM proxy's `X-AgentGuard-Parent-Session` header. The MCP gateway adds `meta.gateway_connection`, a random id per process, and leaves `session_id` unchanged so cost limits behave the same. The hooks record subagents in `meta.subagent`.
@@ -91,6 +97,7 @@ All notable changes to this project will be documented in this file.
   - **Postgres** builds them in the background with `CREATE INDEX CONCURRENTLY`, one replica at a time. An index left invalid by an interrupted build is rebuilt.
 - **A Postgres boot runs DDL only when something is missing.** `ALTER … ADD COLUMN` and `CREATE INDEX` used to run on every start, taking table locks on `approvals` and `audit_entries` even when the schema was current.
 - **Rotated audit files carry a random `segment_id`** in their `_meta` header, and the replay checkpoint identifies files by it (falling back to `created_at` for older files).
+- **The shipped coding-agent blocks** (and the claude-code block in `configs/default.yaml`) also deny GCE's short name `metadata` and AWS's IPv6 metadata endpoint `fd00:ec2::254`.
 - **Toolchain and dependencies:** Go 1.26.9; `golang.org/x/text` v0.43.0, `golang.org/x/sync` v0.24.0, `golang.org/x/sys` v0.49.0 and `golang.org/x/term` v0.47.0; the SQLite driver `modernc.org/sqlite` v1.60.1 (SQLite itself stays 3.53.4) with `modernc.org/libc` v1.77.1.
 - **The README roadmap** now lists what 1.3 shipped and what 1.4 and later plan. The AutoGPT adapter is dropped from the roadmap. The Python package classifier is `Production/Stable`.
 
@@ -106,6 +113,36 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+- **Domain rules missed other spellings of a host.**
+  - **What got through:** A rule compared the host as written, only lower-cased. A deny on `169.254.169.254` let these through, though browsers, Node, curl and the C library all reach the same place:
+    - `0xa9fea9fe`, `2852039166` and `0251.0376.0251.0376`;
+    - `::ffff:a9fe:a9fe`;
+    - `１６９.２５４.１６９.２５４` and `169。254。169。254`;
+    - the address with a soft hyphen or zero-width space inside it;
+    - `metadata.google.internal.`, with a trailing dot.
+  - **Who was affected:** every network check, including Claude Code's `WebFetch` since 1.3.
+  - **The fix:** the engine now writes every host one way before matching, on requests and on rule domains:
+    - loose IPv4 forms become a dotted quad;
+    - IPv6 is written in canonical form, and an IPv4-mapped address becomes IPv4;
+    - non-ASCII is folded with NFKC, after dropping default-ignorable code points (the zero-width joiner and non-joiner are kept);
+    - a trailing dot is dropped;
+    - in a request's domain field, whitespace, a `user@` prefix and a `:port` are dropped.
+  - **Rules with ports:** a rule domain with a port matches that host on that port only.
+  - **Cost:** an ordinary hostname still costs one scan and no allocation.
+- **Shell rules didn't see commands run by another shell or a wrapper.**
+  - **What got through:** `bash -c 'rm -rf /'`, `sh -lc "sudo ls"`, `eval rm -rf /`, `timeout 5 bash -c …` and `env rm -rf /` each read as one harmless-looking command. A catch-all allow passed them, which every coding-agent block has, and the `rm -rf` and `sudo` approval rules never saw the command that ran.
+  - **Who was affected:** every shell check, including Claude Code since 1.3.
+  - **The fix:** the splitter now looks inside these command strings:
+    - the script of a shell given `-c` (alone or in a cluster such as `-lc`);
+    - `eval`, `fish --command`, and here-strings fed to a shell;
+    - commands behind `NAME=value` assignments and launchers (`env`, `sudo`, `doas`, `pkexec`, `runuser`, `nohup`, `nice`, `timeout`, `xargs`, `flock`, `chroot`, `strace`, `npx`, `npm exec`, `uv run`, `poetry run`, `bundle exec`, `nix-shell --run` and others, listed in `POLICY_REFERENCE.md`).
+  - **How the verdict is reached:**
+    - Whole-line deny and approval rules (the fork bomb, `curl * | *sh`) are matched against each nested script and each pipeline as well as the full line.
+    - A deny on any part wins over a whole-line approval.
+  - **Scripts that can't be split:** a nested script with arithmetic, a heredoc or `case` asks for approval (`require_approval:shell:unparseable_script`) rather than being allowed.
+  - **Also handled:** ANSI-C `$'…'` strings are decoded, and command names are matched case-insensitively, as macOS and Windows file systems are.
+- **The Codex hook joined argument-list commands without quoting** (new in 1.4, not in a release): `["bash", "-lc", "rm -rf /"]` became `bash -lc rm -rf /`. Each argument is now quoted as a shell reads it back, and `["apply_patch", <patch>]` gets the file checks.
+
 - **The MCP gateway forwarded a `tools/call` without an id to every upstream with no policy check.** Any frame without an id was treated as a notification. Only `notifications/*` methods are forwarded now. This affected stdio upstreams in earlier releases.
 - **Python adapters checked one tool argument while the tool ran another.** LangChain, CrewAI, MCP and OpenAI Agents read `command` before `cmd` and `path` before `file_path`. Tool input setting both to different values (`{"command": "ls", "cmd": "rm -rf /"}`) is now denied locally. The OpenAI Agents adapter also checks exactly the arguments the tool's schema passes to it. The adapters never take `parent_session_id` from tool input.
 - **`require_prior` failing open** (above) let a gated deny rule be skipped by a history outage.
@@ -116,6 +153,8 @@ All notable changes to this project will be documented in this file.
 - **`GET /v1/audit` rejects a malformed `since`/`until`** (400), and an `until` before `since`. Before 1.4 the parameters were ignored and every entry returned. This is recorded in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) as a deliberate tightening.
 - **Python adapters deny conflicting alias arguments** (`command`/`cmd`, `path`/`file_path`) without calling the server, so these denials are not in the server's audit log.
 - **The MCP gateway drops a host frame without an id** unless its method is `notifications/*`. MCP already treats such frames as invalid.
+- **Shell commands hiding another command are checked as that command.** Under a policy that allows everything except what it denies or sends to approval, `bash -c 'rm -rf /tmp/x'` now needs approval like `rm -rf /tmp/x`. Under an allowlist, `sudo X` is denied when `X` is denied; a deny on any part now wins over a whole-line approval. A `bash -c` script AgentGuard can't split (arithmetic, a heredoc, `case`) asks for approval instead of being allowed. `time cmd` and `! cmd` are matched as `cmd`.
+- **Domain rules match every spelling of a host** (above). A rule domain written in a non-canonical form, such as `0xa9fea9fe`, now also matches `169.254.169.254`, and a rule without a port matches the host on any port, as URL requests already did.
 - **Additive surfaces:**
   - transports `claude_code`, `cursor`, `gemini_cli`, `codex_cli`;
   - request field `parent_session_id`;
@@ -147,7 +186,12 @@ All notable changes to this project will be documented in this file.
   - `audit verify` and `report` passed on the untouched log.
   - Both failed with the exact `file:line` after one byte was changed.
   - Edits, deletions, reordering, truncation and splices are covered by tests.
-- **`agentguard test configs/tests`:** 115 cases pass.
+- **`agentguard test configs/tests`:** 158 cases pass.
+- **The two pre-release security fixes** went through three rounds of independent review, with every finding reproduced and fixed.
+  - The command splitter was fuzzed (about 15M inputs per run, no failures).
+  - A 1 MiB command of nested wrappers is decided in about 20 ms.
+  - The p99 gate stays under 0.5 µs.
+  - Around 200 everyday agent commands keep their verdicts under the shipped policies, apart from the intended changes above.
 - **Not run for this release:** live Cursor, Gemini CLI and Codex CLI sessions. Those CLIs weren't available, so their hooks were driven with each vendor's documented hook input. The Postgres paths ran only in CI's Postgres job.
 
 ## [1.3.0] — 2026-09-26

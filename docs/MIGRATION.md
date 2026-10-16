@@ -738,6 +738,32 @@ two of them can change what a policy decides.
   as before. Write `agentguard test` cases with `prior:` to pin what your
   rules should do.
 
+**Shell rules**
+
+- **Commands inside `bash -c`, `eval` and launchers are checked.** The
+  script of a shell given `-c`, an `eval`, a here-string fed to a shell, and
+  the command behind `env`, `sudo`, `timeout`, `xargs`, `nohup` and the
+  other launchers listed in
+  [`POLICY_REFERENCE.md`](POLICY_REFERENCE.md#compound-shell-commands) are
+  checked as commands of their own, and whole-line rules such as
+  `curl * | *sh` also match inside them and inside longer command lines. In
+  1.3 `bash -c 'rm -rf /tmp/x'` passed a catch-all allow; it now needs the
+  approval `rm -rf` needs. A deny on any part of a line now wins over an
+  approval for the whole line, so under an allowlist `sudo X` is denied
+  when `X` is denied. A `bash -c` script AgentGuard can't split
+  (arithmetic, a heredoc, `case`) asks for approval. Run `agentguard test`
+  on your own cases to see what changes for your policy.
+
+**Network rules**
+
+- **Hosts are matched in one canonical form.** Other spellings of an
+  address (hex, decimal or octal IPv4, IPv4-mapped IPv6, Unicode digits and
+  dots, invisible characters, a trailing dot) now match a rule on the plain
+  form. A request's `domain` field loses surrounding whitespace, a `user@`
+  prefix and a `:port`. A rule domain without a port now matches the host on
+  any port, as URL requests already did; a rule domain with a port matches
+  that port only.
+
 **API**
 
 - **`GET /v1/audit` validates `since` and `until`.** A value that isn't
@@ -792,17 +818,20 @@ See [`CLI.md`](CLI.md), [`CODING_AGENTS.md`](CODING_AGENTS.md),
 1. If your policy uses `require_prior`, decide whether the stricter handling
    of an unreadable history is what you want, and add `agentguard test`
    cases for it.
-2. Check scripts that call `GET /v1/audit` with `since` or `until` for the
+2. Run `agentguard test` with cases for the shell commands your agents run,
+   especially ones wrapped in `bash -c`, `timeout` or `env`, to see which
+   now need approval.
+3. Check scripts that call `GET /v1/audit` with `since` or `until` for the
    format: RFC 3339.
-3. Swap the binaries: `agentguard setup` → *Update*, rerun the one-line
+4. Swap the binaries: `agentguard setup` → *Update*, rerun the one-line
    installer, or `go install github.com/Caua-ferraz/AgentGuard/cmd/...@v1.4.0`.
    Upgrade the SDKs with `pip install --upgrade agentguardproxy==1.4.0` and
    `npm install @lictorate/agentguard@1.4.0`.
-4. To seal an existing install, add `--audit-seal --audit-seal-key-file
+5. To seal an existing install, add `--audit-seal --audit-seal-key-file
    <file>` to the server. Keep the key where agents can't write it, and
    publish anchors somewhere off the machine (the log line reaches journald,
    syslog or your SIEM).
-5. Connect Cursor, Gemini CLI or Codex CLI from `agentguard setup` if you
+6. Connect Cursor, Gemini CLI or Codex CLI from `agentguard setup` if you
    use them.
 
 ### Rollback to v1.3.x
