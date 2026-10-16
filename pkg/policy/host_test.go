@@ -124,21 +124,50 @@ func TestCheck_DomainRulesSeeEverySpellingOfAHost(t *testing.T) {
 	}
 }
 
-// A port or userinfo in a rule's domain is part of the rule: dropping it
-// would let "localhost:3000" allow every port on localhost.
-func TestCheck_RuleDomainKeepsItsPort(t *testing.T) {
-	pol := &Policy{Name: "port", Rules: []RuleSet{{
+// A port in a rule's domain is part of the rule: it matches that host on
+// that port, through the domain field or a URL, and a rule without a port
+// matches the host on any port.
+func TestCheck_RuleDomainPorts(t *testing.T) {
+	pol := &Policy{Name: "ports", Rules: []RuleSet{{
 		Scope: "network",
-		Allow: []Rule{{Domain: "localhost:3000"}},
+		Deny: []Rule{
+			{Domain: "internal.example.com:8443"},
+			{Domain: "0xa9fea9fe:80"},
+			{Domain: "[fd00:ec2::254]:8080"},
+		},
+		Allow: []Rule{{Domain: "localhost:3000"}, {Domain: "*.example.com"}, {Domain: "fd00:ec2::254"}},
 	}}}
 	e := NewEngineFromPolicy(pol)
-	for _, req := range []ActionRequest{
-		{Scope: "network", Domain: "localhost:22"},
-		{Scope: "network", URL: "http://localhost:22/"},
-		{Scope: "network", Domain: "localhost"},
+	cases := []struct {
+		req  ActionRequest
+		want Decision
+	}{
+		{ActionRequest{Scope: "network", Domain: "localhost:3000"}, Allow},
+		{ActionRequest{Scope: "network", URL: "http://localhost:3000/app"}, Allow},
+		{ActionRequest{Scope: "network", Domain: "localhost:22"}, Deny},
+		{ActionRequest{Scope: "network", URL: "http://localhost:22/"}, Deny},
+		{ActionRequest{Scope: "network", Domain: "localhost"}, Deny},
+		{ActionRequest{Scope: "network", Domain: "internal.example.com:8443"}, Deny},
+		{ActionRequest{Scope: "network", URL: "https://internal.example.com:8443/x"}, Deny},
+		{ActionRequest{Scope: "network", Domain: "internal.example.com:443"}, Allow},
+		{ActionRequest{Scope: "network", Domain: "internal.example.com"}, Allow},
+		{ActionRequest{Scope: "network", URL: "http://169.254.169.254:80/latest/"}, Deny},
+		{ActionRequest{Scope: "network", URL: "http://[fd00:ec2::254]:8080/"}, Deny},
+		{ActionRequest{Scope: "network", URL: "http://[fd00:ec2::254]/"}, Allow},
+	}
+	for _, c := range cases {
+		if res := e.Check(c.req, "local"); res.Decision != c.want {
+			t.Errorf("%+v: decision %s (rule %q), want %s", c.req, res.Decision, res.Rule, c.want)
+		}
+	}
+	for in, want := range map[string]string{
+		"0xa9fea9fe:80":        "169.254.169.254:80",
+		"[fd00:ec2::254]:8080": "[fd00:ec2::254]:8080",
+		"localhost:3000":       "localhost:3000",
+		"fd00:ec2::254":        "fd00:ec2::254",
 	} {
-		if res := e.Check(req, "local"); res.Decision != Deny {
-			t.Errorf("%+v: decision %s (rule %q), want DENY", req, res.Decision, res.Rule)
+		if got := canonicalRuleHost(in); got != want {
+			t.Errorf("canonicalRuleHost(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

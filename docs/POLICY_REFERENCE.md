@@ -667,9 +667,13 @@ rule on an address catches the other spellings that reach it:
 | ` 169.254.169.254:80`, `user@169.254.169.254` (a request's `domain` field with whitespace, a port or userinfo) | `169.254.169.254` |
 
 The zero-width joiner and non-joiner are not dropped: URL parsers keep them,
-so `git` + joiner + `hub.com` is another host, not `github.com`. A port or
-userinfo in a *rule's* `domain` is kept: `localhost:3000` allows that port
-only.
+so `git` + joiner + `hub.com` is another host, not `github.com`.
+
+**Ports.** A rule `domain` with a port matches that host on that port only,
+whether the request names it in its `domain` field (`localhost:3000`) or in
+its URL (`http://localhost:3000/`): `allow: localhost:3000` doesn't allow
+`localhost:22`, and `deny: internal.example.com:8443` doesn't deny port 443.
+A rule `domain` without a port matches the host on any port.
 
 Browsers, Node, curl and the C library all accept these forms, so before
 v1.4 a request written in one of them could slip past a deny rule on the

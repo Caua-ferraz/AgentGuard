@@ -32,10 +32,66 @@ import (
 // scan without allocating, so the hot path is unchanged.
 func canonicalHost(host string) string { return canonicalize(host, true) }
 
-// canonicalRuleHost is canonicalHost for a rule's domain. A port or userinfo
-// there is kept: dropping it would widen the rule ("localhost:3000" would
-// allow every port on localhost) and change its name in the audit log.
-func canonicalRuleHost(host string) string { return canonicalize(host, false) }
+// canonicalRuleHost is canonicalHost for a rule's domain. A port there is
+// kept and its host part canonicalised ("0xa9fea9fe:80" is
+// "169.254.169.254:80"): dropping it would widen the rule ("localhost:3000"
+// would allow every port on localhost) and change its name in the audit
+// log. Userinfo is kept as written.
+func canonicalRuleHost(host string) string {
+	if h, port, ok := splitRulePort(host); ok {
+		h = canonicalize(h, false)
+		if strings.Contains(h, ":") {
+			h = "[" + h + "]"
+		}
+		return h + ":" + port
+	}
+	return canonicalize(host, false)
+}
+
+// splitRulePort splits a rule domain of the form host:port or [v6]:port.
+// A bare IPv6 address ("fd00:ec2::254") has no port.
+func splitRulePort(domain string) (host, port string, ok bool) {
+	if strings.IndexByte(domain, ':') < 0 {
+		return "", "", false
+	}
+	if p := hostPort(domain); p != "" {
+		return stripPort(domain), p, true
+	}
+	return "", "", false
+}
+
+// hostPort returns the numeric port of host:port or [v6]:port, after any
+// userinfo, or "" when there is none.
+func hostPort(host string) string {
+	host = strings.TrimSpace(host)
+	if i := strings.LastIndexByte(host, '@'); i >= 0 {
+		host = host[i+1:]
+	}
+	if strings.HasPrefix(host, "[") {
+		i := strings.IndexByte(host, ']')
+		if i < 0 || i+1 >= len(host) || host[i+1] != ':' {
+			return ""
+		}
+		return digitsOnly(host[i+2:])
+	}
+	if strings.Count(host, ":") != 1 {
+		return ""
+	}
+	_, port, _ := strings.Cut(host, ":")
+	return digitsOnly(port)
+}
+
+func digitsOnly(s string) string {
+	if s == "" {
+		return ""
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return ""
+		}
+	}
+	return s
+}
 
 func canonicalize(host string, request bool) string {
 	if host == "" || plainHostname(host) {
@@ -134,7 +190,7 @@ func isASCII(s string) bool {
 func stripPort(host string) string {
 	if strings.HasPrefix(host, "[") {
 		if i := strings.IndexByte(host, ']'); i > 0 {
-			return host[:i+1]
+			return host[1:i]
 		}
 		return host
 	}
