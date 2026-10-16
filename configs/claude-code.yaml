@@ -57,5 +57,9 @@
             message: "Cloud metadata endpoints are off-limits"
           - domain: "metadata.google.internal"
             message: "Cloud metadata endpoints are off-limits"
+          - domain: "metadata"
+            message: "Cloud metadata endpoints are off-limits"
+          - domain: "fd00:ec2::254"
+            message: "Cloud metadata endpoints are off-limits"
         allow:
           - domain: "*"

@@ -259,7 +259,7 @@ func normalizeRuleDomains(pol *Policy) {
 			for _, rules := range [][]Rule{sets[si].Allow, sets[si].Deny, sets[si].RequireApproval} {
 				for ri := range rules {
 					if rules[ri].Domain != "" {
-						rules[ri].Domain = strings.ToLower(rules[ri].Domain)
+						rules[ri].Domain = canonicalRuleHost(strings.ToLower(rules[ri].Domain))
 					}
 				}
 			}
@@ -1128,6 +1128,11 @@ type ActionRequest struct {
 	// the audit lines written for them, byte-identical to before it
 	// existed (sealed logs still verify).
 	ParentSessionID string `json:"parent_session_id,omitempty"`
+
+	// domainPort is the port the request named, in its domain field
+	// ("host:8443") or URL, kept by normalizeRequest so a rule domain
+	// with a port can match it after Domain is reduced to the bare host.
+	domainPort string
 }
 
 // Check evaluates an action request against the active policy for the
@@ -1811,25 +1816,31 @@ func normalizeRequest(req ActionRequest) ActionRequest {
 	// policy reference documents; before, domain rules never matched it and
 	// every url-only network/browser check fell through to default deny.
 	if req.Domain == "" && req.URL != "" {
-		req.Domain = urlHost(req.URL)
+		req.Domain, req.domainPort = urlHost(req.URL)
+	} else {
+		req.domainPort = hostPort(req.Domain)
 	}
+	// One spelling per host: 0xa9fea9fe, 2852039166 and
+	// "metadata.google.internal." reach the same place as the forms a deny
+	// rule names, so they must be matched as those forms.
+	req.Domain = canonicalHost(req.Domain)
 	req.Path = normalizePath(req.Path)
 	return req
 }
 
 // urlHost returns the lower-cased host of an absolute URL (scheme://…),
 // without port, brackets or userinfo, so https://api.github.com@evil.com/
-// yields evil.com. It returns "" for anything it can't parse, which leaves
-// the request to default deny.
-func urlHost(raw string) string {
+// yields evil.com, and the URL's explicit port, if any. It returns "" for
+// anything it can't parse, which leaves the request to default deny.
+func urlHost(raw string) (host, port string) {
 	if !strings.Contains(raw, "://") {
-		return ""
+		return "", ""
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return ""
+		return "", ""
 	}
-	return strings.ToLower(u.Hostname())
+	return strings.ToLower(u.Hostname()), u.Port()
 }
 
 // stripControl removes NUL and other C0 control characters (0x00-0x1F and 0x7F)
@@ -1975,9 +1986,15 @@ func matchRule(rule Rule, req ActionRequest) bool {
 		}
 	}
 
-	// Match by domain
+	// Match by domain. A rule domain with a port ("localhost:3000")
+	// matches that host on that port only; one without matches the host
+	// on any port.
 	if rule.Domain != "" && req.Domain != "" {
-		if globMatch(rule.Domain, req.Domain) {
+		if host, port, ok := splitRulePort(rule.Domain); ok {
+			if port == req.domainPort && globMatch(host, req.Domain) {
+				return true
+			}
+		} else if globMatch(rule.Domain, req.Domain) {
 			return true
 		}
 	}

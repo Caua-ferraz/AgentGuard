@@ -685,6 +685,42 @@ rule's `domain` patterns are both lowercased before matching, so a deny rule
 for `evil.com` also matches `EVIL.com` — DNS names are case-equivalent, and
 before v1.0 a mixed-case request could slip past a lowercase deny rule.
 
+Hosts are also written one way before matching (v1.4), on both sides, so a
+rule on an address catches the other spellings that reach it:
+
+| Request host | Matched as |
+|---|---|
+| `0xa9fea9fe`, `2852039166`, `0251.0376.0251.0376`, `169.254.43518` | `169.254.169.254` |
+| `::ffff:169.254.169.254`, `::ffff:a9fe:a9fe` | `169.254.169.254` |
+| `0:0:0:0:0:0:0:1` | `::1` |
+| `metadata.google.internal.` (trailing dot) | `metadata.google.internal` |
+| `１６９.２５４.１６９.２５４`, `169。254。169。254`, `ｍｅｔａｄａｔａ.google.internal` (Unicode that URL parsers fold to ASCII, NFKC) | `169.254.169.254`, `metadata.google.internal` |
+| `169.254.169.2` + soft hyphen + `54`, `metadata.google.internal` + zero-width space (invisible characters URL parsers drop: format characters, variation selectors, other default-ignorable code points) | `169.254.169.254`, `metadata.google.internal` |
+| ` 169.254.169.254:80`, `user@169.254.169.254` (a request's `domain` field with whitespace, a port or userinfo) | `169.254.169.254` |
+
+The zero-width joiner and non-joiner are not dropped: URL parsers keep them,
+so `git` + joiner + `hub.com` is another host, not `github.com`.
+
+**Ports.** A rule `domain` with a port matches that host on that port only,
+whether the request names it in its `domain` field (`localhost:3000`) or in
+its URL (`http://localhost:3000/`): `allow: localhost:3000` doesn't allow
+`localhost:22`, and `deny: internal.example.com:8443` doesn't deny port 443.
+A rule `domain` without a port matches the host on any port.
+
+Browsers, Node, curl and the C library all accept these forms, so before
+v1.4 a request written in one of them could slip past a deny rule on the
+plain address.
+
+Rules compare names, not where a name resolves. A DNS name that points at an
+address (`169.254.169.254.nip.io`, an attacker's own record, or GCE's short
+name `metadata` through the search domain) is not the address to a domain
+rule; deny such names by name, or block the address at the network level.
+The deprecated IPv4-compatible (`::169.254.169.254`) and NAT64
+(`64:ff9b::a9fe:a9fe`) forms are not mapped to IPv4 either; operating
+systems don't route them to the IPv4 address. The shipped coding-agent
+blocks deny `169.254.169.254`, `metadata.google.internal`, `metadata` and
+AWS's IPv6 endpoint `fd00:ec2::254`.
+
 ### Paths are cleaned first
 
 `matchRule` applies `filepath.Clean + ToSlash` to both the rule's `paths` entries and the request's `Path`, so `./a/./b` and `a/b` are equivalent.
